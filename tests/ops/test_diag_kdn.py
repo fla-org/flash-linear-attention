@@ -162,6 +162,50 @@ def test_gain_varlen(cu_seqlens: list[int], H: int, D: int):
     for name, ref_grad, tri_grad in zip(("dk", "dg", "domega", "dr", "dc0"), ref_grads, tri_grads):
         assert_close(name, ref_grad, tri_grad, 1e-4)
 
+@pytest.mark.parametrize("varlen", [False, True], ids=["dense", "varlen"])
+def test_gain_many_chunks(varlen: bool):
+    """More than 65535 chunks of 64 tokens must launch and match the same inputs run in two pieces."""
+    torch.manual_seed(42)
+    H, D = 1, 16
+    T = 65537 * 64 + 100
+    cut = 32768 * 64 + 37
+    N = 2 if varlen else 1
+
+    k = F.normalize(torch.randn(1, T, H, D, dtype=torch.float, device=device), p=2, dim=-1)
+    g = F.logsigmoid(torch.randn(1, T, H, D, dtype=torch.float, device=device))
+    omega = make_noise(1, T, H, D, lower=0.0).to(device)
+    r = make_noise(1, T, H, lower=0.01).to(device)
+    c0 = make_noise(N, H, D, lower=0.1).to(device)
+    dkappa = torch.randn(1, T, H, D, dtype=torch.float, device=device)
+    dct = torch.randn(N, H, D, dtype=torch.float, device=device)
+
+    def leaves():
+        return [x.clone().requires_grad_(True) for x in (g, omega, r, c0)]
+
+    tri = leaves()
+    cu_seqlens = torch.tensor([0, cut, T], dtype=torch.long, device=device) if varlen else None
+    tri_kappa, tri_ct = diag_kdn_gain(k, *tri[:3], initial_state=tri[3], output_final_state=True, cu_seqlens=cu_seqlens)
+    ((tri_kappa * dkappa).sum() + (tri_ct * dct).sum()).backward()
+
+    ref = leaves()
+    ref_kappa, ref_ct, ct = [], [], None
+    for i, (bos, eos) in enumerate(((0, cut), (cut, T))):
+        h0 = ref[3][i:i+1] if varlen or i == 0 else ct
+        kappa, ct = diag_kdn_gain(
+            k[:, bos:eos], *(x[:, bos:eos] for x in ref[:3]), initial_state=h0, output_final_state=True,
+        )
+        ref_kappa.append(kappa)
+        ref_ct.append(ct)
+    ref_kappa = torch.cat(ref_kappa, 1)
+    ref_ct = torch.cat(ref_ct, 0) if varlen else ref_ct[-1]
+    ((ref_kappa * dkappa).sum() + (ref_ct * dct).sum()).backward()
+
+    assert_close("kappa", ref_kappa, tri_kappa, 1e-5)
+    assert_close("ct", ref_ct, tri_ct, 1e-5)
+    for name, x, y in zip(("dg", "domega", "dr", "dc0"), ref, tri):
+        assert_close(name, x.grad, y.grad, 1e-5)
+
+
 
 @pytest.mark.parametrize(
     ("B", "T", "H", "D", "scale", "use_qk_l2norm_in_kernel", "use_gate_in_kernel", "dtype"),
@@ -341,6 +385,70 @@ def test_chunk_varlen(D: int, cu_seqlens: list[int], dtype: torch.dtype):
     ):
         assert_close(name, ref_grad, tri_grad, ratio)
 
+@pytest.mark.parametrize("varlen", [False, True], ids=["dense", "varlen"])
+def test_chunk_many_chunks(varlen: bool):
+    """More than 65535 memory chunks of 32 tokens must launch and match the same inputs run in two pieces.
+
+    The dense case splits the sequence and chains the memory and precision through the initial state,
+    the varlen case runs each sequence alone, so every piece stays below the limit and only the grid differs.
+    """
+    torch.manual_seed(42)
+    H, D = 1, 64
+    T = 65537 * 32 + 50
+    cut = 32768 * 32
+    N = 2 if varlen else 1
+
+    q = torch.randn(1, T, H, D, dtype=torch.bfloat16, device=device)
+    k = torch.randn(1, T, H, D, dtype=torch.bfloat16, device=device)
+    v = torch.randn(1, T, H, D, dtype=torch.bfloat16, device=device)
+    g = F.logsigmoid(torch.randn(1, T, H, D, dtype=torch.float, device=device))
+    omega = make_noise(1, T, H, D, lower=0.0).to(device)
+    r = make_noise(1, T, H, lower=0.01).to(device)
+    h0 = torch.randn(N, H, D, D, dtype=torch.float, device=device)
+    c0 = make_noise(N, H, D, lower=0.1).to(device)
+    do = torch.randn_like(v)
+    dht = torch.randn_like(h0)
+    dct = torch.randn_like(c0)
+
+    def leaves():
+        return [x.clone().requires_grad_(True) for x in (q, k, v, g, omega, r, h0, c0)]
+
+    tri = leaves()
+    cu_seqlens = torch.tensor([0, cut, T], dtype=torch.long, device=device) if varlen else None
+    tri_o, (tri_ht, tri_ct) = chunk_diag_kdn(
+        *tri[:6],
+        initial_state=(tri[6], tri[7]),
+        output_final_state=True,
+        use_qk_l2norm_in_kernel=True,
+        cu_seqlens=cu_seqlens,
+    )
+    ((tri_o * do).sum() + (tri_ht * dht).sum() + (tri_ct * dct).sum()).backward()
+
+    ref = leaves()
+    ref_o, ref_ht, ref_ct, state = [], [], [], None
+    for i, (bos, eos) in enumerate(((0, cut), (cut, T))):
+        if varlen or i == 0:
+            state = (ref[6][i:i+1], ref[7][i:i+1])
+        o, state = chunk_diag_kdn(
+            *(x[:, bos:eos] for x in ref[:6]),
+            initial_state=state,
+            output_final_state=True,
+            use_qk_l2norm_in_kernel=True,
+        )
+        ref_o.append(o)
+        ref_ht.append(state[0])
+        ref_ct.append(state[1])
+    ref_o = torch.cat(ref_o, 1)
+    ref_ht, ref_ct = (torch.cat(x, 0) if varlen else x[-1] for x in (ref_ht, ref_ct))
+    ((ref_o * do).sum() + (ref_ht * dht).sum() + (ref_ct * dct).sum()).backward()
+
+    assert_close("o", ref_o, tri_o, 1e-4)
+    assert_close("ht", ref_ht, tri_ht, 1e-4)
+    assert_close("ct", ref_ct, tri_ct, 1e-4)
+    for name, x, y in zip(("dq", "dk", "dv", "dg", "domega", "dr", "dh0", "dc0"), ref, tri):
+        assert_close(name, x.grad, y.grad, 1e-4)
+
+
 
 def test_chunk_strong_decay():
     # the KDA gate is unbounded below, so the memory must stay finite when whole chunks are forgotten
@@ -453,6 +561,46 @@ def test_fused_recurrent(
     assert_close("ht", ref_ht, tri_ht, 0.005)
     assert_close("ct", ref_ct, tri_ct, 0.005)
 
+@torch.inference_mode()
+def test_fused_recurrent_many_heads():
+    """More than 65535 (batch, head) pairs in one decoding step must launch."""
+    torch.manual_seed(42)
+    B, H, D = 70000, 1, 32
+    q = torch.randn(B, 1, H, D, dtype=torch.float, device=device)
+    k = torch.randn(B, 1, H, D, dtype=torch.float, device=device)
+    v = torch.randn(B, 1, H, D, dtype=torch.float, device=device)
+    g = F.logsigmoid(torch.randn(B, 1, H, D, dtype=torch.float, device=device))
+    omega = make_noise(B, 1, H, D, lower=0.0).to(device)
+    r = make_noise(B, 1, H, lower=0.01).to(device)
+    h0 = torch.randn(B, H, D, D, dtype=torch.float, device=device)
+    c0 = make_noise(B, H, D, lower=0.1).to(device)
+
+    ref, (ref_ht, ref_ct) = naive_recurrent_diag_kdn(
+        q=F.normalize(q, p=2, dim=-1),
+        k=F.normalize(k, p=2, dim=-1),
+        v=v,
+        g=g,
+        omega=omega,
+        r=r,
+        initial_state=(h0, c0),
+        output_final_state=True,
+    )
+    tri, (tri_ht, tri_ct) = fused_recurrent_diag_kdn(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        omega=omega,
+        r=r,
+        initial_state=(h0, c0),
+        output_final_state=True,
+        use_qk_l2norm_in_kernel=True,
+    )
+    assert_close("o", ref, tri, 0.005)
+    assert_close("ht", ref_ht, tri_ht, 0.005)
+    assert_close("ct", ref_ct, tri_ct, 0.005)
+
+
 
 @torch.inference_mode()
 def test_chunk_prefill_decode():
@@ -486,3 +634,32 @@ def test_chunk_prefill_decode():
             use_qk_l2norm_in_kernel=True,
         )
     assert_close("o", ref, torch.cat(tri, 1), 0.005)
+
+
+@pytest.mark.parametrize("fn", [chunk_diag_kdn, fused_recurrent_diag_kdn], ids=["chunk", "fused_recurrent"])
+def test_initial_state_shape(fn):
+    """A misshapen initial memory or precision must raise instead of being misread."""
+    torch.manual_seed(42)
+    B, T, H, K, V = 2, 16, 2, 32, 64
+    q = torch.randn(B, T, H, K, dtype=torch.bfloat16, device=device)
+    k = torch.randn(B, T, H, K, dtype=torch.bfloat16, device=device)
+    v = torch.randn(B, T, H, V, dtype=torch.bfloat16, device=device)
+    g = F.logsigmoid(torch.randn(B, T, H, K, dtype=torch.float, device=device))
+    omega = make_noise(B, T, H, K, lower=0.0).to(device)
+    r = make_noise(B, T, H, lower=0.01).to(device)
+    h0 = torch.randn(B, H, K, V, dtype=torch.float, device=device)
+    c0 = make_noise(B, H, K, lower=0.1).to(device)
+
+    def run(initial_state, cu_seqlens=None):
+        inputs = (q, k, v, g, omega, r)
+        if cu_seqlens is not None:
+            inputs = (x.flatten(0, 1)[None] for x in inputs)
+        return fn(*inputs, initial_state=initial_state, output_final_state=True, cu_seqlens=cu_seqlens)
+
+    # a transposed memory has the right number of elements when K != V
+    for state in ((h0.transpose(-1, -2), c0), (h0[:1], c0), (h0, c0[:1]), (h0, torch.cat([c0, c0]))):
+        with pytest.raises(AssertionError):
+            run(state)
+    with pytest.raises(ValueError, match="number of initial states"):
+        run((h0[:1], c0), cu_seqlens=torch.tensor([0, T, 2 * T], dtype=torch.long, device=device))
+    run((h0, c0))
