@@ -36,6 +36,10 @@ def shape_BTH(B, T, H, D, **kw):
     return (B, T, H)
 
 
+def shape_BTH1(B, T, H, D, **kw):
+    return (B, T, H, 1)
+
+
 def shape_BTD(B, T, H, D, **kw):
     return (B, T, H * D)
 
@@ -417,6 +421,29 @@ register_op(OpConfig(
     category='gate_beta',
     default_shapes=_gdn2_default_shapes,
     test_file='tests/ops/test_gdn2.py',
+))
+
+# TTT supports D > 64 only on Hopper or newer GPUs (live set ~200KiB on-chip);
+# A2 carries the same D <= 64 constraint as pre-Hopper GPUs.
+_ttt_default_shapes = {
+    'B4_T4096_H32_D64':  {'B': 4, 'T': 4096,  'H': 32, 'D': 64},
+    'B8_T2048_H16_D64':  {'B': 8, 'T': 2048,  'H': 16, 'D': 64},
+    'B1_T16384_H16_D64': {'B': 1, 'T': 16384, 'H': 16, 'D': 64},
+}
+
+register_op(OpConfig(
+    name='chunk_ttt',
+    import_path='fla.ops.ttt',
+    inputs={
+        **_simple_qkv,
+        'w': TensorSpec(shape_HD),
+        'b': TensorSpec(shape_HD),
+        'eta': TensorSpec(shape_BTH1, transform=lambda t: t * 5e-3),
+    },
+    func_name='chunk_ttt_linear',
+    category='ttt',
+    default_shapes=_ttt_default_shapes,
+    test_file='tests/ops/test_ttt.py',
 ))
 
 register_op(OpConfig(
