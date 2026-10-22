@@ -139,6 +139,17 @@ def benchmark_case(
             actual = case.run_once(graphed_step, case.graph_args, True)
         synchronize()
         case.assert_close(actual, reference)
+        if case.measure_graph_safe:
+            with inference_context():
+                graph_safe = case.run_once(case.graph_step, case.graph_args, True)
+            synchronize()
+            case.assert_close(graph_safe, reference)
+
+            def graph_safe_invocation():
+                with inference_context():
+                    case.run_once(case.graph_step, case.graph_args, False)
+
+            result["graph_safe"] = _measure(graph_safe_invocation, synchronize, warmup, iterations, clock_ns)
         result["validation"] = "passed"
         print(f"  Graph validation: {time.perf_counter() - validation_started:.2f}s", flush=True)
 
@@ -231,6 +242,9 @@ def benchmark_graph_op(
             if progress:
                 build_elapsed = time.perf_counter() - build_started
                 print(f"  [{op_name}] {shape_name} {mode}: case built in {build_elapsed:.2f}s", flush=True)
+            if case.measure_graph_safe:
+                torch.npu.reset_peak_memory_stats(device)
+                baseline_allocated = torch.npu.memory_allocated(device)
             measured = benchmark_case(
                 case=case,
                 mode=mode,
@@ -240,6 +254,12 @@ def benchmark_graph_op(
                 graph_factory=graph_factory,
                 synchronize=torch.npu.synchronize,
             )
+            if case.measure_graph_safe:
+                measured["memory"] = {
+                    "baseline_allocated_bytes": baseline_allocated,
+                    "peak_allocated_bytes": torch.npu.max_memory_allocated(device),
+                    "peak_reserved_bytes": torch.npu.max_memory_reserved(device),
+                }
             results.append({
                 "op": op_name,
                 "shape": shape_name,
@@ -360,7 +380,7 @@ def _format_config(row: dict[str, Any]) -> str:
 
     excluded = {
         "op", "shape", "mode", "B", "T", "H", "D", "N",
-        "eager", "graph", "capture_ms", "validation",
+        "eager", "graph", "graph_safe", "memory", "capture_ms", "validation",
     }
     preferred = ("dtype", "chunk_size", "actual_T", "HV", "DV")
     for name, column in (("actual_T", "T"), ("HV", "H"), ("DV", "D")):
@@ -410,6 +430,12 @@ def print_results(current, current_info, baseline=None, baseline_info=None) -> N
                 f"{eager_speedup:>9} {graph_speedup:>9}    "
                 f"{_format_config(row)}"
             )
+        if row.get("graph_safe"):
+            print(f"  Uncaptured graph-safe: p50={row['graph_safe']['p50_ms']:.3f} ms, "
+                  f"p95={row['graph_safe']['p95_ms']:.3f} ms (same capacity as replay)")
+        if row.get("memory"):
+            print(f"  Whole-case allocator peak: allocated={row['memory']['peak_allocated_bytes'] / 2**20:.1f} MiB, "
+                  f"reserved={row['memory']['peak_reserved_bytes'] / 2**20:.1f} MiB")
 
 
 def _parse_args(argv=None):

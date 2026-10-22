@@ -67,6 +67,7 @@ def chunk_scaled_dot_kkt_fwd_kernel(
     IS_VARLEN: tl.constexpr,
     USE_G: tl.constexpr,
     MASK_DMA: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
 ):
     T = T.to(tl.int64)
     bt_stride = B.to(tl.int64) * T
@@ -79,44 +80,49 @@ def chunk_scaled_dot_kkt_fwd_kernel(
         i_t = task_id.to(tl.int64) // bh
         i_bh = task_id.to(tl.int64) % bh
         i_b, i_h = i_bh // HV, i_bh % HV
-        if IS_VARLEN:
-            i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
-            bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
-            T = eos - bos
-        else:
-            bos = tl.cast(i_b, tl.int64) * T
-        o_t = tl.cast(i_t, tl.int64) * BT + o_i
-        m_t = o_t < T
-        m_A = m_causal & (m_t[:, None] & m_t)
-        # 1-token chunks: strictly-lower-tri kkt is 0.
-        if tl.cast(i_t, tl.int64) * BT + 1 < T:
-            p_b = beta + i_h * bt_stride + bos + o_t
-            b_b = mload(p_b, m_t, MASK_DMA).to(tl.float32)
+        is_valid = True
+        if USE_GRAPH:
+            i_n_check = tl.load(chunk_indices + tl.cast(i_t, tl.int64) * 2).to(tl.int32)
+            is_valid = i_n_check >= 0
+        if is_valid:
+            if IS_VARLEN:
+                i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+                bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+                T = eos - bos
+            else:
+                bos = tl.cast(i_b, tl.int64) * T
+            o_t = tl.cast(i_t, tl.int64) * BT + o_i
+            m_t = o_t < T
+            m_A = m_causal & (m_t[:, None] & m_t)
+            # 1-token chunks: strictly-lower-tri kkt is 0.
+            if tl.cast(i_t, tl.int64) * BT + 1 < T:
+                p_b = beta + i_h * bt_stride + bos + o_t
+                b_b = mload(p_b, m_t, MASK_DMA).to(tl.float32)
 
-            if USE_G:
-                p_g = g + i_h * bt_stride + bos + o_t
-                b_g = mload(p_g, m_t, MASK_DMA).to(tl.float32)
+                if USE_G:
+                    p_g = g + i_h * bt_stride + bos + o_t
+                    b_g = mload(p_g, m_t, MASK_DMA).to(tl.float32)
 
-            b_A = tl.zeros([BT, BT], dtype=tl.float32)
-            for i_k in range(tl.cdiv(K, BK)):
-                o_k = i_k * BK + tl.arange(0, BK)
-                m_k = (o_k >= 0) & (o_k < K)
-                m_p_k = m_t[:, None] & m_k[None, :]
-                p_k = k + (bos * H + i_h // (HV // H)) * K + o_t[:, None] * (H * K) + o_k[None, :]
-                b_k = mload(p_k, m_p_k, MASK_DMA).to(tl.float32)
-                # ascend tl.dot may clobber lhs; keep rhs on the original tile.
-                b_k_lhs = b_k + 0.0
-                b_A = tl.dot(b_k_lhs, tl.trans(b_k), b_A, allow_tf32=False)
+                b_A = tl.zeros([BT, BT], dtype=tl.float32)
+                for i_k in range(tl.cdiv(K, BK)):
+                    o_k = i_k * BK + tl.arange(0, BK)
+                    m_k = (o_k >= 0) & (o_k < K)
+                    m_p_k = m_t[:, None] & m_k[None, :]
+                    p_k = k + (bos * H + i_h // (HV // H)) * K + o_t[:, None] * (H * K) + o_k[None, :]
+                    b_k = mload(p_k, m_p_k, MASK_DMA).to(tl.float32)
+                    # ascend tl.dot may clobber lhs; keep rhs on the original tile.
+                    b_k_lhs = b_k + 0.0
+                    b_A = tl.dot(b_k_lhs, tl.trans(b_k), b_A, allow_tf32=False)
 
-            if USE_G:
-                # mask first so upper-triangle g_i-g_j cannot overflow to inf.
-                b_g_diff = tl.where(m_A, b_g[:, None] - b_g[None, :], 0)
-                b_A *= exp2(b_g_diff)
-            b_A *= b_b[:, None]
-            b_A = tl.where(m_A, b_A, 0)
+                if USE_G:
+                    # mask first so upper-triangle g_i-g_j cannot overflow to inf.
+                    b_g_diff = tl.where(m_A, b_g[:, None] - b_g[None, :], 0)
+                    b_A *= exp2(b_g_diff)
+                b_A *= b_b[:, None]
+                b_A = tl.where(m_A, b_A, 0)
 
-            p_A = A + (bos * HV + i_h) * BT + o_t[:, None] * (BT * HV) + o_i[None, :]
-            mstore(p_A, b_A.to(p_A.dtype.element_ty), m_t[:, None], MASK_DMA)
+                p_A = A + (bos * HV + i_h) * BT + o_t[:, None] * (BT * HV) + o_i[None, :]
+                mstore(p_A, b_A.to(p_A.dtype.element_ty), m_t[:, None], MASK_DMA)
 
 
 def chunk_scaled_dot_kkt_fwd_verifier(
@@ -149,6 +155,7 @@ def chunk_scaled_dot_kkt_fwd_npu(
     chunk_size: int = 64,
     output_dtype: torch.dtype = torch.float32,
     chunk_indices: torch.LongTensor | None = None,
+    use_graph: bool = False,
 ) -> torch.Tensor:
     r"""
     Compute beta * K * K^T.
@@ -201,6 +208,7 @@ def chunk_scaled_dot_kkt_fwd_npu(
         K=K,
         BT=BT,
         BK=BK,
-        MASK_DMA=need_dma_mask(T, BT, K, BK, K, BK, cu_seqlens is not None, cu_seqlens),
+        USE_GRAPH=use_graph,
+        MASK_DMA=use_graph or need_dma_mask(T, BT, K, BK, K, BK, cu_seqlens is not None, cu_seqlens),
     )
     return A
