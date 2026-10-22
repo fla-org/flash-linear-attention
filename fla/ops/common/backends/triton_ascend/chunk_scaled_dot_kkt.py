@@ -63,6 +63,7 @@ def chunk_scaled_dot_kkt_fwd_kernel(
     BK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     USE_G: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
 ):
     T = T.to(tl.int64)
     bt_stride = B.to(tl.int64) * T
@@ -75,50 +76,67 @@ def chunk_scaled_dot_kkt_fwd_kernel(
         i_t = task_id.to(tl.int64) // bh
         i_bh = task_id.to(tl.int64) % bh
         i_b, i_h = i_bh // HV, i_bh % HV
+        is_valid = True
         if IS_VARLEN:
             i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
-            bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
-            T = eos - bos
-        else:
-            bos = tl.cast(i_b, tl.int64) * T
-        o_t = i_t * BT + o_i
-        m_t = o_t < T
-        m_A = m_causal & (m_t[:, None] & m_t)
-        # make_block_ptr offsets must be 32-bit; keep 64-bit o_t for regular indexing.
-        t_off = (i_t * BT).to(tl.int32)
-        # 1-token chunks: strictly-lower-tri kkt is 0; T=1 block_ptr misaligns UB.
-        if i_t * BT + 1 < T:
-            p_b = tl.make_block_ptr(beta + i_h * bt_stride + bos, (T,), (1,), (t_off,), (BT,), (0,))
-            b_b = tl.load(p_b, boundary_check=(0,)).to(tl.float32)
+            if USE_GRAPH:
+                is_valid = i_n >= 0
+        if is_valid:
+            if IS_VARLEN:
+                bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+                T = eos - bos
+            else:
+                bos = tl.cast(i_b, tl.int64) * T
+            o_t = i_t * BT + o_i
+            m_t = o_t < T
+            m_A = m_causal & (m_t[:, None] & m_t)
+            # make_block_ptr offsets must be 32-bit; keep 64-bit o_t for regular indexing.
+            t_off = (i_t * BT).to(tl.int32)
+            # 1-token chunks: strictly-lower-tri kkt is 0; T=1 block_ptr misaligns UB.
+            if i_t * BT + 1 < T:
+                p_b = tl.make_block_ptr(beta + i_h * bt_stride + bos, (T,), (1,), (t_off,), (BT,), (0,))
+                if USE_GRAPH:
+                    b_b = tl.load(p_b, padding_option='zero', boundary_check=(0,)).to(tl.float32)
+                else:
+                    b_b = tl.load(p_b, boundary_check=(0,)).to(tl.float32)
 
-            if USE_G:
-                p_g = tl.make_block_ptr(g + i_h * bt_stride + bos, (T,), (1,), (t_off,), (BT,), (0,))
-                b_g = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
+                if USE_G:
+                    p_g = tl.make_block_ptr(g + i_h * bt_stride + bos, (T,), (1,), (t_off,), (BT,), (0,))
+                    if USE_GRAPH:
+                        b_g = tl.load(p_g, padding_option='zero', boundary_check=(0,)).to(tl.float32)
+                    else:
+                        b_g = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
 
-            b_A = tl.zeros([BT, BT], dtype=tl.float32)
-            for i_k in range(tl.cdiv(K, BK)):
-                p_k = tl.make_block_ptr(
-                    base=k + (bos * H + i_h // (HV // H)) * K,
-                    shape=(T, K),
-                    strides=(H * K, 1),
-                    offsets=(t_off, i_k * BK),
-                    block_shape=(BT, BK),
-                    order=(1, 0),
-                )
-                b_k = tl.load(p_k, boundary_check=(0, 1)).to(tl.float32)
-                # ascend tl.dot may clobber lhs; keep rhs on the original tile.
-                b_k_lhs = b_k + 0.0
-                b_A = tl.dot(b_k_lhs, tl.trans(b_k), b_A, allow_tf32=False)
+                b_A = tl.zeros([BT, BT], dtype=tl.float32)
+                for i_k in range(tl.cdiv(K, BK)):
+                    p_k = tl.make_block_ptr(
+                        base=k + (bos * H + i_h // (HV // H)) * K,
+                        shape=(T, K),
+                        strides=(H * K, 1),
+                        offsets=(t_off, i_k * BK),
+                        block_shape=(BT, BK),
+                        order=(1, 0),
+                    )
+                    if USE_GRAPH:
+                        b_k = tl.load(p_k, padding_option='zero', boundary_check=(0, 1)).to(tl.float32)
+                    else:
+                        b_k = tl.load(p_k, boundary_check=(0, 1)).to(tl.float32)
+                    if USE_GRAPH:
+                        m_k = (i_k * BK + tl.arange(0, BK)) < K
+                        b_k = tl.where(m_t[:, None] & m_k[None, :], b_k, 0)
+                    # ascend tl.dot may clobber lhs; keep rhs on the original tile.
+                    b_k_lhs = b_k + 0.0
+                    b_A = tl.dot(b_k_lhs, tl.trans(b_k), b_A, allow_tf32=False)
 
-            if USE_G:
-                # mask first so upper-triangle g_i-g_j cannot overflow to inf.
-                b_g_diff = tl.where(m_A, b_g[:, None] - b_g[None, :], 0)
-                b_A *= exp2(b_g_diff)
-            b_A *= b_b[:, None]
-            b_A = tl.where(m_A, b_A, 0)
+                if USE_G:
+                    # mask first so upper-triangle g_i-g_j cannot overflow to inf.
+                    b_g_diff = tl.where(m_A, b_g[:, None] - b_g[None, :], 0)
+                    b_A *= exp2(b_g_diff)
+                b_A *= b_b[:, None]
+                b_A = tl.where(m_A, b_A, 0)
 
-            p_A = A + (bos * HV + i_h) * BT + o_t[:, None] * (BT * HV) + o_i[None, :]
-            tl.store(p_A, b_A.to(p_A.dtype.element_ty), mask=m_t[:, None])
+                p_A = A + (bos * HV + i_h) * BT + o_t[:, None] * (BT * HV) + o_i[None, :]
+                tl.store(p_A, b_A.to(p_A.dtype.element_ty), mask=m_t[:, None])
 
 
 @input_guard
@@ -130,6 +148,7 @@ def chunk_scaled_dot_kkt_fwd_npu(
     chunk_size: int = 64,
     output_dtype: torch.dtype = torch.float32,
     chunk_indices: torch.LongTensor | None = None,
+    use_graph: bool = False,
 ) -> torch.Tensor:
     r"""
     Compute beta * K * K^T.
@@ -182,5 +201,6 @@ def chunk_scaled_dot_kkt_fwd_npu(
         K=K,
         BT=BT,
         BK=BK,
+        USE_GRAPH=use_graph,
     )
     return A

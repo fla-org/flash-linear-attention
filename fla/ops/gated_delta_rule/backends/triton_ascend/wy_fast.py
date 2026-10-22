@@ -150,6 +150,7 @@ def recompute_w_u_fwd_kernel_npu(
     USE_G: tl.constexpr,
     G_T_CONTIG: tl.constexpr,
     BETA_T_CONTIG: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
 ):
     T_seq = T
     core_id = tl.program_id(0)
@@ -157,66 +158,104 @@ def recompute_w_u_fwd_kernel_npu(
         i_t_o = task_id // (B * HV)
         i_bh = task_id % (B * HV)
         i_b, i_h = i_bh // HV, i_bh % HV
+        is_valid = True
         if IS_VARLEN:
             i_n, i_t = tl.load(chunk_indices + i_t_o * 2).to(tl.int32), tl.load(
                 chunk_indices + i_t_o * 2 + 1
             ).to(tl.int32)
-            bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(
-                cu_seqlens + i_n + 1
-            ).to(tl.int64)
-            T = (eos - bos).to(tl.int32)
-        else:
-            i_t = i_t_o
-            bos = tl.cast(i_b, tl.int64) * T_seq
-
-        k_ptr = k + (bos * H + i_h // (HV // H)) * K
-        v_ptr = v + (bos * HV + i_h) * V
-        u_ptr = u + (bos * HV + i_h) * V
-        w_ptr = w + (bos * HV + i_h) * K
-        if BETA_T_CONTIG:
-            beta_ptr = _g_contig_base(beta, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
-        else:
-            beta_ptr = beta + bos * HV + i_h
-        p_b = _t_block_ptr(beta_ptr, T, i_t * BT, BT, BETA_T_CONTIG, HV)
-        b_b = tl.load(p_b, boundary_check=(0,))
-        p_A = tl.make_block_ptr(
-            A + (bos * HV + i_h) * BT, (T, BT), (HV * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0),
-        )
-        if USE_G:
-            if G_T_CONTIG:
-                g_ptr = _g_contig_base(g, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
+            if USE_GRAPH:
+                is_valid = i_n >= 0
+        if is_valid:
+            if IS_VARLEN:
+                bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(
+                    cu_seqlens + i_n + 1
+                ).to(tl.int64)
+                T = (eos - bos).to(tl.int32)
             else:
-                g_ptr = g + bos * HV + i_h
-            p_g = _t_block_ptr(g_ptr, T, i_t * BT, BT, G_T_CONTIG, HV)
-            b_g = exp2(tl.load(p_g, boundary_check=(0,)).to(tl.float32))
-        for i_v in range(tl.cdiv(V, BV)):
-            p_v = tl.make_block_ptr(
-                v_ptr, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0),
+                i_t = i_t_o
+                bos = tl.cast(i_b, tl.int64) * T_seq
+
+            k_ptr = k + (bos * H + i_h // (HV // H)) * K
+            v_ptr = v + (bos * HV + i_h) * V
+            u_ptr = u + (bos * HV + i_h) * V
+            w_ptr = w + (bos * HV + i_h) * K
+            if BETA_T_CONTIG:
+                beta_ptr = _g_contig_base(beta, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
+            else:
+                beta_ptr = beta + bos * HV + i_h
+            p_b = _t_block_ptr(beta_ptr, T, i_t * BT, BT, BETA_T_CONTIG, HV)
+            if USE_GRAPH:
+                b_b = tl.load(p_b, padding_option='zero', boundary_check=(0,))
+            else:
+                b_b = tl.load(p_b, boundary_check=(0,))
+            p_A = tl.make_block_ptr(
+                A + (bos * HV + i_h) * BT, (T, BT), (HV * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0),
             )
-            p_u = tl.make_block_ptr(
-                u_ptr, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0),
-            )
-            b_v = tl.load(p_v, boundary_check=(0, 1))
-            b_vb = (b_v * b_b[:, None]).to(b_v.dtype)
-            # Ascend tl.dot may clobber the left operand; reload A each V tile.
-            b_A = tl.load(p_A, boundary_check=(0, 1))
-            b_u = tl.dot(b_A, b_vb, allow_tf32=False)
-            tl.store(p_u, b_u.to(p_u.dtype.element_ty), boundary_check=(0, 1))
-        for i_k in range(tl.cdiv(K, BK)):
-            p_k = tl.make_block_ptr(
-                k_ptr, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0),
-            )
-            p_w = tl.make_block_ptr(
-                w_ptr, (T, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0),
-            )
-            b_k = tl.load(p_k, boundary_check=(0, 1))
-            b_kb = b_k * b_b[:, None]
             if USE_G:
-                b_kb = b_kb * b_g[:, None]
-            # Ascend tl.dot may clobber the left operand; reload A each K tile.
-            b_A = tl.load(p_A, boundary_check=(0, 1))
-            b_w = tl.dot(b_A, b_kb.to(b_k.dtype), allow_tf32=False)
-            tl.store(p_w, b_w.to(p_w.dtype.element_ty), boundary_check=(0, 1))
+                if G_T_CONTIG:
+                    g_ptr = _g_contig_base(g, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
+                else:
+                    g_ptr = g + bos * HV + i_h
+                p_g = _t_block_ptr(g_ptr, T, i_t * BT, BT, G_T_CONTIG, HV)
+                if USE_GRAPH:
+                    b_g_raw = tl.load(p_g, boundary_check=(0,), padding_option='zero').to(tl.float32)
+                    b_g = exp2(tl.where(i_t * BT + tl.arange(0, BT) < T, b_g_raw, 0))
+                else:
+                    b_g = exp2(tl.load(p_g, boundary_check=(0,)).to(tl.float32))
+            for i_v in range(tl.cdiv(V, BV)):
+                p_v = tl.make_block_ptr(
+                    v_ptr, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0),
+                )
+                p_u = tl.make_block_ptr(
+                    u_ptr, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0),
+                )
+                if USE_GRAPH:
+                    b_v = tl.load(p_v, padding_option='zero', boundary_check=(0, 1))
+                else:
+                    b_v = tl.load(p_v, boundary_check=(0, 1))
+                b_vb = (b_v * b_b[:, None]).to(b_v.dtype)
+                if USE_GRAPH:
+                    mask = ((i_t * BT + tl.arange(0, BT)) < T)[:, None]
+                    mask = mask & ((i_v * BV + tl.arange(0, BV)) < V)[None, :]
+                    b_vb = tl.where(mask, b_vb, 0)
+                # Ascend tl.dot may clobber the left operand; reload A each V tile.
+                if USE_GRAPH:
+                    b_A = tl.load(p_A, padding_option='zero', boundary_check=(0, 1))
+                else:
+                    b_A = tl.load(p_A, boundary_check=(0, 1))
+                if USE_GRAPH:
+                    m_t = (i_t * BT + tl.arange(0, BT)) < T
+                    b_A = tl.where(m_t[:, None] & m_t[None, :], b_A, 0)
+                b_u = tl.dot(b_A, b_vb, allow_tf32=False)
+                tl.store(p_u, b_u.to(p_u.dtype.element_ty), boundary_check=(0, 1))
+            for i_k in range(tl.cdiv(K, BK)):
+                p_k = tl.make_block_ptr(
+                    k_ptr, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0),
+                )
+                p_w = tl.make_block_ptr(
+                    w_ptr, (T, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0),
+                )
+                if USE_GRAPH:
+                    b_k = tl.load(p_k, padding_option='zero', boundary_check=(0, 1))
+                else:
+                    b_k = tl.load(p_k, boundary_check=(0, 1))
+                b_kb = b_k * b_b[:, None]
+                if USE_G:
+                    b_kb = b_kb * b_g[:, None]
+                if USE_GRAPH:
+                    mask = ((i_t * BT + tl.arange(0, BT)) < T)[:, None]
+                    mask = mask & ((i_k * BK + tl.arange(0, BK)) < K)[None, :]
+                    b_kb = tl.where(mask, b_kb, 0)
+                # Ascend tl.dot may clobber the left operand; reload A each K tile.
+                if USE_GRAPH:
+                    b_A = tl.load(p_A, padding_option='zero', boundary_check=(0, 1))
+                else:
+                    b_A = tl.load(p_A, boundary_check=(0, 1))
+                if USE_GRAPH:
+                    m_t = (i_t * BT + tl.arange(0, BT)) < T
+                    b_A = tl.where(m_t[:, None] & m_t[None, :], b_A, 0)
+                b_w = tl.dot(b_A, b_kb.to(b_k.dtype), allow_tf32=False)
+                tl.store(p_w, b_w.to(p_w.dtype.element_ty), boundary_check=(0, 1))
 
 
 @triton.heuristics({
@@ -233,6 +272,7 @@ def prepare_wy_repr_bwd_kv_npu(
     G_T_CONTIG: tl.constexpr, BETA_T_CONTIG: tl.constexpr,
     DG_T_CONTIG: tl.constexpr, DB_T_CONTIG: tl.constexpr,
     G_EXP_PRECOMP: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
 ):
     """K/V backward stage on a 1D Cube core-grid.
 
@@ -245,119 +285,163 @@ def prepare_wy_repr_bwd_kv_npu(
         i_t_o = task_id // (B * HV)
         i_bh = task_id % (B * HV)
         i_b, i_h = i_bh // HV, i_bh % HV
+        is_valid = True
         if IS_VARLEN:
             i_n, i_t = tl.load(chunk_indices + i_t_o * 2).to(tl.int32), tl.load(
                 chunk_indices + i_t_o * 2 + 1
             ).to(tl.int32)
-            bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(
-                cu_seqlens + i_n + 1
-            ).to(tl.int64)
-            T = (eos - bos).to(tl.int32)
-        else:
-            i_t = i_t_o
-            bos = tl.cast(i_b, tl.int64) * T_seq
-
-        if BETA_T_CONTIG:
-            beta_ptr = _g_contig_base(beta, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
-            p_b = _t_block_ptr(beta_ptr, T, i_t * BT, BT, True, HV)
-        else:
-            p_b = tl.make_block_ptr(beta + (bos * HV + i_h), (T,), (HV,), (i_t * BT,), (BT,), (0,))
-        if DB_T_CONTIG:
-            db_ptr = _g_contig_base(db, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
-            p_db = _t_block_ptr(db_ptr, T, i_t * BT, BT, True, HV)
-        else:
-            p_db = tl.make_block_ptr(db + (bos * HV + i_h), (T,), (HV,), (i_t * BT,), (BT,), (0,))
-        p_A = tl.make_block_ptr(
-            A + (bos * HV + i_h) * BT, (BT, T), (1, HV * BT), (0, i_t * BT), (BT, BT), (0, 1),
-        )
-        p_dA = tl.make_block_ptr(
-            dA_scr + (bos * HV + i_h) * BT, (BT, T), (1, HV * BT), (0, i_t * BT), (BT, BT), (0, 1),
-        )
-
-        b_b = tl.load(p_b, boundary_check=(0,)).to(tl.float32)
-        b_db = tl.zeros([BT], dtype=tl.float32)
-        b_dA = tl.zeros([BT, BT], dtype=tl.float32)
-        b_A = tl.load(p_A, boundary_check=(0, 1)).to(tl.float32)
-
-        if USE_G:
-            if G_T_CONTIG:
-                g_ptr = _g_contig_base(g, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
-                p_g = _t_block_ptr(g_ptr, T, i_t * BT, BT, True, HV)
+            if USE_GRAPH:
+                is_valid = i_n >= 0
+        if is_valid:
+            if IS_VARLEN:
+                bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(
+                    cu_seqlens + i_n + 1
+                ).to(tl.int64)
+                T = (eos - bos).to(tl.int32)
             else:
-                p_g = tl.make_block_ptr(g + (bos * HV + i_h), (T,), (HV,), (i_t * BT,), (BT,), (0,))
-            b_g = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
-            b_g_exp = b_g if G_EXP_PRECOMP else exp2(b_g)
-            b_bg = b_b * b_g_exp
-            b_dg = tl.zeros([BT], dtype=tl.float32)
+                i_t = i_t_o
+                bos = tl.cast(i_b, tl.int64) * T_seq
 
-        k_ptr = k + (bos * H + i_h // (HV // H)) * K
-        dk_ptr = dk + (bos * HV + i_h) * K
-        dw_ptr = dw + (bos * HV + i_h) * K
-        for i_k in range(tl.cdiv(K, BK)):
-            p_k = tl.make_block_ptr(
-                k_ptr, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0),
+            if BETA_T_CONTIG:
+                beta_ptr = _g_contig_base(beta, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
+                p_b = _t_block_ptr(beta_ptr, T, i_t * BT, BT, True, HV)
+            else:
+                p_b = tl.make_block_ptr(beta + (bos * HV + i_h), (T,), (HV,), (i_t * BT,), (BT,), (0,))
+            if DB_T_CONTIG:
+                db_ptr = _g_contig_base(db, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
+                p_db = _t_block_ptr(db_ptr, T, i_t * BT, BT, True, HV)
+            else:
+                p_db = tl.make_block_ptr(db + (bos * HV + i_h), (T,), (HV,), (i_t * BT,), (BT,), (0,))
+            p_A = tl.make_block_ptr(
+                A + (bos * HV + i_h) * BT, (BT, T), (1, HV * BT), (0, i_t * BT), (BT, BT), (0, 1),
             )
-            p_dk = tl.make_block_ptr(
-                dk_ptr, (T, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0),
+            p_dA = tl.make_block_ptr(
+                dA_scr + (bos * HV + i_h) * BT, (BT, T), (1, HV * BT), (0, i_t * BT), (BT, BT), (0, 1),
             )
-            p_dw = tl.make_block_ptr(
-                dw_ptr, (T, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0),
-            )
-            b_k = tl.load(p_k, boundary_check=(0, 1))
+
+            if USE_GRAPH:
+                b_b = tl.load(p_b, padding_option='zero', boundary_check=(0,)).to(tl.float32)
+            else:
+                b_b = tl.load(p_b, boundary_check=(0,)).to(tl.float32)
+            if USE_GRAPH:
+                m_t = i_t * BT + tl.arange(0, BT) < T
+                b_b = tl.where(m_t, b_b, 0)
+            b_db = tl.zeros([BT], dtype=tl.float32)
+            b_dA = tl.zeros([BT, BT], dtype=tl.float32)
+            if USE_GRAPH:
+                b_A = tl.load(p_A, padding_option='zero', boundary_check=(0, 1)).to(tl.float32)
+            else:
+                b_A = tl.load(p_A, boundary_check=(0, 1)).to(tl.float32)
+
+            if USE_GRAPH:
+                b_A = tl.where(m_t[:, None] & m_t[None, :], b_A, 0)
+
             if USE_G:
-                b_kbg = (b_k.to(tl.float32) * b_bg[:, None]).to(b_k.dtype)
-            else:
-                b_kbg = (b_k.to(tl.float32) * b_b[:, None]).to(b_k.dtype)
-            b_dw = tl.load(p_dw, boundary_check=(0, 1))
-            # Match CUDA: accumulate dA in fp32. Copy A before downcast so lhs clobber is safe.
-            b_dw_c = b_dw + 0.0
-            b_A_c = b_A.to(b_dw.dtype) + 0.0
-            b_dA = tl.dot(b_dw, tl.trans(b_kbg), acc=b_dA, allow_tf32=False)
-            b_dkbg = tl.dot(b_A_c, b_dw_c, allow_tf32=False).to(tl.float32)
-            b_k_f = b_k.to(tl.float32)
+                if G_T_CONTIG:
+                    g_ptr = _g_contig_base(g, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
+                    p_g = _t_block_ptr(g_ptr, T, i_t * BT, BT, True, HV)
+                else:
+                    p_g = tl.make_block_ptr(g + (bos * HV + i_h), (T,), (HV,), (i_t * BT,), (BT,), (0,))
+                if USE_GRAPH:
+                    b_g = tl.load(p_g, padding_option='zero', boundary_check=(0,)).to(tl.float32)
+                else:
+                    b_g = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
+                if USE_GRAPH:
+                    b_g = tl.where(m_t, b_g, 0)
+                b_g_exp = b_g if G_EXP_PRECOMP else exp2(b_g)
+                b_bg = b_b * b_g_exp
+                b_dg = tl.zeros([BT], dtype=tl.float32)
+
+            k_ptr = k + (bos * H + i_h // (HV // H)) * K
+            dk_ptr = dk + (bos * HV + i_h) * K
+            dw_ptr = dw + (bos * HV + i_h) * K
+            for i_k in range(tl.cdiv(K, BK)):
+                p_k = tl.make_block_ptr(
+                    k_ptr, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0),
+                )
+                p_dk = tl.make_block_ptr(
+                    dk_ptr, (T, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0),
+                )
+                p_dw = tl.make_block_ptr(
+                    dw_ptr, (T, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0),
+                )
+                if USE_GRAPH:
+                    b_k = tl.load(p_k, padding_option='zero', boundary_check=(0, 1))
+                else:
+                    b_k = tl.load(p_k, boundary_check=(0, 1))
+                if USE_GRAPH:
+                    m_k = i_k * BK + tl.arange(0, BK) < K
+                    b_k = tl.where(m_t[:, None] & m_k[None, :], b_k, 0)
+                if USE_G:
+                    b_kbg = (b_k.to(tl.float32) * b_bg[:, None]).to(b_k.dtype)
+                else:
+                    b_kbg = (b_k.to(tl.float32) * b_b[:, None]).to(b_k.dtype)
+                if USE_GRAPH:
+                    b_dw = tl.load(p_dw, padding_option='zero', boundary_check=(0, 1))
+                else:
+                    b_dw = tl.load(p_dw, boundary_check=(0, 1))
+                if USE_GRAPH:
+                    b_dw = tl.where(m_t[:, None] & m_k[None, :], b_dw, 0)
+                # Match CUDA: accumulate dA in fp32. Copy A before downcast so lhs clobber is safe.
+                b_dw_c = b_dw + 0.0
+                b_A_c = b_A.to(b_dw.dtype) + 0.0
+                b_dA = tl.dot(b_dw, tl.trans(b_kbg), acc=b_dA, allow_tf32=False)
+                b_dkbg = tl.dot(b_A_c, b_dw_c, allow_tf32=False).to(tl.float32)
+                b_k_f = b_k.to(tl.float32)
+                if USE_G:
+                    b_dk = b_dkbg * b_bg[:, None]
+                    b_db += b_g_exp * tl.sum(b_dkbg * b_k_f, 1)
+                    b_dg += tl.sum(b_dkbg * b_kbg.to(tl.float32), 1)
+                else:
+                    b_dk = b_dkbg * b_b[:, None]
+                    b_db += tl.sum(b_dkbg * b_k_f, 1)
+                tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
+
+            v_ptr = v + (bos * HV + i_h) * V
+            dv_ptr = dv + (bos * HV + i_h) * V
+            du_ptr = du + (bos * HV + i_h) * V
+            for i_v in range(tl.cdiv(V, BV)):
+                p_v = tl.make_block_ptr(
+                    v_ptr, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0),
+                )
+                p_dv = tl.make_block_ptr(
+                    dv_ptr, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0),
+                )
+                p_du = tl.make_block_ptr(
+                    du_ptr, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0),
+                )
+                if USE_GRAPH:
+                    b_v = tl.load(p_v, padding_option='zero', boundary_check=(0, 1))
+                else:
+                    b_v = tl.load(p_v, boundary_check=(0, 1))
+                if USE_GRAPH:
+                    b_du = tl.load(p_du, padding_option='zero', boundary_check=(0, 1))
+                else:
+                    b_du = tl.load(p_du, boundary_check=(0, 1))
+                if USE_GRAPH:
+                    m_v = i_v * BV + tl.arange(0, BV) < V
+                    m_tv = m_t[:, None] & m_v[None, :]
+                    b_v = tl.where(m_tv, b_v, 0)
+                    b_du = tl.where(m_tv, b_du, 0)
+                b_vb = (b_v.to(tl.float32) * b_b[:, None]).to(b_v.dtype)
+                b_du_c = b_du + 0.0
+                b_A_c = b_A.to(b_du.dtype) + 0.0
+                b_dA = tl.dot(b_du, tl.trans(b_vb), acc=b_dA, allow_tf32=False)
+                b_dvb = tl.dot(b_A_c, b_du_c, allow_tf32=False).to(tl.float32)
+                b_v_f = b_v.to(tl.float32)
+                b_dv = b_dvb * b_b[:, None]
+                b_db += tl.sum(b_dvb * b_v_f, 1)
+                tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
+
+            tl.store(p_dA, b_dA.to(p_dA.dtype.element_ty), boundary_check=(0, 1))
+            tl.store(p_db, b_db.to(p_db.dtype.element_ty), boundary_check=(0,))
             if USE_G:
-                b_dk = b_dkbg * b_bg[:, None]
-                b_db += b_g_exp * tl.sum(b_dkbg * b_k_f, 1)
-                b_dg += tl.sum(b_dkbg * b_kbg.to(tl.float32), 1)
-            else:
-                b_dk = b_dkbg * b_b[:, None]
-                b_db += tl.sum(b_dkbg * b_k_f, 1)
-            tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
-
-        v_ptr = v + (bos * HV + i_h) * V
-        dv_ptr = dv + (bos * HV + i_h) * V
-        du_ptr = du + (bos * HV + i_h) * V
-        for i_v in range(tl.cdiv(V, BV)):
-            p_v = tl.make_block_ptr(
-                v_ptr, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0),
-            )
-            p_dv = tl.make_block_ptr(
-                dv_ptr, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0),
-            )
-            p_du = tl.make_block_ptr(
-                du_ptr, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0),
-            )
-            b_v = tl.load(p_v, boundary_check=(0, 1))
-            b_du = tl.load(p_du, boundary_check=(0, 1))
-            b_vb = (b_v.to(tl.float32) * b_b[:, None]).to(b_v.dtype)
-            b_du_c = b_du + 0.0
-            b_A_c = b_A.to(b_du.dtype) + 0.0
-            b_dA = tl.dot(b_du, tl.trans(b_vb), acc=b_dA, allow_tf32=False)
-            b_dvb = tl.dot(b_A_c, b_du_c, allow_tf32=False).to(tl.float32)
-            b_v_f = b_v.to(tl.float32)
-            b_dv = b_dvb * b_b[:, None]
-            b_db += tl.sum(b_dvb * b_v_f, 1)
-            tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
-
-        tl.store(p_dA, b_dA.to(p_dA.dtype.element_ty), boundary_check=(0, 1))
-        tl.store(p_db, b_db.to(p_db.dtype.element_ty), boundary_check=(0,))
-        if USE_G:
-            if DG_T_CONTIG:
-                dg_ptr = _g_contig_base(dg, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
-                p_dg = _t_block_ptr(dg_ptr, T, i_t * BT, BT, True, HV)
-            else:
-                p_dg = tl.make_block_ptr(dg + (bos * HV + i_h), (T,), (HV,), (i_t * BT,), (BT,), (0,))
-            tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), boundary_check=(0,))
+                if DG_T_CONTIG:
+                    dg_ptr = _g_contig_base(dg, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
+                    p_dg = _t_block_ptr(dg_ptr, T, i_t * BT, BT, True, HV)
+                else:
+                    p_dg = tl.make_block_ptr(dg + (bos * HV + i_h), (T,), (HV,), (i_t * BT,), (BT,), (0,))
+                tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), boundary_check=(0,))
 
 
 @triton.jit(do_not_specialize=['T'])
@@ -367,6 +451,7 @@ def prepare_wy_repr_bwd_da_mask_dot1_npu(
     HV: tl.constexpr, BT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     NT_OFFSET: tl.constexpr, BH_OFFSET: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
 ):
     i_t = tl.program_id(0) + NT_OFFSET
     i_bh = tl.program_id(1) + BH_OFFSET
@@ -375,6 +460,9 @@ def prepare_wy_repr_bwd_da_mask_dot1_npu(
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(
             chunk_indices + i_t * 2 + 1
         ).to(tl.int32)
+        if USE_GRAPH:
+            if i_n < 0:
+                return
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(
             cu_seqlens + i_n + 1
         ).to(tl.int64)
@@ -392,12 +480,23 @@ def prepare_wy_repr_bwd_da_mask_dot1_npu(
     p_out = tl.make_block_ptr(
         dA_mid + (bos * HV + i_h) * BT, (BT, T), (1, HV * BT), (0, i_t * BT), (BT, BT), (0, 1),
     )
-    b_A = tl.load(p_A, boundary_check=(0, 1)).to(tl.float32)
-    b_dA = tl.load(p_in, boundary_check=(0, 1)).to(tl.float32)
+    if USE_GRAPH:
+        b_A = tl.load(p_A, padding_option='zero', boundary_check=(0, 1)).to(tl.float32)
+    else:
+        b_A = tl.load(p_A, boundary_check=(0, 1)).to(tl.float32)
+    if USE_GRAPH:
+        b_dA = tl.load(p_in, padding_option='zero', boundary_check=(0, 1)).to(tl.float32)
+    else:
+        b_dA = tl.load(p_in, boundary_check=(0, 1)).to(tl.float32)
     o_t = i_t * BT + tl.arange(0, BT)
     m_t = o_t < T
     m_A = (o_t[:, None] > o_t[None, :]) & (m_t[:, None] & m_t)
     b_dA = tl.where(m_A, b_dA, 0)
+    if USE_GRAPH:
+        m_t = i_t * BT + tl.arange(0, BT) < T
+        m_tt = m_t[:, None] & m_t[None, :]
+        b_A = tl.where(m_tt, b_A, 0)
+        b_dA = tl.where(m_tt, b_dA, 0)
     b_out = tl.dot(b_dA, b_A, allow_tf32=False)
     tl.store(p_out, b_out.to(p_out.dtype.element_ty), boundary_check=(0, 1))
 
@@ -409,12 +508,16 @@ def prepare_wy_repr_bwd_da_dot2_npu(
     HV: tl.constexpr, BT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     NT_OFFSET: tl.constexpr, BH_OFFSET: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
 ):
     i_t = tl.program_id(0) + NT_OFFSET
     i_bh = tl.program_id(1) + BH_OFFSET
     i_b, i_h = i_bh // HV, i_bh % HV
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        if USE_GRAPH:
+            if i_n < 0:
+                return
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = (eos - bos).to(tl.int32)
     else:
@@ -424,8 +527,19 @@ def prepare_wy_repr_bwd_da_dot2_npu(
     p_A = tl.make_block_ptr(A + (bos * HV + i_h) * BT, (BT, T), (1, HV * BT), (0, i_t * BT), (BT, BT), (0, 1))
     p_in = tl.make_block_ptr(dA_mid + (bos * HV + i_h) * BT, (BT, T), (1, HV * BT), (0, i_t * BT), (BT, BT), (0, 1))
     p_out = tl.make_block_ptr(dA_out + (bos * HV + i_h) * BT, (BT, T), (1, HV * BT), (0, i_t * BT), (BT, BT), (0, 1))
-    b_A = tl.load(p_A, boundary_check=(0, 1)).to(tl.float32)
-    b_dA = tl.load(p_in, boundary_check=(0, 1)).to(tl.float32)
+    if USE_GRAPH:
+        b_A = tl.load(p_A, padding_option='zero', boundary_check=(0, 1)).to(tl.float32)
+    else:
+        b_A = tl.load(p_A, boundary_check=(0, 1)).to(tl.float32)
+    if USE_GRAPH:
+        b_dA = tl.load(p_in, padding_option='zero', boundary_check=(0, 1)).to(tl.float32)
+    else:
+        b_dA = tl.load(p_in, boundary_check=(0, 1)).to(tl.float32)
+    if USE_GRAPH:
+        m_t = i_t * BT + tl.arange(0, BT) < T
+        m_tt = m_t[:, None] & m_t[None, :]
+        b_A = tl.where(m_tt, b_A, 0)
+        b_dA = tl.where(m_tt, b_dA, 0)
     b_dA = tl.dot(b_A, b_dA, allow_tf32=False)
     o_t = i_t * BT + tl.arange(0, BT)
     m_t = o_t < T
@@ -441,6 +555,7 @@ def prepare_wy_repr_bwd_da_gate_npu(
     HV: tl.constexpr, BT: tl.constexpr,
     IS_VARLEN: tl.constexpr, G_T_CONTIG: tl.constexpr,
     NT_OFFSET: tl.constexpr, BH_OFFSET: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
 ):
     i_t = tl.program_id(0) + NT_OFFSET
     i_bh = tl.program_id(1) + BH_OFFSET
@@ -450,6 +565,9 @@ def prepare_wy_repr_bwd_da_gate_npu(
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(
             chunk_indices + i_t * 2 + 1
         ).to(tl.int32)
+        if USE_GRAPH:
+            if i_n < 0:
+                return
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(
             cu_seqlens + i_n + 1
         ).to(tl.int64)
@@ -465,9 +583,24 @@ def prepare_wy_repr_bwd_da_gate_npu(
     p_dA = tl.make_block_ptr(
         dA_out + (bos * HV + i_h) * BT, (BT, T), (1, HV * BT), (0, i_t * BT), (BT, BT), (0, 1),
     )
-    b_g = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
-    b_dA = tl.load(p_dA, boundary_check=(0, 1)).to(tl.float32)
-    b_prod = b_dA * exp2(b_g[:, None] - b_g[None, :])
+    if USE_GRAPH:
+        b_g = tl.load(p_g, padding_option='zero', boundary_check=(0,)).to(tl.float32)
+    else:
+        b_g = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
+    if USE_GRAPH:
+        b_dA = tl.load(p_dA, padding_option='zero', boundary_check=(0, 1)).to(tl.float32)
+    else:
+        b_dA = tl.load(p_dA, boundary_check=(0, 1)).to(tl.float32)
+    if USE_GRAPH:
+        o_t = i_t * BT + tl.arange(0, BT)
+        m_t = o_t < T
+        m_A = (o_t[:, None] > o_t[None, :]) & m_t[:, None] & m_t[None, :]
+        b_g = tl.where(m_t, b_g, 0)
+        b_dA = tl.where(m_A, b_dA, 0)
+        b_delta = tl.where(m_A, b_g[:, None] - b_g[None, :], 0)
+        b_prod = b_dA * exp2(b_delta)
+    else:
+        b_prod = b_dA * exp2(b_g[:, None] - b_g[None, :])
     b_dA = tl.where(b_prod == b_prod, b_prod, 0.0)
     tl.store(p_dA, b_dA.to(p_dA.dtype.element_ty), boundary_check=(0, 1))
 
@@ -483,6 +616,7 @@ def prepare_wy_repr_bwd_finalize_k_npu(
     H: tl.constexpr, HV: tl.constexpr, K: tl.constexpr,
     BT: tl.constexpr, BK: tl.constexpr,
     IS_VARLEN: tl.constexpr, BETA_T_CONTIG: tl.constexpr, DB_T_CONTIG: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
 ):
     T_seq = T
     core_id = tl.program_id(0)
@@ -490,55 +624,85 @@ def prepare_wy_repr_bwd_finalize_k_npu(
         i_t_o = task_id // (B * HV)
         i_bh = task_id % (B * HV)
         i_b, i_h = i_bh // HV, i_bh % HV
+        is_valid = True
         if IS_VARLEN:
             i_n, i_t = tl.load(chunk_indices + i_t_o * 2).to(tl.int32), tl.load(
                 chunk_indices + i_t_o * 2 + 1
             ).to(tl.int32)
-            bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(
-                cu_seqlens + i_n + 1
-            ).to(tl.int64)
-            T = (eos - bos).to(tl.int32)
-        else:
-            i_t = i_t_o
-            bos = tl.cast(i_b, tl.int64) * T_seq
+            if USE_GRAPH:
+                is_valid = i_n >= 0
+        if is_valid:
+            if IS_VARLEN:
+                bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(
+                    cu_seqlens + i_n + 1
+                ).to(tl.int64)
+                T = (eos - bos).to(tl.int32)
+            else:
+                i_t = i_t_o
+                bos = tl.cast(i_b, tl.int64) * T_seq
 
-        if BETA_T_CONTIG:
-            beta_ptr = _g_contig_base(beta, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
-            p_b = _t_block_ptr(beta_ptr, T, i_t * BT, BT, True, HV)
-        else:
-            p_b = tl.make_block_ptr(beta + (bos * HV + i_h), (T,), (HV,), (i_t * BT,), (BT,), (0,))
-        if DB_T_CONTIG:
-            db_ptr = _g_contig_base(db, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
-            p_db = _t_block_ptr(db_ptr, T, i_t * BT, BT, True, HV)
-        else:
-            p_db = tl.make_block_ptr(db + (bos * HV + i_h), (T,), (HV,), (i_t * BT,), (BT,), (0,))
-        p_dA = tl.make_block_ptr(
-            dA_out + (bos * HV + i_h) * BT, (BT, T), (1, HV * BT), (0, i_t * BT), (BT, BT), (0, 1),
-        )
-
-        b_b = tl.load(p_b, boundary_check=(0,)).to(tl.float32)
-        b_db = tl.load(p_db, boundary_check=(0,)).to(tl.float32)
-        b_dA = tl.load(p_dA, boundary_check=(0, 1)).to(tl.float32)
-        b_dA_c = b_dA + 0.0
-
-        for i_k in range(tl.cdiv(K, BK)):
-            p_k = tl.make_block_ptr(
-                k + (bos * H + i_h // (HV // H)) * K, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0),
+            if BETA_T_CONTIG:
+                beta_ptr = _g_contig_base(beta, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
+                p_b = _t_block_ptr(beta_ptr, T, i_t * BT, BT, True, HV)
+            else:
+                p_b = tl.make_block_ptr(beta + (bos * HV + i_h), (T,), (HV,), (i_t * BT,), (BT,), (0,))
+            if DB_T_CONTIG:
+                db_ptr = _g_contig_base(db, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
+                p_db = _t_block_ptr(db_ptr, T, i_t * BT, BT, True, HV)
+            else:
+                p_db = tl.make_block_ptr(db + (bos * HV + i_h), (T,), (HV,), (i_t * BT,), (BT,), (0,))
+            p_dA = tl.make_block_ptr(
+                dA_out + (bos * HV + i_h) * BT, (BT, T), (1, HV * BT), (0, i_t * BT), (BT, BT), (0, 1),
             )
-            p_dk = tl.make_block_ptr(
-                dk + (bos * HV + i_h) * K, (T, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0),
-            )
-            b_k = tl.load(p_k, boundary_check=(0, 1)).to(tl.float32)
-            b_kb = b_k * b_b[:, None]
-            # Ascend tl.dot clobbers lhs; keep a pristine copy for the rhs dot.
-            b_dA_lhs = b_dA + 0.0
-            b_dkb = tl.dot(b_dA_lhs, b_k, allow_tf32=False)
-            b_db += tl.sum(b_dkb * b_k, 1)
-            b_dk = b_dkb * b_b[:, None] + tl.trans(tl.dot(tl.trans(b_kb), b_dA_c, allow_tf32=False))
-            b_dk += tl.load(p_dk, boundary_check=(0, 1)).to(tl.float32)
-            tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
 
-        tl.store(p_db, b_db.to(p_db.dtype.element_ty), boundary_check=(0,))
+            if USE_GRAPH:
+                b_b = tl.load(p_b, padding_option='zero', boundary_check=(0,)).to(tl.float32)
+            else:
+                b_b = tl.load(p_b, boundary_check=(0,)).to(tl.float32)
+            if USE_GRAPH:
+                b_db = tl.load(p_db, padding_option='zero', boundary_check=(0,)).to(tl.float32)
+            else:
+                b_db = tl.load(p_db, boundary_check=(0,)).to(tl.float32)
+            if USE_GRAPH:
+                b_dA = tl.load(p_dA, padding_option='zero', boundary_check=(0, 1)).to(tl.float32)
+            else:
+                b_dA = tl.load(p_dA, boundary_check=(0, 1)).to(tl.float32)
+            if USE_GRAPH:
+                m_t = i_t * BT + tl.arange(0, BT) < T
+                b_b = tl.where(m_t, b_b, 0)
+                b_db = tl.where(m_t, b_db, 0)
+                b_dA = tl.where(m_t[:, None] & m_t[None, :], b_dA, 0)
+            b_dA_c = b_dA + 0.0
+
+            for i_k in range(tl.cdiv(K, BK)):
+                p_k = tl.make_block_ptr(
+                    k + (bos * H + i_h // (HV // H)) * K, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0),
+                )
+                p_dk = tl.make_block_ptr(
+                    dk + (bos * HV + i_h) * K, (T, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0),
+                )
+                if USE_GRAPH:
+                    b_k = tl.load(p_k, padding_option='zero', boundary_check=(0, 1)).to(tl.float32)
+                else:
+                    b_k = tl.load(p_k, boundary_check=(0, 1)).to(tl.float32)
+                if USE_GRAPH:
+                    m_k = i_k * BK + tl.arange(0, BK) < K
+                    m_tk = m_t[:, None] & m_k[None, :]
+                    b_k = tl.where(m_tk, b_k, 0)
+                b_kb = b_k * b_b[:, None]
+                # Ascend tl.dot clobbers lhs; keep a pristine copy for the rhs dot.
+                b_dA_lhs = b_dA + 0.0
+                b_dkb = tl.dot(b_dA_lhs, b_k, allow_tf32=False)
+                b_db += tl.sum(b_dkb * b_k, 1)
+                b_dk = b_dkb * b_b[:, None] + tl.trans(tl.dot(tl.trans(b_kb), b_dA_c, allow_tf32=False))
+                if USE_GRAPH:
+                    b_dk_prev = tl.load(p_dk, boundary_check=(0, 1), padding_option='zero').to(tl.float32)
+                    b_dk += tl.where(m_tk, b_dk_prev, 0)
+                else:
+                    b_dk += tl.load(p_dk, boundary_check=(0, 1)).to(tl.float32)
+                tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
+
+            tl.store(p_db, b_db.to(p_db.dtype.element_ty), boundary_check=(0,))
 
 
 @triton.jit(do_not_specialize=['T'])
@@ -549,6 +713,7 @@ def prepare_wy_repr_bwd_finalize_a2_dg_npu(
     BT: tl.constexpr, BK: tl.constexpr,
     IS_VARLEN: tl.constexpr, BETA_T_CONTIG: tl.constexpr, DG_T_CONTIG: tl.constexpr,
     NT_OFFSET: tl.constexpr, BH_OFFSET: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
 ):
     """Fuse A2 = (k k^T) * beta with dg += row(dA*A2) - col(dA*A2). Keep A2 in UB."""
     i_t = tl.program_id(0) + NT_OFFSET
@@ -557,6 +722,9 @@ def prepare_wy_repr_bwd_finalize_a2_dg_npu(
     T_seq = T
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        if USE_GRAPH:
+            if i_n < 0:
+                return
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = (eos - bos).to(tl.int32)
     else:
@@ -576,19 +744,41 @@ def prepare_wy_repr_bwd_finalize_a2_dg_npu(
     else:
         p_dg = tl.make_block_ptr(dg + (bos * HV + i_h), (T,), (HV,), (i_t * BT,), (BT,), (0,))
 
-    b_b = tl.load(p_b, boundary_check=(0,)).to(tl.float32)
+    if USE_GRAPH:
+        b_b = tl.load(p_b, padding_option='zero', boundary_check=(0,)).to(tl.float32)
+    else:
+        b_b = tl.load(p_b, boundary_check=(0,)).to(tl.float32)
+    if USE_GRAPH:
+        m_t = i_t * BT + tl.arange(0, BT) < T
+        b_b = tl.where(m_t, b_b, 0)
     b_A2 = tl.zeros([BT, BT], dtype=tl.float32)
     for i_k in range(tl.cdiv(K, BK)):
         p_k = tl.make_block_ptr(
             k + (bos * H + i_h // (HV // H)) * K, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0),
         )
-        b_k = tl.load(p_k, boundary_check=(0, 1)).to(tl.float32)
+        if USE_GRAPH:
+            b_k = tl.load(p_k, padding_option='zero', boundary_check=(0, 1)).to(tl.float32)
+        else:
+            b_k = tl.load(p_k, boundary_check=(0, 1)).to(tl.float32)
+        if USE_GRAPH:
+            m_k = i_k * BK + tl.arange(0, BK) < K
+            b_k = tl.where(m_t[:, None] & m_k[None, :], b_k, 0)
         b_k_c = b_k + 0.0
         b_A2 = tl.dot(b_k, tl.trans(b_k_c), b_A2, allow_tf32=False)
     b_A2 *= b_b[:, None]
-    b_dA = tl.load(p_dA, boundary_check=(0, 1)).to(tl.float32)
+    if USE_GRAPH:
+        b_dA = tl.load(p_dA, padding_option='zero', boundary_check=(0, 1)).to(tl.float32)
+    else:
+        b_dA = tl.load(p_dA, boundary_check=(0, 1)).to(tl.float32)
+    if USE_GRAPH:
+        b_dA = tl.where(m_t[:, None] & m_t[None, :], b_dA, 0)
     b_prod = b_dA * b_A2
-    b_dg = tl.load(p_dg, boundary_check=(0,)).to(tl.float32)
+    if USE_GRAPH:
+        b_dg = tl.load(p_dg, padding_option='zero', boundary_check=(0,)).to(tl.float32)
+    else:
+        b_dg = tl.load(p_dg, boundary_check=(0,)).to(tl.float32)
+    if USE_GRAPH:
+        b_dg = tl.where(m_t, b_dg, 0)
     b_dg += tl.sum(b_prod, axis=1) - tl.sum(b_prod, axis=0)
     tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), boundary_check=(0,))
 
@@ -602,6 +792,7 @@ def recompute_w_u_fwd_npu(
     g: torch.Tensor | None = None,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
+    use_graph: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
@@ -627,8 +818,8 @@ def recompute_w_u_fwd_npu(
             if best_cost is None or cost < best_cost or (cost == best_cost and bk + bv > BK + BV):
                 best_cost, BK, BV = cost, bk, bv
 
-    u = torch.empty_like(v)
-    w = k.new_empty(B, T, HV, K)
+    u = (torch.zeros_like if use_graph else torch.empty_like)(v)
+    w = (k.new_zeros if use_graph else k.new_empty)(B, T, HV, K)
     beta, beta_t_contig = _beta_npu_arg(beta, HV)
     g, g_t_contig = _g_npu_arg(g, HV)
 
@@ -656,6 +847,7 @@ def recompute_w_u_fwd_npu(
             BV=BV,
             G_T_CONTIG=g_t_contig,
             BETA_T_CONTIG=beta_t_contig,
+            USE_GRAPH=use_graph,
         ),
     )
     return w, u
@@ -672,8 +864,35 @@ def prepare_wy_repr_bwd_npu(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    return _prepare_wy_repr_bwd_npu(
+        k=k,
+        v=v,
+        beta=beta,
+        A=A,
+        dw=dw,
+        du=du,
+        g=g,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+    )
+
+
+def _prepare_wy_repr_bwd_npu(
+    k: torch.Tensor,
+    v: torch.Tensor,
+    beta: torch.Tensor,
+    A: torch.Tensor,
+    dw: torch.Tensor,
+    du: torch.Tensor,
+    g: torch.Tensor = None,
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
+    use_graph: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
     B, T, H, K, V, HV = *k.shape, v.shape[-1], v.shape[2]
     BT = A.shape[-1]
+    if use_graph and (cu_seqlens is None or chunk_indices is None):
+        raise ValueError("GDN graph WY backward requires fixed-capacity chunk indices and cu_seqlens.")
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
@@ -683,8 +902,8 @@ def prepare_wy_repr_bwd_npu(
     use_g = g is not None
     is_varlen = cu_seqlens is not None
 
-    dk = k.new_empty(B, T, HV, K)
-    dv = torch.empty_like(v)
+    dk = (k.new_zeros if use_graph else k.new_empty)(B, T, HV, K)
+    dv = (torch.zeros_like if use_graph else torch.empty_like)(v)
     db, db_t_contig = _t_npu_buf(B, T, HV, dtype=beta.dtype, device=k.device)
     beta_arg, beta_t_contig = _beta_npu_arg(beta, HV)
     dg, dg_t_contig = None, False
@@ -698,10 +917,15 @@ def prepare_wy_repr_bwd_npu(
         if not is_varlen:
             g_k_arg = torch.exp2(g_gate.float()).to(g_gate.dtype)
             g_exp_precomp = True
+    if use_graph:
+        db.zero_()
+        if dg is not None:
+            dg.zero_()
     dg_arg = dg if use_g else beta
-    dA_scr = torch.empty_like(A, dtype=torch.float32)
-    dA_mid = torch.empty_like(A, dtype=torch.float32)
-    dA_out = torch.empty_like(A, dtype=torch.float32)
+    allocate = torch.zeros_like if use_graph else torch.empty_like
+    dA_scr = allocate(A, dtype=torch.float32)
+    dA_mid = allocate(A, dtype=torch.float32)
+    dA_out = allocate(A, dtype=torch.float32)
 
     base = dict(
         cu_seqlens=cu_seqlens,
@@ -709,6 +933,7 @@ def prepare_wy_repr_bwd_npu(
         T=T,
         BT=BT,
         IS_VARLEN=is_varlen,
+        USE_GRAPH=use_graph,
     )
     core_base = dict(B=B, **base)
     task_num = NT * B * HV

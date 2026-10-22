@@ -189,6 +189,7 @@ def chunk_gated_delta_rule_h_fwd_kernel(
     SAVE_NEW_VALUE: tl.constexpr,
     STATE_V_FIRST: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
 ):
     core_id = tl.program_id(0)
     NV: tl.constexpr = tl.cdiv(V, BV)
@@ -306,28 +307,48 @@ def chunk_gated_delta_rule_h_fwd_kernel(
                     tl.store(p_h4, b_h4.to(p_h4.dtype.element_ty), boundary_check=(0, 1))
 
             p_w1 = tl.make_block_ptr(w_base, (T, K), (stride_w, 1), (i_t * BT, 0), (BT, BK), (1, 0))
-            b_w = tl.load(p_w1, boundary_check=(0, 1)).to(tl.float32)
+            if USE_GRAPH:
+                b_w = tl.load(p_w1, padding_option='zero', boundary_check=(0, 1)).to(tl.float32)
+                m_graph = (i_t * BT + tl.arange(0, BT)) < T
+                b_w = tl.where(m_graph[:, None], b_w, 0)
+            else:
+                b_w = tl.load(p_w1, boundary_check=(0, 1)).to(tl.float32)
             if STATE_V_FIRST:
                 b_v = tl.dot(b_w, tl.trans(b_h1).to(b_w.dtype))
             else:
                 b_v = tl.dot(b_w, b_h1.to(b_w.dtype))
             if K > BK:
                 p_w2 = tl.make_block_ptr(w_base, (T, K), (stride_w, 1), (i_t * BT, BK), (BT, BK), (1, 0))
-                b_w = tl.load(p_w2, boundary_check=(0, 1)).to(tl.float32)
+                if USE_GRAPH:
+                    b_w = tl.load(p_w2, padding_option='zero', boundary_check=(0, 1)).to(tl.float32)
+                    m_graph = (i_t * BT + tl.arange(0, BT)) < T
+                    b_w = tl.where(m_graph[:, None], b_w, 0)
+                else:
+                    b_w = tl.load(p_w2, boundary_check=(0, 1)).to(tl.float32)
                 if STATE_V_FIRST:
                     b_v = tl.dot(b_w, tl.trans(b_h2).to(b_w.dtype), b_v)
                 else:
                     b_v = tl.dot(b_w, b_h2.to(b_w.dtype), b_v)
             if K > BK * 2:
                 p_w3 = tl.make_block_ptr(w_base, (T, K), (stride_w, 1), (i_t * BT, BK * 2), (BT, BK), (1, 0))
-                b_w = tl.load(p_w3, boundary_check=(0, 1)).to(tl.float32)
+                if USE_GRAPH:
+                    b_w = tl.load(p_w3, padding_option='zero', boundary_check=(0, 1)).to(tl.float32)
+                    m_graph = (i_t * BT + tl.arange(0, BT)) < T
+                    b_w = tl.where(m_graph[:, None], b_w, 0)
+                else:
+                    b_w = tl.load(p_w3, boundary_check=(0, 1)).to(tl.float32)
                 if STATE_V_FIRST:
                     b_v = tl.dot(b_w, tl.trans(b_h3).to(b_w.dtype), b_v)
                 else:
                     b_v = tl.dot(b_w, b_h3.to(b_w.dtype), b_v)
             if K > BK * 3:
                 p_w4 = tl.make_block_ptr(w_base, (T, K), (stride_w, 1), (i_t * BT, BK * 3), (BT, BK), (1, 0))
-                b_w = tl.load(p_w4, boundary_check=(0, 1)).to(tl.float32)
+                if USE_GRAPH:
+                    b_w = tl.load(p_w4, padding_option='zero', boundary_check=(0, 1)).to(tl.float32)
+                    m_graph = (i_t * BT + tl.arange(0, BT)) < T
+                    b_w = tl.where(m_graph[:, None], b_w, 0)
+                else:
+                    b_w = tl.load(p_w4, boundary_check=(0, 1)).to(tl.float32)
                 if STATE_V_FIRST:
                     b_v = tl.dot(b_w, tl.trans(b_h4).to(b_w.dtype), b_v)
                 else:
@@ -336,7 +357,10 @@ def chunk_gated_delta_rule_h_fwd_kernel(
             if USE_G:
                 if USE_G_PRECOMP:
                     p_g_ratio = tl.make_block_ptr(g_ratio_ptr, (T,), (1,), (i_t * BT,), (BT,), (0,))
-                    b_g_ratio = tl.load(p_g_ratio, boundary_check=(0,)).to(tl.float32)
+                    if USE_GRAPH:
+                        b_g_ratio = tl.load(p_g_ratio, padding_option='zero', boundary_check=(0,)).to(tl.float32)
+                    else:
+                        b_g_ratio = tl.load(p_g_ratio, boundary_check=(0,)).to(tl.float32)
                     b_g_last = tl.load(g_last_exp_ptr + i_t).to(tl.float32)
                 else:
                     last_idx = min((i_t + 1) * BT, T) - 1
@@ -347,11 +371,18 @@ def chunk_gated_delta_rule_h_fwd_kernel(
                         g_ptr = g + tl.cast(i_n, tl.int64) * HV * T_max + i_h * T_max
                     b_g_last = tl.load(g_ptr + last_idx).to(tl.float32)
                     p_g = tl.make_block_ptr(g_ptr, (T,), (1,), (i_t * BT,), (BT,), (0,))
-                    b_g = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
+                    if USE_GRAPH:
+                        b_g = tl.load(p_g, padding_option='zero', boundary_check=(0,)).to(tl.float32)
+                    else:
+                        b_g = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
                     m_t = (i_t * BT + tl.arange(0, BT)) < T
 
             p_v = tl.make_block_ptr(v_base, (T, V), (stride_v, 1), (i_t * BT, v_start), (BT, BV), (1, 0))
             b_v = tl.load(p_v, boundary_check=(0, 1)).to(tl.float32) - b_v
+
+            if USE_GRAPH:
+                m_graph = (i_t * BT + tl.arange(0, BT)) < T
+                b_v = tl.where(m_graph[:, None], b_v, 0)
 
             if SAVE_NEW_VALUE:
                 p_v_new = tl.make_block_ptr(v_new_base, (T, V), (stride_v, 1), (i_t * BT, v_start), (BT, BV), (1, 0))
@@ -417,28 +448,48 @@ def chunk_gated_delta_rule_h_fwd_kernel(
                         b_h4 *= b_gk_last4[:, None]
 
             p_k1 = tl.make_block_ptr(k_base, (K, T), (1, stride_k), (0, i_t * BT), (BK, BT), (0, 1))
-            b_k = tl.load(p_k1, boundary_check=(0, 1)).to(tl.float32)
+            if USE_GRAPH:
+                b_k = tl.load(p_k1, padding_option='zero', boundary_check=(0, 1)).to(tl.float32)
+                m_graph = (i_t * BT + tl.arange(0, BT)) < T
+                b_k = tl.where(m_graph[None, :], b_k, 0)
+            else:
+                b_k = tl.load(p_k1, boundary_check=(0, 1)).to(tl.float32)
             if STATE_V_FIRST:
                 b_h1 += tl.trans(tl.dot(b_k, b_v))
             else:
                 b_h1 = tl.dot(b_k, b_v, b_h1)
             if K > BK:
                 p_k2 = tl.make_block_ptr(k_base, (K, T), (1, stride_k), (BK, i_t * BT), (BK, BT), (0, 1))
-                b_k = tl.load(p_k2, boundary_check=(0, 1)).to(tl.float32)
+                if USE_GRAPH:
+                    b_k = tl.load(p_k2, padding_option='zero', boundary_check=(0, 1)).to(tl.float32)
+                    m_graph = (i_t * BT + tl.arange(0, BT)) < T
+                    b_k = tl.where(m_graph[None, :], b_k, 0)
+                else:
+                    b_k = tl.load(p_k2, boundary_check=(0, 1)).to(tl.float32)
                 if STATE_V_FIRST:
                     b_h2 += tl.trans(tl.dot(b_k, b_v))
                 else:
                     b_h2 = tl.dot(b_k, b_v, b_h2)
             if K > BK * 2:
                 p_k3 = tl.make_block_ptr(k_base, (K, T), (1, stride_k), (BK * 2, i_t * BT), (BK, BT), (0, 1))
-                b_k = tl.load(p_k3, boundary_check=(0, 1)).to(tl.float32)
+                if USE_GRAPH:
+                    b_k = tl.load(p_k3, padding_option='zero', boundary_check=(0, 1)).to(tl.float32)
+                    m_graph = (i_t * BT + tl.arange(0, BT)) < T
+                    b_k = tl.where(m_graph[None, :], b_k, 0)
+                else:
+                    b_k = tl.load(p_k3, boundary_check=(0, 1)).to(tl.float32)
                 if STATE_V_FIRST:
                     b_h3 += tl.trans(tl.dot(b_k, b_v))
                 else:
                     b_h3 = tl.dot(b_k, b_v, b_h3)
             if K > BK * 3:
                 p_k4 = tl.make_block_ptr(k_base, (K, T), (1, stride_k), (BK * 3, i_t * BT), (BK, BT), (0, 1))
-                b_k = tl.load(p_k4, boundary_check=(0, 1)).to(tl.float32)
+                if USE_GRAPH:
+                    b_k = tl.load(p_k4, padding_option='zero', boundary_check=(0, 1)).to(tl.float32)
+                    m_graph = (i_t * BT + tl.arange(0, BT)) < T
+                    b_k = tl.where(m_graph[None, :], b_k, 0)
+                else:
+                    b_k = tl.load(p_k4, boundary_check=(0, 1)).to(tl.float32)
                 if STATE_V_FIRST:
                     b_h4 += tl.trans(tl.dot(b_k, b_v))
                 else:
@@ -646,6 +697,7 @@ def chunk_gated_delta_rule_fwd_h_npu(
     cu_seqlens_cpu: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
     chunk_offsets: torch.LongTensor | None = None,
+    use_graph: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     B, T, H, K, V, HV = *k.shape, u.shape[-1], u.shape[2]
     BT = chunk_size
@@ -667,7 +719,7 @@ def chunk_gated_delta_rule_fwd_h_npu(
         h = k.new_empty(B, NT, HV, K, V)
         final_state = k.new_zeros(N, HV, K, V, dtype=torch.float32) if output_final_state else None
 
-    v_new = torch.empty_like(u) if save_new_value else None
+    v_new = (torch.zeros_like if use_graph else torch.empty_like)(u) if save_new_value else None
     g, g_ratio, g_last_exp = _prepare_fwd_g_gates(g=g, B=B, T=T, HV=HV, BT=BT, cu_seqlens=cu_seqlens)
     gk, gk_last_exp = _prepare_fwd_gk_last_exp(gk=gk, B=B, T=T, HV=HV, K=K, BT=BT, cu_seqlens=cu_seqlens)
 
@@ -717,6 +769,7 @@ def chunk_gated_delta_rule_fwd_h_npu(
                 "cu_seqlens": cu_seqlens,
                 "chunk_offsets": chunk_offsets,
                 "STATE_V_FIRST": state_v_first,
+                "USE_GRAPH": use_graph,
             },
             **_FWD_H_COMPILE,
         )
@@ -759,6 +812,7 @@ def chunk_gated_delta_rule_h_bwd_kernel(
     USE_FINAL_STATE_GRADIENT: tl.constexpr,
     STATE_V_FIRST: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
 ):
     core_id = tl.program_id(0)
     T_max = T
@@ -842,24 +896,35 @@ def chunk_gated_delta_rule_h_bwd_kernel(
                 else:
                     p_dht1 = tl.make_block_ptr(dht_base, (K, V), (V, 1), (0, v_start), (64, BV), (1, 0))
                 b_dh1 += tl.load(p_dht1, boundary_check=(0, 1))
+                if USE_GRAPH:
+                    b_dh1 = tl.where((tl.arange(0, 64)[:, None] < K) & ((v_start + tl.arange(0, BV))[None, :] < V), b_dh1, 0)
                 if K > 64:
                     if STATE_V_FIRST:
                         p_dht2 = tl.make_block_ptr(dht_base, (V, K), (K, 1), (v_start, 64), (BV, 64), (1, 0))
                     else:
                         p_dht2 = tl.make_block_ptr(dht_base, (K, V), (V, 1), (64, v_start), (64, BV), (1, 0))
                     b_dh2 += tl.load(p_dht2, boundary_check=(0, 1))
+                    if USE_GRAPH:
+                        b_dh2 = tl.where(((64 + tl.arange(0, 64))[:, None] < K) &
+                                         ((v_start + tl.arange(0, BV))[None, :] < V), b_dh2, 0)
                 if K > 128:
                     if STATE_V_FIRST:
                         p_dht3 = tl.make_block_ptr(dht_base, (V, K), (K, 1), (v_start, 128), (BV, 64), (1, 0))
                     else:
                         p_dht3 = tl.make_block_ptr(dht_base, (K, V), (V, 1), (128, v_start), (64, BV), (1, 0))
                     b_dh3 += tl.load(p_dht3, boundary_check=(0, 1))
+                    if USE_GRAPH:
+                        b_dh3 = tl.where(((128 + tl.arange(0, 64))[:, None] < K) &
+                                         ((v_start + tl.arange(0, BV))[None, :] < V), b_dh3, 0)
                 if K > 192:
                     if STATE_V_FIRST:
                         p_dht4 = tl.make_block_ptr(dht_base, (V, K), (K, 1), (v_start, 192), (BV, 64), (1, 0))
                     else:
                         p_dht4 = tl.make_block_ptr(dht_base, (K, V), (V, 1), (192, v_start), (64, BV), (1, 0))
                     b_dh4 += tl.load(p_dht4, boundary_check=(0, 1))
+                    if USE_GRAPH:
+                        b_dh4 = tl.where(((192 + tl.arange(0, 64))[:, None] < K) &
+                                         ((v_start + tl.arange(0, BV))[None, :] < V), b_dh4, 0)
 
             if USE_GK:
                 o_k1 = tl.arange(0, 64)
@@ -898,22 +963,36 @@ def chunk_gated_delta_rule_h_bwd_kernel(
                         p_g_exp = tl.make_block_ptr(g_exp_base, (T,), (1,), (i_t * BT,), (BT,), (0,))
                         p_g_ratio = tl.make_block_ptr(g_ratio_base, (T,), (1,), (i_t * BT,), (BT,), (0,))
                         b_g_exp = tl.load(p_g_exp, boundary_check=(0,)).to(tl.float32)
+                        if USE_GRAPH:
+                            b_g_exp = tl.where(((i_t * BT + tl.arange(0, BT)) < T), b_g_exp, 0)
                         b_g_ratio = tl.load(p_g_ratio, boundary_check=(0,)).to(tl.float32)
+                        if USE_GRAPH:
+                            b_g_ratio = tl.where(((i_t * BT + tl.arange(0, BT)) < T), b_g_ratio, 0)
                     else:
                         last_idx = min((i_t + 1) * BT, T) - 1
                         bg_last = tl.load(g_base + last_idx).to(tl.float32)
                         p_g = tl.make_block_ptr(g_base, (T,), (1,), (i_t * BT,), (BT,), (0,))
                         b_g = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
+                        if USE_GRAPH:
+                            b_g = tl.where(((i_t * BT + tl.arange(0, BT)) < T), b_g, 0)
                         bg_last_exp = exp2(bg_last)
                         b_g_exp = exp2(b_g)
-                        b_g_ratio = exp2(bg_last - b_g)
+                        if USE_GRAPH:
+                            b_g_ratio = exp2(tl.where((i_t * BT + tl.arange(0, BT)) < T, bg_last - b_g, 0))
+                        else:
+                            b_g_ratio = exp2(bg_last - b_g)
                 p_dv = tl.make_block_ptr(dv_base, (T, V), (stride_v, 1), (i_t * BT, v_start), (BT, BV), (1, 0))
                 p_dv2 = tl.make_block_ptr(dv2_base, (T, V), (stride_v, 1), (i_t * BT, v_start), (BT, BV), (1, 0))
                 p_do = tl.make_block_ptr(do_base, (T, V), (stride_v, 1), (i_t * BT, v_start), (BT, BV), (1, 0))
                 b_do = tl.load(p_do, boundary_check=(0, 1))
+                if USE_GRAPH:
+                    b_do = tl.where(((i_t * BT + tl.arange(0, BT))[:, None] < T)
+                                    & ((v_start + tl.arange(0, BV))[None, :] < V), b_do, 0)
 
                 p_k = tl.make_block_ptr(k_base, (T, K), (stride_k, 1), (i_t * BT, 0), (BT, 64), (1, 0))
                 b_k = tl.load(p_k, boundary_check=(0, 1))
+                if USE_GRAPH:
+                    b_k = tl.where(((i_t * BT + tl.arange(0, BT))[:, None] < T) & (tl.arange(0, 64)[None, :] < K), b_k, 0)
                 if USE_GK:
                     last_idx = min((i_t + 1) * BT, T) - 1
                     b_gk_last1 = tl.load(gk_base + last_idx * stride_w + o_k1, mask=(o_k1 < K), other=0.0).to(tl.float32)
@@ -926,6 +1005,9 @@ def chunk_gated_delta_rule_h_bwd_kernel(
                 if K > 64:
                     p_k = tl.make_block_ptr(k_base, (T, K), (stride_k, 1), (i_t * BT, 64), (BT, 64), (1, 0))
                     b_k = tl.load(p_k, boundary_check=(0, 1))
+                    if USE_GRAPH:
+                        b_k = tl.where(((i_t * BT + tl.arange(0, BT))[:, None] < T)
+                                       & ((64 + tl.arange(0, 64))[None, :] < K), b_k, 0)
                     if USE_GK:
                         o_k2 = 64 + o_k1
                         b_gk_last2 = tl.load(gk_base + last_idx * stride_w + o_k2, mask=(o_k2 < K), other=0.0).to(tl.float32)
@@ -938,6 +1020,9 @@ def chunk_gated_delta_rule_h_bwd_kernel(
                 if K > 128:
                     p_k = tl.make_block_ptr(k_base, (T, K), (stride_k, 1), (i_t * BT, 128), (BT, 64), (1, 0))
                     b_k = tl.load(p_k, boundary_check=(0, 1))
+                    if USE_GRAPH:
+                        b_k = tl.where(((i_t * BT + tl.arange(0, BT))[:, None] < T)
+                                       & ((128 + tl.arange(0, 64))[None, :] < K), b_k, 0)
                     if USE_GK:
                         o_k3 = 128 + o_k1
                         b_gk_last3 = tl.load(gk_base + last_idx * stride_w + o_k3, mask=(o_k3 < K), other=0.0).to(tl.float32)
@@ -950,6 +1035,9 @@ def chunk_gated_delta_rule_h_bwd_kernel(
                 if K > 192:
                     p_k = tl.make_block_ptr(k_base, (T, K), (stride_k, 1), (i_t * BT, 192), (BT, 64), (1, 0))
                     b_k = tl.load(p_k, boundary_check=(0, 1))
+                    if USE_GRAPH:
+                        b_k = tl.where(((i_t * BT + tl.arange(0, BT))[:, None] < T)
+                                       & ((192 + tl.arange(0, 64))[None, :] < K), b_k, 0)
                     if USE_GK:
                         o_k4 = 192 + o_k1
                         b_gk_last4 = tl.load(gk_base + last_idx * stride_w + o_k4, mask=(o_k4 < K), other=0.0).to(tl.float32)
@@ -966,6 +1054,9 @@ def chunk_gated_delta_rule_h_bwd_kernel(
                         m_t = (i_t * BT + tl.arange(0, BT)) < T
                         b_dv *= tl.where(m_t, b_g_ratio, 0)[:, None]
                 b_dv += tl.load(p_dv, boundary_check=(0, 1))
+                if USE_GRAPH:
+                    b_dv = tl.where(((i_t * BT + tl.arange(0, BT))[:, None] < T)
+                                    & ((v_start + tl.arange(0, BV))[None, :] < V), b_dv, 0)
                 # dot padding on Ascend can retain NaNs across replays with different tails.
                 # clear invalid tokens before the dH reduction: zero weights do not cancel NaNs.
                 m_t = (i_t * BT + tl.arange(0, BT)) < T
@@ -993,7 +1084,11 @@ def chunk_gated_delta_rule_h_bwd_kernel(
                 p_w = tl.make_block_ptr(w_base, (K, T), (1, stride_w), (0, i_t * BT), (64, BT), (0, 1))
                 p_q = tl.make_block_ptr(q_base, (K, T), (1, stride_k), (0, i_t * BT), (64, BT), (0, 1))
                 b_w = tl.load(p_w, boundary_check=(0, 1))
+                if USE_GRAPH:
+                    b_w = tl.where((tl.arange(0, 64)[:, None] < K) & ((i_t * BT + tl.arange(0, BT))[None, :] < T), b_w, 0)
                 b_q = tl.load(p_q, boundary_check=(0, 1))
+                if USE_GRAPH:
+                    b_q = tl.where((tl.arange(0, 64)[:, None] < K) & ((i_t * BT + tl.arange(0, BT))[None, :] < T), b_q, 0)
                 if USE_GK:
                     if STATE_V_FIRST:
                         b_dh1 *= exp2(b_gk_last1)[None, :]
@@ -1013,7 +1108,13 @@ def chunk_gated_delta_rule_h_bwd_kernel(
                     p_q = tl.make_block_ptr(q_base, (K, T), (1, stride_k), (64, i_t * BT), (64, BT), (0, 1))
                     p_w = tl.make_block_ptr(w_base, (K, T), (1, stride_w), (64, i_t * BT), (64, BT), (0, 1))
                     b_q = tl.load(p_q, boundary_check=(0, 1))
+                    if USE_GRAPH:
+                        b_q = tl.where(((64 + tl.arange(0, 64))[:, None] < K) &
+                                       ((i_t * BT + tl.arange(0, BT))[None, :] < T), b_q, 0)
                     b_w = tl.load(p_w, boundary_check=(0, 1))
+                    if USE_GRAPH:
+                        b_w = tl.where(((64 + tl.arange(0, 64))[:, None] < K) &
+                                       ((i_t * BT + tl.arange(0, BT))[None, :] < T), b_w, 0)
                     if USE_GK:
                         if STATE_V_FIRST:
                             b_dh2 *= exp2(b_gk_last2)[None, :]
@@ -1033,7 +1134,13 @@ def chunk_gated_delta_rule_h_bwd_kernel(
                     p_q = tl.make_block_ptr(q_base, (K, T), (1, stride_k), (128, i_t * BT), (64, BT), (0, 1))
                     p_w = tl.make_block_ptr(w_base, (K, T), (1, stride_w), (128, i_t * BT), (64, BT), (0, 1))
                     b_q = tl.load(p_q, boundary_check=(0, 1))
+                    if USE_GRAPH:
+                        b_q = tl.where(((128 + tl.arange(0, 64))[:, None] < K) &
+                                       ((i_t * BT + tl.arange(0, BT))[None, :] < T), b_q, 0)
                     b_w = tl.load(p_w, boundary_check=(0, 1))
+                    if USE_GRAPH:
+                        b_w = tl.where(((128 + tl.arange(0, 64))[:, None] < K) &
+                                       ((i_t * BT + tl.arange(0, BT))[None, :] < T), b_w, 0)
                     if USE_GK:
                         if STATE_V_FIRST:
                             b_dh3 *= exp2(b_gk_last3)[None, :]
@@ -1053,7 +1160,13 @@ def chunk_gated_delta_rule_h_bwd_kernel(
                     p_q = tl.make_block_ptr(q_base, (K, T), (1, stride_k), (192, i_t * BT), (64, BT), (0, 1))
                     p_w = tl.make_block_ptr(w_base, (K, T), (1, stride_w), (192, i_t * BT), (64, BT), (0, 1))
                     b_q = tl.load(p_q, boundary_check=(0, 1))
+                    if USE_GRAPH:
+                        b_q = tl.where(((192 + tl.arange(0, 64))[:, None] < K) &
+                                       ((i_t * BT + tl.arange(0, BT))[None, :] < T), b_q, 0)
                     b_w = tl.load(p_w, boundary_check=(0, 1))
+                    if USE_GRAPH:
+                        b_w = tl.where(((192 + tl.arange(0, 64))[:, None] < K) &
+                                       ((i_t * BT + tl.arange(0, BT))[None, :] < T), b_w, 0)
                     if USE_GK:
                         if STATE_V_FIRST:
                             b_dh4 *= exp2(b_gk_last4)[None, :]
@@ -1124,7 +1237,6 @@ def _prepare_dhu_gate_tensors(
     return g_log, None, None, None, False
 
 
-@input_guard
 def chunk_gated_delta_rule_bwd_dhu_npu(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -1142,8 +1254,48 @@ def chunk_gated_delta_rule_bwd_dhu_npu(
     chunk_indices: torch.LongTensor | None = None,
     chunk_offsets: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    return _chunk_gated_delta_rule_bwd_dhu_npu(
+        q=q,
+        k=k,
+        w=w,
+        do=do,
+        dv=dv,
+        g=g,
+        gk=gk,
+        h0=h0,
+        dht=dht,
+        scale=scale,
+        state_v_first=state_v_first,
+        cu_seqlens=cu_seqlens,
+        chunk_size=chunk_size,
+        chunk_indices=chunk_indices,
+        chunk_offsets=chunk_offsets,
+    )
+
+
+@input_guard
+def _chunk_gated_delta_rule_bwd_dhu_npu(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    w: torch.Tensor,
+    do: torch.Tensor,
+    dv: torch.Tensor,
+    g: torch.Tensor | None = None,
+    gk: torch.Tensor | None = None,
+    h0: torch.Tensor | None = None,
+    dht: torch.Tensor | None = None,
+    scale: float | None = None,
+    state_v_first: bool = False,
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_size: int = 64,
+    chunk_indices: torch.LongTensor | None = None,
+    chunk_offsets: torch.LongTensor | None = None,
+    use_graph: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     B, T, H, K, V, HV = *q.shape, do.shape[-1], do.shape[2]
     BT = chunk_size
+    if use_graph and (cu_seqlens is None or chunk_indices is None or chunk_offsets is None):
+        raise ValueError("GDN graph backward requires fixed chunk indices, offsets, and cu_seqlens.")
     assert K <= 256, "current kernel does not support head dimension being larger than 256."
 
     if chunk_indices is None and cu_seqlens is not None:
@@ -1156,12 +1308,12 @@ def chunk_gated_delta_rule_bwd_dhu_npu(
             chunk_offsets = prepare_chunk_offsets(cu_seqlens=cu_seqlens, chunk_size=BT)
 
     if state_v_first:
-        dh = q.new_empty(B, NT, HV, V, K)
+        dh = (q.new_zeros if use_graph else q.new_empty)(B, NT, HV, V, K)
     else:
-        dh = q.new_empty(B, NT, HV, K, V)
-    dh0 = torch.empty_like(h0, dtype=torch.float32) if h0 is not None else None
+        dh = (q.new_zeros if use_graph else q.new_empty)(B, NT, HV, K, V)
+    dh0 = (torch.zeros_like if use_graph else torch.empty_like)(h0, dtype=torch.float32) if h0 is not None else None
     # keep the caller's dv unchanged while updating the value gradient.
-    dv2 = torch.empty_like(dv)
+    dv2 = (torch.zeros_like if use_graph else torch.empty_like)(dv)
     g_log, g_exp, g_ratio, g_last_exp, use_g_precomp = _prepare_dhu_gate_tensors(
         g=g,
         B=B,
@@ -1208,6 +1360,7 @@ def chunk_gated_delta_rule_bwd_dhu_npu(
             "USE_FINAL_STATE_GRADIENT": dht is not None,
             "STATE_V_FIRST": state_v_first,
             "IS_VARLEN": cu_seqlens is not None,
+            "USE_GRAPH": use_graph,
         },
     )
     return dh, dh0, dv2
