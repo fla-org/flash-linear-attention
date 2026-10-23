@@ -16,7 +16,7 @@ import triton.language as tl
 from fla.ops.kda.backends.triton_ascend.chunk_bwd import chunk_kda_bwd_kernel_wy_k_part_npu
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 from fla.ops.utils.op import exp2
-from fla.utils import input_guard
+from fla.utils import ascend_compile_kwargs, input_guard
 from fla.utils.ascend_ub_manager import compute_row_tile_block_size, get_npu_properties
 
 _BC = 16
@@ -410,6 +410,7 @@ def chunk_gdn2_bwd_wy_dqkg_fused_npu(
         BV=BV,
         IS_VARLEN=is_varlen,
         T_CONTIG=t_contig,
+        **ascend_compile_kwargs(),
     )
 
     k_part_kwargs = dict(
@@ -444,7 +445,7 @@ def chunk_gdn2_bwd_wy_dqkg_fused_npu(
     )
     for k_off in range(NK):
         k_part_kwargs['K_OFFSET'] = k_off
-        chunk_kda_bwd_kernel_wy_k_part_npu[(num_core,)](**k_part_kwargs)
+        chunk_kda_bwd_kernel_wy_k_part_npu[(num_core,)](**k_part_kwargs, **ascend_compile_kwargs())
 
     k_arg, k_t_contig = _t_contig_arg(k, H)
     g_arg, g_t_contig = _t_contig_arg(g, H)
@@ -480,7 +481,7 @@ def chunk_gdn2_bwd_wy_dqkg_fused_npu(
     )
     for k_off in range(NK):
         gate_kwargs['K_OFFSET'] = k_off
-        chunk_gdn2_bwd_kernel_wy_gate_part_npu[(num_core,)](**gate_kwargs)
+        chunk_gdn2_bwd_kernel_wy_gate_part_npu[(num_core,)](**gate_kwargs, **ascend_compile_kwargs())
 
     finalize_kwargs = dict(
         A=A_arg,
@@ -495,6 +496,7 @@ def chunk_gdn2_bwd_wy_dqkg_fused_npu(
         BT=BT,
         IS_VARLEN=is_varlen,
         A_T_CONTIG=t_contig,
+        **ascend_compile_kwargs(),
     )
     if is_varlen:
         finalize_kwargs['task_num'] = NT * bh_total

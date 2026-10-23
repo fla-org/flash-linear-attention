@@ -2,6 +2,8 @@
 
 Context Parallel of Linear Attention (alias KCP in Moonshot) is context parallelism designed for delta-rule recurrent models such as GDN (Gated Delta Rule), GDP (Gated DeltaProduct), and KDA (Kimi Delta Attention). It enables efficient distributed training by partitioning the sequence dimension across ranks, with each rank processing a local token chunk and CP automatically synchronizing cross-rank states.
 
+Delta-rule CP affine chains, including intra-card CP, use TF32x3 on NVIDIA Ampere or newer (compute capability >= 8.0) and IEEE FP32 on Ascend. Other devices raise an error before CP kernel execution. Precision is selected by the backend; input tensor dtypes are unchanged.
+
 ## Quick Start
 
 ### Build CP Context
@@ -385,10 +387,10 @@ In CP mode, only the first sequence in the local batch can be a continuation fro
 
 ## Test References
 
-- [`tests/context_parallel/test_cp_conv.py`](../../../tests/context_parallel/test_cp_conv.py)
-- [`tests/context_parallel/test_cp_gdp.py`](../../../tests/context_parallel/test_cp_gdp.py)
-- [`tests/context_parallel/test_cp_kda.py`](../../../tests/context_parallel/test_cp_kda.py)
-- [`tests/context_parallel/test_cp_gdn2.py`](../../../tests/context_parallel/test_cp_gdn2.py)
+- [`tests/cp/test_conv.py`](../../../tests/cp/test_conv.py)
+- [`tests/cp/test_gdp.py`](../../../tests/cp/test_gdp.py)
+- [`tests/cp/test_kda.py`](../../../tests/cp/test_kda.py)
+- [`tests/cp/test_gdn2.py`](../../../tests/cp/test_gdn2.py)
 
 ## Discussion
 
