@@ -99,6 +99,9 @@ def test_chunk_invalid_chunk_size():
             (4, 1024, 4, 4, 128, 0.1, 1, False, torch.float),
             (2, 512, 2, 4, 60, 1, 1, False, torch.float),
             (2, 1024, 2, 8, 128, 0.1, 1, True, torch.float),
+            (2, 4, 2, 4, 7, 1, 1, False, torch.float),
+            (2, 4, 2, 4, 8, 1, 1, False, torch.bfloat16),
+            (2, 4, 2, 4, 9, 1, 1, False, torch.float16),
         ]
     ],
 )
@@ -224,6 +227,7 @@ def test_fused_recurrent_use_beta_sigmoid_in_kernel(
             (2, 512, 3, 60, 1, 1, torch.float),
             (3, 1000, 4, 100, 0.1, 1, torch.float),
             (4, 1024, 4, 128, 0.1, 1, torch.float),
+            (2, 4, 4, 9, 1, 1, torch.bfloat16),
         ]
     ],
 )
