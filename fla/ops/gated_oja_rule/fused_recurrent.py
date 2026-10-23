@@ -9,6 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.backends import dispatch
 from fla.ops.utils.op import exp
 from fla.utils import input_guard
 
@@ -120,6 +121,7 @@ def fused_recurrent_oja_fwd_kernel(
         tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
 
 
+@dispatch('gated_oja_rule')
 def fused_recurrent_oja_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
