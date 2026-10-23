@@ -445,12 +445,13 @@ def test_fused_linear_cross_entropy(
         pytest.fail(f'Gradient storage bytes: expected {expected_saved}, got {saved}')
     if tri.requires_grad != bool(inputs):
         pytest.fail(f'Loss gradient requirement: expected {bool(inputs)}, got {tri.requires_grad}')
-    tri_grads = torch.autograd.grad(tri * do, inputs) if inputs else ()
-
     err_atol = 0 if confident_target else 1e-6
     assert_close("loss", ref, tri, ratio=1e-2, err_atol=err_atol)
-    for name, expected, actual in zip(gradient_names, ref_grads, tri_grads):
-        assert_close(name, expected, actual, ratio=1e-2, err_atol=err_atol)
+    multipliers = (1, 2, 0, -3) if gradient_mode in ('input', 'weight', 'bias') else (1,)
+    for multiplier in multipliers:
+        tri_grads = torch.autograd.grad(tri * do * multiplier, inputs, retain_graph=True) if inputs else ()
+        for name, expected, actual in zip(gradient_names, ref_grads, tri_grads):
+            assert_close(name, expected * multiplier, actual, ratio=1e-2, err_atol=err_atol)
     if ignore_all:
         assert tri.item() == 0
         for grad in tri_grads:

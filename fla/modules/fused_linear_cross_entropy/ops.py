@@ -76,6 +76,7 @@ def logsumexp_fwd_kernel(
 @triton.jit
 def elementwise_mul_kernel(
     x,  # [N]
+    y,  # [N]
     g,  # scalar
     N: tl.constexpr,
     BN: tl.constexpr,
@@ -84,11 +85,9 @@ def elementwise_mul_kernel(
     o_x = i_x * BN + tl.arange(0, BN)
 
     b_g = tl.load(g)
-    if b_g == 1.0:
-        return
     # [BN]
     b_x = tl.load(x + o_x, mask=o_x < N)
-    tl.store(x + o_x, b_x * b_g, mask=o_x < N)
+    tl.store(y + o_x, b_x * b_g, mask=o_x < N)
 
 
 @dispatch
@@ -243,15 +242,16 @@ def fused_linear_cross_entropy_bwd(
     dw: torch.Tensor | None,
     db: torch.Tensor | None,
 ):
-    # in-place gradient storage across repeated backward calls causes PyTorch anomalies; use Triton.
     H = next((grad.shape[-1] for grad in (dx, dw, db) if grad is not None), 1)
     BN = min(MAX_FUSED_SIZE, triton.next_power_of_2(H))
-    for grad in (dx, dw, db):
+    scaled_grads = [None, None, None]
+    for i, grad in enumerate((dx, dw, db)):
         if grad is None:
             continue
         N = grad.numel()
-        elementwise_mul_kernel[(triton.cdiv(N, BN),)](x=grad, g=do, N=N, BN=BN, num_warps=STATIC_WARPS)
-    return dx, dw, db
+        scaled_grads[i] = torch.empty_like(grad)
+        elementwise_mul_kernel[(triton.cdiv(N, BN),)](x=grad, y=scaled_grads[i], g=do, N=N, BN=BN, num_warps=STATIC_WARPS)
+    return tuple(scaled_grads)
 
 
 fused_linear_cross_entropy_forward = fused_linear_cross_entropy_fwd

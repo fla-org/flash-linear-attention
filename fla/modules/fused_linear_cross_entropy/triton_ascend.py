@@ -162,15 +162,13 @@ def cross_entropy_kernel(
 
 
 @triton.jit
-def elementwise_mul_kernel(x, g, N: tl.constexpr, B: tl.constexpr):
+def elementwise_mul_kernel(x, y, g, N: tl.constexpr, B: tl.constexpr):
     i_x = tl.program_id(0).to(tl.int64)
     o_x = i_x * B + tl.arange(0, B)
 
     b_g = tl.load(g)
-    if b_g == 1.0:
-        return
     b_x = tl.load(x + o_x, mask=o_x < N)
-    tl.store(x + o_x, b_x * b_g, mask=o_x < N)
+    tl.store(y + o_x, b_x * b_g, mask=o_x < N)
 
 
 def _npu_vocab_block_size(vocab_size: int, num_rows: int, is_backward: bool = True) -> int:
@@ -320,10 +318,12 @@ def fused_linear_cross_entropy_bwd_npu(
     dw: torch.Tensor | None,
     db: torch.Tensor | None,
 ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
-    for grad in (dx, dw, db):
+    scaled_grads = [None, None, None]
+    for i, grad in enumerate((dx, dw, db)):
         if grad is None:
             continue
         N = grad.numel()
         B = compute_elementwise_block_size(n_elements=N, memory_multiplier=_ELEMENTWISE_MEM_MULT)
-        elementwise_mul_kernel[(triton.cdiv(N, B),)](x=grad, g=do, N=N, B=B, num_warps=STATIC_WARPS)
-    return dx, dw, db
+        scaled_grads[i] = torch.empty_like(grad)
+        elementwise_mul_kernel[(triton.cdiv(N, B),)](x=grad, y=scaled_grads[i], g=do, N=N, B=B, num_warps=STATIC_WARPS)
+    return tuple(scaled_grads)
