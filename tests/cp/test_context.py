@@ -5,10 +5,13 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
-from fla.ops.cp.context import get_cp_cu_seqlens
+from fla.ops.cp import context
+from fla.ops.cp.context import build_cp_context, get_cp_cu_seqlens
 
 
 @pytest.mark.parametrize(
@@ -53,3 +56,45 @@ def test_get_cp_cu_seqlens_varlen():
     assert not context.is_first_rank
     assert context.post_num_ranks == 1
     assert not context.is_last_rank
+
+
+@pytest.mark.parametrize('use_tf32x3', [False, True])
+def test_precision_keyword(use_tf32x3: bool, monkeypatch):
+    monkeypatch.setattr(context.dist, 'get_world_size', lambda group: 2)
+    monkeypatch.setattr(context.dist, 'get_rank', lambda group: 0)
+    kwargs = dict(cu_seqlens=torch.tensor([0, 256]), group=object(), use_tf32x3_affine_chain=use_tf32x3)
+    if use_tf32x3:
+        cp_context = build_cp_context(**kwargs)
+        assert not hasattr(cp_context, 'use_tf32x3_affine_chain')
+    else:
+        with pytest.raises(ValueError, match='use_tf32x3_affine_chain=False'):
+            build_cp_context(**kwargs)
+
+
+@pytest.mark.parametrize(
+    ('is_nvidia', 'is_npu', 'device_name', 'capability', 'supported'),
+    [
+        pytest.param(True, False, 'cuda:1', (7, 5), False, id='turing'),
+        pytest.param(True, False, 'cuda:1', (8, 0), True, id='ampere'),
+        pytest.param(False, False, 'cuda:1', (9, 0), False, id='amd'),
+        pytest.param(False, False, 'cpu', (0, 0), False, id='cpu'),
+        pytest.param(False, True, 'npu:1', None, True, id='ascend'),
+    ],
+)
+def test_device_requirement(is_nvidia, is_npu, device_name, capability, supported, monkeypatch):
+    monkeypatch.setattr(context, 'IS_NVIDIA', is_nvidia)
+    monkeypatch.setattr(context, 'IS_NPU', is_npu)
+    device = SimpleNamespace(type='npu', index=1) if is_npu else torch.device(device_name)
+    checked_devices = []
+
+    def get_capability(device_index):
+        checked_devices.append(device_index)
+        return capability
+
+    monkeypatch.setattr(context, 'get_device_capability', get_capability)
+    if supported:
+        context._check_cp_device(device)
+    else:
+        with pytest.raises(RuntimeError, match='compute capability >= 8.0'):
+            context._check_cp_device(device)
+    assert checked_devices == ([1] if is_nvidia else [])

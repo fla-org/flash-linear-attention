@@ -19,10 +19,10 @@ from fla.ops.cp import build_cp_context
 from fla.ops.gdn2 import chunk_gdn2
 from fla.ops.gdn2.naive import naive_recurrent_gdn2
 from fla.ops.kda.gate import naive_kda_lowerbound_gate
-from fla.utils import assert_close, device
+from fla.utils import IS_NPU, IS_TF32_SUPPORTED, assert_close, device
 from tests.cp.utils import gather_global, shard_tensor
 
-pytestmark = pytest.mark.skipif(device != "cuda", reason="requires CUDA or ROCm GPUs")
+pytestmark = pytest.mark.skipif(not (IS_TF32_SUPPORTED or IS_NPU), reason="requires NVIDIA Ampere or newer, or Ascend")
 
 
 def _make_inputs(rank, T, H, D, dtype):
