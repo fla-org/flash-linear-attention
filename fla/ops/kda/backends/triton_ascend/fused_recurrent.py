@@ -122,7 +122,7 @@ def fused_recurrent_kda_fwd_kernel_npu(
         bos = tl.cast(i_n, tl.int64) * T
         T_cur = T
 
-    if T_cur > 0:
+    if T_cur > 0 or not IS_CONTINUOUS_BATCHING:
         o_k = i_k * BK + tl.arange(0, BK)
         o_v = i_v * BV + tl.arange(0, BV)
 
