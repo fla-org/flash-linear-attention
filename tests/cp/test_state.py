@@ -18,7 +18,7 @@ from fla.ops.cp.chunk_bwd import chunk_cp_bwd_dh
 from fla.ops.cp.chunk_delta_h import compress_h0, expand_h0
 from fla.ops.cp.chunk_merge import chunk_cp_merge
 from fla.ops.cp.context import FLACPContext
-from fla.utils import IS_TF32_SUPPORTED, assert_close, device
+from fla.utils import IS_NPU, IS_TF32_SUPPORTED, assert_close, device
 
 
 @pytest.mark.parametrize(
@@ -103,7 +103,7 @@ def test_affine_chain_precision(monkeypatch, constructor, layout):
         assert 'AFFINE_CHAIN_PRECISION' not in call.kwargs
 
 
-@pytest.mark.skipif(not IS_TF32_SUPPORTED, reason='requires NVIDIA Ampere or newer')
+@pytest.mark.skipif(not (IS_TF32_SUPPORTED or IS_NPU), reason='requires NVIDIA Ampere or newer, or Ascend')
 @pytest.mark.parametrize('H', [2, 4], ids=['gva', 'mha'])
 @pytest.mark.parametrize('vector_gate', [False, True], ids=['scalar-gate', 'vector-gate'])
 @pytest.mark.parametrize('state_v_first', [False, True])
@@ -198,7 +198,7 @@ def test_intracard_affine_chain_precision(monkeypatch):
         assert 'AFFINE_CHAIN_PRECISION' not in launch.call_args.kwargs
 
 
-@pytest.mark.skipif(not IS_TF32_SUPPORTED, reason='requires NVIDIA Ampere or newer')
+@pytest.mark.skipif(not (IS_TF32_SUPPORTED or IS_NPU), reason='requires NVIDIA Ampere or newer, or Ascend')
 @pytest.mark.parametrize(
     ("T", "H", "K", "V"),
     [
@@ -284,7 +284,7 @@ def test_chunk_bwd_gate_head(T: int, H: int, K: int, V: int):
         )
 
 
-@pytest.mark.skipif(not IS_TF32_SUPPORTED, reason='requires NVIDIA Ampere or newer')
+@pytest.mark.skipif(not (IS_TF32_SUPPORTED or IS_NPU), reason='requires NVIDIA Ampere or newer, or Ascend')
 @pytest.mark.parametrize('K', [96, 192, 256])
 @pytest.mark.parametrize('state_v_first', [False, True])
 @pytest.mark.parametrize('forward', [False, True], ids=['backward', 'forward'])

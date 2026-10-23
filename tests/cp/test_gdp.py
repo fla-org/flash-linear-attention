@@ -5,7 +5,6 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-
 import pytest
 import torch
 import torch.distributed as dist
@@ -14,8 +13,10 @@ import torch.nn.functional as F
 from fla.ops.cp import build_cp_context
 from fla.ops.gated_delta_product import chunk_gated_delta_product
 from fla.ops.gated_delta_product.naive import naive_recurrent_gated_delta_product
-from fla.utils import assert_close, device
-from tests.cp.utils import assert_chunk_matches_cp, gather_global
+from fla.utils import IS_NPU, IS_TF32_SUPPORTED, assert_close, device
+from tests.cp.utils import assert_chunk_matches_cp, gather_global, shard_tensor
+
+pytestmark = pytest.mark.skipif(not (IS_TF32_SUPPORTED or IS_NPU), reason="requires NVIDIA Ampere or newer, or Ascend")
 
 
 def _run_chunk(
@@ -43,12 +44,14 @@ def _run_chunk(
         torch.manual_seed(42)
         q_global.copy_(
             F.normalize(
-                torch.randn(B, T, H, K, dtype=torch.float32, device=current_device), p=2, dim=-1
+                input=torch.randn(B, T, H, K, dtype=torch.float32, device=current_device),
+                p=2,
+                dim=-1,
             ).to(dtype)
         )
         k_global.copy_(
             F.normalize(
-                torch.randn(B, T * num_householder, H, K, dtype=torch.float32, device=current_device),
+                input=torch.randn(B, T * num_householder, H, K, dtype=torch.float32, device=current_device),
                 p=2,
                 dim=-1,
             ).to(dtype)
@@ -61,6 +64,7 @@ def _run_chunk(
     for tensor in (q_global, k_global, v_global, beta_global, g_global, do_global):
         dist.broadcast(tensor, src=0)
 
+    # offsets count output tokens; k/v/beta carry num_householder updates per token
     sequence_offsets = [0, *torch.tensor(lengths).cumsum(0).tolist()]
     cu_seqlens_global = torch.tensor(sequence_offsets, dtype=torch.long, device=current_device)
 
@@ -85,6 +89,7 @@ def _run_chunk(
                 num_householder=num_householder,
             )
             outputs.append(o_ref_i)
+        # the recurrent reference applies scale to q before reading the state
         o_ref = torch.cat(outputs, dim=1)
         o_ref.backward(do_global)
         ref = {
@@ -98,17 +103,12 @@ def _run_chunk(
 
     dist.barrier()
     cp_context = build_cp_context(cu_seqlens_global, group=dist.group.WORLD)
-    local_T = T // world_size
-    start = rank * local_T
-    end = start + local_T
-    start_dp, end_dp = start * num_householder, end * num_householder
-
-    q_local = q_global[:, start:end].detach().clone().requires_grad_(True)
-    k_local = k_global[:, start_dp:end_dp].detach().clone().requires_grad_(True)
-    v_local = v_global[:, start_dp:end_dp].detach().clone().requires_grad_(True)
-    beta_local = beta_global[:, start_dp:end_dp].detach().clone().requires_grad_(True)
-    g_local = g_global[:, start:end].detach().clone().requires_grad_(True)
-    do_local = do_global[:, start:end].clone()
+    q_local = shard_tensor(q_global, rank=rank, world_size=world_size).detach().clone().requires_grad_(True)
+    k_local = shard_tensor(k_global, rank=rank, world_size=world_size).detach().clone().requires_grad_(True)
+    v_local = shard_tensor(v_global, rank=rank, world_size=world_size).detach().clone().requires_grad_(True)
+    beta_local = shard_tensor(beta_global, rank=rank, world_size=world_size).detach().clone().requires_grad_(True)
+    g_local = shard_tensor(g_global, rank=rank, world_size=world_size).detach().clone().requires_grad_(True)
+    do_local = shard_tensor(do_global, rank=rank, world_size=world_size).clone()
 
     dist.barrier()
 
@@ -135,23 +135,15 @@ def _run_chunk(
         "dg": gather_global(g_local.grad, world_size),
     }
 
-    test_passed = True
     if rank == 0:
         ratios = {"o": 5e-3, "dq": 8e-3, "dk": 8e-3, "dv": 8e-3, "dbeta": 2e-2, "dg": 2e-2}
-        try:
-            for name, expected in ref.items():
-                assert_close(name, expected, actual[name], ratio=ratios[name], warning=False)
-        except AssertionError:
-            test_passed = False
-    result = torch.tensor(test_passed, dtype=torch.int32, device=current_device)
-    dist.broadcast(result, src=0)
-    if not result.item():
-        raise AssertionError("GDP context parallel result did not match the single-device reference")
+        for name, expected in ref.items():
+            assert_close(name, expected, actual[name], ratio=ratios[name], warning=False)
 
 
-@pytest.mark.parametrize('num_householder', [2, 3], ids=['n2', 'n3'])
-def test_chunk(run_distributed, num_householder):
-    run_distributed(_run_chunk, world_size=2, num_householder=num_householder)
+@pytest.mark.parametrize("num_householder", [2, 3], ids=["n2", "n3"])
+def test_chunk(run_distributed, num_householder: int) -> None:
+    run_distributed(worker=_run_chunk, world_size=2, num_householder=num_householder)
 
 
 def _run_chunk_gradients(rank: int, world_size: int, num_householder: int):

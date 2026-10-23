@@ -5,6 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+"""Compare CP token shift outputs and gradients across packed sequence boundaries."""
 
 import pytest
 import torch
@@ -13,23 +14,21 @@ import torch.distributed as dist
 from fla.modules.token_shift import token_shift_ref
 from fla.modules.token_shift_cp import token_shift_cp
 from fla.ops.cp import build_cp_context
-from fla.utils import assert_close
-from fla.utils import device as device_type
-from tests.cp.utils import gather_global
+from fla.utils import assert_close, device
+from tests.cp.utils import gather_global, shard_tensor
+
+pytestmark = pytest.mark.skipif(device != "cuda", reason="requires CUDA or ROCm GPUs")
 
 
-def _run_chunk(
+def _run_token_shift(
     rank: int,
     world_size: int,
-    T: int,
     D: int,
     lengths: list[int],
     dtype,
 ):
-    device = torch.device(f'{device_type}:{rank}')
-
+    T = sum(lengths)
     assert T % world_size == 0, f"T={T} must be divisible by world_size={world_size}"
-    assert sum(lengths) == T, f"Sum of lengths {sum(lengths)} must equal T={T}"
 
     torch.manual_seed(42)
     B = 1
@@ -51,12 +50,8 @@ def _run_chunk(
 
     context = build_cp_context(cu_seqlens_global, group=dist.group.WORLD)
 
-    chunk_size = T // world_size
-    start_idx = rank * chunk_size
-    end_idx = (rank + 1) * chunk_size
-
-    x_local = x_global[:, start_idx:end_idx, :].clone().detach().requires_grad_(True)
-    dy_local = dy_global[:, start_idx:end_idx, :].clone()
+    x_local = shard_tensor(x_global, rank=rank, world_size=world_size).clone().detach().requires_grad_(True)
+    dy_local = shard_tensor(dy_global, rank=rank, world_size=world_size).clone()
 
     dist.barrier()
 
@@ -69,21 +64,11 @@ def _run_chunk(
     y_local.backward(dy_local)
 
     y_cp_global = gather_global(y_local, world_size=world_size)
-
     dx_cp_global = gather_global(x_local.grad, world_size=world_size)
 
-    test_passed = True
     if rank == 0:
-        try:
-            assert_close("Output", ref_out, y_cp_global, ratio=0.001)
-            assert_close("dx", ref_dx, dx_cp_global, ratio=0.001)
-        except AssertionError:
-            test_passed = False
-
-    dist.barrier()
-
-    if not test_passed:
-        raise AssertionError(f"CP comparison failed on rank {rank}")
+        assert_close("Output", ref_out, y_cp_global, ratio=0.001)
+        assert_close("dx", ref_dx, dx_cp_global, ratio=0.001)
 
 
 @pytest.mark.parametrize(
@@ -91,19 +76,12 @@ def _run_chunk(
     [
         pytest.param(2, [300, 400, 324], id='cp2-sequence-cut'),
         pytest.param(2, [512, 512], id='cp2-boundary-aligned'),
-        pytest.param(4, [700, 324], id='cp4-complex'),
+        pytest.param(4, [700, 324], id='cp4-sequence-cut'),
         pytest.param(4, [1024], id='cp4-single-sequence'),
-        pytest.param(2, [100, 150, 200, 250, 124, 100, 100], id='cp2-many-short-sequences'),
-        pytest.param(2, [513, 511], id='cp2-short-tail-len1'),
-        pytest.param(2, [514, 510], id='cp2-short-tail-len2'),
+        pytest.param(2, [100, 150, 200, 250, 124, 100, 100], id='cp2-short-sequences'),
+        pytest.param(2, [513, 511], id='cp2-tail-1'),
+        pytest.param(2, [514, 510], id='cp2-tail-2'),
     ],
 )
 def test_token_shift(run_distributed, world_size, lengths):
-    run_distributed(
-        _run_chunk,
-        world_size=world_size,
-        T=1024,
-        D=128,
-        lengths=lengths,
-        dtype=torch.float32,
-    )
+    run_distributed(worker=_run_token_shift, world_size=world_size, D=128, lengths=lengths, dtype=torch.float32)

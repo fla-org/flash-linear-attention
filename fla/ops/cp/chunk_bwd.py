@@ -10,7 +10,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.common.chunk_delta_h_state import chunk_delta_rule_bwd_dh_state
-from fla.ops.cp.chunk_merge import _prune_cp_configs
+from fla.ops.cp.chunk_merge import CP_DOT_PRECISION, _prune_cp_configs
 from fla.ops.cp.context import _check_cp_device
 from fla.ops.utils.op import exp2
 from fla.utils import autotune_cache_kwargs, check_shared_mem
@@ -49,8 +49,8 @@ def chunk_cp_bwd_kernel_dh(
     K: tl.constexpr,
     V: tl.constexpr,
     BT: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-    BK1: tl.constexpr,
+    BV: tl.constexpr,
+    BK: tl.constexpr,
     USE_G: tl.constexpr,
     USE_GK: tl.constexpr,
     USE_BG: tl.constexpr,
@@ -61,7 +61,7 @@ def chunk_cp_bwd_kernel_dh(
     Each value head writes [dh_local | dM] with shape [K, V+K].
     Both the zero-terminal-gradient response and its boundary-gradient transform scan chunks in reverse order.
     """
-    i_col, i_h = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
+    i_c, i_h = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_n = 0
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
@@ -71,9 +71,9 @@ def chunk_cp_bwd_kernel_dh(
         bos, eos = (i_n * T).to(tl.int64), (i_n * T + T).to(tl.int64)
         NT = tl.cdiv(T, BT)
 
-    is_dh_part = i_col * BLOCK_SIZE < V
+    is_dh_part = i_c * BV < V
 
-    # for DPLR, use H heads for w; GDN and KDA use HV heads for w
+    # for DPLR, w uses H heads; GDN/KDA w uses HV heads
     q += ((bos * H + i_h // (HV // H)) * K).to(tl.int64)
     k += ((bos * H + i_h // (HV // H)) * K).to(tl.int64)
     if USE_BG:
@@ -91,20 +91,20 @@ def chunk_cp_bwd_kernel_dh(
     if is_dh_part:
         do += ((bos * HV + i_h) * V).to(tl.int64)
         dv += ((bos * HV + i_h) * V).to(tl.int64)
-        i_v = i_col
+        i_v = i_c
 
         b_dh2, b_dh3, b_dh4 = tl.full((), 0, tl.float32), tl.full((), 0, tl.float32), tl.full((), 0, tl.float32)
         # zero terminal gradient isolates contributions from this rank's do and dv
-        b_dh1 = tl.zeros([64, BLOCK_SIZE], dtype=tl.float32)
+        b_dh1 = tl.zeros([64, BV], dtype=tl.float32)
         if K > 64:
-            b_dh2 = tl.zeros([64, BLOCK_SIZE], dtype=tl.float32)
+            b_dh2 = tl.zeros([64, BV], dtype=tl.float32)
         if K > 128:
-            b_dh3 = tl.zeros([64, BLOCK_SIZE], dtype=tl.float32)
+            b_dh3 = tl.zeros([64, BV], dtype=tl.float32)
         if K > 192:
-            b_dh4 = tl.zeros([64, BLOCK_SIZE], dtype=tl.float32)
+            b_dh4 = tl.zeros([64, BV], dtype=tl.float32)
 
-        o_vb = i_v * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-        m_vb = o_vb < V
+        o_v = i_v * BV + tl.arange(0, BV)
+        m_v = o_v < V
         o_k1 = tl.arange(0, 64)
         m_k1 = o_k1 < K
         o_k2 = 64 + o_k1
@@ -130,7 +130,7 @@ def chunk_cp_bwd_kernel_dh(
                 dv2=None,
                 b_dh=(b_dh1, b_dh2, b_dh3, b_dh4),
                 o_t=o_t,
-                o_v=o_vb,
+                o_v=o_v,
                 last_idx=last_idx,
                 T=T,
                 scale=scale,
@@ -145,34 +145,34 @@ def chunk_cp_bwd_kernel_dh(
                 STATE_V_FIRST=False,
             )
 
-        p_dh1 = dhm + o_k1[:, None] * (V + K) + o_vb[None, :]
-        tl.store(p_dh1, b_dh1.to(p_dh1.dtype.element_ty), mask=m_k1[:, None] & m_vb[None, :])
+        p_dh1 = dhm + o_k1[:, None] * (V + K) + o_v[None, :]
+        tl.store(p_dh1, b_dh1.to(p_dh1.dtype.element_ty), mask=m_k1[:, None] & m_v[None, :])
         if K > 64:
-            p_dh2 = dhm + o_k2[:, None] * (V + K) + o_vb[None, :]
-            tl.store(p_dh2, b_dh2.to(p_dh2.dtype.element_ty), mask=m_k2[:, None] & m_vb[None, :])
+            p_dh2 = dhm + o_k2[:, None] * (V + K) + o_v[None, :]
+            tl.store(p_dh2, b_dh2.to(p_dh2.dtype.element_ty), mask=m_k2[:, None] & m_v[None, :])
         if K > 128:
-            p_dh3 = dhm + o_k3[:, None] * (V + K) + o_vb[None, :]
-            tl.store(p_dh3, b_dh3.to(p_dh3.dtype.element_ty), mask=m_k3[:, None] & m_vb[None, :])
+            p_dh3 = dhm + o_k3[:, None] * (V + K) + o_v[None, :]
+            tl.store(p_dh3, b_dh3.to(p_dh3.dtype.element_ty), mask=m_k3[:, None] & m_v[None, :])
         if K > 192:
-            p_dh4 = dhm + o_k4[:, None] * (V + K) + o_vb[None, :]
-            tl.store(p_dh4, b_dh4.to(p_dh4.dtype.element_ty), mask=m_k4[:, None] & m_vb[None, :])
+            p_dh4 = dhm + o_k4[:, None] * (V + K) + o_v[None, :]
+            tl.store(p_dh4, b_dh4.to(p_dh4.dtype.element_ty), mask=m_k4[:, None] & m_v[None, :])
     else:
-        i_k_col = i_col - tl.cdiv(V, BLOCK_SIZE)
+        i_k = i_c - tl.cdiv(V, BV)
 
-        row = tl.arange(0, BK1)
-        col = tl.arange(0, BLOCK_SIZE) + i_k_col * BLOCK_SIZE
+        o_k = tl.arange(0, BK)
+        o_kc = tl.arange(0, BV) + i_k * BV
 
-        b_m = tl.where(row[:, None] == col[None, :], 1.0, 0.0)
+        b_m = tl.where(o_k[:, None] == o_kc[None, :], 1.0, 0.0)
 
         for _i_t in range(NT):
             i_t = NT - 1 - _i_t
             o_t = i_t * BT + tl.arange(0, BT)
             m_t = o_t < T
 
-            p_k = k + o_t[:, None] * stride_qk + row[None, :]
-            b_k = tl.load(p_k, mask=m_t[:, None] & (row < K)[None, :], other=0.0)
-            p_w = w + o_t[:, None] * stride_w + row[None, :]
-            b_w = tl.load(p_w, mask=m_t[:, None] & (row < K)[None, :], other=0.0)
+            p_k = k + o_t[:, None] * stride_qk + o_k[None, :]
+            b_k = tl.load(p_k, mask=m_t[:, None] & (o_k < K)[None, :], other=0.0)
+            p_w = w + o_t[:, None] * stride_w + o_k[None, :]
+            b_w = tl.load(p_w, mask=m_t[:, None] & (o_k < K)[None, :], other=0.0)
 
             last_idx = min((i_t + 1) * BT, T) - 1
 
@@ -182,27 +182,25 @@ def chunk_cp_bwd_kernel_dh(
                 b_g = tl.load(p_g, mask=m_t, other=0.0).to(tl.float32)
                 b_k = b_k * tl.where(m_t, exp2(b_g_last - b_g), 0)[:, None]
                 b_g_last = exp2(b_g_last)
-                b_diag = tl.where(row[:, None] == row[None, :], b_g_last, 0.0)
+                b_diag = tl.where(o_k[:, None] == o_k[None, :], b_g_last, 0.0)
             elif USE_GK:
-                b_gk_last = tl.load(gk + last_idx * HV * K + row, mask=(row < K), other=0.).to(tl.float32)
+                b_gk_last = tl.load(gk + last_idx * HV * K + o_k, mask=(o_k < K), other=0.).to(tl.float32)
                 b_gk_last = exp2(b_gk_last)
-                b_diag = tl.where(row[:, None] == row[None, :], b_gk_last[:, None], 0.0)
+                b_diag = tl.where(o_k[:, None] == o_k[None, :], b_gk_last[:, None], 0.0)
             else:
-                b_diag = tl.where(row[:, None] == row[None, :], 1.0, 0.0)
+                b_diag = tl.where(o_k[:, None] == o_k[None, :], 1.0, 0.0)
 
             # backward transposes each chunk's state transform; DPLR passes its gated bg through k
             b_kw = tl.dot(tl.trans(b_w), b_k.to(b_w.dtype))
             if USE_BG:
-                # DPLR: dM = (diag + w^T @ bg) @ dM
-                b_m_i = b_diag + b_kw
+                b_m_chunk = b_diag + b_kw
             else:
-                # GDN/KDA: dM = (diag - w^T @ k) @ dM
-                b_m_i = b_diag - b_kw
-            # keep the matrix chain in fp32 to avoid repeated bf16 rounding
-            b_m = tl.dot(b_m_i.to(tl.float32), b_m.to(tl.float32), input_precision="tf32x3")
+                b_m_chunk = b_diag - b_kw
+            # keep the affine chain in fp32 to avoid repeated bf16 rounding
+            b_m = tl.dot(b_m_chunk.to(tl.float32), b_m.to(tl.float32), input_precision=CP_DOT_PRECISION)
 
-        p_m = dhm + V + row[:, None] * (V + K) + col[None, :]
-        tl.store(p_m, b_m.to(p_m.dtype.element_ty), mask=(row < K)[:, None] & (col < K)[None, :])
+        p_m = dhm + V + o_k[:, None] * (V + K) + o_kc[None, :]
+        tl.store(p_m, b_m.to(p_m.dtype.element_ty), mask=(o_k < K)[:, None] & (o_kc < K)[None, :])
 
 
 def chunk_cp_bwd_dh(
@@ -224,8 +222,8 @@ def chunk_cp_bwd_dh(
     _, T, H, K = q.shape
     HV, V = do.shape[2:]
     BK = triton.next_power_of_2(K)
-    BLOCK_SIZE = 32 if K <= 64 else 64
-    grid = (triton.cdiv(V, BLOCK_SIZE) + triton.cdiv(K, BLOCK_SIZE), HV)
+    BV = 32 if K <= 64 else 64
+    grid = (triton.cdiv(V, BV) + triton.cdiv(K, BV), HV)
     chunk_cp_bwd_kernel_dh[grid](
         q=q,
         k=k if bg is None else bg,
@@ -243,7 +241,7 @@ def chunk_cp_bwd_dh(
         K=K,
         V=V,
         BT=chunk_size,
-        BLOCK_SIZE=BLOCK_SIZE,
-        BK1=BK,
+        BV=BV,
+        BK=BK,
         USE_BG=bg is not None,
     )

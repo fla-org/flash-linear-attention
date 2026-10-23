@@ -59,7 +59,7 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
         else:
             initial_state = k.new_zeros(N, HV, K, V, dtype=torch.float32)
         # each part exports the affine chain of its last segment, skipped when chain-last
-        for part, (cu_part, is_last) in enumerate(zip(
+        for i_part, (cu_seqlens_part, is_last) in enumerate(zip(
             (cu_seqlens[front_num_seqs - 1: front_num_seqs + 1], cu_seqlens[-2:]),
             context.is_last_by_part,
         )):
@@ -68,26 +68,26 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
                     k=k,
                     w=w,
                     u=u,
-                    hm=hm[part],
+                    hm=hm[i_part],
                     g=g,
                     gk=gk,
                     bg=bg,
                     v=v,
-                    cu_seqlens=cu_part,
+                    cu_seqlens=cu_seqlens_part,
                     chunk_size=chunk_size,
                 )
         ag_hm, _ = all_gather_into_tensor(hm, group=context.group)
         # chain order: rank fronts in ascending order, then rank backs in descending order
-        slots = torch.cat([ag_hm[:, 0], ag_hm[:, 1].flip(0)])
+        hm_chain = torch.cat([ag_hm[:, 0], ag_hm[:, 1].flip(0)])
         world_size = dist.get_world_size(group=context.group)
 
-        for part in range(2):
-            if not context.is_first_by_part[part]:
+        for i_part in range(2):
+            if not context.is_first_by_part[i_part]:
                 chunk_cp_merge(
-                    h=initial_state[0] if part == 0 else initial_state[front_num_seqs],
-                    ag_hm=slots,
-                    num_ranks=context.pre_num_ranks_by_part[part],
-                    rank=rank if part == 0 else 2 * world_size - 1 - rank,
+                    h=initial_state[0] if i_part == 0 else initial_state[front_num_seqs],
+                    ag_hm=hm_chain,
+                    num_ranks=context.pre_num_ranks_by_part[i_part],
+                    rank=rank if i_part == 0 else 2 * world_size - 1 - rank,
                     state_v_first=state_v_first,
                     forward=True,
                     h_seq_idx=None,
@@ -100,12 +100,12 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
         initial_state = k.new_zeros(N, HV, V, K, dtype=torch.float32)
     else:
         initial_state = k.new_zeros(N, HV, K, V, dtype=torch.float32)
-    cu_last = cu_seqlens[-2:]
+    cu_seqlens_last = cu_seqlens[-2:]
     if use_graph:
         assert context.pre_num_ranks_dev is not None, "use_graph with CP requires context.pre_num_ranks_dev"
         # skip zero-length tail padding when selecting the last sequence during graph replay
         i_last = (cu_seqlens[1:] > cu_seqlens[:-1]).sum() - 1
-        cu_last = cu_seqlens.index_select(0, torch.stack((i_last, i_last + 1)))
+        cu_seqlens_last = cu_seqlens.index_select(0, torch.stack((i_last, i_last + 1)))
     # every rank participates during graph replay because host-side flags are frozen at capture
     if use_graph or not context.is_last_rank:
         chunk_cp_fwd_h(
@@ -117,7 +117,7 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
             gk=gk,
             bg=bg,
             v=v,
-            cu_seqlens=cu_last,
+            cu_seqlens=cu_seqlens_last,
             chunk_size=chunk_size,
         )
     ag_hm, _ = all_gather_into_tensor(hm, group=context.group)
@@ -176,7 +176,7 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
         else:
             dht = q.new_zeros(N, HV, K, V, dtype=torch.float32)
         # each part exports the backward affine chain of its first segment, skipped when chain-first
-        for part, (cu_part, is_first) in enumerate(zip(
+        for i_part, (cu_seqlens_part, is_first) in enumerate(zip(
             (cu_seqlens[:2], cu_seqlens[front_num_seqs: front_num_seqs + 2]),
             context.is_first_by_part,
         )):
@@ -187,26 +187,26 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
                     w=w,
                     do=do,
                     dv=dv,
-                    dhm=dhm[part],
+                    dhm=dhm[i_part],
                     g=g,
                     gk=gk,
                     bg=bg,
                     scale=scale,
-                    cu_seqlens=cu_part,
+                    cu_seqlens=cu_seqlens_part,
                     chunk_size=chunk_size,
                 )
         ag_dhm, _ = all_gather_into_tensor(dhm, group=context.group)
         # chain order: rank fronts in ascending order, then rank backs in descending order
-        slots = torch.cat([ag_dhm[:, 0], ag_dhm[:, 1].flip(0)])
+        dhm_chain = torch.cat([ag_dhm[:, 0], ag_dhm[:, 1].flip(0)])
         world_size = dist.get_world_size(group=context.group)
 
-        for part in range(2):
-            if not context.is_last_by_part[part]:
+        for i_part in range(2):
+            if not context.is_last_by_part[i_part]:
                 chunk_cp_merge(
-                    h=dht[front_num_seqs - 1] if part == 0 else dht[-1],
-                    ag_hm=slots,
-                    num_ranks=context.post_num_ranks_by_part[part],
-                    rank=rank if part == 0 else 2 * world_size - 1 - rank,
+                    h=dht[front_num_seqs - 1] if i_part == 0 else dht[-1],
+                    ag_hm=dhm_chain,
+                    num_ranks=context.post_num_ranks_by_part[i_part],
+                    rank=rank if i_part == 0 else 2 * world_size - 1 - rank,
                     state_v_first=state_v_first,
                     forward=False,
                     h_seq_idx=None,

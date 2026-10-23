@@ -183,42 +183,42 @@ def prepare_subseq_cu_seqlens(
     threshold_subseq_len = 3 * subseq_len
 
     split_seq_ids: list[int] = []
-    start_subseq_idxs: list[int] = []
+    start_subseq_indices: list[int] = []
     num_subseqs_list: list[int] = []
 
     boundaries: list[int] = [0]
-    cumsum_offset = 0
+    subseq_offset = 0
 
-    for i in range(N):
-        seq_start = int(cu_seqlens_cpu[i].item())
-        seq_end = int(cu_seqlens_cpu[i + 1].item())
-        seq_len_i = seq_end - seq_start
-        seq_chunks_i = (seq_len_i + chunk_size - 1) // chunk_size
+    for i_n in range(N):
+        bos = int(cu_seqlens_cpu[i_n].item())
+        eos = int(cu_seqlens_cpu[i_n + 1].item())
+        seq_len = eos - bos
+        num_chunks = (seq_len + chunk_size - 1) // chunk_size
 
-        if seq_len_i >= threshold_subseq_len:
-            num_ss = min(max_splits, (seq_chunks_i + subseq_chunks - 1) // subseq_chunks)
-            chunks_per = (seq_chunks_i + num_ss - 1) // num_ss
-            actual_ssl = chunks_per * chunk_size
+        if seq_len >= threshold_subseq_len:
+            num_subseqs = min(max_splits, (num_chunks + subseq_chunks - 1) // subseq_chunks)
+            chunks_per_subseq = (num_chunks + num_subseqs - 1) // num_subseqs
+            split_len = chunks_per_subseq * chunk_size
 
             # preserve chunk alignment inside the sequence; only its final subsequence may end in a partial chunk
-            split_seq_ids.append(i)
-            start_subseq_idxs.append(cumsum_offset)
-            num_subseqs_list.append(num_ss)
+            split_seq_ids.append(i_n)
+            start_subseq_indices.append(subseq_offset)
+            num_subseqs_list.append(num_subseqs)
 
-            for j in range(num_ss):
-                boundary = min(seq_start + (j + 1) * actual_ssl, seq_end)
+            for i_s in range(num_subseqs):
+                boundary = min(bos + (i_s + 1) * split_len, eos)
                 boundaries.append(boundary)
-            cumsum_offset += num_ss
+            subseq_offset += num_subseqs
         else:
-            boundaries.append(seq_end)
-            cumsum_offset += 1
+            boundaries.append(eos)
+            subseq_offset += 1
 
     if not split_seq_ids:
         return cu_seqlens_cpu.tolist(), False, 0
 
-    total_subseqs = cumsum_offset
+    total_subseqs = subseq_offset
 
-    split_info = SplitSeqInfo(split_seq_ids=split_seq_ids, start_subseq_idx=start_subseq_idxs, num_subseqs=num_subseqs_list)
+    split_info = SplitSeqInfo(split_seq_ids=split_seq_ids, start_subseq_idx=start_subseq_indices, num_subseqs=num_subseqs_list)
 
     return boundaries, split_info, total_subseqs
 
@@ -281,26 +281,26 @@ def intracard_merge(
     num_split_seqs = split_info.num_split_seqs
 
     # combine metadata into one device transfer to reduce synchronization
-    all_int_data = merge_seq_offsets + merge_init_offsets + split_info.split_seq_ids
-    all_tensor = torch.tensor(all_int_data, dtype=torch.int32, device=device)
-    n_so = len(merge_seq_offsets)
-    n_io = len(merge_init_offsets)
-    seq_offsets = all_tensor[:n_so]
-    init_offsets = all_tensor[n_so:n_so+n_io]
-    h0_seq_ids = all_tensor[n_so+n_io:]
+    merge_metadata = merge_seq_offsets + merge_init_offsets + split_info.split_seq_ids
+    merge_metadata_tensor = torch.tensor(merge_metadata, dtype=torch.int32, device=device)
+    num_seq_offsets = len(merge_seq_offsets)
+    num_init_offsets = len(merge_init_offsets)
+    seq_offsets = merge_metadata_tensor[:num_seq_offsets]
+    init_offsets = merge_metadata_tensor[num_seq_offsets:num_seq_offsets+num_init_offsets]
+    h0_seq_ids = merge_metadata_tensor[num_seq_offsets+num_init_offsets:]
 
     if state_v_first:
-        initial_states_merge = hm.new_empty(num_non_first, HV, V, K, dtype=torch.float32)
+        merged_initial_state = hm.new_empty(num_non_first, HV, V, K, dtype=torch.float32)
     else:
-        initial_states_merge = hm.new_empty(num_non_first, HV, K, V, dtype=torch.float32)
+        merged_initial_state = hm.new_empty(num_non_first, HV, K, V, dtype=torch.float32)
 
     def grid(meta):
         return (triton.cdiv(V, meta['BV']), num_split_seqs, HV)
 
     chunk_cp_fwd_bwd_kernel_merge[grid](
-        h=initial_states_merge,
+        h=merged_initial_state,
         ag_hm=hm,
-        pre_or_post_num_ranks=num_split_seqs,
+        num_ranks=num_split_seqs,
         rank=0,
         seq_offsets=seq_offsets,
         init_offsets=init_offsets,
@@ -312,12 +312,12 @@ def intracard_merge(
         V=V,
         BK=BK,
         FORWARD=True,
-        INTRACARD_MODE=True,
-        NUM_SEQ_ENTRIES=num_split_seqs,
+        IS_INTRACARD=True,
+        N=num_split_seqs,
         STATE_V_FIRST=state_v_first,
     )
 
-    return initial_states_merge, num_non_first
+    return merged_initial_state, num_non_first
 
 
 def _precompute_intracard_indices(
@@ -345,47 +345,47 @@ def _precompute_intracard_indices(
         merge_init_offsets (list[int]):
             Cumulative non-first subsequence counts for the merge kernel.
     """
-    starts = split_info.start_subseq_idx
-    num_ss = split_info.num_subseqs
-    split_ids = split_info.split_seq_ids
+    subseq_starts = split_info.start_subseq_idx
+    subseq_counts = split_info.num_subseqs
+    split_seq_ids = split_info.split_seq_ids
 
     # cu_seqlens_split_values: for each split seq, extract [start:start+n+1] boundaries
     cu_seqlens_split_values: list[int] = []
     num_split_subseqs = 0
-    for s, n in zip(starts, num_ss):
-        cu_seqlens_split_values.extend(cu_seqlens_subseq_values[s:s+n+1])
-        num_split_subseqs += n
+    for subseq_start, num_subseqs in zip(subseq_starts, subseq_counts):
+        cu_seqlens_split_values.extend(cu_seqlens_subseq_values[subseq_start:subseq_start+num_subseqs+1])
+        num_split_subseqs += num_subseqs
 
     # num_subseqs_per_seq: [num_seqs], default 1 for unsplit sequences
     num_subseqs_per_seq = [1] * num_seqs
-    for sid, nss in zip(split_ids, num_ss):
-        num_subseqs_per_seq[sid] = nss
+    for seq_id, subseq_count in zip(split_seq_ids, subseq_counts):
+        num_subseqs_per_seq[seq_id] = subseq_count
 
     # non_first_indices: for scattering merged initial states
     non_first_indices: list[int] = []
-    for s, n in zip(starts, num_ss):
-        for j in range(1, n):
-            non_first_indices.append(s + j)
+    for subseq_start, num_subseqs in zip(subseq_starts, subseq_counts):
+        for i_s in range(1, num_subseqs):
+            non_first_indices.append(subseq_start + i_s)
 
     # first_subseq_indices: for scattering original initial states
     first_subseq_indices: list[int] = [0]
-    running = 0
-    for i in range(num_seqs - 1):
-        running += num_subseqs_per_seq[i]
-        first_subseq_indices.append(running)
+    subseq_offset = 0
+    for i_n in range(num_seqs - 1):
+        subseq_offset += num_subseqs_per_seq[i_n]
+        first_subseq_indices.append(subseq_offset)
 
     # last_subseq_indices: for gathering final states
     last_subseq_indices: list[int] = []
-    running = 0
-    for n in num_subseqs_per_seq:
-        running += n
-        last_subseq_indices.append(running - 1)
+    subseq_offset = 0
+    for num_subseqs in num_subseqs_per_seq:
+        subseq_offset += num_subseqs
+        last_subseq_indices.append(subseq_offset - 1)
 
     merge_seq_offsets: list[int] = [0]
     merge_init_offsets: list[int] = [0]
-    for n in num_ss:
-        merge_seq_offsets.append(merge_seq_offsets[-1] + n)
-        merge_init_offsets.append(merge_init_offsets[-1] + n - 1)
+    for num_subseqs in subseq_counts:
+        merge_seq_offsets.append(merge_seq_offsets[-1] + num_subseqs)
+        merge_init_offsets.append(merge_init_offsets[-1] + num_subseqs - 1)
     num_non_first = merge_init_offsets[-1]
 
     return (
@@ -557,7 +557,7 @@ def intracard_fwd_h(
         chunk_size=chunk_size,
     )
 
-    initial_states_merge, num_non_first = intracard_merge(
+    merged_initial_state, num_non_first = intracard_merge(
         hm=hm,
         split_info=split_info,
         num_non_first=num_non_first,
@@ -569,16 +569,16 @@ def intracard_fwd_h(
     )
 
     if state_v_first:
-        initial_state_expanded = k.new_zeros(total_subseqs, HV, V, K, dtype=torch.float32)
+        subseq_initial_state = k.new_zeros(total_subseqs, HV, V, K, dtype=torch.float32)
     else:
-        initial_state_expanded = k.new_zeros(total_subseqs, HV, K, V, dtype=torch.float32)
+        subseq_initial_state = k.new_zeros(total_subseqs, HV, K, V, dtype=torch.float32)
 
     # first subsequences inherit h0; later subsequences inherit the preceding affine prefix
     if initial_state is not None:
-        initial_state_expanded[first_subseq_indices] = initial_state
+        subseq_initial_state[first_subseq_indices] = initial_state
 
-    if initial_states_merge is not None and num_non_first > 0:
-        initial_state_expanded[non_first_indices] = initial_states_merge
+    if merged_initial_state is not None and num_non_first > 0:
+        subseq_initial_state[non_first_indices] = merged_initial_state
 
     chunk_indices_subseq = prepare_chunk_indices(cu_seqlens_subseq_gpu, chunk_size)
 
@@ -588,7 +588,7 @@ def intracard_fwd_h(
         u=u,
         g=g,
         gk=gk,
-        initial_state=initial_state_expanded,
+        initial_state=subseq_initial_state,
         output_final_state=output_final_state,
         chunk_size=chunk_size,
         save_new_value=save_new_value,

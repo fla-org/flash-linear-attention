@@ -2,7 +2,7 @@
 
 Context Parallel of Linear Attention (alias KCP in Moonshot) is context parallelism designed for delta-rule recurrent models such as GDN (Gated Delta Rule), GDP (Gated DeltaProduct), and KDA (Kimi Delta Attention). It enables efficient distributed training by partitioning the sequence dimension across ranks, with each rank processing a local token chunk and CP automatically synchronizing cross-rank states.
 
-Delta-rule CP affine chains, including intra-card CP, require NVIDIA Ampere or newer (compute capability >= 8.0). Their FP32 matrix products always use TF32x3; unsupported devices raise an error before CP kernel execution. Input tensor dtypes are unchanged.
+Delta-rule CP affine chains, including intra-card CP, use TF32x3 on NVIDIA Ampere or newer (compute capability >= 8.0) and IEEE FP32 on Ascend. Other devices raise an error before CP kernel execution. Precision is selected by the backend; input tensor dtypes are unchanged.
 
 ## Quick Start
 
@@ -376,7 +376,7 @@ $$\mathbf{S}_r = \mathbf{M}_{r-1} (\mathbf{M}_{r-2} (\cdots \mathbf{S}_{\text{ex
 > [!IMPORTANT]
 > The $\mathbf{M}$ chain multiply must stay in **fp32** to avoid accumulated precision loss. In bf16, repeatedly casting fp32 accumulators back to bf16 between iterations causes significant error growth over many chunks.
 
-Affine-chain products automatically use `tf32x3` on NVIDIA GPUs with compute capability ≥ 8.0 and `ieee` on other hardware. This applies to forward/backward summaries and state merging, including intra-card CP. State storage and accumulation remain FP32.
+Affine-chain products automatically use `tf32x3` on NVIDIA GPUs with compute capability ≥ 8.0 and `ieee` on Ascend. This applies to forward/backward summaries and state merging, including intra-card CP. State storage and accumulation remain FP32.
 
 ---
 

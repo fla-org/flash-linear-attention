@@ -6,6 +6,8 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -92,23 +94,35 @@ def test_copy_for_backward(layout: str):
 
 
 @pytest.mark.parametrize('entry', [FLACPContext, get_cp_cu_seqlens, build_cp_context], ids=['context', 'partition', 'build'])
-@pytest.mark.parametrize('mode', ['omitted', 'true', 'false', 'unknown'])
+@pytest.mark.parametrize('mode', ['omitted', 'true', 'false', 'unknown', 'positional-true', 'positional-false'])
 def test_precision_keyword(entry, mode, monkeypatch):
     monkeypatch.setattr(context.dist, 'get_world_size', lambda group: 2)
     monkeypatch.setattr(context.dist, 'get_rank', lambda group: 0)
     kwargs = dict(cu_seqlens=torch.tensor([0, 256]), group=object())
+    args = ()
+    if mode.startswith('positional-'):
+        mode = mode.removeprefix('positional-')
+        cu_seqlens, group = kwargs['cu_seqlens'], kwargs['group']
+        if entry is FLACPContext:
+            args = (group, cu_seqlens, None, None, None, None, None, None, None, mode == 'true')
+        elif entry is get_cp_cu_seqlens:
+            args = (cu_seqlens, None, 2, 0, group, None, mode == 'true')
+        else:
+            args = (cu_seqlens, group, None, None, mode == 'true')
+        kwargs = {}
     if mode in ('true', 'false'):
-        kwargs['use_tf32x3_affine_chain'] = mode == 'true'
+        if not args:
+            kwargs['use_tf32x3_affine_chain'] = mode == 'true'
     elif mode == 'unknown':
         kwargs['unknown_option'] = True
     if mode == 'false':
         with pytest.raises(ValueError, match='use_tf32x3_affine_chain=False'):
-            entry(**kwargs)
+            entry(*args, **kwargs)
     elif mode == 'unknown':
         with pytest.raises(TypeError, match='unknown_option'):
-            entry(**kwargs)
+            entry(*args, **kwargs)
     else:
-        cp_context = entry(**kwargs)
+        cp_context = entry(*args, **kwargs)
         assert not hasattr(cp_context, 'use_tf32x3_affine_chain')
         copied = cp_context.copy_for_backward()
         assert copied.group is cp_context.group
@@ -116,19 +130,19 @@ def test_precision_keyword(entry, mode, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ('is_nvidia', 'device_name', 'capability', 'supported'),
+    ('is_nvidia', 'is_npu', 'device_name', 'capability', 'supported'),
     [
-        pytest.param(True, 'cuda:1', (7, 0), False, id='volta'),
-        pytest.param(True, 'cuda:1', (7, 5), False, id='turing'),
-        pytest.param(True, 'cuda:1', (8, 0), True, id='ampere'),
-        pytest.param(True, 'cuda:1', (9, 0), True, id='hopper'),
-        pytest.param(True, 'cuda:1', (10, 0), True, id='blackwell'),
-        pytest.param(False, 'cuda:1', (9, 0), False, id='amd'),
-        pytest.param(False, 'cpu', (0, 0), False, id='cpu'),
+        pytest.param(True, False, 'cuda:1', (7, 5), False, id='turing'),
+        pytest.param(True, False, 'cuda:1', (8, 0), True, id='ampere'),
+        pytest.param(False, False, 'cuda:1', (9, 0), False, id='amd'),
+        pytest.param(False, False, 'cpu', (0, 0), False, id='cpu'),
+        pytest.param(False, True, 'npu:1', None, True, id='ascend'),
     ],
 )
-def test_device_requirement(is_nvidia, device_name, capability, supported, monkeypatch):
+def test_device_requirement(is_nvidia, is_npu, device_name, capability, supported, monkeypatch):
     monkeypatch.setattr(context, 'IS_NVIDIA', is_nvidia)
+    monkeypatch.setattr(context, 'IS_NPU', is_npu)
+    device = SimpleNamespace(type='npu', index=1) if is_npu else torch.device(device_name)
     checked_devices = []
 
     def get_capability(device_index):
@@ -137,10 +151,10 @@ def test_device_requirement(is_nvidia, device_name, capability, supported, monke
 
     monkeypatch.setattr(context, 'get_device_capability', get_capability)
     if supported:
-        context._check_cp_device(torch.device(device_name))
+        context._check_cp_device(device)
     else:
         with pytest.raises(RuntimeError, match='compute capability >= 8.0'):
-            context._check_cp_device(torch.device(device_name))
+            context._check_cp_device(device)
     assert checked_devices == ([1] if is_nvidia else [])
 
 

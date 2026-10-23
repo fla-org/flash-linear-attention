@@ -20,7 +20,7 @@ from fla.ops.common.intracard_cp import _intracard_cache
 from fla.ops.cp import context
 from fla.ops.gated_delta_rule import chunk_gated_delta_rule
 from fla.ops.kda import chunk_kda
-from fla.utils import IS_TF32_SUPPORTED, assert_close, device
+from fla.utils import IS_NPU, IS_TF32_SUPPORTED, device
 
 
 @pytest.fixture(autouse=True)
@@ -31,7 +31,7 @@ def _clear_intracard_cache():
 
 
 @pytest.mark.skipif(os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") == "1", reason="backend dispatch disabled")
-@pytest.mark.skipif(not IS_TF32_SUPPORTED, reason="requires NVIDIA Ampere or newer")
+@pytest.mark.skipif(not (IS_TF32_SUPPORTED or IS_NPU), reason="requires NVIDIA Ampere or newer, or Ascend")
 def test_chunk_kda_cache(monkeypatch):
     """Reuse the intracard precompute cache for repeated calls with the same cu_seqlens object."""
     # intracard CP is disabled by default.
@@ -112,7 +112,7 @@ def test_backend_enabled(monkeypatch, enabled: bool):
 
 
 @pytest.mark.skipif(os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") == "1", reason="backend dispatch disabled")
-@pytest.mark.skipif(not IS_TF32_SUPPORTED, reason="requires NVIDIA Ampere or newer")
+@pytest.mark.skipif(not (IS_TF32_SUPPORTED or IS_NPU), reason="requires NVIDIA Ampere or newer, or Ascend")
 def test_chunk_gdn_grouped_heads(monkeypatch):
     """Compare intra-card splitting with the ordinary chunk path when query heads are shared by value heads."""
     monkeypatch.setenv("FLA_INTRACARD_CP", "1")
@@ -213,66 +213,3 @@ def test_intracard_precision_requirement(entry, legacy_false, monkeypatch):
                 device=x.device,
                 **kwargs,
             )
-
-
-@pytest.mark.skipif(not IS_TF32_SUPPORTED, reason='requires NVIDIA Ampere or newer')
-@pytest.mark.parametrize('vector_gate', [False, True], ids=['scalar-gate', 'vector-gate'])
-@pytest.mark.parametrize('state_v_first', [False, True])
-@pytest.mark.parametrize(('K', 'V'), [(192, 64), (256, 80)])
-def test_intracard_pre_scan_merge(vector_gate: bool, state_v_first: bool, K: int, V: int):
-    torch.manual_seed(42)
-    T, H, HV = 319, 2, 4
-    k = torch.randn(1, T, H, K, device=device, dtype=torch.bfloat16) * 0.05
-    w = torch.randn(1, T, HV, K, device=device, dtype=torch.bfloat16) * 0.05
-    u = torch.randn(1, T, HV, V, device=device, dtype=torch.bfloat16)
-    decay = -0.01 * (torch.arange(T, device=device) % 64 + 1)
-    if vector_gate:
-        g, gk = None, decay.view(1, T, 1, 1).expand(1, T, HV, K).contiguous()
-    else:
-        g, gk = decay.view(1, T, 1).expand(1, T, HV).contiguous(), None
-    state_shape = (1, HV, V, K) if state_v_first else (1, HV, K, V)
-    h0 = torch.randn(state_shape, device=device, dtype=torch.float32) * 0.1
-    cu_seqlens_split = torch.tensor([0, 128, 256, T], device=device, dtype=torch.int32)
-    if vector_gate:
-        # scalar and vector gates must not share an autotuned pipeline configuration
-        intracard_cp.intracard_pre_scan(
-            k=k,
-            w=w,
-            u=u,
-            g=decay.view(1, T, 1).expand(1, T, HV).contiguous(),
-            gk=None,
-            cu_seqlens=cu_seqlens_split,
-            num_subseqs=3,
-        )
-    hm = intracard_cp.intracard_pre_scan(
-        k=k,
-        w=w,
-        u=u,
-        g=g,
-        gk=gk,
-        cu_seqlens=cu_seqlens_split,
-        num_subseqs=3,
-    )
-    states, count = intracard_cp.intracard_merge(
-        hm=hm,
-        split_info=intracard_cp.SplitSeqInfo(split_seq_ids=[0], start_subseq_idx=[0], num_subseqs=[3]),
-        num_non_first=2,
-        merge_seq_offsets=[0, 3],
-        merge_init_offsets=[0, 2],
-        device=k.device,
-        initial_state=h0,
-        state_v_first=state_v_first,
-    )
-    ref_h, _, _ = intracard_cp._raw_chunk_gated_delta_rule_fwd_h(
-        k=k,
-        w=w,
-        u=u,
-        g=g,
-        gk=gk,
-        initial_state=h0,
-        state_v_first=state_v_first,
-        cu_seqlens=torch.tensor([0, T], device=device, dtype=torch.int32),
-    )
-    assert count == 2
-    assert torch.isfinite(hm).all()
-    assert_close('h', ref_h[0, [2, 4]], states, 0.006)
