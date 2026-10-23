@@ -48,10 +48,14 @@ def chunk_delta_rule_bwd_dh_state(
         b_g_exp = exp2(b_g)
     p_do = do + o_t[:, None] * (HV * V) + o_v[None, :]
     b_do = tl.load(p_do, mask=m_t[:, None] & m_v[None, :], other=0.)
+    b_gk_last = ()
     for i_k in tl.static_range(tl.cdiv(K, 64)):
         o_k = i_k * 64 + tl.arange(0, 64).to(tl.int64)
         p_k = k + o_t[:, None] * (H * K) + o_k[None, :]
         b_k = tl.load(p_k, mask=m_t[:, None] & (o_k < K)[None, :], other=0.)
+        if USE_GK:
+            p_gk = gk + last_idx * HV * K + o_k
+            b_gk_last += (tl.load(p_gk, mask=o_k < K, other=0.).to(tl.float32),)
         b_dh_i = tl.trans(b_dh[i_k]) if STATE_V_FIRST else b_dh[i_k]
         if i_k == 0:
             b_dv = tl.dot(b_k, b_dh_i.to(b_k.dtype))
@@ -78,8 +82,7 @@ def chunk_delta_rule_bwd_dh_state(
             b_dh_i *= b_g_last_exp
             b_q *= b_g_exp[None, :]
         if USE_GK:
-            b_gk_last = tl.load(gk + last_idx * HV * K + o_k, mask=m_k, other=0.).to(tl.float32)
-            b_decay = exp2(b_gk_last)
+            b_decay = exp2(b_gk_last[i_k])
             b_dh_i *= b_decay[None, :] if STATE_V_FIRST else b_decay[:, None]
         if USE_BG:
             # the DPLR recurrence adds the state update and receives pre-scaled queries

@@ -133,22 +133,22 @@ def chunk_cp_bwd_kernel_dh(
             p_dh = dhm + o_k[:, None] * (V + K) + o_v[None, :]
             tl.store(p_dh, b_dh[i_k].to(p_dh.dtype.element_ty), mask=(o_k < K)[:, None] & m_v[None, :])
     else:
-        i_k = i_c - tl.cdiv(V, BV)
+        i_kc = i_c - tl.cdiv(V, BV)
 
-        o_k = tl.arange(0, BK).to(tl.int64)
-        o_kc = tl.arange(0, BV) + i_k * BV
+        o_kr = tl.arange(0, BK).to(tl.int64)
+        o_kc = tl.arange(0, BV) + i_kc * BV
 
-        b_m = tl.where(o_k[:, None] == o_kc[None, :], 1.0, 0.0)
+        b_m = tl.where(o_kr[:, None] == o_kc[None, :], 1.0, 0.0)
 
         for _i_t in range(NT):
             i_t = (NT - 1 - _i_t).to(tl.int64)
             o_t = i_t * BT + tl.arange(0, BT)
             m_t = o_t < T
 
-            p_k = k + o_t[:, None] * stride_qk + o_k[None, :]
-            b_k = tl.load(p_k, mask=m_t[:, None] & (o_k < K)[None, :], other=0.0)
-            p_w = w + o_t[:, None] * stride_w + o_k[None, :]
-            b_w = tl.load(p_w, mask=m_t[:, None] & (o_k < K)[None, :], other=0.0)
+            p_k = k + o_t[:, None] * stride_qk + o_kr[None, :]
+            b_k = tl.load(p_k, mask=m_t[:, None] & (o_kr < K)[None, :], other=0.0)
+            p_w = w + o_t[:, None] * stride_w + o_kr[None, :]
+            b_w = tl.load(p_w, mask=m_t[:, None] & (o_kr < K)[None, :], other=0.0)
 
             last_idx = min((i_t + 1) * BT, T) - 1
 
@@ -158,13 +158,13 @@ def chunk_cp_bwd_kernel_dh(
                 b_g = tl.load(p_g, mask=m_t, other=0.0).to(tl.float32)
                 b_k = b_k * tl.where(m_t, exp2(b_g_last - b_g), 0)[:, None]
                 b_g_last = exp2(b_g_last)
-                b_diag = tl.where(o_k[:, None] == o_k[None, :], b_g_last, 0.0)
+                b_diag = tl.where(o_kr[:, None] == o_kr[None, :], b_g_last, 0.0)
             elif USE_GK:
-                b_gk_last = tl.load(gk + last_idx * HV * K + o_k, mask=(o_k < K), other=0.).to(tl.float32)
+                b_gk_last = tl.load(gk + last_idx * HV * K + o_kr, mask=(o_kr < K), other=0.).to(tl.float32)
                 b_gk_last = exp2(b_gk_last)
-                b_diag = tl.where(o_k[:, None] == o_k[None, :], b_gk_last[:, None], 0.0)
+                b_diag = tl.where(o_kr[:, None] == o_kr[None, :], b_gk_last[:, None], 0.0)
             else:
-                b_diag = tl.where(o_k[:, None] == o_k[None, :], 1.0, 0.0)
+                b_diag = tl.where(o_kr[:, None] == o_kr[None, :], 1.0, 0.0)
 
             # backward transposes each chunk's state transform; DPLR passes its gated bg through k
             b_kw = tl.dot(tl.trans(b_w), b_k.to(b_w.dtype))
@@ -175,8 +175,8 @@ def chunk_cp_bwd_kernel_dh(
             # keep the affine chain in fp32 to avoid repeated bf16 rounding
             b_m = tl.dot(b_m_chunk.to(tl.float32), b_m.to(tl.float32), input_precision=CP_DOT_PRECISION)
 
-        p_m = dhm + V + o_k[:, None] * (V + K) + o_kc[None, :]
-        tl.store(p_m, b_m.to(p_m.dtype.element_ty), mask=(o_k < K)[:, None] & (o_kc < K)[None, :])
+        p_m = dhm + V + o_kr[:, None] * (V + K) + o_kc[None, :]
+        tl.store(p_m, b_m.to(p_m.dtype.element_ty), mask=(o_kr < K)[:, None] & (o_kc < K)[None, :])
 
 
 def chunk_cp_bwd_dh(
