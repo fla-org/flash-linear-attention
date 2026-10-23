@@ -1239,6 +1239,7 @@ def chunk_gla_fwd(
         chunk_size=chunk_size,
         states_in_fp32=False,
         state_v_first=state_v_first,
+        chunk_indices=chunk_indices,
     )
 
     # the intra A is kept in fp32
@@ -1305,6 +1306,7 @@ def chunk_gla_bwd(
             chunk_size=chunk_size,
             states_in_fp32=True,
             state_v_first=state_v_first,
+            chunk_indices=chunk_indices,
         )
     dh, dh0 = chunk_bwd_dh(
         q=q,
@@ -1321,6 +1323,7 @@ def chunk_gla_bwd(
         chunk_size=chunk_size,
         states_in_fp32=True,
         state_v_first=state_v_first,
+        chunk_indices=chunk_indices,
     )
 
     dv = chunk_gla_bwd_dv(
