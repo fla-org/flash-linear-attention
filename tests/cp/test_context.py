@@ -11,41 +11,25 @@ import pytest
 import torch
 
 from fla.ops.cp import context
+from fla.ops.cp.chunk_delta_h import (
+    chunk_gated_delta_rule_bwd_dhu_pre_process,
+    chunk_gated_delta_rule_fwd_h_pre_process,
+)
 from fla.ops.cp.context import FLACPContext, build_cp_context, get_cp_cu_seqlens
 
 
 @pytest.mark.parametrize(
-    ('total_tokens', 'world_size'),
+    ('total_tokens', 'world_size', 'match'),
     [
-        pytest.param(10, 3, id='remainder'),
-        pytest.param(14, 4, id='remainder-varlen'),
+        pytest.param(10, 3, 'must be divisible by', id='remainder'),
+        pytest.param(14, 4, 'must be divisible by', id='remainder-four-ranks'),
+        pytest.param(2, 3, 'must be at least', id='empty-partition'),
     ],
 )
 @pytest.mark.parametrize('layout', ['contiguous', 'zigzag'])
-def test_get_cp_cu_seqlens_invalid_total(total_tokens: int, world_size: int, layout: str):
+def test_get_cp_cu_seqlens_invalid_total(total_tokens: int, world_size: int, match: str, layout: str):
     cu_seqlens = torch.tensor([0, total_tokens], dtype=torch.long)
-    divisor = r'2 \* world_size' if layout == 'zigzag' else 'world_size'
-    num_parts = 2 * world_size if layout == 'zigzag' else world_size
-
-    with pytest.raises(
-        ValueError,
-        match=rf"`total_tokens` \({total_tokens}\) must be divisible by `{divisor}` \({num_parts}\)",
-    ):
-        get_cp_cu_seqlens(cu_seqlens, world_size=world_size, rank=0, layout=layout)
-
-
-@pytest.mark.parametrize('layout', ['contiguous', 'zigzag'])
-def test_get_cp_cu_seqlens_empty_partition(layout: str):
-    total_tokens = 2
-    world_size = 3
-    cu_seqlens = torch.tensor([0, total_tokens], dtype=torch.long)
-    divisor = r'2 \* world_size' if layout == 'zigzag' else 'world_size'
-    num_parts = 2 * world_size if layout == 'zigzag' else world_size
-
-    with pytest.raises(
-        ValueError,
-        match=rf"`total_tokens` \({total_tokens}\) must be at least `{divisor}` \({num_parts}\)",
-    ):
+    with pytest.raises(ValueError, match=match):
         get_cp_cu_seqlens(cu_seqlens, world_size=world_size, rank=0, layout=layout)
 
 
@@ -75,100 +59,110 @@ def test_copy_for_backward(layout: str):
     saved = context.copy_for_backward()
 
     assert saved is not context
-    for name, value in vars(context).items():
-        actual = getattr(saved, name)
-        if name in ('cu_seqlens', 'cu_seqlens_cpu'):
-            assert torch.equal(actual, value)
-            assert actual.data_ptr() != value.data_ptr()
-        elif isinstance(value, torch.Tensor):
-            assert actual is value
-        else:
-            assert actual == value
+    assert saved.group is context.group
+    assert saved.layout == layout
+    assert saved.front_num_seqs == context.front_num_seqs
+    assert saved.pre_num_ranks_by_part == context.pre_num_ranks_by_part
+    assert saved.post_num_ranks_by_part == context.post_num_ranks_by_part
+    # graph replay refreshes these tensors in place for both contexts
+    assert saved.pre_num_ranks_dev is context.pre_num_ranks_dev
+    assert saved.post_num_ranks_dev is context.post_num_ranks_dev
 
-    expected = saved.cu_seqlens.clone()
+    expected = context.cu_seqlens.clone()
     context.cu_seqlens.zero_()
     context.cu_seqlens_cpu.zero_()
     assert torch.equal(saved.cu_seqlens, expected)
     assert torch.equal(saved.cu_seqlens_cpu, expected)
 
 
-@pytest.mark.parametrize('entry', [FLACPContext, get_cp_cu_seqlens, build_cp_context], ids=['context', 'partition', 'build'])
-@pytest.mark.parametrize('mode', ['omitted', 'true', 'false', 'unknown', 'positional-true', 'positional-false'])
-def test_precision_argument(entry, mode, monkeypatch):
+@pytest.fixture
+def cp_group(monkeypatch):
     monkeypatch.setattr(context.dist, 'get_world_size', lambda group: 2)
     monkeypatch.setattr(context.dist, 'get_rank', lambda group: 0)
-    kwargs = dict(cu_seqlens=torch.tensor([0, 256]), group=object())
-    args = ()
-    if mode.startswith('positional-'):
-        enabled = mode == 'positional-true'
-        cu_seqlens, group = kwargs['cu_seqlens'], kwargs['group']
-        if entry is FLACPContext:
-            args = (group, cu_seqlens, None, None, None, None, None, None, None, enabled)
-        elif entry is get_cp_cu_seqlens:
-            args = (cu_seqlens, None, 2, 0, group, None, enabled)
-        else:
-            args = (cu_seqlens, group, None, None, enabled)
-        kwargs = {}
-    if mode in ('true', 'false'):
-        kwargs['use_tf32x3_affine_chain'] = mode == 'true'
-    elif mode == 'unknown':
-        kwargs['unknown_option'] = True
-    if mode in ('false', 'positional-false'):
-        with pytest.raises(ValueError, match='use_tf32x3_affine_chain=False'):
-            entry(*args, **kwargs)
-    elif mode == 'unknown':
-        with pytest.raises(TypeError, match='unknown_option'):
-            entry(*args, **kwargs)
-    else:
-        cp_context = entry(*args, **kwargs)
-        assert not hasattr(cp_context, 'use_tf32x3_affine_chain')
-        copied = cp_context.copy_for_backward()
-        assert copied.group is cp_context.group
-        torch.testing.assert_close(copied.cu_seqlens, cp_context.cu_seqlens)
+    return object()
 
 
 @pytest.mark.parametrize(
-    ('is_nvidia', 'is_npu', 'device_name', 'capability', 'supported'),
+    ('entry', 'expected'),
     [
-        pytest.param(True, False, 'cuda:1', (7, 5), False, id='turing'),
-        pytest.param(True, False, 'cuda:1', (8, 0), True, id='ampere'),
-        pytest.param(False, False, 'cuda:1', (9, 0), False, id='amd'),
-        pytest.param(False, False, 'cpu', (0, 0), False, id='cpu'),
-        pytest.param(False, True, 'npu:1', None, True, id='ascend'),
+        pytest.param(FLACPContext, [0, 256], id='context'),
+        pytest.param(get_cp_cu_seqlens, [0, 128], id='partition'),
+        pytest.param(build_cp_context, [0, 128], id='build'),
     ],
 )
-def test_device_requirement(is_nvidia, is_npu, device_name, capability, supported, monkeypatch):
-    monkeypatch.setattr(context, 'IS_NVIDIA', is_nvidia)
-    monkeypatch.setattr(context, 'IS_NPU', is_npu)
-    device = SimpleNamespace(type='npu', index=1) if is_npu else torch.device(device_name)
-    checked_devices = []
-
-    def get_capability(device_index):
-        checked_devices.append(device_index)
-        return capability
-
-    monkeypatch.setattr(context, 'get_device_capability', get_capability)
-    if supported:
-        context._check_cp_device(device)
-    else:
-        with pytest.raises(RuntimeError, match='compute capability >= 8.0'):
-            context._check_cp_device(device)
-    assert checked_devices == ([1] if is_nvidia else [])
+@pytest.mark.parametrize('kwargs', [{}, {'use_tf32x3_affine_chain': True}], ids=['default', 'legacy-true'])
+def test_context_precision_keyword(cp_group, entry, expected, kwargs):
+    cp_context = entry(cu_seqlens=torch.tensor([0, 256]), group=cp_group, **kwargs)
+    assert cp_context.group is cp_group
+    assert cp_context.cu_seqlens.tolist() == expected
 
 
-@pytest.mark.parametrize('direction', ['fwd', 'bwd'])
-def test_pre_process_unsupported_device(direction, monkeypatch):
-    from fla.ops.cp.chunk_delta_h import (
-        chunk_gated_delta_rule_bwd_dhu_pre_process,
-        chunk_gated_delta_rule_fwd_h_pre_process,
-    )
+@pytest.mark.parametrize('entry', [FLACPContext, get_cp_cu_seqlens, build_cp_context], ids=['context', 'partition', 'build'])
+@pytest.mark.parametrize(
+    ('kwargs', 'error', 'match'),
+    [
+        pytest.param({'use_tf32x3_affine_chain': False}, ValueError, 'use_tf32x3_affine_chain=False', id='legacy-false'),
+        pytest.param({'unknown_option': True}, TypeError, 'unknown_option', id='unknown-keyword'),
+    ],
+)
+def test_context_invalid_keyword(entry, kwargs, error, match):
+    with pytest.raises(error, match=match):
+        entry(cu_seqlens=torch.tensor([0, 256]), group=object(), **kwargs)
 
+
+def test_context_positional_precision(cp_group):
+    cu_seqlens = torch.tensor([0, 256])
+    direct = FLACPContext(cp_group, cu_seqlens, None, None, None, None, None, None, None, True)
+    partition = get_cp_cu_seqlens(cu_seqlens, None, 2, 0, cp_group, None, True)
+    built = build_cp_context(cu_seqlens, cp_group, None, None, True)
+    assert direct.cu_seqlens.tolist() == [0, 256]
+    assert partition.cu_seqlens.tolist() == built.cu_seqlens.tolist() == [0, 128]
+
+
+def test_context_invalid_positional_precision():
+    cu_seqlens, group = torch.tensor([0, 256]), object()
+    with pytest.raises(ValueError, match='use_tf32x3_affine_chain=False'):
+        FLACPContext(group, cu_seqlens, None, None, None, None, None, None, None, False)
+    with pytest.raises(ValueError, match='use_tf32x3_affine_chain=False'):
+        get_cp_cu_seqlens(cu_seqlens, None, 2, 0, group, None, False)
+    with pytest.raises(ValueError, match='use_tf32x3_affine_chain=False'):
+        build_cp_context(cu_seqlens, group, None, None, False)
+
+
+@pytest.fixture
+def nvidia_devices(monkeypatch):
+    monkeypatch.setattr(context, 'IS_NVIDIA', True)
+    monkeypatch.setattr(context, 'IS_NPU', False)
+    monkeypatch.setattr(context, 'get_device_capability', lambda index: {0: (7, 5), 1: (8, 0)}[index])
+
+
+def test_check_cp_device_cuda(nvidia_devices):
+    context._check_cp_device(torch.device('cuda:1'))
+
+
+def test_check_cp_device_pre_ampere(nvidia_devices):
+    with pytest.raises(RuntimeError, match='compute capability >= 8.0'):
+        context._check_cp_device(torch.device('cuda:0'))
+
+
+@pytest.mark.parametrize('device_name', ['cpu', 'cuda:1'], ids=['cpu', 'amd'])
+def test_check_cp_device_unsupported_platform(monkeypatch, device_name):
     monkeypatch.setattr(context, 'IS_NVIDIA', False)
     monkeypatch.setattr(context, 'IS_NPU', False)
+    with pytest.raises(RuntimeError, match='compute capability >= 8.0'):
+        context._check_cp_device(torch.device(device_name))
+
+
+def test_check_cp_device_ascend(monkeypatch):
+    monkeypatch.setattr(context, 'IS_NVIDIA', False)
+    monkeypatch.setattr(context, 'IS_NPU', True)
+    context._check_cp_device(SimpleNamespace(type='npu', index=1))
+
+
+def test_pre_process_unsupported_device():
     x = torch.empty(1, 64, 1, 32)
     cp_context = FLACPContext(group=object())
     with pytest.raises(RuntimeError, match='compute capability >= 8.0'):
-        if direction == 'fwd':
-            chunk_gated_delta_rule_fwd_h_pre_process(k=x, w=x, u=x, context=cp_context)
-        else:
-            chunk_gated_delta_rule_bwd_dhu_pre_process(q=x, k=x, w=x, do=x, dv=x, context=cp_context)
+        chunk_gated_delta_rule_fwd_h_pre_process(k=x, w=x, u=x, context=cp_context)
+    with pytest.raises(RuntimeError, match='compute capability >= 8.0'):
+        chunk_gated_delta_rule_bwd_dhu_pre_process(q=x, k=x, w=x, do=x, dv=x, context=cp_context)

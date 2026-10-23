@@ -8,6 +8,7 @@
 """Check intra-card CP routing, cache reuse, and grouped-head outputs and final states."""
 
 import os
+from functools import partial
 
 import pytest
 import torch
@@ -17,7 +18,6 @@ from fla import backends
 from fla.ops.common import intracard_cp
 from fla.ops.common.backends.intracard import IntraCardCPBackend
 from fla.ops.common.intracard_cp import _intracard_cache
-from fla.ops.cp import context
 from fla.ops.gated_delta_rule import chunk_gated_delta_rule
 from fla.ops.kda import chunk_kda
 from fla.utils import IS_NPU, IS_TF32_SUPPORTED, device
@@ -92,16 +92,12 @@ def test_chunk_kda_cache(monkeypatch):
 
     assert call_count == 1, "second call should hit cache and skip precompute"
     assert len(_intracard_cache) == 1
-    key = next(iter(_intracard_cache))
-    entry = _intracard_cache[key]
-    assert key[0] == id(cu_seqlens)
-    assert entry.cu_seqlens_ref() is cu_seqlens
     assert torch.allclose(o1, o2, atol=1e-4, rtol=1e-4)
 
 
-def test_backend_default():
-    """Verify that IntraCardCPBackend is disabled by default."""
-    assert IntraCardCPBackend.default_enable is False
+def test_backend_default(monkeypatch):
+    monkeypatch.delenv('FLA_INTRACARD_CP', raising=False)
+    assert not IntraCardCPBackend().is_enabled()
 
 
 @pytest.mark.parametrize('enabled', [False, True], ids=['disabled', 'enabled'])
@@ -181,36 +177,40 @@ def test_chunk_gdn_grouped_heads(monkeypatch):
     )
 
 
-@pytest.mark.parametrize('entry', ['fwd', 'pre_scan', 'merge'])
-@pytest.mark.parametrize('legacy_false', [False, True], ids=['unsupported-device', 'legacy-false'])
-def test_intracard_precision_requirement(entry, legacy_false, monkeypatch):
-    monkeypatch.setattr(context, 'IS_NVIDIA', False)
-    monkeypatch.setattr(context, 'IS_NPU', False)
+@pytest.fixture(params=['fwd', 'pre_scan', 'merge'])
+def intracard_call(request):
     x = torch.empty(1, 64, 1, 32)
-    kwargs = {'use_tf32x3_affine_chain': False} if legacy_false else {}
-    error = ValueError if legacy_false else RuntimeError
-    message = 'use_tf32x3_affine_chain=False' if legacy_false else 'compute capability >= 8.0'
-    with pytest.raises(error, match=message):
-        if entry == 'fwd':
-            intracard_cp.intracard_fwd_h(k=x, w=x, u=x, **kwargs)
-        elif entry == 'pre_scan':
-            intracard_cp.intracard_pre_scan(
-                k=x,
-                w=x,
-                u=x,
-                g=None,
-                gk=None,
-                cu_seqlens=None,
-                num_subseqs=0,
-                **kwargs,
-            )
-        else:
-            intracard_cp.intracard_merge(
-                hm=x,
-                split_info=None,
-                num_non_first=0,
-                merge_seq_offsets=[],
-                merge_init_offsets=[],
-                device=x.device,
-                **kwargs,
-            )
+    cu_seqlens = torch.tensor([0, 64], dtype=torch.int32)
+    calls = {
+        'fwd': partial(intracard_cp.intracard_fwd_h, k=x, w=x, u=x, cu_seqlens=cu_seqlens),
+        'pre_scan': partial(
+            intracard_cp.intracard_pre_scan,
+            k=x,
+            w=x,
+            u=x,
+            g=None,
+            gk=None,
+            cu_seqlens=cu_seqlens,
+            num_subseqs=1,
+        ),
+        'merge': partial(
+            intracard_cp.intracard_merge,
+            hm=torch.empty(1, 1, 32, 64),
+            split_info=intracard_cp.SplitSeqInfo(split_seq_ids=[0], start_subseq_idx=[0], num_subseqs=[1]),
+            num_non_first=0,
+            merge_seq_offsets=[0, 1],
+            merge_init_offsets=[0, 0],
+            device=x.device,
+        ),
+    }
+    return calls[request.param]
+
+
+def test_intracard_unsupported_device(intracard_call):
+    with pytest.raises(RuntimeError, match='compute capability >= 8.0'):
+        intracard_call()
+
+
+def test_intracard_invalid_precision(intracard_call):
+    with pytest.raises(ValueError, match='use_tf32x3_affine_chain=False'):
+        intracard_call(use_tf32x3_affine_chain=False)

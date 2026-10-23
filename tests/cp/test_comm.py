@@ -5,46 +5,37 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from unittest.mock import Mock
-
 import pytest
 import torch
+import torch.distributed as dist
 
 from fla.ops.cp import comm
+from fla.utils import device
 
 
-@pytest.mark.parametrize(
-    ('world_size', 'rank', 'previous', 'following'),
-    [(1, 0, None, None), (3, 0, None, 1), (3, 1, 0, 2), (3, 2, 1, None)],
-)
-@pytest.mark.parametrize(
-    ('op', 'kwargs', 'receive_previous'),
-    [
-        pytest.param(comm.send_recv_fwd, {'recv_from_prev': True}, True, id='forward-previous'),
-        pytest.param(comm.send_recv_fwd, {'recv_from_prev': False}, False, id='forward-next'),
-        pytest.param(comm.send_recv_bwd, {'recv_from_next': True}, False, id='backward-next'),
-        pytest.param(comm.send_recv_bwd, {'recv_from_next': False}, True, id='backward-previous'),
-        pytest.param(comm.conv_cp_send_recv_fwd, {}, True, id='conv-forward'),
-        pytest.param(comm.conv_cp_send_recv_bwd, {}, False, id='conv-backward'),
-    ],
-)
-def test_send_recv(monkeypatch, world_size, rank, previous, following, op, kwargs, receive_previous):
-    group = object()
-    gathered = torch.arange(world_size * 6, dtype=torch.float32).view(world_size, 2, 3)
-    original = gathered.clone()
-    send = gathered[rank].clone()
-    gather = Mock(return_value=(gathered, None))
-    monkeypatch.setattr(comm.dist, 'get_rank', Mock(return_value=rank))
-    monkeypatch.setattr(comm.dist, 'get_world_size', Mock(return_value=world_size))
-    monkeypatch.setattr(comm, 'all_gather_into_tensor', gather)
+def _run_send_recv(rank: int, world_size: int):
+    group = dist.group.WORLD
+    tensors = torch.arange(1, world_size * 6 + 1, dtype=torch.float32, device=device).view(world_size, 2, 3)
+    send = tensors[rank].clone()
+    previous = tensors[rank - 1] if rank > 0 else torch.zeros_like(send)
+    following = tensors[rank + 1] if rank + 1 < world_size else torch.zeros_like(send)
 
-    received = op(send, group=group, **kwargs)
-    source = previous if receive_previous else following
-    expected = torch.zeros_like(send) if source is None else gathered[source]
-    assert torch.equal(received, expected)
-    gather.assert_called_once_with(inp=send, group=group)
-    comm.dist.get_rank.assert_called_once_with(group=group)
-    comm.dist.get_world_size.assert_called_once_with(group=group)
-    received.fill_(-1)
-    assert torch.equal(gathered, original)
-    assert torch.equal(send, original[rank])
+    for op, kwargs, expected in (
+        (comm.send_recv_fwd, {}, previous),
+        (comm.send_recv_fwd, {'recv_from_prev': False}, following),
+        (comm.send_recv_bwd, {}, following),
+        (comm.send_recv_bwd, {'recv_from_next': False}, previous),
+        (comm.conv_cp_send_recv_fwd, {}, previous),
+        (comm.conv_cp_send_recv_bwd, {}, following),
+    ):
+        received = op(send, group=group, **kwargs)
+        torch.testing.assert_close(received, expected, rtol=0, atol=0)
+        # a neighbor's receive must not retain the full gathered allocation
+        assert received.untyped_storage().nbytes() == send.numel() * send.element_size()
+        received.fill_(-1)
+        torch.testing.assert_close(send, tensors[rank], rtol=0, atol=0)
+
+
+@pytest.mark.parametrize('world_size', [1, 3], ids=['single-rank', 'three-ranks'])
+def test_send_recv(run_distributed, world_size: int):
+    run_distributed(worker=_run_send_recv, world_size=world_size)
