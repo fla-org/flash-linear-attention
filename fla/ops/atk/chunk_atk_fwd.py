@@ -330,13 +330,12 @@ def _atk_fwd_stages(
     is_varlen = cu_seqlens is not None
 
     if is_varlen:
-        from fla.ops.utils import prepare_chunk_indices
+        from fla.ops.utils import get_max_num_splits, prepare_chunk_indices, prepare_lens
         N = len(cu_seqlens) - 1
         chunk_indices = prepare_chunk_indices(cu_seqlens, CHUNK_LEN)
         NT = len(chunk_indices)
 
-        seq_lens = [cu_seqlens[i + 1] - cu_seqlens[i] for i in range(N)]
-        max_chunks = max(triton.cdiv(s.item(), CHUNK_LEN) for s in seq_lens)
+        max_chunks = get_max_num_splits(cu_seqlens, CHUNK_LEN)
 
         a = torch.empty(N, max_chunks, H, D, dtype=torch.float32, device=k.device)
         sa = torch.empty(N, max_chunks, H, dtype=torch.float32, device=k.device)
@@ -411,9 +410,10 @@ def _atk_fwd_stages(
     at = None
     if output_final_state:
         if is_varlen:
-            seq_lens = [cu_seqlens[i + 1] - cu_seqlens[i] for i in range(N)]
-            last_chunk_indices = [triton.cdiv(s.item(), CHUNK_LEN) - 1 for s in seq_lens]
-            at = torch.stack([ac[i, last_chunk_indices[i], :, :] for i in range(N)], dim=0).to(k.dtype)
+            # gather each sequence's last chunk in one indexing op: reading the indices into Python
+            # would synchronize the host once per sequence
+            last_chunk_indices = triton.cdiv(prepare_lens(cu_seqlens).long(), CHUNK_LEN) - 1
+            at = ac[torch.arange(N, device=ac.device), last_chunk_indices].to(k.dtype)
         else:
             at = ac[:, -1, :, :].contiguous().to(k.dtype)
 

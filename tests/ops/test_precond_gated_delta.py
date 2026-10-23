@@ -8,6 +8,7 @@
 # Tests for preconditioned gated delta rule kernel
 
 import os
+import warnings
 
 import pytest
 import torch
@@ -801,3 +802,43 @@ def test_chunk_A_state(
     assert_close('dh0', h0.grad, tri_dh0, 0.008)
     assert_close('dh0_atk', A0.grad, tri_dA0, 0.02)
     assert_close('d_log_atk_scale', log_atk_scale.grad, tri_d_log_atk_scale, 0.02)
+
+
+@pytest.mark.skipif(device != 'cuda', reason="Host-sync counting relies on torch.cuda.set_sync_debug_mode")
+@torch.inference_mode()
+def test_chunk_varlen_syncs_do_not_grow_with_batch():
+    """The ATK forward must not read packed sequence lengths one at a time.
+
+    Doing so blocks the host on queued GPU work once per sequence, twice when the final state is
+    returned, which makes a step slower the more sequences are packed into it.
+    """
+    def count_syncs(n_seqs):
+        torch.manual_seed(42)
+        H, D, seq = 4, 64, 64
+        T = n_seqs * seq
+        cu_seqlens = torch.arange(0, T + 1, seq, dtype=torch.long, device=device)
+        q = torch.rand(1, T, H, D, dtype=torch.float16, device=device)
+        k = F.normalize(torch.randn(1, T, H, D, dtype=torch.float32, device=device), p=2, dim=-1).to(torch.float16)
+        v = torch.rand(1, T, H, D, dtype=torch.float16, device=device)
+        beta_atk = torch.rand(1, T, H, dtype=torch.float16, device=device).sigmoid()
+        beta = torch.rand(1, T, H, dtype=torch.float16, device=device).sigmoid()
+        g_atk = F.logsigmoid(torch.rand(1, T, H, dtype=torch.float32, device=device)) * 0.5
+        g = F.logsigmoid(torch.rand(1, T, H, dtype=torch.float32, device=device)) * 0.5
+        kwargs = dict(q=q, k=k, v=v, g_atk=g_atk, g=g, beta_atk=beta_atk, beta=beta,
+                      initial_state=torch.zeros(n_seqs, H, D, D, dtype=torch.float32, device=device),
+                      output_final_state=True, cu_seqlens=cu_seqlens,
+                      log_atk_scale=torch.rand(H, dtype=torch.float32, device=device) - 1.0, x=1.5)
+        chunk_precond_gated_delta_rule(**kwargs)  # compile and tune before counting
+        torch.cuda.synchronize()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            torch.cuda.set_sync_debug_mode('warn')
+            try:
+                chunk_precond_gated_delta_rule(**kwargs)
+            finally:
+                torch.cuda.set_sync_debug_mode('default')
+        # enabling the mode warns about itself, so match only the per-operation warning
+        return sum('called a synchronizing' in str(w.message) for w in caught)
+
+    few, many = count_syncs(4), count_syncs(32)
+    assert many <= few, f"syncs grew with the batch: {few} for 4 sequences, {many} for 32"
