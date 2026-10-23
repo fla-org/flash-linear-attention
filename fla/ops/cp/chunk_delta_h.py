@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 import torch
 import torch.distributed as dist
 
+from fla.backends import dispatch
 from fla.ops.cp.chunk_bwd import chunk_cp_bwd_dh
 from fla.ops.cp.chunk_fwd import chunk_cp_fwd_h
 from fla.ops.cp.chunk_merge import chunk_cp_merge
@@ -22,6 +23,7 @@ if TYPE_CHECKING:
     from fla.ops.cp.context import FLACPContext
 
 
+@dispatch('cp')
 def chunk_gated_delta_rule_fwd_h_pre_process(
     k: torch.Tensor,
     w: torch.Tensor,
@@ -136,6 +138,7 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
     return initial_state
 
 
+@dispatch('cp')
 def chunk_gated_delta_rule_bwd_dhu_pre_process(
     q: torch.Tensor,
     k: torch.Tensor,
