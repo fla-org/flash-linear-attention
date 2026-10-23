@@ -175,3 +175,37 @@ def test_conv_backend_padding_and_cached_decode_parity(monkeypatch):
         torch.testing.assert_close(cached[0], cached[1], rtol=2e-2, atol=2e-2)
     for expected, actual in zip(full, cached):
         torch.testing.assert_close(expected[attention_mask], actual[attention_mask], rtol=2e-2, atol=2e-2)
+
+
+def test_beam_generation(monkeypatch):
+    torch.manual_seed(42)
+    monkeypatch.setenv('FLA_CONV_BACKEND', 'triton')
+    config = LogLinearMamba2Config(
+        num_hidden_layers=1,
+        hidden_size=32,
+        expand=2,
+        head_dim=64,
+        state_size=64,
+        chunk_size=64,
+        residual_in_fp32=False,
+        use_bias=True,
+        vocab_size=64,
+        eos_token_id=None,
+        pad_token_id=0,
+    )
+    model = LogLinearMamba2ForCausalLM(config).to(device=device, dtype=torch.bfloat16).eval()
+    model.generation_config.eos_token_id = None
+    input_ids = torch.tensor([[3, 4, 5]], device=device)
+
+    with torch.no_grad():
+        output = model.generate(
+            input_ids=input_ids,
+            attention_mask=torch.ones_like(input_ids),
+            num_beams=2,
+            do_sample=False,
+            max_new_tokens=2,
+            use_cache=True,
+            pad_token_id=0,
+        )
+
+    assert output.shape == (1, 5)
