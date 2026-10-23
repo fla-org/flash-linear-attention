@@ -140,7 +140,7 @@ class Parallax(nn.Module):
         if past_key_values is not None:
             seqlen_offset = past_key_values.get_seq_length(self.layer_idx)
             max_seqlen = q_len + seqlen_offset
-            if attention_mask is not None:
+            if cu_seqlens is None and attention_mask is not None:
                 # account for left-padding when indexing rotary positions
                 seqlen_offset = seqlen_offset + prepare_lens_from_mask(attention_mask) - attention_mask.shape[-1]
                 max_seqlen = q_len + seqlen_offset.max().item()
@@ -169,13 +169,16 @@ class Parallax(nn.Module):
             elif cache_has_content:
                 k = rearrange(k_cached, '... (h d) -> ... h d', d=self.head_dim)
                 v = rearrange(v_cached, '... (h d) -> ... h d', d=self.head_dim)
-            # left-padding: the first `kv_len - valid_len` cached keys are padding.
-            cache_start = None
-            if attention_mask is not None:
-                cache_start = (k.shape[1] - attention_mask.sum(-1)).to(torch.int32)
-            # single-token step -> optimized vector decode; chunked prefill -> tile kernel
-            decode_fn = parallax_decode_one_step if q_len == 1 else parallax_decode
-            o = decode_fn(q, r, k, v, window_size=self.window_size, cache_start=cache_start)
+            if cache_has_content or cu_seqlens is None:
+                # left-padding: the first `kv_len - valid_len` cached keys are padding.
+                cache_start = None
+                if cu_seqlens is None and attention_mask is not None:
+                    cache_start = (k.shape[1] - attention_mask.sum(-1)).to(torch.int32)
+                # single-token step -> optimized vector decode; chunked prefill -> tile kernel
+                decode_fn = parallax_decode_one_step if q_len == 1 else parallax_decode
+                o = decode_fn(q, r, k, v, window_size=self.window_size, cache_start=cache_start)
+            else:
+                o = parallel_parallax(q, r, k, v, window_size=self.window_size, cu_seqlens=cu_seqlens)
         elif cu_seqlens is None and attention_mask is not None:
             # Unpad to a single packed sequence (batch folded into the seq axis).
             q, (r, k, v), indices_q, cu_seqlens, _ = unpad_input(
