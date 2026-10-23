@@ -6,6 +6,7 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import importlib.metadata
+import inspect
 import logging
 from pathlib import Path
 from types import SimpleNamespace
@@ -59,34 +60,71 @@ def _configure_no_nvcc(monkeypatch):
     monkeypatch.setattr(env.Path, "exists", fake_exists)
 
 
+@pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
 @pytest.mark.parametrize(
-    ('module_name', 'func_name'),
+    ('module_name', 'names', 'backend_types'),
     [
-        ('chunk_intra', 'chunk_gdn2_fwd_intra'),
-        ('chunk_bwd', 'chunk_gdn2_bwd_wy_dqkg_fused'),
-        ('fused_recurrent', 'fused_recurrent_gdn2_fwd'),
+        ('atk.chunk_atk_bwd', ['chunk_atk_bwd'], ['triton_ascend']),
+        ('atk.chunk_atk_fwd', ['chunk_atk_fwd', 'recompute_atk_fwd'], ['triton_ascend']),
+        ('attn.parallel', ['parallel_attn_bwd', 'parallel_attn_fwd'], ['tilelang']),
+        ('attnres.fused', ['fused_attnres'], ['gluon', 'triton_ascend']),
+        ('common.chunk_delta_h', ['chunk_gated_delta_rule_bwd_dhu'], ['triton_ascend']),
+        ('common.chunk_delta_h', ['chunk_gated_delta_rule_fwd_h'], ['intracard_cp', 'triton_ascend']),
+        ('common.chunk_h', ['chunk_bwd_dh', 'chunk_fwd_h'], ['triton_ascend']),
+        ('common.chunk_o', ['chunk_bwd_dqkwg'], ['tilelang', 'triton_ascend']),
+        ('common.chunk_o', ['chunk_bwd_dv_local', 'chunk_fwd_o'], ['triton_ascend']),
+        ('common.chunk_scaled_dot_kkt', ['chunk_scaled_dot_kkt_fwd'], ['triton_ascend']),
+        ('common.gate', ['fused_beta_sigmoid_bwd', 'fused_beta_sigmoid_fwd'], ['triton_ascend']),
+        ('gated_delta_rule.chunk', ['chunk_gated_delta_rule'], ['flash_qla']),
+        ('gated_delta_rule.chunk_fwd', ['chunk_gated_delta_rule_fwd_intra'], ['triton_ascend']),
+        ('gated_delta_rule.gate', ['gdn_gate_bwd', 'gdn_gate_chunk_cumsum', 'gdn_gate_fwd'], ['triton_ascend']),
+        ('gated_delta_rule.wy_fast', ['prepare_wy_repr_bwd', 'recompute_w_u_fwd'], ['triton_ascend']),
+        ('gdn2.chunk_bwd', ['chunk_gdn2_bwd_wy_dqkg_fused'], ['triton_ascend']),
+        ('gdn2.chunk_intra', ['chunk_gdn2_fwd_intra'], ['triton_ascend']),
+        ('gdn2.fused_recurrent', ['fused_recurrent_gdn2_fwd'], ['triton_ascend']),
+        ('generalized_delta_rule.dplr.chunk', ['chunk_dplr_delta_rule'], ['tilelang']),
+        ('gla.chunk', ['chunk_gla_bwd_dA', 'chunk_gla_bwd_dqk_intra', 'chunk_gla_bwd_dqkg',
+         'chunk_gla_bwd_dv', 'chunk_gla_fwd_intra_gk', 'chunk_gla_fwd_o_gk'], ['triton_ascend']),
+        ('kda.chunk_bwd', ['chunk_kda_bwd_dAv'], ['triton_ascend']),
+        ('kda.chunk_bwd', ['chunk_kda_bwd_wy_dqkg_fused'], ['tilelang', 'triton_ascend']),
+        ('kda.chunk_intra', ['chunk_kda_bwd_intra', 'chunk_kda_fwd_intra'], ['triton_ascend']),
+        ('kda.chunk_intra_token_parallel', ['chunk_kda_fwd_intra_token_parallel'], ['triton_ascend']),
+        ('kda.fused_recurrent', ['fused_recurrent_kda_fwd'], ['triton_ascend']),
+        ('kda.gate', ['fused_kda_gate', 'kda_gate_bwd', 'kda_gate_chunk_cumsum', 'kda_gate_fwd'], ['triton_ascend']),
+        ('kda.wy_fast', ['recompute_w_u_fwd'], ['triton_ascend']),
+        ('precond_gated_delta_rule.chunk_precond_kkt_fwd', ['chunk_precond_kkt_fwd'], ['triton_ascend']),
+        ('precond_gated_delta_rule.chunk_precond_wy_bwd', ['prepare_precond_wy_repr_bwd'], ['triton_ascend']),
+        ('precond_gated_delta_rule.fused_recurrent', ['fused_recurrent_precond_gated_delta_rule_fwd'], ['triton_ascend']),
+        ('rwkv6.chunk', ['chunk_rwkv6_fwd_intra'], ['tilelang']),
+        ('wall_attn.parallel', ['parallel_wall_attn_bwd', 'parallel_wall_attn_fwd'], []),
     ],
-    ids=['forward', 'backward', 'fused-recurrent-forward'],
 )
-def test_gdn2_dispatch_uses_local_registry(monkeypatch, module_name, func_name):
-    from fla.ops.gdn2.backends.triton_ascend import TritonAscendGDN2Backend
-
-    entry = getattr(importlib.import_module(f'fla.ops.gdn2.{module_name}'), func_name)
-    if backends._DISPATCH_DISABLED:
-        pytest.skip('Backend dispatch was disabled before import')
-    assert hasattr(entry, '__wrapped__')
-    monkeypatch.setattr(TritonAscendGDN2Backend, 'is_available', classmethod(lambda cls: True))
-    monkeypatch.setattr(TritonAscendGDN2Backend, 'is_enabled', lambda self: True)
-    monkeypatch.setattr(TritonAscendGDN2Backend, f'{func_name}_verifier', lambda self, q: (True, None))
-    result = object()
-
-    def implementation(self, q):
-        assert torch.is_grad_enabled()
-        assert q.requires_grad
-        return result
-
-    monkeypatch.setattr(TritonAscendGDN2Backend, func_name, implementation)
-    assert entry(q=torch.tensor([1.0, 2.0], requires_grad=True)) is result
+def test_ops_registered_dispatch(monkeypatch, module_name, names, backend_types):
+    module = importlib.import_module(f'fla.ops.{module_name}')
+    expected = set(backend_types)
+    required = expected.copy()
+    if not backends.GluonBackend.is_available():
+        required.discard('gluon')
+    if not backends.TritonAscendBackend.is_available():
+        required.discard('triton_ascend')
+    if module_name == 'attn.parallel' and not attn_tilelang_backend.AttnTileLangBackend.is_available():
+        required.discard('tilelang')
+    for name in names:
+        entry = getattr(module, name)
+        registry = backends._function_registries[inspect.unwrap(entry)]
+        assert required <= registry._backends.keys() <= expected
+        for backend_type, candidate in registry._backends.items():
+            assert candidate.get_implementation(name) is not None
+            with monkeypatch.context() as patch:
+                patch.setattr(registry, '_backends', {backend_type: candidate})
+                patch.setattr(type(candidate), 'is_available', classmethod(lambda cls: True))
+                patch.setattr(type(candidate), 'is_enabled', lambda self: True)
+                patch.setattr(candidate, 'verifier', lambda x: (True, None))
+                patch.setattr(candidate, 'implementation', lambda x: x.square())
+                x = torch.tensor([1., 2.], requires_grad=True)
+                y = entry(x)
+                torch.testing.assert_close(y, x.square())
+                torch.testing.assert_close(torch.autograd.grad(y.sum(), x)[0], 2 * x)
 
 
 @pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
@@ -132,16 +170,23 @@ def test_flash_kda_registered_dispatch(monkeypatch, route):
     assert calls == ['flash_kda' if route == 'accepted' else 'triton']
 
 
+@pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
 def test_attention_and_common_backends_have_separate_implementations():
-    common = backends._load_operation_registry('common')._backends['tilelang']
-    attention = backends._load_operation_registry('attn')._backends['tilelang']
+    from fla.ops.attn.parallel import parallel_attn_fwd
+    from fla.ops.common.chunk_o import chunk_bwd_dqkwg
+
+    common = backends._function_registries[inspect.unwrap(chunk_bwd_dqkwg)]._backends['tilelang']
     assert type(common) is common_tilelang_backend.CommonTileLangBackend
-    assert type(attention) is attn_tilelang_backend.AttnTileLangBackend
-    assert hasattr(common, 'chunk_bwd_dqkwg')
-    assert not hasattr(attention, 'chunk_bwd_dqkwg')
     for name in ('parallel_attn_fwd', 'parallel_attn_bwd'):
-        assert hasattr(attention, name)
         assert not hasattr(common, name)
+    registry = backends._function_registries[inspect.unwrap(parallel_attn_fwd)]
+    if attn_tilelang_backend.AttnTileLangBackend.is_available():
+        attention = registry._backends['tilelang']
+        assert type(attention) is attn_tilelang_backend.AttnTileLangBackend
+        assert attention.implementation.__name__ == 'parallel_attn_fwd_tilelang'
+        assert attention.implementation.__module__ == 'fla.ops.attn.backends.tilelang.parallel'
+    else:
+        assert 'tilelang' not in registry._backends
 
 
 def test_nvcc_from_cuda_home_env(monkeypatch, tmp_path):
@@ -285,10 +330,9 @@ def kda_bwd_inputs():
 
 @pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
 def test_kda_tilelang_backend_dispatch(monkeypatch, kda_bwd_inputs):
-    from fla.ops.kda.backends.triton_ascend import TritonAscendKDABackend
     from fla.ops.kda.chunk_bwd import chunk_kda_bwd_wy_dqkg_fused
 
-    monkeypatch.setattr(TritonAscendKDABackend, 'is_available', classmethod(lambda cls: False))
+    monkeypatch.setattr(backends.TritonAscendBackend, 'is_available', classmethod(lambda cls: False))
     backend = kda_tilelang_backend.KDATileLangBackend
     monkeypatch.setattr(backend, 'is_available', classmethod(lambda cls: True))
     monkeypatch.setenv('FLA_TILELANG', '1')
@@ -322,10 +366,9 @@ def test_kda_tilelang_backend_verifier(kda_bwd_inputs, use_graph, accepted, reas
 def test_intracard_backend_dispatch(monkeypatch, extra):
     """KDA's eager forward passes chunk_offsets=None; the opt-in intra-card backend must still be selected."""
     from fla.ops.common.backends.intracard import IntraCardCPBackend
-    from fla.ops.common.backends.triton_ascend import TritonAscendCommonBackend
     from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_fwd_h
 
-    monkeypatch.setattr(TritonAscendCommonBackend, 'is_available', classmethod(lambda cls: False))
+    monkeypatch.setattr(backends.TritonAscendBackend, 'is_available', classmethod(lambda cls: False))
     monkeypatch.setenv('FLA_INTRACARD_CP', '1')
     result = object()
     implementation = create_autospec(IntraCardCPBackend.chunk_gated_delta_rule_fwd_h, return_value=result)
@@ -365,7 +408,7 @@ def test_simple_gla_ascend_verifier(monkeypatch, is_npu, device, accepted, reaso
     assert simple_gla_verifier(q=q, k=q, v=q) == (accepted, reason)
 
 
-def test_retention_ascend_registration_import_order(run_python):
+def test_ops_ascend_registration_import_order(run_python):
     run_python(
         """
         import importlib
@@ -376,11 +419,21 @@ def test_retention_ascend_registration_import_order(run_python):
         from fla.ops.simple_gla.backends.triton_ascend.utils import simple_gla_verifier
 
         backends.TritonAscendBackend.is_available = classmethod(lambda cls: True)
+        for owner in ('atk', 'attnres', 'common', 'gated_delta_rule', 'gdn2', 'gla', 'kda', 'precond_gated_delta_rule'):
+            importlib.reload(importlib.import_module(f'fla.ops.{owner}.backends'))
         for operation, name in [
             ('common.chunk_o', 'chunk_bwd_dv'),
             ('simple_gla.fused_chunk', 'fused_chunk_simple_gla'),
             ('simple_gla.parallel', 'parallel_simple_gla'),
             ('simple_gla.fused_recurrent', 'fused_recurrent_simple_gla'),
+            ('atk.chunk_atk_fwd', 'chunk_atk_fwd'),
+            ('attnres.fused', 'fused_attnres'),
+            ('gated_delta_rule.gate', 'gdn_gate_fwd'),
+            ('gdn2.chunk_intra', 'chunk_gdn2_fwd_intra'),
+            ('gla.chunk', 'chunk_gla_fwd_intra_gk'),
+            ('kda.chunk_intra', 'chunk_kda_fwd_intra'),
+            ('kda.chunk_bwd', 'chunk_kda_bwd_dAv'),
+            ('precond_gated_delta_rule.chunk_precond_kkt_fwd', 'chunk_precond_kkt_fwd'),
         ]:
             module = 'fla.ops.' + operation
             owner, file = operation.split('.')
@@ -389,10 +442,12 @@ def test_retention_ascend_registration_import_order(run_python):
             entry = getattr(importlib.import_module(module), name)
             implementation = sys.modules[backend_module]
             registry = backends._function_registries[inspect.unwrap(entry)]
-            assert len(registry._backends) == 1
             candidate = registry._backends['triton_ascend']
             assert candidate.implementation is getattr(implementation, name + '_npu')
-            assert candidate.verifier is (simple_gla_verifier if owner == 'simple_gla' else None)
+            if owner == 'simple_gla':
+                assert candidate.verifier is simple_gla_verifier
+            if owner not in ('common', 'simple_gla'):
+                continue
             expected = inspect.signature(entry).parameters
             actual = inspect.signature(candidate.implementation).parameters
             assert expected.keys() == actual.keys()

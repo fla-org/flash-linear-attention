@@ -7,7 +7,8 @@
 
 """GDR backends."""
 
-from fla.ops.gated_delta_rule.backends.flash_qla import FlashQLABackend
-from fla.ops.gated_delta_rule.backends.triton_ascend import TritonAscendGDNBackend
+from fla.backends import TritonAscendBackend
+from fla.ops.gated_delta_rule.backends.flash_qla import FlashQLABackend  # noqa: F401
 
-__all__ = ['FlashQLABackend', 'TritonAscendGDNBackend']
+if TritonAscendBackend.is_available():
+    from fla.ops.gated_delta_rule.backends.triton_ascend import chunk_fwd, gate, wy_fast  # noqa: F401

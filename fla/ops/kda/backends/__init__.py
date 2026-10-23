@@ -7,7 +7,16 @@
 
 """KDA backends."""
 
-from fla.ops.kda.backends.tilelang import KDATileLangBackend
-from fla.ops.kda.backends.triton_ascend import TritonAscendKDABackend
+from fla.backends import TritonAscendBackend
+from fla.ops.kda.backends.flash_kda import FlashKDABackend  # noqa: F401
+from fla.ops.kda.backends.tilelang import KDATileLangBackend  # noqa: F401
 
-__all__ = ['KDATileLangBackend', 'TritonAscendKDABackend']
+if TritonAscendBackend.is_available():
+    from fla.ops.kda.backends.triton_ascend import (  # noqa: F401
+        chunk_bwd,
+        chunk_intra,
+        chunk_intra_token_parallel,
+        fused_recurrent,
+        gate,
+        wy_fast,
+    )

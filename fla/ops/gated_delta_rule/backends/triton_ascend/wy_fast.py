@@ -14,6 +14,8 @@ import triton
 import triton.language as tl
 import triton.runtime.driver as driver
 
+from fla.backends import TritonAscendBackend, register
+from fla.ops.gated_delta_rule.wy_fast import prepare_wy_repr_bwd, recompute_w_u_fwd
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp2
 from fla.utils import ascend_compile_kwargs, input_guard
@@ -593,6 +595,27 @@ def prepare_wy_repr_bwd_finalize_a2_dg_npu(
     tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), boundary_check=(0,))
 
 
+def recompute_w_u_fwd_verifier(
+    k,
+    v,
+    beta,
+    A,
+    g=None,
+    cu_seqlens=None,
+    chunk_indices=None,
+) -> tuple[bool, str | None]:
+    from fla.utils import IS_NPU
+    if not IS_NPU:
+        return False, "not running on NPU"
+    if k.device.type != "npu":
+        return False, "input device is not NPU"
+    if all(t.dtype in (torch.float32, torch.float16, torch.bfloat16)
+           for t in (k, v, beta, A)):
+        return True, None
+    return False, "unsupported dtype for NPU recompute_w_u_fwd"
+
+
+@register(recompute_w_u_fwd, backend=TritonAscendBackend, verifier=recompute_w_u_fwd_verifier)
 @input_guard
 def recompute_w_u_fwd_npu(
     k: torch.Tensor,
@@ -661,6 +684,7 @@ def recompute_w_u_fwd_npu(
     return w, u
 
 
+@register(prepare_wy_repr_bwd, backend=TritonAscendBackend)
 def prepare_wy_repr_bwd_npu(
     k: torch.Tensor,
     v: torch.Tensor,

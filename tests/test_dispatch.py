@@ -434,9 +434,9 @@ def test_load_dependency_error(monkeypatch, lazy_backend):
 def test_dispatch_disabled(run_python, disabled):
     run_python(
         """
+        import importlib
         import os
         import sys
-        import warnings
 
         from fla import backends
         from fla.backends import GluonBackend, TileLangBackend, TritonAscendBackend, dispatch, register
@@ -447,18 +447,12 @@ def test_dispatch_disabled(run_python, disabled):
             return x + 1
 
         for operation in [
-            'attn', 'attnres', 'common', 'gated_delta_rule', 'gdn2', 'generalized_delta_rule.dplr',
-            'gla', 'kda', 'rwkv6',
+            'atk', 'attn', 'attnres', 'common', 'gated_delta_rule', 'gdn2', 'generalized_delta_rule.dplr',
+            'gla', 'kda', 'precond_gated_delta_rule', 'rwkv6', 'wall_attn',
         ]:
-            with warnings.catch_warnings():
-                warnings.simplefilter('error', DeprecationWarning)
-                decorate = dispatch(operation)
-            registry = backends._operation_registries[operation]
-            assert registry.operation_name == operation
-            assert registry._backends
-            wrapped = decorate(compute)
-            assert (wrapped is compute) == (not enabled)
-            assert wrapped(1) == 2
+            importlib.import_module(f'fla.ops.{operation}')
+        assert not backends._operation_registries
+        assert bool(backends._function_registries) == enabled
 
         wrapped = dispatch(compute)
         assert (wrapped is compute) == (not enabled)
@@ -473,12 +467,11 @@ def test_dispatch_disabled(run_python, disabled):
         assert 'fla.ops.kda.backends.flash_kda' in sys.modules
         for owner in ['activations', 'rotary', 'grpo', 'fused_cross_entropy', 'fused_linear_cross_entropy', 'fused_kl_div']:
             assert f'modules.{owner}' not in backends._operation_registries
-        assert 'flash_kda' not in backends._operation_registries['kda']._backends
         assert ('fla.ops.utils.sinkhorn.tilelang' in sys.modules) == TileLangBackend.is_available()
         assert 'flash_kda' not in sys.modules
-        assert 'fla.ops.kda.backends.triton_ascend.chunk_intra' not in sys.modules
         assert 'utils' not in backends._operation_registries
         ascend_available = TritonAscendBackend.is_available()
+        assert ('fla.ops.kda.backends.triton_ascend.chunk_intra' in sys.modules) == ascend_available
         assert ('fla.ops.utils.triton_ascend.cumsum' in sys.modules) == ascend_available
         assert ('fla.ops.utils.triton_ascend.solve_tril' in sys.modules) == ascend_available
         assert ('fla.ops.common.backends.triton_ascend.chunk_o' in sys.modules) == ascend_available

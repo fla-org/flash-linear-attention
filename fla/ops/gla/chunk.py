@@ -889,7 +889,7 @@ def chunk_gla_bwd_kernel_inter(
     tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), mask=m_tk)
 
 
-@dispatch('gla')
+@dispatch
 def chunk_gla_fwd_intra_gk(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -986,7 +986,7 @@ def chunk_gla_fwd_intra_gk(
     return A
 
 
-@dispatch('gla')
+@dispatch
 def chunk_gla_fwd_o_gk(
     q: torch.Tensor,
     v: torch.Tensor,
@@ -1032,7 +1032,7 @@ def chunk_gla_fwd_o_gk(
     return o
 
 
-@dispatch('gla')
+@dispatch
 def chunk_gla_bwd_dA(
     v: torch.Tensor,
     do: torch.Tensor,
@@ -1067,7 +1067,7 @@ def chunk_gla_bwd_dA(
     return dA
 
 
-@dispatch('gla')
+@dispatch
 def chunk_gla_bwd_dv(
     k: torch.Tensor,
     g: torch.Tensor,
@@ -1107,7 +1107,7 @@ def chunk_gla_bwd_dv(
     return dv
 
 
-@dispatch('gla')
+@dispatch
 def chunk_gla_bwd_dqk_intra(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -1151,7 +1151,7 @@ def chunk_gla_bwd_dqk_intra(
     return dq, dk
 
 
-@dispatch('gla')
+@dispatch
 def chunk_gla_bwd_dqkg(
     q: torch.Tensor,
     k: torch.Tensor,

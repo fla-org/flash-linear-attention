@@ -16,6 +16,9 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.backends import TritonAscendBackend, register
+from fla.ops.atk.backends.triton_ascend.utils import chunk_atk_fwd_verifier
+from fla.ops.atk.chunk_atk_fwd import chunk_atk_fwd, recompute_atk_fwd
 from fla.ops.utils import prepare_chunk_indices
 from fla.utils.ascend_ub_manager import ASCEND_LAUNCH_BLOCK_BUDGET
 
@@ -415,6 +418,7 @@ def _atk_fwd_stages_npu(
     return k_precond.to(k.dtype), ac, a, sa, at
 
 
+@register(chunk_atk_fwd, backend=TritonAscendBackend, verifier=chunk_atk_fwd_verifier)
 def chunk_atk_fwd_npu(
     k: torch.Tensor,
     beta: torch.Tensor,
@@ -435,6 +439,7 @@ def chunk_atk_fwd_npu(
     return k_precond, at
 
 
+@register(recompute_atk_fwd, backend=TritonAscendBackend, verifier=chunk_atk_fwd_verifier)
 def recompute_atk_fwd_npu(
     k: torch.Tensor,
     beta: torch.Tensor,
