@@ -52,6 +52,7 @@ class ChunkKDAFunction(torch.autograd.Function):
         cp_context: FLACPContext | None = None,
         use_graph: bool = False,
         max_num_seqs: int | None = None,
+        use_tilelang_helpers: bool = False,
     ):
         q_rstd, k_rstd = None, None
         if use_qk_l2norm_in_kernel:
@@ -111,6 +112,7 @@ class ChunkKDAFunction(torch.autograd.Function):
             cp_context=cp_context,
             use_graph=use_graph,
             chunk_offsets=chunk_offsets,
+            use_tilelang_helpers=use_tilelang_helpers,
         )
 
         if return_intermediate_states:
@@ -155,6 +157,7 @@ class ChunkKDAFunction(torch.autograd.Function):
         ctx.disable_recompute = disable_recompute
         ctx.cp_context = cp_context
         ctx.state_v_first = state_v_first
+        ctx.use_tilelang_helpers = use_tilelang_helpers
         return o.type_as(q), final_state
 
     @staticmethod
@@ -191,14 +194,15 @@ class ChunkKDAFunction(torch.autograd.Function):
             dt_bias=dt_bias,
             disable_recompute=ctx.disable_recompute,
             cp_context=ctx.cp_context,
+            use_graph=ctx.use_graph,
+            chunk_offsets=chunk_offsets,
+            use_tilelang_helpers=ctx.use_tilelang_helpers,
             w=w,
             u=u,
             qg=qg,
             kg=kg,
             v_new=v_new,
             h=h,
-            use_graph=ctx.use_graph,
-            chunk_offsets=chunk_offsets,
         )
         if ctx.use_qk_l2norm_in_kernel:
             dq = l2norm_bwd(q, q_rstd, dq)
@@ -208,7 +212,7 @@ class ChunkKDAFunction(torch.autograd.Function):
 
         return (dq.to(q), dk.to(k), dv.to(v), dg.to(g_input), db.to(beta_raw), dA, dbias, None, dh0,
                 None, None, None, None, None, None, None, None, None, None, None, None, None, None,
-                None, None)
+                None, None, None)
 
 
 @torch.compiler.disable
@@ -427,6 +431,8 @@ def chunk_kda(
         ...     dt_bias=dt_bias,
         ... )
     """
+    use_tilelang_helpers = kwargs.pop("_tilelang_helpers", False)
+
     if 'transpose_state_layout' in kwargs:
         if state_v_first:
             raise ValueError("Cannot pass both `state_v_first` and the deprecated `transpose_state_layout`.")
@@ -522,4 +528,5 @@ def chunk_kda(
         cp_context,
         use_graph,
         max_num_seqs,
+        use_tilelang_helpers,
     )
