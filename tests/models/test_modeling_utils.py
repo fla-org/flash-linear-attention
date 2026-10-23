@@ -21,7 +21,7 @@ from fla.utils import assert_close, device_name
 CAUSAL_LM_CONFIGS = [
     models.ABCConfig, models.BitNetConfig, models.CombaConfig, models.DeltaNetConfig,
     models.ForgettingTransformerConfig, models.GatedDeltaNetConfig, models.GatedDeltaProductConfig,
-    models.GLAConfig, models.GSAConfig, models.HGRNConfig, models.HGRN2Config, models.KDAConfig, models.LightNetConfig,
+    models.GLAConfig, models.GSA2Config, models.GSAConfig, models.HGRNConfig, models.HGRN2Config, models.KDAConfig, models.LightNetConfig,
     models.MesaNetConfig, models.MLAConfig, models.MoBAConfig, models.NSAConfig, models.ParallaxConfig,
     models.PaTHAttentionConfig, models.PrecondGatedDeltaNetConfig, models.RavenConfig, models.RetNetConfig,
     models.RodimusConfig, models.RWKV6Config, models.TransformerConfig, models.WallTransformerConfig,
@@ -29,7 +29,7 @@ CAUSAL_LM_CONFIGS = [
 
 DECODER_CONFIGS = [
     models.ABCConfig, models.CombaConfig, models.DeltaNetConfig, models.GatedDeltaNetConfig,
-    models.GatedDeltaProductConfig, models.GLAConfig, models.GSAConfig, models.KDAConfig,
+    models.GatedDeltaProductConfig, models.GLAConfig, models.GSA2Config, models.GSAConfig, models.KDAConfig,
     models.MesaNetConfig, models.MLAConfig, models.MoBAConfig, models.NSAConfig, models.RavenConfig,
 ]
 
@@ -44,7 +44,7 @@ def full_precision_matmul():
         torch.set_float32_matmul_precision(precision)
 
 
-@pytest.mark.parametrize('config_class', [GLAConfig, KDAConfig, TransformerConfig])
+@pytest.mark.parametrize('config_class', [GLAConfig, models.GSA2Config, KDAConfig, TransformerConfig])
 @pytest.mark.parametrize('num_items', [None, 11, torch.tensor(11)])
 @pytest.mark.parametrize('custom_criterion', [None, 'mean', 'sum'])
 def test_causal_lm_loss(config_class, num_items, custom_criterion, make_model):
@@ -74,6 +74,43 @@ def test_causal_lm_loss(config_class, num_items, custom_criterion, make_model):
         torch.testing.assert_close(actual, expected)
     if custom_criterion:
         assert model.criterion.reduction == custom_criterion
+
+
+@pytest.mark.parametrize('num_items', [None, 10])
+@pytest.mark.parametrize('custom_criterion', [False, True])
+@pytest.mark.parametrize('cu_seqlens', [[0, 7, 14], [0, 0, 7, 7, 14, 14]], ids=['packed', 'empty-sequences'])
+def test_causal_lm_packed_loss(num_items, custom_criterion, cu_seqlens, make_model):
+    torch.manual_seed(42)
+    model = make_model(models.GSA2Config)
+    if custom_criterion:
+        model.criterion = nn.CrossEntropyLoss(ignore_index=-7, label_smoothing=0.1)
+    ignore_index = -7 if custom_criterion else -100
+    input_ids = torch.randint(0, 64, (1, 14))
+    labels = input_ids.clone()
+    labels[:, 2] = ignore_index
+    original_labels = labels.clone()
+    output = model(
+        input_ids=input_ids,
+        labels=labels,
+        num_items_in_batch=num_items,
+        cu_seqlens=torch.tensor(cu_seqlens, dtype=torch.int32),
+    )
+    expected = F.cross_entropy(
+        input=output.logits.reshape(2, 7, 64)[:, :-1].reshape(-1, 64),
+        target=labels.reshape(2, 7)[:, 1:].reshape(-1),
+        ignore_index=ignore_index,
+        label_smoothing=0.1 if custom_criterion else 0.0,
+        reduction='sum' if num_items is not None else 'mean',
+    )
+    if num_items is not None:
+        expected = expected / num_items
+    torch.testing.assert_close(output.loss, expected)
+    assert torch.equal(labels, original_labels)
+    parameters = tuple(model.parameters())
+    actual_gradients = torch.autograd.grad(output.loss, parameters, retain_graph=True)
+    expected_gradients = torch.autograd.grad(expected, parameters)
+    for actual, reference in zip(actual_gradients, expected_gradients, strict=True):
+        torch.testing.assert_close(actual, reference)
 
 
 @pytest.mark.skipif(device_name == 'cpu', reason='Fused cross entropy requires an accelerator.')
