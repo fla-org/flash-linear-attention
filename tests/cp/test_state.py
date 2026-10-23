@@ -284,7 +284,7 @@ def test_chunk_bwd_gate_head(T: int, H: int, K: int, V: int):
         )
 
 
-@pytest.mark.skipif(not (IS_TF32_SUPPORTED or IS_NPU), reason='requires NVIDIA Ampere or newer, or Ascend')
+@pytest.mark.skipif(not IS_TF32_SUPPORTED, reason='requires NVIDIA Ampere or newer')
 @pytest.mark.parametrize('K', [96, 192, 256])
 @pytest.mark.parametrize('state_v_first', [False, True])
 @pytest.mark.parametrize('forward', [False, True], ids=['backward', 'forward'])
