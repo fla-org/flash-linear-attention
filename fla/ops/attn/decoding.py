@@ -9,6 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.backends import dispatch
 from fla.ops.utils.cumsum import chunk_global_cumsum
 from fla.ops.utils.op import exp
 from fla.utils import autotune_cache_kwargs, check_shared_mem, input_guard
@@ -125,6 +126,7 @@ def naive_attn_decoding_kernel(
 
 
 @input_guard
+@dispatch('attn')
 def attn_decoding_one_step(
     q: torch.Tensor,
     k: torch.Tensor,
