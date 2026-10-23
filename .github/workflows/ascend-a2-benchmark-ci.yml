@@ -296,3 +296,23 @@ jobs:
             conv_benchmark/
           if-no-files-found: ignore
           retention-days: 10
+
+      - name: Benchmark recurrent KDA compile options
+        shell: bash
+        env:
+          ASCEND_RT_VISIBLE_DEVICES: "0"
+          FLA_CI_ENV: "0"
+          FLA_BENCH_WARMUP_MS: "25"
+          FLA_BENCH_REP_MS: "100"
+        run: |
+          source /usr/local/Ascend/ascend-toolkit/set_env.sh
+          python -m benchmarks.ops.benchmark_kda_recurrent --json benchmark_kda_recurrent.json
+
+      - name: Upload recurrent KDA benchmark
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: ascend-a2-recurrent-kda-benchmark
+          path: benchmark_kda_recurrent.json
+          if-no-files-found: ignore
+          retention-days: 10
