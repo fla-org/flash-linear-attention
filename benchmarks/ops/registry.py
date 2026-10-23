@@ -598,6 +598,38 @@ register_op(OpConfig(
     category='attn',
 ))
 
+# --- Wall attention (per-channel multiplicative-decay attention) ---
+
+
+def wall_log_decay(t):
+    """Small-negative per-channel log-decay gate for Wall attention (``g <= 0``)."""
+    return -t.abs() * 0.05
+
+
+# Wall attention is quadratic in T with per-channel gates, so the global shape
+# matrix (up to T=16384 / H=96 / D=256) is too heavy for the NPU benchmark CI;
+# use a bounded per-op matrix (dense only, fwd + fwdbwd).
+_wall_attn_default_shapes = {
+    'B1_T1024_H8_D64':   {'B': 1, 'T': 1024, 'H': 8,  'D': 64},
+    'B1_T2048_H8_D128':  {'B': 1, 'T': 2048, 'H': 8,  'D': 128},
+    'B2_T1024_H16_D128': {'B': 2, 'T': 1024, 'H': 16, 'D': 128},
+    'B1_T4096_H4_D128':  {'B': 1, 'T': 4096, 'H': 4,  'D': 128},
+}
+
+register_op(OpConfig(
+    name='parallel_wall_attn',
+    import_path='fla.ops.wall_attn',
+    inputs={
+        'q': TensorSpec(shape_BTHD),
+        'k': TensorSpec(shape_BTHD),
+        'v': TensorSpec(shape_BTHD),
+        'g': TensorSpec(shape_BTHD, transform=wall_log_decay),
+    },
+    output_is_tuple=False,
+    category='attn',
+    default_shapes=_wall_attn_default_shapes,
+))
+
 
 register_op(OpConfig(
     name='flash_attn',
