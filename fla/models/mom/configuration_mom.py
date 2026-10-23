@@ -5,12 +5,16 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
-from fla.models.hybrid import HybridAttentionConfig, _HybridAttentionConfigMixin
+from fla.models.configuration_utils import (
+    AttentionConfig,
+    AttentionConfigBase,
+    validate_attnres_config,
+)
 
 
-class MomConfig(_HybridAttentionConfigMixin, PretrainedConfig):
+class MomConfig(AttentionConfigBase, PreTrainedConfig):
     model_type = 'mom'
     keys_to_ignore_at_inference = ['past_key_values']
 
@@ -30,7 +34,7 @@ class MomConfig(_HybridAttentionConfigMixin, PretrainedConfig):
         hidden_act: str = "swish",
         num_hidden_layers: int = 24,
         norm_eps: float = 1e-6,
-        attn: HybridAttentionConfig = None,
+        attn: AttentionConfig = None,
         use_cache: bool = True,
         pad_token_id: int | None = None,
         bos_token_id: int = 1,
@@ -89,12 +93,7 @@ class MomConfig(_HybridAttentionConfigMixin, PretrainedConfig):
         if self.mom_backend not in ['gated_deltanet']:
             raise NotImplementedError(f"The MoM backend {mom_backend} is not currently supported.")
 
-        if attnres_block_size is not None and attnres_block_size != 1:
-            if attnres_block_size < 2 or attnres_block_size % 2 != 0:
-                raise ValueError(
-                    "`attnres_block_size` must be `None`, `1` (full mode), or an even integer (one block "
-                    f"contains `attnres_block_size // 2` transformer layers); got {attnres_block_size}."
-                )
+        validate_attnres_config(attnres_block_size=attnres_block_size)
 
         super().__init__(
             pad_token_id=pad_token_id,

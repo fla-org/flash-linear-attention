@@ -1,18 +1,11 @@
 name: ascend-a2-benchmark-ci
 
 # Pinned stack: CANN 9.1.0 image + pyproject [npu] extra
-# (torch 2.9.0 / torch_npu 2.9.0.post6 / torchvision 0.24.0 / triton-ascend 3.2.2)
+# (torch 2.10.0 / torch_npu 2.10.0.post7 / torchvision 0.25.0 / triton-ascend 3.6.0)
 # Runs NPU performance benchmarks for triton-ascend backends and causal conv.
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-    paths:
-      - "**/*.py"
-      - "pyproject.toml"
-      - ".github/workflows/*.yml"
   pull_request:
     branches:
       - main
@@ -25,7 +18,6 @@ on:
 jobs:
   changes:
     name: Detect NPU-related changes
-    if: github.event.action != 'edited' || github.event.changes.title != null
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -63,12 +55,11 @@ jobs:
             }
             core.setOutput('npu_related', related.length > 0 ? 'true' : 'false');
 
-  benchmark-a2-npu-pytorch-2-9:
-    name: Benchmark A2 NPU (PyTorch 2.9.0)
+  benchmark-a2-npu-pytorch-2-10:
+    name: Benchmark A2 NPU (PyTorch 2.10.0)
     needs: changes
     if: |
       github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'push' ||
       (
         github.event_name == 'pull_request' &&
         (
@@ -162,7 +153,7 @@ jobs:
           print("matplotlib savefig smoke test: ok")
           PY
 
-      - name: Benchmark chunk_gdn, fused_recurrent_gdn2, chunk_gdn2, chunk_kda, KDA graph, fused_attnres, and conv1d
+      - name: Benchmark chunk_gdn, fused_recurrent_gdn2, chunk_gdn2, chunk_kda, KDA graph, fused_attnres, conv1d, and chunk_precond_gdn
         shell: bash
         env:
           FLA_BENCH_WARMUP_MS: "25"
@@ -229,10 +220,16 @@ jobs:
           run_benchmark conv1d 3 python benchmarks/modules/benchmark_conv.py &
           pid_conv1d=$!
           status=0
+          wait "$pid_conv1d" || status=1
+          ASCEND_RT_VISIBLE_DEVICES=3 python -m benchmarks.ops.run \
+            --op chunk_precond_gdn --base '' --json benchmark_chunk_precond_gdn.json \
+            > chunk_precond_gdn.log 2>&1 &
+          pid_precond_gdn=$!
+
           wait "$pid_gdn" || status=1
           wait "$pid_kda" || status=1
           wait "$pid_attnres" || status=1
-          wait "$pid_conv1d" || status=1
+          wait "$pid_precond_gdn" || status=1
 
           # The runner exposes devices 0-3. Reuse device 0 only after the
           # parallel benchmarks finish so graph latency is not affected by
@@ -257,6 +254,8 @@ jobs:
           cat chunk_kda_graph.log
           echo "========== conv1d =========="
           cat conv1d.log
+          echo "========== chunk_precond_gdn =========="
+          cat chunk_precond_gdn.log
           exit "$status"
 
       - name: Check fused-recurrent GDN2 benchmark results
@@ -292,6 +291,7 @@ jobs:
             benchmark_chunk_gdn2.json
             benchmark_chunk_kda.json
             benchmark_fused_attnres.json
+            benchmark_chunk_precond_gdn.json
             benchmark_kda_graph.json
             conv_benchmark/
           if-no-files-found: ignore

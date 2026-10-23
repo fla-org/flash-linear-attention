@@ -19,20 +19,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import warnings
+from transformers.configuration_utils import PreTrainedConfig
 
-from transformers.configuration_utils import PretrainedConfig
+from fla.models.configuration_utils import validate_loss_config
 
 
-class Mamba2Config(PretrainedConfig):
+class Mamba2Config(PreTrainedConfig):
     """
     This is the configuration class to store the configuration of a [`Mamba2Model`]. It is used to instantiate a MAMBA2
     model according to the specified arguments, defining the model architecture. Instantiating a configuration with the
     defaults will yield a similar configuration to that of the MAMBA2
     [state-spaces/mamba2-2.8b](https://huggingface.co/state-spaces/mamba2-2.8b) architecture.
 
-    Configuration objects inherit from [`PretrainedConfig`] and can be used to control the model outputs. Read the
-    documentation from [`PretrainedConfig`] for more information.
+    Configuration objects inherit from [`PreTrainedConfig`] and can be used to control the model outputs. Read the
+    documentation from [`PreTrainedConfig`] for more information.
 
 
     Args:
@@ -180,16 +180,7 @@ class Mamba2Config(PretrainedConfig):
         if dt_init_floor <= 0:
             raise ValueError("`dt_init_floor` must be > 0.")
 
-        if fuse_cross_entropy and fuse_linear_cross_entropy:
-            raise ValueError(
-                "`fuse_cross_entropy` and `fuse_linear_cross_entropy` cannot be True at the same time.",
-            )
-        if fuse_linear_cross_entropy:
-            warnings.warn(
-                "`fuse_linear_cross_entropy` is enabled, which can improves memory efficiency "
-                "at the potential cost of reduced precision. "
-                "If you observe issues like loss divergence, consider disabling this setting.",
-            )
+        validate_loss_config(fuse_cross_entropy=fuse_cross_entropy, fuse_linear_cross_entropy=fuse_linear_cross_entropy)
 
         super().__init__(
             bos_token_id=bos_token_id,

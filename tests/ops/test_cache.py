@@ -11,6 +11,7 @@ import triton
 import triton.language as tl
 
 from fla.modules.causal_conv1d.ops import causal_conv1d_bwd_kernel, causal_conv1d_fwd_kernel
+from fla.modules.token_shift import token_shift_bwd_kernel_long, token_shift_fwd_kernel_long
 from fla.ops.gla.chunk import chunk_gla_bwd_kernel_inter
 from fla.ops.utils.cache import AutotuneKey, fla_cache_autotune
 from fla.utils import device
@@ -62,23 +63,19 @@ def test_fla_cache_autotune_handles_none_restore_value():
     assert torch.equal(y2, torch.zeros(M, dtype=torch.int32, device=device))
 
 
-@pytest.mark.parametrize("kernel", [causal_conv1d_fwd_kernel, causal_conv1d_bwd_kernel])
-def test_causal_conv1d_autotune_key_excludes_unused_nb(kernel):
-    """NB (ceil(B*T / 1024)) is never read inside either kernel body, so it must not sit in the
-    autotune key: leaving it in forces a redundant re-tune on every distinct B*T even though D
-    and W, the values that actually pick the fastest config, are unchanged.
+@pytest.mark.parametrize("kernel", [
+    causal_conv1d_fwd_kernel,
+    causal_conv1d_bwd_kernel,
+    token_shift_fwd_kernel_long,
+    token_shift_bwd_kernel_long,
+], ids=["causal_conv1d_fwd", "causal_conv1d_bwd", "token_shift_fwd_long", "token_shift_bwd_long"])
+def test_kernels_do_not_take_unused_nb(kernel):
+    """NB (a 1024-token bucket of the input size) is never read inside these kernel bodies, so none of them may take it:
+    in the autotune key it forces a re-tune on every new bucket, and as a constexpr it still compiles a new kernel for each one.
     """
     autotuner = kernel.fn
     assert 'NB' not in autotuner.keys
-
-    arg_names = autotuner.arg_names
-
-    def build_key(nb):
-        values = {'D': 64, 'W': 4, 'NB': nb}
-        args = tuple(values.get(name) for name in arg_names)
-        return AutotuneKey.build(arg_names, autotuner.keys, args, {})
-
-    assert build_key(nb=5).autotune_key == build_key(nb=7).autotune_key
+    assert 'NB' not in autotuner.arg_names
 
 
 @pytest.mark.parametrize(

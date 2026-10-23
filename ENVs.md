@@ -25,6 +25,7 @@ These switches control registered implementations. Unavailable backends and unsu
 | Variable            | Default | Options   | Description                                                                     |
 | ------------------- | ------- | --------- | ------------------------------------------------------------------------------- |
 | `FLA_GLUON`         | `0`     | `0` / `1` | Enable all available Gluon backends, overriding individual switches set to `0`. |
+| `FLA_CE_GLUON`      | `0`     | `0` / `1` | Enable Gluon CE kernels, including fused-linear CE (NVIDIA).                    |
 | `FLA_CONV_GLUON`    | `0`     | `0` / `1` | Enable Gluon causal convolution independently.                                  |
 | `FLA_ATTNRES_GLUON` | `0`     | `0` / `1` | Enable Gluon AttnRes independently.                                             |
 
@@ -36,7 +37,6 @@ When `FLA_GLUON` is unset or `0`, the individual switches apply. `FLA_DISABLE_BA
 | -------------------------- | ------- | ----------- | ---------------------------------------------------------------------------------------------------- |
 | `FLA_INTRACARD_CP`         | `0`     | `0` / `1`   | Enable intra-card CP for shared delta-rule operations; inference and variable-length sequences only. |
 | `FLA_INTRACARD_MAX_SPLITS` | `32`    | Integer ≥ 1 | Maximum sub-sequences per original sequence.                                                         |
-| `FLA_INTRACARD_TF32X3`     | `0`     | `0` / `1`   | Use TF32x3 for affine-chain dot products on NVIDIA GPUs.                                             |
 
 ## Convolution backend
 

@@ -354,60 +354,73 @@ def test_scalar_gate_gradient_finite_differences():
     assert_close("dg_scalar", dgs_fd, dgs_ana, RTOL_FD)
 
 
-def _decode_at(t, q, k, v, P, scale, C, *, g_scalar_cumsum=None):
-    """Decode at position `t` with the cache truncated to [0, t].
-
-    Decode has no intra-cache causal mask (the query is assumed to come after
-    everything in the cache), so we truncate the cache to the current position.
-    """
+def _decode_at(t, q, k, v, P, scale, C, *, T_q=1, g_scalar_cumsum=None, window_size=None):
+    """Decode the last `T_q` queries of the cache ending at position `t`."""
     k_c = k[:, : t + 1].contiguous()
     v_c = v[:, : t + 1].contiguous()
     P_c = P[:, : t + 1].contiguous()
     gsc = g_scalar_cumsum[:, : t + 1].contiguous() if g_scalar_cumsum is not None else None
 
-    k_tilde, r_cache = build_wall_kv_cache(k_c, P_c, chunk_size=C)
+    k_tilde, r_cache = build_wall_kv_cache(k=k_c, g_cumsum=P_c, chunk_size=C)
     o_dec, _ = parallel_wall_attn_decode(
-        q=q[:, t: t + 1].contiguous(),
+        q=q[:, t + 1 - T_q: t + 1].contiguous(),
         v=v_c,
-        p_curr=P[:, t: t + 1].contiguous(),
+        p_curr=P[:, t + 1 - T_q: t + 1].contiguous(),
         k_tilde=k_tilde,
         r_cache=r_cache,
         sink_bias=None,
         scale=scale,
         cache_chunk_size=C,
         g_scalar_cumsum=gsc,
+        window_size=window_size,
     )
     return o_dec
 
 
 @pytest.mark.parametrize('dtype', [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'HQ', 'K', 'V', 'C'),
+    ('B', 'T', 'T_q', 'H', 'HQ', 'K', 'V', 'C', 'window_size'),
     [
-        pytest.param(*test, id="B{}-T{}-H{}-HQ{}-K{}-V{}-C{}".format(*test))
+        pytest.param(*test, id="B{}-T{}-Tq{}-H{}-HQ{}-K{}-V{}-C{}-W{}".format(*test))
         for test in [
-            (1, 256, 4, 4, 64, 64, 64),   # MHA
-            (1, 256, 2, 8, 64, 64, 64),   # GQA, G=4
-            (2, 128, 1, 2, 32, 32, 32),   # small
-            (1, 128, 1, 2, 32, 320, 32),  # split value dimension
+            (1, 256, 1, 4, 4, 64, 64, 64, None),
+            (1, 256, 1, 2, 8, 64, 64, 64, None),
+            (2, 128, 1, 1, 2, 32, 32, 32, None),
+            (1, 128, 1, 1, 2, 32, 320, 32, None),
+            (2, 160, 5, 2, 4, 64, 64, 32, None),
+            (2, 160, 48, 2, 4, 64, 64, 32, None),
+            (2, 160, 5, 2, 4, 64, 64, 32, 32),
+            (2, 160, 48, 2, 4, 64, 64, 32, 32),
+            (2, 161, 33, 2, 4, 64, 64, 32, 17),
         ]
     ],
 )
-def test_decode_matches_training_forward(dtype, B: int, T: int, H: int, HQ: int, K: int, V: int, C: int):
-    """Decode at position t reproduces the training forward output at that row."""
-    torch.manual_seed(0)
+def test_decode_matches_training_forward(
+    B: int,
+    T: int,
+    T_q: int,
+    H: int,
+    HQ: int,
+    K: int,
+    V: int,
+    C: int,
+    window_size: int | None,
+    dtype: torch.dtype,
+):
+    """Cached continuation matches the corresponding training forward outputs."""
+    torch.manual_seed(42)
     scale = K**-0.5
     q = torch.randn(B, T, HQ, K, device=device, dtype=dtype)
     k = torch.randn(B, T, H, K, device=device, dtype=dtype)
     v = torch.randn(B, T, H, V, device=device, dtype=dtype)
     g = log_decay(B, T, HQ, K, dtype=dtype)
 
-    o_ref = parallel_wall_attn(q, k, v, g, scale=scale)
+    o_ref = parallel_wall_attn(q=q, k=k, v=v, g=g, scale=scale, window_size=window_size)
     P = chunk_global_cumsum(g, scale=RCP_LN2)
 
     for t in (T - 1, (T // 2 // C) * C + C - 1):
-        o_dec = _decode_at(t, q, k, v, P, scale, C)
-        assert_close("o_dec", o_ref[:, t: t + 1], o_dec, RTOL_DECODE)
+        o_dec = _decode_at(t=t, q=q, k=k, v=v, P=P, scale=scale, C=C, T_q=T_q, window_size=window_size)
+        assert_close("o_dec", o_ref[:, t + 1 - T_q: t + 1], o_dec, RTOL_DECODE)
 
 
 def test_decode_matches_training_forward_long():
@@ -430,9 +443,11 @@ def test_decode_matches_training_forward_long():
     assert_close("o_dec_long", o_ref[:, t: t + 1], o_dec, RTOL_DECODE)
 
 
-def test_decode_with_scalar_gate():
+@pytest.mark.parametrize('T_q', [1, 5, 48], ids=["Tq1", "Tq5", "Tq48"])
+@pytest.mark.parametrize('window_size', [None, 32], ids=["full", "windowed"])
+def test_decode_with_scalar_gate(window_size: int | None, T_q: int):
     """Wall + FoX-style scalar gate: decode matches training forward."""
-    torch.manual_seed(2)
+    torch.manual_seed(42)
     dtype = torch.float32
     B, T, H, HQ, K, V, C = 1, 256, 2, 4, 64, 64, 64
     scale = K**-0.5
@@ -442,13 +457,13 @@ def test_decode_with_scalar_gate():
     g = log_decay(B, T, HQ, K, dtype=dtype)
     g_scalar = log_decay(B, T, HQ, dtype=dtype)
 
-    o_ref = parallel_wall_attn(q, k, v, g, scale=scale, g_scalar=g_scalar)
+    o_ref = parallel_wall_attn(q=q, k=k, v=v, g=g, scale=scale, g_scalar=g_scalar, window_size=window_size)
     P = chunk_global_cumsum(g, scale=RCP_LN2)
     c = chunk_global_cumsum(g_scalar, scale=RCP_LN2)
 
     t = T - 1
-    o_dec = _decode_at(t, q, k, v, P, scale, C, g_scalar_cumsum=c)
-    assert_close("o_dec_scalar", o_ref[:, t: t + 1], o_dec, RTOL_DECODE)
+    o_dec = _decode_at(t=t, q=q, k=k, v=v, P=P, scale=scale, C=C, T_q=T_q, g_scalar_cumsum=c, window_size=window_size)
+    assert_close("o_dec_scalar", o_ref[:, t + 1 - T_q: t + 1], o_dec, RTOL_DECODE)
 
 
 @pytest.mark.parametrize('dtype', [torch.float32, torch.bfloat16])

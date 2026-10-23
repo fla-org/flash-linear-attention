@@ -27,7 +27,7 @@ from fla.modules import RMSNorm, RotaryEmbedding
 from fla.ops.utils.index import prepare_lens_from_mask
 
 if TYPE_CHECKING:
-    from fla.models.utils import Cache
+    from fla.models.cache_utils import Cache
 
 try:
     from flash_attn import flash_attn_func, flash_attn_varlen_func
@@ -158,7 +158,7 @@ class MultiheadLatentAttention(nn.Module):
             seqlen_offset = past_key_values.get_seq_length(self.layer_idx)
             max_seqlen = q_len + seqlen_offset
 
-            if attention_mask is not None:
+            if kwargs.get("cu_seqlens") is None and attention_mask is not None:
                 seqlen_offset = seqlen_offset + prepare_lens_from_mask(attention_mask) - attention_mask.shape[-1]
                 max_seqlen = q_len + max(seqlen_offset)
 
@@ -192,7 +192,7 @@ class MultiheadLatentAttention(nn.Module):
             v = F.pad(v, [0, self.qk_head_dim - self.v_head_dim])
 
         # Contains at least one padding token in the sequence
-        if attention_mask is not None:
+        if cu_seqlens is None and attention_mask is not None:
             if q.shape[1] == 1 and self.window_size is not None:
                 attention_mask = attention_mask[:, -self.window_size:]
             q, (k, v), indices_q, cu_seqlens, max_seq_lens = unpad_input(q, (k, v), attention_mask, q_len)

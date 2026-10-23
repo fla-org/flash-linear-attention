@@ -48,7 +48,7 @@ _MODULE_ALIASES = {
     'conv.cp': ('causal_conv1d.cp',),
     'conv.cp.ops': ('causal_conv1d.cp',),
     'conv.cuda': ('causal_conv1d.backends.cuda',),
-    'conv.cuda.ops': ('causal_conv1d.backends.cuda',),
+    'conv.cuda.ops': ('causal_conv1d.backends.cuda.ops',),
     'conv.triton': ('causal_conv1d.ops',),
     'conv.triton.ops': ('causal_conv1d.ops',),
     'conv.triton.kernels': ('causal_conv1d.ops',),

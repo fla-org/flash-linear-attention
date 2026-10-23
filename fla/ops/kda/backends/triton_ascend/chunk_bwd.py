@@ -193,6 +193,15 @@ def _get_bk(K: int) -> int:
     )
 
 
+def _k_major_state(state: torch.Tensor, name: str, use_graph: bool) -> torch.Tensor:
+    """Return ``state`` as ``[..., K, V]``. The input is ``[..., V, K]``."""
+    transposed = state.transpose(-1, -2)
+    if not use_graph:
+        return transposed.contiguous()
+    buf = get_static_buffer(name, tuple(transposed.shape), state.dtype, state.device)
+    return buf.copy_(transposed)
+
+
 def _get_bv(V: int) -> int:
     return compute_row_tile_block_size(
         _BC,
@@ -232,6 +241,7 @@ def _launch_wy_dA_finalize(
     """Host-split aligned bulk vs tail so TAIL_MODE is constexpr per launch."""
     kwargs = dict(kernel_kwargs)
     kwargs['num_core'] = num_core
+    kwargs.update(ascend_compile_kwargs())
     if is_varlen:
         kwargs['TAIL_MODE'] = 1
         kwargs['NT_OFFSET'] = 0
@@ -807,6 +817,12 @@ def chunk_kda_bwd_wy_dqkg_fused_npu(
 
     BK = _get_bk(K)
     BV = _get_bv(V)
+    # v-first [V, K] leaves the dot reduction axis strided, and that layout
+    # conversion does not fit the 192KB UB. h and dh are read-only here.
+    if state_v_first:
+        h = _k_major_state(h, "wy_h_kmajor", use_graph)
+        dh = _k_major_state(dh, "wy_dh_kmajor", use_graph)
+        state_v_first = False
     NK = triton.cdiv(K, BK)
     is_varlen = cu_seqlens is not None
     if chunk_offsets is None:
@@ -869,7 +885,8 @@ def chunk_kda_bwd_wy_dqkg_fused_npu(
         K=K,
         V=V,
         BT=BT,
-        BC=32 if BT >= 32 else _BC,
+        # BC=32 exceeds the UB budget sized for _BC and fails to compile.
+        BC=_BC,
         BK=BK,
         BV=BV,
         STATE_V_FIRST=state_v_first,
@@ -878,7 +895,7 @@ def chunk_kda_bwd_wy_dqkg_fused_npu(
     )
     for k_off in range(NK):
         k_part_kwargs['K_OFFSET'] = k_off
-        chunk_kda_bwd_kernel_wy_k_part_npu[(num_core,)](**k_part_kwargs)
+        chunk_kda_bwd_kernel_wy_k_part_npu[(num_core,)](**k_part_kwargs, **ascend_compile_kwargs())
 
     k_arg, k_t_contig = _t_contig_arg(k, H)
     g_arg, g_t_contig = _t_contig_arg(g, HV)
@@ -915,7 +932,7 @@ def chunk_kda_bwd_wy_dqkg_fused_npu(
     )
     for k_off in range(NK):
         dw_kwargs['K_OFFSET'] = k_off
-        chunk_kda_bwd_kernel_wy_dw_part_npu[(num_core,)](**dw_kwargs)
+        chunk_kda_bwd_kernel_wy_dw_part_npu[(num_core,)](**dw_kwargs, **ascend_compile_kwargs())
 
     _launch_wy_dA_finalize(
         chunk_kda_bwd_kernel_wy_dA_finalize_npu,

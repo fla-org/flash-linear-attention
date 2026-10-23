@@ -801,3 +801,93 @@ def test_chunk_A_state(
     assert_close('dh0', h0.grad, tri_dh0, 0.008)
     assert_close('dh0_atk', A0.grad, tri_dA0, 0.02)
     assert_close('d_log_atk_scale', log_atk_scale.grad, tri_d_log_atk_scale, 0.02)
+
+
+@pytest.mark.parametrize('with_initial_A_state', [True, False], ids=['initial_A_state', 'no_initial_A_state'])
+def test_chunk_varlen_empty_A_state(with_initial_A_state: bool):
+    torch.manual_seed(42)
+    H, D = 1, 16
+    cu_seqlens = [0, 0, 3, 3, 5, 5]
+    T = cu_seqlens[-1]
+    N = len(cu_seqlens) - 1
+
+    q = torch.rand(1, T, H, D, dtype=torch.float16)
+    k = torch.rand(1, T, H, D, dtype=torch.float16)
+    v = torch.rand(1, T, H, D, dtype=torch.float16)
+    g_atk = F.logsigmoid(torch.randn(1, T, H, dtype=torch.float32))
+    g = F.logsigmoid(torch.randn(1, T, H, dtype=torch.float32))
+    beta_atk = torch.rand(1, T, H, dtype=torch.float32).sigmoid()
+    beta = torch.rand(1, T, H, dtype=torch.float32).sigmoid()
+    h0 = torch.randn(N, H, D, D, dtype=torch.float32)
+    A0 = torch.rand(N, H, D, dtype=torch.float32) if with_initial_A_state else None
+    log_atk_scale = torch.rand(H, dtype=torch.float32) - 1.0
+    q, k, v, g_atk, g, beta_atk, beta, h0, log_atk_scale = tuple(
+        t.to(device).requires_grad_(True)
+        for t in (q, k, v, g_atk, g, beta_atk, beta, h0, log_atk_scale)
+    )
+    if A0 is not None:
+        A0 = A0.to(device).requires_grad_(True)
+    inputs = (q, k, v, g_atk, g, beta_atk, beta, h0, log_atk_scale)
+    if A0 is not None:
+        inputs = (*inputs[:-1], A0, inputs[-1])
+
+    do = torch.randn_like(v)
+    dht = torch.randn_like(h0)
+    dat = torch.randn(N, H, D, dtype=torch.float32, device=device)
+    tri, tri_ht, tri_at = chunk_precond_gated_delta_rule(
+        q=q,
+        k=k,
+        v=v,
+        g_atk=g_atk,
+        g=g,
+        beta_atk=beta_atk,
+        beta=beta,
+        initial_state=h0,
+        initial_A_state=A0,
+        output_final_state=True,
+        cu_seqlens=torch.tensor(cu_seqlens, device=device),
+        x=1.5,
+        log_atk_scale=log_atk_scale,
+    )
+    tri_grads = torch.autograd.grad(
+        (tri * do).sum() + (tri_ht * dht).sum() + (tri_at.float() * dat).sum(),
+        inputs,
+    )
+
+    refs, refs_ht, refs_at = [], [], []
+    for i, (bos, eos) in enumerate(zip(cu_seqlens[:-1], cu_seqlens[1:], strict=True)):
+        ref_i, ref_ht_i, ref_at_i = naive_recurrent_precond_gated_delta_rule(
+            q=q[:, bos:eos],
+            k=k[:, bos:eos],
+            v=v[:, bos:eos],
+            g_atk=g_atk[:, bos:eos],
+            g=g[:, bos:eos],
+            beta_atk=beta_atk[:, bos:eos],
+            beta=beta[:, bos:eos],
+            initial_state=h0[i:i + 1],
+            initial_A_state=None if A0 is None else A0[i:i + 1],
+            output_final_state=True,
+            x=1.5,
+            log_atk_scale=log_atk_scale,
+        )
+        refs.append(ref_i)
+        refs_ht.append(ref_ht_i)
+        refs_at.append(ref_at_i)
+    ref = torch.cat(refs, dim=1)
+    ref_ht = torch.cat(refs_ht)
+    ref_at = torch.cat(refs_at)
+    ref_grads = torch.autograd.grad(
+        (ref * do).sum() + (ref_ht * dht).sum() + (ref_at * dat).sum(),
+        inputs,
+    )
+
+    assert_close('o', ref, tri, 0.005)
+    assert_close('ht', ref_ht, tri_ht, 0.005)
+    assert_close('at', ref_at, tri_at, 0.005)
+    names = ('dq', 'dk', 'dv', 'dg_atk', 'dg', 'dbeta_atk', 'dbeta', 'dh0')
+    if with_initial_A_state:
+        names += ('dh0_atk',)
+    names += ('d_log_atk_scale',)
+    for name, ref_grad, tri_grad in zip(names, ref_grads, tri_grads, strict=True):
+        tolerance = 0.008 if name in ('dq', 'dk', 'dv', 'dh0') else 0.02
+        assert_close(name, ref_grad, tri_grad, tolerance)

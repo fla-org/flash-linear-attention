@@ -22,7 +22,7 @@ from fla.ops.mesa_net import chunk_mesa_net, mesa_net_decoding_one_step
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
-    from fla.models.utils import Cache
+    from fla.models.cache_utils import Cache
 
 
 class MesaNet(nn.Module):
@@ -150,6 +150,7 @@ class MesaNet(nn.Module):
         conv_state_q, conv_state_k = None, None
         if last_state is not None:
             conv_state_q, conv_state_k = last_state['conv_state']
+        prev_conv_state_q = conv_state_q
         q, conv_state_q = self.q_conv1d(
             x=self.q_proj(hidden_states),
             cache=conv_state_q,
@@ -173,9 +174,11 @@ class MesaNet(nn.Module):
 
         last_h_kk, last_h_kv = last_state['recurrent_state'] if last_state is not None else (None, None)
 
-        # prefilling or training
+        # prefilling, training, or cached inputs without guaranteed one-step shapes
         # Note that QK will be normalized inside the kernel to avoid saving the activations, thereby reducing the memory usage.
-        if last_state is None:
+        # no-grad single-token convolution updates its cache in place
+        is_decoding = q_len == 1 if cu_seqlens is None else conv_state_q is not None and conv_state_q is prev_conv_state_q
+        if last_state is None or not is_decoding:
             o, h_kk, h_kv = chunk_mesa_net(
                 q=q,
                 k=k,
@@ -183,6 +186,8 @@ class MesaNet(nn.Module):
                 g=g,
                 beta=beta,
                 lamb=lamb,
+                h_kk_init=last_h_kk,
+                h_kv_init=last_h_kv,
                 output_final_state=use_cache,
                 max_CG_iteration=self.max_cg_step_training,
                 use_qk_l2norm_in_kernel=True,
@@ -190,20 +195,21 @@ class MesaNet(nn.Module):
             )
         # decoding
         else:
+            dim = 1 if cu_seqlens is None else 0
             q = l2_norm(q)
             k = l2_norm(k)
             o, h_kk, h_kv = mesa_net_decoding_one_step(
-                q=q.squeeze(0),
-                k=k.squeeze(0),
-                v=v.squeeze(0),
-                g=g.squeeze(0),
-                beta=beta.squeeze(0),
+                q=q.squeeze(dim),
+                k=k.squeeze(dim),
+                v=v.squeeze(dim),
+                g=g.squeeze(dim),
+                beta=beta.squeeze(dim),
                 lamb=lamb,
                 prev_h_kk=last_h_kk,
                 prev_h_kv=last_h_kv,
                 max_CG_iteration=self.max_cg_step_decoding,
             )
-            o = o.unsqueeze(0).to(q)
+            o = o.unsqueeze(dim).to(q)
 
         update_layer_cache(
             self,

@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from fla.layers.parallax import Parallax
-from fla.models.utils import Cache
+from fla.models.cache_utils import Cache
 from fla.utils import assert_close, device
 
 
@@ -40,3 +40,45 @@ def test_empty_sliding_window_cache_prefill(dtype: torch.dtype):
     cached_k, cached_v = cache[0]['attn_state']
     assert cached_k.shape == cached_v.shape == (B, W, H * D)
     assert cache.get_seq_length(0) == T + 1
+
+
+@torch.no_grad()
+def test_left_padded_cache_matches_unpadded():
+    torch.manual_seed(42)
+    layer = Parallax(hidden_size=32, num_heads=2, layer_idx=0).to(device=device, dtype=torch.float16).eval()
+    hidden_states = torch.randn(2, 4, 32, device=device, dtype=torch.float16)
+    next_hidden_states = torch.randn(2, 1, 32, device=device, dtype=torch.float16)
+    prefill_mask = torch.tensor([[0, 1, 1, 1], [1, 1, 1, 1]], device=device, dtype=torch.long)
+    decode_mask = torch.tensor([[0, 1, 1, 1, 1], [1, 1, 1, 1, 1]], device=device, dtype=torch.long)
+    cache = Cache()
+    actual, _, _ = layer(
+        hidden_states=hidden_states,
+        attention_mask=prefill_mask,
+        past_key_values=cache,
+        use_cache=True,
+    )
+    actual_next, _, _ = layer(
+        hidden_states=next_hidden_states,
+        attention_mask=decode_mask,
+        past_key_values=cache,
+        use_cache=True,
+    )
+
+    expected, expected_next = [], []
+    for batch, start in ((0, 1), (1, 0)):
+        reference_cache = Cache()
+        output, _, _ = layer(
+            hidden_states=hidden_states[batch:batch+1, start:],
+            past_key_values=reference_cache,
+            use_cache=True,
+        )
+        output_next, _, _ = layer(
+            hidden_states=next_hidden_states[batch:batch+1],
+            past_key_values=reference_cache,
+            use_cache=True,
+        )
+        expected.append(output.squeeze(0))
+        expected_next.append(output_next)
+
+    assert_close("prefill", torch.cat(expected, dim=0), torch.cat([actual[0, 1:], actual[1]], dim=0), 0.005)
+    assert_close("decode", torch.cat(expected_next, dim=0), actual_next, 0.005)
