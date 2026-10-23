@@ -242,6 +242,7 @@ def test_chunk_varlen(
     [
         pytest.param(*test, id="B{}-T{}-H{}-D{}-{}".format(*test))
         for test in [
+            (2, 16, 1, 64, torch.float32),
             (1, 70, 4, 64, torch.float32),
             (1, 200, 4, 64, torch.float32),
             (2, 320, 4, 64, torch.float32),  # divisible by the chunk size: control
@@ -295,6 +296,17 @@ def test_chunk_partial_last_chunk(
             f"{name} is not finite: {(~torch.isfinite(tensor.grad)).sum().item()} of "
             f"{tensor.grad.numel()} elements read past the end of level_scales"
         )
+
+    tri_dq, tri_dk, tri_dv, tri_dg, tri_dl = q.grad, k.grad, v.grad, g.grad, level_scales.grad
+    q.grad = k.grad = v.grad = g.grad = level_scales.grad = None
+    ref = naive_log_linear_attn(q, k, v, g, level_scales)
+    assert_close("o", ref, out, 0.004)
+    (ref * do).sum().backward()
+    assert_close("dq", q.grad, tri_dq, 0.007)
+    assert_close("dk", k.grad, tri_dk, 0.008)
+    assert_close("dv", v.grad, tri_dv, 0.007)
+    assert_close("dg", g.grad, tri_dg, 0.015)
+    assert_close("dl", level_scales.grad, tri_dl, 0.015)
 
 
 @pytest.mark.parametrize(

@@ -32,6 +32,7 @@ from fla.ops.utils.logsumexp import logsumexp_fwd
 from fla.ops.utils.matmul import addmm, matmul
 from fla.ops.utils.pack import pack_sequence, unpack_sequence
 from fla.ops.utils.pooling import mean_pooling
+from fla.ops.utils.sinkhorn import sinkhorn
 from fla.ops.utils.softmax import softmax_bwd, softmax_fwd
 from fla.ops.utils.softplus import softplus
 from fla.ops.utils.solve_tril import solve_tril
@@ -60,6 +61,7 @@ __all__ = [
     "prepare_position_ids",
     "prepare_sequence_ids",
     "prepare_token_indices",
+    "sinkhorn",
     "softmax_bwd",
     "softmax_fwd",
     "softplus",
