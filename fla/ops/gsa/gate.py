@@ -9,6 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.backends import dispatch
 from fla.ops.utils.op import exp, logaddexp, unflatten_program_id
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, input_guard
 
@@ -28,7 +29,7 @@ from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_k
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
-def fused_lightnet_gate_fwd_kernel(
+def fused_additive_gate_fwd_kernel(
     x,
     z,
     k,
@@ -96,7 +97,7 @@ def _reverse_recurrence(a_left, b_left, a_right, b_right):
     'USE_FINAL_STATE_GRADIENT': lambda args: args['dfinal_state'] is not None,
 })
 @triton.jit(do_not_specialize=['T'])
-def fused_lightnet_gate_bwd_kernel(
+def fused_additive_gate_bwd_kernel(
     x,
     z,
     initial_state,
@@ -180,19 +181,22 @@ def fused_lightnet_gate_bwd_kernel(
         tl.store(dinitial_state + i_n * S + o_s, b_dz0, mask=m_s)
 
 
-def fused_lightnet_gate_fwd(
+def fused_additive_gate_fwd(
     x: torch.Tensor,
     initial_state: torch.Tensor | None,
     cu_seqlens: torch.Tensor | None,
     save_z: bool,
+    output_dtype: torch.dtype | None = None,
+    gate_dtype: torch.dtype | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
     B, T, H, K = x.shape
     N = B if cu_seqlens is None else cu_seqlens.numel() - 1
     S, BS = H * K, 32
-    k, g = torch.empty_like(x), torch.empty_like(x)
+    k = torch.empty_like(x, dtype=output_dtype or x.dtype)
+    g = torch.empty_like(x, dtype=gate_dtype or x.dtype)
     z = torch.empty_like(x, dtype=torch.float32) if save_z else None
     final_state = x.new_empty((N, 1, H, K), dtype=torch.float32)
-    fused_lightnet_gate_fwd_kernel[(N * triton.cdiv(S, BS),)](
+    fused_additive_gate_fwd_kernel[(N * triton.cdiv(S, BS),)](
         x=x,
         z=z,
         k=k,
@@ -207,7 +211,7 @@ def fused_lightnet_gate_fwd(
     return k, g, final_state, z
 
 
-def fused_lightnet_gate_bwd(
+def fused_additive_gate_bwd(
     x: torch.Tensor,
     z: torch.Tensor,
     initial_state: torch.Tensor | None,
@@ -221,7 +225,7 @@ def fused_lightnet_gate_bwd(
     S, BS = H * K, 32
     dx = torch.empty_like(x)
     dinitial_state = torch.empty_like(initial_state) if initial_state is not None else None
-    fused_lightnet_gate_bwd_kernel[(N * triton.cdiv(S, BS),)](
+    fused_additive_gate_bwd_kernel[(N * triton.cdiv(S, BS),)](
         x=x,
         z=z,
         initial_state=initial_state,
@@ -239,17 +243,19 @@ def fused_lightnet_gate_bwd(
     return dx, dinitial_state
 
 
-class FusedLightNetGateFunction(torch.autograd.Function):
+class FusedAdditiveGateFunction(torch.autograd.Function):
 
     @staticmethod
     @input_guard
     @autocast_custom_fwd
-    def forward(ctx, x, initial_state, cu_seqlens):
-        k, g, final_state, z = fused_lightnet_gate_fwd(
+    def forward(ctx, x, initial_state, cu_seqlens, output_dtype, gate_dtype):
+        k, g, final_state, z = fused_additive_gate_fwd(
             x=x,
             initial_state=initial_state,
             cu_seqlens=cu_seqlens,
             save_z=ctx.needs_input_grad[0] or ctx.needs_input_grad[1],
+            output_dtype=output_dtype,
+            gate_dtype=gate_dtype,
         )
         ctx.save_for_backward(x, z, initial_state, cu_seqlens)
         ctx.set_materialize_grads(False)
@@ -260,7 +266,7 @@ class FusedLightNetGateFunction(torch.autograd.Function):
     @autocast_custom_bwd
     def backward(ctx, dk, dg, dfinal_state):
         x, z, initial_state, cu_seqlens = ctx.saved_tensors
-        dx, dinitial_state = fused_lightnet_gate_bwd(
+        dx, dinitial_state = fused_additive_gate_bwd(
             x=x,
             z=z,
             initial_state=initial_state,
@@ -269,29 +275,36 @@ class FusedLightNetGateFunction(torch.autograd.Function):
             dg=dg,
             dfinal_state=dfinal_state,
         )
-        return dx, dinitial_state, None
+        return dx, dinitial_state, None, None, None
 
 
-def fused_lightnet_gate(
+@dispatch
+def fused_additive_gate(
     x: torch.Tensor,
     initial_state: torch.Tensor | None = None,
     cu_seqlens: torch.Tensor | None = None,
+    output_dtype: torch.dtype | None = None,
+    gate_dtype: torch.dtype | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Compute LightNet's cumulative key normalization and log-decay gates.
+    """Compute additive input and log-forget gates from cumulative exponential scores.
 
     Args:
         x (torch.Tensor):
-            Key logits of shape `[B, T, H, K]`. Packed inputs have `B=1`.
+            Logits of shape `[B, T, H, K]`. Packed inputs have `B=1`.
         initial_state (torch.Tensor, Optional):
             FP32 log-normalizers of shape `[N, 1, H, K]`, where `N` is the number of sequences. Default: `None`.
         cu_seqlens (torch.Tensor, Optional):
             Cumulative lengths of the packed sequences, including empty sequences. Default: `None`.
+        output_dtype (torch.dtype, Optional):
+            Dtype of the normalized output. Default: the input dtype.
+        gate_dtype (torch.dtype, Optional):
+            Dtype of the log-decay gates. Default: the input dtype.
 
     Returns:
         k (torch.Tensor):
-            Normalized keys with the shape and dtype of `x`.
+            Normalized values with the shape of `x` and the requested output dtype.
         g (torch.Tensor):
-            Log-decay gates with the shape and dtype of `x`. An empty prefix has a zero first gate.
+            Log-decay gates with the shape of `x` and the requested gate dtype. An empty prefix has a zero first gate.
         final_state (torch.Tensor):
             FP32 log-normalizers of shape `[N, 1, H, K]`. Empty sequences preserve `initial_state`,
             or return `-inf` without one. Gradients are supported for `x` and `initial_state`.
@@ -303,4 +316,4 @@ def fused_lightnet_gate(
         expected_shape = (N, 1, *x.shape[2:])
         if initial_state.shape != expected_shape:
             raise ValueError(f"initial_state must have shape {expected_shape}, got {tuple(initial_state.shape)}.")
-    return FusedLightNetGateFunction.apply(x, initial_state, cu_seqlens)
+    return FusedAdditiveGateFunction.apply(x, initial_state, cu_seqlens, output_dtype, gate_dtype)
