@@ -326,18 +326,25 @@ class SlidingWindowSharedKeyAttention(nn.Module):
                 recurrent_state, conv_state = None, None
 
             cache_has_content = past_key_values.get_seq_length(layer_idx) > 0
+            attn_state = [k.flatten(-2, -1), v.flatten(-2, -1)]
+            cached_attn_state = past_key_values[layer_idx]['attn_state'] if cache_has_content else None
             k_cached, v_cached = past_key_values.update(
                 recurrent_state=recurrent_state,
                 conv_state=conv_state,
-                attn_state=[k.flatten(-2, -1), v.flatten(-2, -1)],
+                attn_state=attn_state,
                 layer_idx=layer_idx,
                 offset=q_len,
                 cache_kwargs=dict(window_size=self.window_size),
             )['attn_state']
-            if cache_has_content:
-                k, v = k_cached, v_cached
-                k = rearrange(k, '... (h d) -> ... h d', d=self.head_dim)
-                v = rearrange(v, '... (h d) -> ... h d', d=self.head_dim)
+            if self.window_size is not None and q_len > 1 and attention_mask is None and cached_attn_state is not None:
+                k_cached, v_cached = cached_attn_state
+                k = torch.cat([rearrange(k_cached, '... (h d) -> ... h d', d=self.head_dim), k], dim=1)
+                v = torch.cat([rearrange(v_cached, '... (h d) -> ... h d', d=self.head_dim), v], dim=1)
+                k = k[:, -(self.window_size + q_len - 1):]
+                v = v[:, -(self.window_size + q_len - 1):]
+            elif cache_has_content:
+                k = rearrange(k_cached, '... (h d) -> ... h d', d=self.head_dim)
+                v = rearrange(v_cached, '... (h d) -> ... h d', d=self.head_dim)
 
         if flash_attn_func is None:
             raise ImportError("Please install Flash Attention via `pip install flash-attn --no-build-isolation` first")

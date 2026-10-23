@@ -10,9 +10,13 @@ import pickle
 import pytest
 import torch
 
+from fla.layers.attn import Attention
+from fla.layers.bitattn import BitAttention
+from fla.layers.parallax import Parallax
+from fla.layers.rodimus import SlidingWindowSharedKeyAttention
 from fla.models.cache_utils import Cache, FLACache, FLALayer, LegacyFLACache
 from fla.ops.log_linear_attn.chunk import LogLinearAttentionState
-from fla.utils import device_name
+from fla.utils import assert_close, device, device_name
 
 
 @pytest.fixture(params=[FLACache, LegacyFLACache], ids=['layered', 'legacy'])
@@ -131,6 +135,70 @@ def test_update_attention(cache, with_recurrent_state, prefill_length, update_le
         for state in states:
             grad = torch.zeros_like(state) if state.grad is None else state.grad
             torch.testing.assert_close(grad, expected.expand_as(state), rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize(
+    'layer_class',
+    [
+        pytest.param(Attention, id='attention'),
+        pytest.param(BitAttention, id='bitattention'),
+        pytest.param(Parallax, id='parallax'),
+        pytest.param(SlidingWindowSharedKeyAttention, id='rodimus-shared-key'),
+    ],
+)
+@pytest.mark.parametrize('continuation_length', [1, 3, 6], ids=['decode', 'chunk', 'chunk-larger-than-window'])
+def test_sliding_window_cached_continuation(layer_class, continuation_length):
+    B, P, H, D, W = 1, 6, 2, 64, 4
+    torch.manual_seed(42)
+    layer = layer_class(hidden_size=H * D, num_heads=H, window_size=W, layer_idx=0)
+    layer = layer.to(device=device, dtype=torch.float16).eval()
+    hidden_states = torch.randn(B, P + continuation_length, H * D, device=device, dtype=torch.float16)
+
+    with torch.no_grad():
+        expected_cache = Cache()
+        expected = layer(hidden_states=hidden_states, past_key_values=expected_cache, use_cache=True)[0]
+        cache = Cache()
+        actual_prefill = layer(hidden_states=hidden_states[:, :P], past_key_values=cache, use_cache=True)[0]
+        actual = layer(hidden_states=hidden_states[:, P:], past_key_values=cache, use_cache=True)[0]
+
+    assert_close('prefill', expected[:, :P], actual_prefill, 0.005)
+    assert_close('continuation', expected[:, P:], actual, 0.005)
+    cached_k, cached_v = cache[0]['attn_state']
+    assert cached_k.shape[:2] == cached_v.shape[:2] == (B, W)
+    torch.testing.assert_close(cache[0]['attn_state'], expected_cache[0]['attn_state'])
+    assert cache.get_seq_length(0) == P + continuation_length
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize(
+    'layer_class',
+    [
+        pytest.param(Attention, id='attention'),
+        pytest.param(BitAttention, id='bitattention'),
+        pytest.param(Parallax, id='parallax'),
+        pytest.param(SlidingWindowSharedKeyAttention, id='rodimus-shared-key'),
+    ],
+)
+@pytest.mark.parametrize('cache_class', [Cache, LegacyFLACache], ids=['cache', 'legacy'])
+def test_cached_continuation_without_attention_state(layer_class, cache_class):
+    B, P, T, H, D, W = 1, 5, 3, 2, 64, 4
+    torch.manual_seed(42)
+    layer = layer_class(hidden_size=H * D, num_heads=H, window_size=W, layer_idx=0)
+    layer = layer.to(device=device, dtype=torch.float16).eval()
+    hidden_states = torch.randn(B, T, H * D, device=device, dtype=torch.float16)
+    cache = cache_class()
+    recurrent_state = torch.zeros(1, device=device)
+    conv_state = torch.zeros(1, device=device)
+    cache.update(recurrent_state=recurrent_state, conv_state=conv_state, offset=P)
+
+    with torch.no_grad():
+        output = layer(hidden_states=hidden_states, past_key_values=cache, use_cache=True)[0]
+
+    assert torch.isfinite(output).all()
+    assert cache[0]['recurrent_state'] is recurrent_state
+    assert cache[0]['conv_state'] is conv_state
+    assert cache.get_seq_length(0) == P + T
 
 
 @pytest.mark.parametrize('operation', ['reorder_cache', 'batch_repeat_interleave', 'batch_select_indices'])
