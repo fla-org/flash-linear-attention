@@ -9,21 +9,25 @@ from fla.backends import GluonBackend, TritonAscendBackend
 from fla.modules.causal_conv1d.ops import (
     CausalConv1dFunction,
     ShortConvolution,
+    can_fuse_qkv_short_conv,
     causal_conv1d,
     causal_conv1d_bwd,
     causal_conv1d_fwd,
     causal_conv1d_update,
     causal_conv1d_update_states,
+    fused_qkv_short_conv,
 )
 
 __all__ = [
     'CausalConv1dFunction',
     'ShortConvolution',
+    'can_fuse_qkv_short_conv',
     'causal_conv1d',
     'causal_conv1d_bwd',
     'causal_conv1d_fwd',
     'causal_conv1d_update',
     'causal_conv1d_update_states',
+    'fused_qkv_short_conv',
 ]
 
 
