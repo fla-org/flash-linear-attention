@@ -106,6 +106,35 @@ def test_chunk(
     assert_close('dh_kv_init', ref_dh_kv_init, tri_dh_kv_init, 0.008)
 
 
+@pytest.mark.skipif(
+    device_platform == 'intel',
+    reason='Intel Triton Failure',
+)
+def test_chunk_without_final_state():
+    torch.manual_seed(42)
+    B, T, H, D = 1, 15, 1, 64
+    q = torch.rand(B, T, H, D, dtype=torch.float16, device=device) / 10
+    k = F.normalize(torch.rand(B, T, H, D, dtype=torch.float32, device=device), p=2, dim=-1).to(torch.float16)
+    v = torch.rand(B, T, H, D, dtype=torch.float16, device=device) / 10
+    beta = torch.rand(B, T, H, dtype=torch.float16, device=device).sigmoid()
+    g = torch.rand(B, T, H, dtype=torch.float16, device=device).float().uniform_(0.8, 0.99).log()
+    lamb = torch.rand(H, D, dtype=torch.float16, device=device).sigmoid() * 0.75 + 0.25
+
+    o, h_kk_final, h_kv_final = chunk_mesa_net(
+        q=q,
+        k=k,
+        v=v,
+        beta=beta,
+        g=g,
+        lamb=lamb,
+        output_final_state=False,
+    )
+
+    assert torch.isfinite(o).all()
+    assert h_kk_final is None
+    assert h_kv_final is None
+
+
 @pytest.mark.parametrize(
     ('H', 'D', 'gate_range', 'cu_seqlens', 'dtype'),
     [
