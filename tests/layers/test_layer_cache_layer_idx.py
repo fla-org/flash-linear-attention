@@ -31,6 +31,7 @@ from fla.layers.rodimus import RodimusAttention
 from fla.layers.rwkv6 import RWKV6Attention
 from fla.layers.rwkv7 import RWKV7Attention
 from fla.layers.simple_gla import SimpleGatedLinearAttention
+from fla.layers.stickbreaking_attn import StickBreakingAttention
 from fla.utils import device
 
 
@@ -171,6 +172,11 @@ CACHE_REQUIRES_LAYER_IDX_CASES = [
         lambda: Comba(hidden_size=16, num_heads=4),
         torch.randn(1, 2, 16),
         id="comba",
+    ),
+    pytest.param(
+        lambda: StickBreakingAttention(hidden_size=16, num_heads=4),
+        torch.randn(1, 2, 16),
+        id="stickbreaking_attn",
     ),
 ]
 
