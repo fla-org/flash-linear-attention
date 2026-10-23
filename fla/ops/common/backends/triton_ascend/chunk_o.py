@@ -183,6 +183,7 @@ def _g_block_ptr(g_base, T, offset, BC, G_T_CONTIG: tl.constexpr, HV: tl.constex
     "USE_G": lambda args: args["g"] is not None,
     "USE_G_GAMMA": lambda args: args["g_gamma"] is not None,
     "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
+    "USE_CHUNK_INDICES": lambda args: args["chunk_indices"] is not None,
 })
 @triton.autotune(
     configs=[triton.Config({'BK': 128}), triton.Config({'BK': 64}), triton.Config({'BK': 32})],
@@ -199,6 +200,7 @@ def chunk_o_fwd_kernel(
     o,
     cu_seqlens,
     chunk_offsets,
+    chunk_indices,
     scale,
     T,
     H,
@@ -216,6 +218,7 @@ def chunk_o_fwd_kernel(
     USE_G_GAMMA: tl.constexpr,
     STATE_V_FIRST: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    USE_CHUNK_INDICES: tl.constexpr,
 ):
     core_id = tl.program_id(0)
     h_t_step = HV * total_chunks
@@ -227,11 +230,16 @@ def chunk_o_fwd_kernel(
         T_cur = T
 
         if IS_VARLEN:
-            # find the sequence whose chunk offsets contain global_t.
-            i_n = 0
-            for n in tl.range(0, N, 1):
-                i_n = tl.where(tl.load(chunk_offsets + n + 1) <= global_t, n + 1, i_n)
-            i_t = global_t - tl.load(chunk_offsets + i_n).to(tl.int32)
+            if USE_CHUNK_INDICES:
+                p_indices = chunk_indices + global_t.to(tl.int64) * 2
+                i_n = tl.load(p_indices).to(tl.int32)
+                i_t = tl.load(p_indices + 1).to(tl.int32)
+            else:
+                # find the sequence whose chunk offsets contain global_t.
+                i_n = 0
+                for n in tl.range(0, N, 1):
+                    i_n = tl.where(tl.load(chunk_offsets + n + 1) <= global_t, n + 1, i_n)
+                i_t = global_t - tl.load(chunk_offsets + i_n).to(tl.int32)
             bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
             T_cur = (eos - bos).to(tl.int32)
             i_tg = global_t
@@ -330,6 +338,9 @@ def chunk_fwd_o_npu(
         N, chunk_offsets = B, None
         NT = triton.cdiv(T, BT)
         total_chunks = N * NT
+    elif chunk_indices is not None:
+        N, chunk_offsets = len(cu_seqlens) - 1, None
+        total_chunks = chunk_indices.shape[0]
     else:
         N, chunk_offsets = len(cu_seqlens) - 1, prepare_chunk_offsets(cu_seqlens=cu_seqlens, chunk_size=BT)
         # chunk_offsets[-1] stores the cumulative total chunks across all batches
@@ -352,6 +363,7 @@ def chunk_fwd_o_npu(
         o=o,
         cu_seqlens=cu_seqlens,
         chunk_offsets=chunk_offsets,
+        chunk_indices=chunk_indices,
         scale=scale,
         T=T,
         H=H,
@@ -373,13 +385,7 @@ def _launch_bwd_2d_kernel(kernel, *, nt: int, bh_total: int, kernel_kwargs: dict
     max_nt = max_grid_axis_chunks(axis_size=nt, other_grid_product=bh_total, max_grid=ASCEND_MAX_GRID_DIM)
     for nt_off in range(0, nt, max_nt):
         nt_len = min(max_nt, nt - nt_off)
-        chunk_indices = kernel_kwargs.get('chunk_indices')
-        cu_seqlens = kernel_kwargs.get('cu_seqlens')
-        if cu_seqlens is not None and chunk_indices is not None:
-            kernel_kwargs['chunk_indices'] = chunk_indices[nt_off:nt_off + nt_len]
-            kernel_kwargs['NT_OFFSET'] = 0
-        else:
-            kernel_kwargs['NT_OFFSET'] = nt_off
+        kernel_kwargs['NT_OFFSET'] = nt_off
         max_bh = max_grid_axis_chunks(axis_size=bh_total, other_grid_product=nt_len, max_grid=ASCEND_MAX_GRID_DIM)
         for bh_off in range(0, bh_total, max_bh):
             bh_len = min(max_bh, bh_total - bh_off)
@@ -393,13 +399,7 @@ def _launch_bwd_3d_kernel(kernel, *, nk: int, nt: int, bh_total: int, kernel_kwa
         kernel_kwargs['K_OFFSET'] = k_idx
         for nt_off in range(0, nt, max_nt):
             nt_len = min(max_nt, nt - nt_off)
-            chunk_indices = kernel_kwargs.get('chunk_indices')
-            cu_seqlens = kernel_kwargs.get('cu_seqlens')
-            if cu_seqlens is not None and chunk_indices is not None:
-                kernel_kwargs['chunk_indices'] = chunk_indices[nt_off:nt_off + nt_len]
-                kernel_kwargs['NT_OFFSET'] = 0
-            else:
-                kernel_kwargs['NT_OFFSET'] = nt_off
+            kernel_kwargs['NT_OFFSET'] = nt_off
             max_bh = max_grid_axis_chunks(axis_size=bh_total, other_grid_product=nt_len, max_grid=ASCEND_MAX_GRID_DIM)
             for bh_off in range(0, bh_total, max_bh):
                 bh_len = min(max_bh, bh_total - bh_off)
