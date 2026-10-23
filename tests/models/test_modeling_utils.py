@@ -21,15 +21,15 @@ from fla.utils import assert_close, device_name
 CAUSAL_LM_CONFIGS = [
     models.ABCConfig, models.BitNetConfig, models.CombaConfig, models.DeltaNetConfig,
     models.ForgettingTransformerConfig, models.GatedDeltaNetConfig, models.GatedDeltaProductConfig,
-    models.GLAConfig, models.GSAConfig, models.HGRNConfig, models.HGRN2Config, models.KDAConfig, models.LightNetConfig,
-    models.MesaNetConfig, models.MLAConfig, models.MoBAConfig, models.NSAConfig, models.ParallaxConfig,
+    models.GLAConfig, models.GSAConfig, models.HGRNConfig, models.HGRN2Config, models.IsoKDNConfig, models.KDAConfig,
+    models.LightNetConfig, models.MesaNetConfig, models.MLAConfig, models.MoBAConfig, models.NSAConfig, models.ParallaxConfig,
     models.PaTHAttentionConfig, models.PrecondGatedDeltaNetConfig, models.RavenConfig, models.RetNetConfig,
     models.RodimusConfig, models.RWKV6Config, models.TransformerConfig, models.WallTransformerConfig,
 ]
 
 DECODER_CONFIGS = [
     models.ABCConfig, models.CombaConfig, models.DeltaNetConfig, models.GatedDeltaNetConfig,
-    models.GatedDeltaProductConfig, models.GLAConfig, models.GSAConfig, models.KDAConfig,
+    models.GatedDeltaProductConfig, models.GLAConfig, models.GSAConfig, models.IsoKDNConfig, models.KDAConfig,
     models.MesaNetConfig, models.MLAConfig, models.MoBAConfig, models.NSAConfig, models.RavenConfig,
 ]
 
