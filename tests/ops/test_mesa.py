@@ -6,11 +6,15 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import os
+from unittest.mock import Mock
 
 import pytest
 import torch
 import torch.nn.functional as F
 
+from fla.layers import mesa_net
+from fla.layers.mesa_net import MesaNet
+from fla.models.cache_utils import Cache
 from fla.ops.mesa_net import chunk_mesa_net, mesa_net_decoding_one_step, naive_mesa_net_decoding_one_step, naive_mesa_net_exact
 from fla.utils import IS_INTEL_ALCHEMIST, assert_close, device, device_platform
 
@@ -310,3 +314,148 @@ def test_decoding_one_step(
     assert_close('o', o, o_ref, 0.005)
     assert_close('curr_h_kk', curr_h_kk, curr_h_kk_re, 0.005)
     assert_close('curr_h_kv', curr_h_kv, curr_h_kv_re, 0.005)
+
+
+@torch.no_grad()
+def test_cached_multi_token_continuation(monkeypatch):
+    torch.manual_seed(42)
+    chunk = Mock(wraps=mesa_net.chunk_mesa_net)
+    decoding = Mock(wraps=mesa_net.mesa_net_decoding_one_step)
+    monkeypatch.setattr(mesa_net, 'chunk_mesa_net', chunk)
+    monkeypatch.setattr(mesa_net, 'mesa_net_decoding_one_step', decoding)
+    layer = MesaNet(
+        hidden_size=64,
+        num_heads=1,
+        head_dim=64,
+        max_cg_step_training=5,
+        max_cg_step_decoding=1,
+        layer_idx=0,
+    ).to(device=device, dtype=torch.float16).eval()
+    prefix = torch.randn(2, 4, 64, device=device, dtype=torch.float16)
+    continuation = torch.randn(2, 3, 64, device=device, dtype=torch.float16)
+    expected_cache, actual_cache = Cache(), Cache()
+    expected = layer(torch.cat((prefix, continuation), dim=1), past_key_values=expected_cache, use_cache=True)[0]
+    layer(prefix, past_key_values=actual_cache, use_cache=True)
+    chunk.reset_mock()
+    decoding.reset_mock()
+    actual = layer(continuation, past_key_values=actual_cache, use_cache=True)[0]
+
+    chunk.assert_called_once()
+    decoding.assert_not_called()
+    assert chunk.call_args.kwargs['max_CG_iteration'] == layer.max_cg_step_training
+    assert_close('o', expected[:, 4:], actual, 0.02)
+    for expected_state, actual_state in zip(expected_cache[0]['recurrent_state'], actual_cache[0]['recurrent_state']):
+        assert_close('recurrent_state', expected_state, actual_state, 0.02)
+
+
+@pytest.mark.parametrize('layout', ['dense', 'packed', 'masked'])
+@torch.no_grad()
+def test_cached_singleton_continuation(layout, monkeypatch):
+    torch.manual_seed(42)
+    chunk = Mock(wraps=mesa_net.chunk_mesa_net)
+    decoding = Mock(wraps=mesa_net.mesa_net_decoding_one_step)
+    monkeypatch.setattr(mesa_net, 'chunk_mesa_net', chunk)
+    monkeypatch.setattr(mesa_net, 'mesa_net_decoding_one_step', decoding)
+    layer = MesaNet(
+        hidden_size=64,
+        num_heads=1,
+        head_dim=64,
+        max_cg_step_training=1,
+        max_cg_step_decoding=5,
+        layer_idx=0,
+    ).to(device=device, dtype=torch.float16).eval()
+    prefix = torch.randn(2, 4, 64, device=device, dtype=torch.float16)
+    continuation = torch.randn(2, 64, device=device, dtype=torch.float16)
+    actual_cache = Cache()
+    layer(prefix, past_key_values=actual_cache, use_cache=True)
+    expected, expected_caches = [], []
+    for i in range(2):
+        expected_cache = Cache()
+        layer(prefix[i:i+1], past_key_values=expected_cache, use_cache=True)
+        expected.append(layer(continuation[i:i+1].unsqueeze(0), past_key_values=expected_cache, use_cache=True)[0].squeeze(0))
+        expected_caches.append(expected_cache)
+    expected = torch.cat(expected)
+    chunk.reset_mock()
+    decoding.reset_mock()
+
+    if layout == 'dense':
+        actual = layer(continuation.unsqueeze(1), past_key_values=actual_cache, use_cache=True)[0].squeeze(1)
+    elif layout == 'packed':
+        cu_seqlens = torch.arange(3, device=device, dtype=torch.int32)
+        actual = layer(
+            continuation.unsqueeze(0),
+            past_key_values=actual_cache,
+            use_cache=True,
+            cu_seqlens=cu_seqlens,
+        )[0].squeeze(0)
+    else:
+        mask = torch.tensor([[False, True, False], [False, False, True]], device=device)
+        padded = continuation.new_zeros(2, 3, 64)
+        padded[mask] = continuation
+        actual = layer(padded, attention_mask=mask, past_key_values=actual_cache, use_cache=True)[0][mask]
+
+    chunk.assert_not_called()
+    decoding.assert_called_once()
+    assert decoding.call_args.kwargs['max_CG_iteration'] == layer.max_cg_step_decoding
+    assert_close('o', expected, actual, 0.02)
+    for i, expected_cache in enumerate(expected_caches):
+        for name, expected_state, actual_state in zip(
+            ('h_kk', 'h_kv'),
+            expected_cache[0]['recurrent_state'],
+            actual_cache[0]['recurrent_state'],
+        ):
+            assert_close(name, expected_state, actual_state[i:i+1], 0.02)
+
+
+@torch.no_grad()
+def test_cached_packed_zero_length_continuation(monkeypatch):
+    torch.manual_seed(42)
+    chunk = Mock(wraps=mesa_net.chunk_mesa_net)
+    decoding = Mock(wraps=mesa_net.mesa_net_decoding_one_step)
+    monkeypatch.setattr(mesa_net, 'chunk_mesa_net', chunk)
+    monkeypatch.setattr(mesa_net, 'mesa_net_decoding_one_step', decoding)
+    layer = MesaNet(
+        hidden_size=64,
+        num_heads=1,
+        head_dim=64,
+        max_cg_step_training=1,
+        max_cg_step_decoding=5,
+        layer_idx=0,
+    ).to(device=device, dtype=torch.float16).eval()
+    prefix = torch.randn(2, 4, 64, device=device, dtype=torch.float16)
+    continuation = torch.randn(2, 64, device=device, dtype=torch.float16)
+    actual_cache = Cache()
+    layer(prefix, past_key_values=actual_cache, use_cache=True)
+    expected, expected_caches = [], []
+    for i in range(2):
+        expected_cache = Cache()
+        layer(prefix[i:i+1], past_key_values=expected_cache, use_cache=True)
+        if i == 0:
+            expected.append(continuation.new_empty(0, 64))
+        else:
+            expected.append(
+                layer(continuation.unsqueeze(0), past_key_values=expected_cache, use_cache=True)[0].squeeze(0)
+            )
+        expected_caches.append(expected_cache)
+    expected = torch.cat(expected)
+    chunk.reset_mock()
+    decoding.reset_mock()
+    cu_seqlens = torch.tensor([0, 0, 2], device=device, dtype=torch.int32)
+    actual = layer(
+        continuation.unsqueeze(0),
+        past_key_values=actual_cache,
+        use_cache=True,
+        cu_seqlens=cu_seqlens,
+    )[0].squeeze(0)
+
+    chunk.assert_called_once()
+    decoding.assert_not_called()
+    assert chunk.call_args.kwargs['max_CG_iteration'] == layer.max_cg_step_training
+    assert_close('o', expected, actual, 0.02)
+    for i, expected_cache in enumerate(expected_caches):
+        for name, expected_state, actual_state in zip(
+            ('h_kk', 'h_kv'),
+            expected_cache[0]['recurrent_state'],
+            actual_cache[0]['recurrent_state'],
+        ):
+            assert_close(name, expected_state, actual_state[i:i+1], 0.02)
