@@ -19,8 +19,8 @@ if TYPE_CHECKING:
     from torch.distributed import ProcessGroup
 
 
-def _validate_cp_kwargs(**kwargs) -> None:
-    if kwargs.pop('use_tf32x3_affine_chain', True) is False:
+def _validate_cp_kwargs(use_tf32x3_affine_chain: bool = True, **kwargs) -> None:
+    if use_tf32x3_affine_chain is False:
         raise ValueError(
             "use_tf32x3_affine_chain=False is no longer supported; "
             "CP requires TF32x3 on NVIDIA and IEEE FP32 on Ascend."
@@ -79,7 +79,7 @@ class FLACPContext:
         post_num_ranks: int | None = None,
         conv1d_kernel_size: int | None = None,
         pre_num_conv_tokens: int | None = None,
-        *,
+        use_tf32x3_affine_chain: bool = True,
         pre_num_ranks_dev: torch.Tensor | None = None,
         post_num_ranks_dev: torch.Tensor | None = None,
         layout: str = 'contiguous',
@@ -92,7 +92,7 @@ class FLACPContext:
         pre_num_conv_tokens_by_part: tuple[int, int] | None = None,
         **kwargs,
     ):
-        _validate_cp_kwargs(**kwargs)
+        _validate_cp_kwargs(use_tf32x3_affine_chain=use_tf32x3_affine_chain, **kwargs)
         self.group = group
         self.cu_seqlens = cu_seqlens
         self.cu_seqlens_cpu = cu_seqlens_cpu
@@ -179,11 +179,11 @@ def get_cp_cu_seqlens(
     rank: int | None = None,
     group: dist.ProcessGroup | None = None,
     conv1d_kernel_size: int | None = None,
-    *,
+    use_tf32x3_affine_chain: bool = True,
     layout: str = 'contiguous',
     **kwargs,
 ) -> FLACPContext:
-    _validate_cp_kwargs(**kwargs)
+    _validate_cp_kwargs(use_tf32x3_affine_chain=use_tf32x3_affine_chain, **kwargs)
     if world_size is None:
         assert group is not None
         world_size = dist.get_world_size(group=group)
@@ -279,7 +279,7 @@ def build_cp_context(
     group: ProcessGroup,
     conv1d_kernel_size: int | None = None,
     cu_seqlens_cpu: torch.Tensor | None = None,
-    *,
+    use_tf32x3_affine_chain: bool = True,
     layout: str = 'contiguous',
     **kwargs,
 ) -> FLACPContext:
@@ -294,12 +294,12 @@ def build_cp_context(
             Convolution kernel size. Default: `None`.
         cu_seqlens_cpu (torch.Tensor, Optional):
             CPU sequence boundaries to avoid a device-to-host transfer. Default: `None`.
+        use_tf32x3_affine_chain (bool, Optional):
+            Legacy precision argument. Must be `True`; CP always uses the backend's required precision. Default: `True`.
         layout (str, Optional):
             Partition layout. Default: 'contiguous'. Each rank receives one interval in contiguous mode.
             In 'zigzag' mode, rank r receives intervals r and 2 * world_size - 1 - r,
             concatenated as [front; back]. Each interval contains T / (2 * world_size) tokens.
-        **kwargs:
-            Accepts legacy `use_tf32x3_affine_chain=True`; `False` raises `ValueError`.
 
     Returns:
         FLACPContext:
@@ -310,6 +310,7 @@ def build_cp_context(
         cu_seqlens_cpu=cu_seqlens_cpu,
         group=group,
         conv1d_kernel_size=conv1d_kernel_size,
+        use_tf32x3_affine_chain=use_tf32x3_affine_chain,
         layout=layout,
         **kwargs,
     )
