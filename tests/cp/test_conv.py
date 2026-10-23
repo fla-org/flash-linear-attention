@@ -122,23 +122,9 @@ def _run_causal_conv1d(
 
 
 @pytest.mark.parametrize(
-    ('world_size', 'lengths', 'D', 'W', 'activation', 'has_bias', 'has_residual',
-     'non_contiguous', 'dtype', 'layout', 'backend'),
+    ('world_size', 'lengths', 'backend', 'options'),
     [
-        pytest.param(
-            world_size,
-            lengths,
-            128,
-            4,
-            'swish',
-            True,
-            False,
-            False,
-            torch.float32,
-            layout,
-            backend,
-            id=f'{name}-{backend}',
-        )
+        pytest.param(world_size, lengths, backend, {'layout': layout}, id=f'{name}-{backend}')
         for world_size, lengths, layout, backends, name in [
             (2, [300, 400, 324], 'contiguous', ('triton', 'cuda', 'mix'), 'cp2-sequence-cut'),
             (2, [512, 512], 'contiguous', ('triton', 'cuda'), 'cp2-boundary-aligned'),
@@ -163,91 +149,84 @@ def _run_causal_conv1d(
         pytest.param(
             2,
             lengths,
-            D,
-            W,
-            activation,
-            has_bias,
-            has_residual,
-            non_contiguous,
-            dtype,
-            'contiguous',
             'cuda',
+            {**options, 'dtype': dtype},
             id=f'{name}-{dtype_name}',
         )
-        for lengths, D, W, activation, has_bias, has_residual, non_contiguous, name in [
-            ([126], 65, 2, None, False, False, False, 'dense-width-2'),
-            ([62, 1, 63], 127, 3, 'silu', True, True, True, 'packed-width-3-strided'),
-            ([65, 61], 33, 4, 'swish', False, True, True, 'packed-width-4-strided'),
-            ([2, 4], 7, 4, None, True, True, False, 'minimum-local-length'),
+        for lengths, options, name in [
+            ([126], dict(D=65, W=2, activation=None, has_bias=False), 'dense-width-2'),
+            ([62, 1, 63], dict(D=127, W=3, activation='silu', has_residual=True, non_contiguous=True), 'packed-width-3-strided'),
+            ([65, 61], dict(D=33, has_bias=False, has_residual=True, non_contiguous=True), 'packed-width-4-strided'),
+            ([2, 4], dict(D=7, activation=None, has_residual=True), 'minimum-local-length'),
         ]
         for dtype, dtype_name in [(torch.float32, 'fp32'), (torch.float16, 'fp16'), (torch.bfloat16, 'bf16')]
     ],
 )
-def test_causal_conv1d(
-    run_distributed,
-    world_size: int,
-    lengths: list[int],
-    D: int,
-    W: int,
-    activation: str | None,
-    has_bias: bool,
-    has_residual: bool,
-    non_contiguous: bool,
-    dtype: torch.dtype,
-    layout: str,
-    backend: str,
-) -> None:
+def test_causal_conv1d(run_distributed, world_size: int, lengths: list[int], backend: str, options: dict) -> None:
     if device != 'cuda' or device_torch_lib.device_count() < world_size:
         pytest.skip(f'Requires {world_size} CUDA or ROCm GPUs')
     if backend == 'cuda':
         if not IS_NVIDIA:
             pytest.skip('CUDA backend requires an NVIDIA GPU')
         pytest.importorskip('causal_conv1d')
+    options = dict(
+        D=128,
+        W=4,
+        activation='swish',
+        has_bias=True,
+        has_residual=False,
+        non_contiguous=False,
+        dtype=torch.float32,
+        layout='contiguous',
+    ) | options
     run_distributed(
         worker=_run_causal_conv1d,
         world_size=world_size,
         lengths=lengths,
-        D=D,
-        W=W,
-        activation=activation,
-        has_bias=has_bias,
-        has_residual=has_residual,
-        non_contiguous=non_contiguous,
-        dtype=dtype,
-        layout=layout,
         conv_backend=backend,
+        **options,
     )
 
 
 @pytest.mark.parametrize(
-    ('case', 'error', 'match'),
+    ('inputs', 'error', 'match'),
     [
-        pytest.param('layout', NotImplementedError, 'contiguous CP', id='zigzag'),
-        pytest.param('width', NotImplementedError, 'kernel widths', id='width-1'),
-        pytest.param('shape', ValueError, 'input shape', id='batched'),
-        pytest.param('length', ValueError, 'tokens per rank', id='short-rank'),
-        pytest.param('context', ValueError, 'kernel width must match', id='mismatched-width'),
-        pytest.param('activation', NotImplementedError, 'activation must be', id='relu'),
-        pytest.param('package', ImportError, 'causal-conv1d', id='missing-package'),
+        pytest.param({'layout': 'zigzag'}, NotImplementedError, 'contiguous CP', id='zigzag'),
+        pytest.param({'width': 1}, NotImplementedError, 'kernel widths', id='width-1'),
+        pytest.param({'shape': (2, 8, 8)}, ValueError, 'input shape', id='batched'),
+        pytest.param({'shape': (1, 2, 8)}, ValueError, 'tokens per rank', id='short-rank'),
+        pytest.param({'context_width': 3}, ValueError, 'kernel width must match', id='mismatched-width'),
+        pytest.param({'activation': 'relu'}, NotImplementedError, 'activation must be', id='relu'),
     ],
 )
-def test_causal_conv1d_cuda_invalid(monkeypatch: pytest.MonkeyPatch, case: str, error: type[Exception], match: str) -> None:
+def test_causal_conv1d_cuda_invalid(monkeypatch, inputs, error, match):
     def unexpected_cuda_call(**kwargs) -> None:
         pytest.fail('Invalid arguments must be rejected before CUDA execution')
 
-    monkeypatch.setattr(ops, 'causal_conv1d_fn_cuda', None if case == 'package' else unexpected_cuda_call)
-    x = torch.zeros(2 if case == 'shape' else 1, 2 if case == 'length' else 8, 8)
-    weight = torch.zeros(8, 1 if case == 'width' else 4)
+    monkeypatch.setattr(ops, 'causal_conv1d_fn_cuda', unexpected_cuda_call)
+    x = torch.zeros(inputs.get('shape', (1, 8, 8)))
+    weight = torch.zeros(8, inputs.get('width', 4))
     cp_context = FLACPContext(
         cu_seqlens=torch.tensor([0, x.shape[1]], dtype=torch.int32),
-        conv1d_kernel_size=3 if case == 'context' else weight.shape[-1],
-        layout='zigzag' if case == 'layout' else 'contiguous',
+        conv1d_kernel_size=inputs.get('context_width', weight.shape[-1]),
+        layout=inputs.get('layout', 'contiguous'),
     )
     with pytest.raises(error, match=match):
         causal_conv1d(
             x=x,
             weight=weight,
-            activation='relu' if case == 'activation' else None,
+            activation=inputs.get('activation'),
             backend='cuda',
             cp_context=cp_context,
+        )
+
+
+def test_causal_conv1d_cuda_missing_package(monkeypatch):
+    monkeypatch.setattr(ops, 'causal_conv1d_fn_cuda', None)
+    with pytest.raises(ImportError, match='causal-conv1d'):
+        causal_conv1d(
+            x=torch.zeros(1, 8, 8),
+            weight=torch.zeros(8, 4),
+            backend='cuda',
+            cp_context=FLACPContext(cu_seqlens=torch.tensor([0, 8], dtype=torch.int32), conv1d_kernel_size=4),
         )

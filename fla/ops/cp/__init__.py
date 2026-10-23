@@ -5,9 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-# Context Parallel operators and utilities
-
-from .comm import (
+from fla.ops.cp.comm import (
     all_gather_into_tensor,
     all_reduce_sum,
     conv_cp_send_recv_bwd,
@@ -15,7 +13,7 @@ from .comm import (
     send_recv_bwd,
     send_recv_fwd,
 )
-from .context import (
+from fla.ops.cp.context import (
     FLACPContext,
     build_cp_context,
 )
