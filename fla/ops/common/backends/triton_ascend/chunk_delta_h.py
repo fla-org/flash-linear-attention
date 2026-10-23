@@ -22,19 +22,23 @@ from fla.utils.ascend_ub_manager import (
     get_ub_manager,
 )
 
-# all fp32 state slabs stay live; w/k use one slab at a time.
+# b_h[BK,BV] fp32 × n_slabs stay live; the w/v/k one-slab tiles are all live
+# together ahead of the h store, one [BK,BT] fp32 tile more than the estimate
+# below -- deliberate: the ~4.6KiB soft headroom cannot cover it, and D256
+# only fits with ``enable_ubuf_saving`` (planner stages dot tiles in cube-side
+# cbuf/cc, UB packed by life interval: 80KiB UB / 128KiB cbuf / cc measured;
+# without the option it requires 256KiB UB and fails to compile).
 _FWD_H_MEM_MULT = 8.0
 _SAFETY_MARGIN = 0.80
 _FALLBACK_BV = 16
 _MAX_BV = 64
 _FWD_H_BT = 64
-# live-range packing fits BK=256/BV=128 despite a peak estimate of 1.18 times physical UB capacity.
+# Soft over-admit: D256 BK=256/BV=128 estimate peaks at 1.18× 192KiB (cost 14 vs 22 for BK=128/BV=128).
 _FWD_UB_SOFT = 1.20
 _DHU_BT = 64
-# host-precomputed gates allow live-range packing to reduce the estimated peak.
+# Soft UB over-admit (live-range can beat the peak estimate); also covers the
+# inline-gate (in-kernel exp2) path.
 _DHU_UB_SOFT = 1.15
-# in-kernel exp2(g) raises live UB usage to roughly 1.7 times the analytical estimate.
-_DHU_UB_GATE_INLINE = 0.60
 
 
 def _get_bv(K: int, V: int) -> int:
@@ -51,12 +55,17 @@ def _get_bv(K: int, V: int) -> int:
 
 
 def _fwd_h_peak_bytes(BK: int, BV: int, n_slabs: int, BT: int = _FWD_H_BT) -> int:
-    """Estimate forward UB usage with all state slabs live and one w/k slab at a time."""
+    """b_h all slabs stay live (fp32); w/v/k one-slab tiles.
+
+    Omits one [BK,BT] tile (post-hoist w/v/k live together before the h
+    store); covered by ``enable_ubuf_saving``, not the soft factor -- see
+    the comment block above.
+    """
     return n_slabs * BK * BV * 4 + BK * BT * 4 + BT * BV * 4 + BK * 4 + 12 * BT
 
 
 def _fwd_h_tile_cost(K: int, V: int, BK: int, BV: int) -> int:
-    """Scalar proxy: nv × (base ptrs + ~4 per K-slab), same family as bwd dhu."""
+    """Scalar proxy: nv × (base ptrs + ~4 per K-slab)."""
     return triton.cdiv(V, BV) * (3 + 4 * triton.cdiv(K, BK))
 
 
@@ -92,45 +101,9 @@ def _select_fwd_h_tiles(K: int, V: int, state_v_first: bool) -> tuple[int, int]:
     return best[1], best[2]
 
 
-def _dhu_peak_bytes(BK: int, BV: int, n_slabs: int, BT: int = _DHU_BT) -> int:
-    # all state-gradient slabs stay live; q/w use one slab at a time.
-    return n_slabs * BK * BV * 4 + 2 * BK * BT * 2 + BT * BV * 2 + BT * BV * 4 + 12 * BT
-
-
-def _dhu_tile_cost(K: int, V: int, BK: int, BV: int) -> int:
-    """Reverse-loop scalar proxy: nv × (base ptrs + ~4 per K-slab)."""
-    return triton.cdiv(V, BV) * (3 + 4 * triton.cdiv(K, BK))
-
-
-def _select_bwd_dhu_tiles(K: int, V: int, state_v_first: bool, *, gate_inline: bool = False) -> tuple[int, int]:
-    """Choose backward tiles, reserving extra UB when tails or varlen require in-kernel gate evaluation."""
-    if state_v_first:
-        return 64, _get_bv(K=K, V=V)
-
-    soft_cap = int(get_ub_manager().ub_capacity_bytes * (_DHU_UB_GATE_INLINE if gate_inline else _DHU_UB_SOFT))
-    # the backward kernel covers K with up to four fixed 64-column slabs.
-    max_bk = 64
-    desired_v = triton.next_power_of_2(V)
-    # partial K/V slabs plus tail-token masking can exceed UB with BV > 64 (e.g. D=100).
-    if K % 64 or V % 64:
-        desired_v = min(desired_v, 64)
-    best: tuple[int, int, int] | None = None  # cost, BK, BV
-
-    bk = 64
-    while bk <= max_bk:
-        n_slabs = triton.cdiv(K, bk)
-        bv = 16
-        while bv <= min(desired_v, 256):
-            if _dhu_peak_bytes(BK=bk, BV=bv, n_slabs=n_slabs) <= soft_cap:
-                cost = _dhu_tile_cost(K=K, V=V, BK=bk, BV=bv)
-                if best is None or cost < best[0] or (cost == best[0] and bk > best[1]):
-                    best = (cost, bk, bv)
-            bv *= 2
-        bk *= 2
-
-    if best is None:
-        return 64, _get_bv(K=K, V=V)
-    return best[1], best[2]
+def _dhu_peak_bytes(BK: int, BV: int, BT: int = _DHU_BT) -> int:
+    # [BK, BV] fp32 dh accumulator plus the q/w one-slab tiles dominate.
+    return BK * BV * 4 + 2 * BK * BT * 2 + BT * BV * 2 + BT * BV * 4 + 12 * BT
 
 
 def _launch_core_grid(kernel, *, task_num: int, kernel_kwargs: dict, **compile_opts) -> None:
@@ -548,11 +521,22 @@ def chunk_gated_delta_rule_h_fwd_kernel_single_slab(
 
         for i_t in range(NT):
             h_base = h_nh + tl.cast(i_t, tl.int64) * DH_CS
+            # issue the chunk's big-tile loads (w/v/k, +gk_last) before the h
+            # store so they are in flight behind any conservative
+            # store->load barrier instead of the dependent dots.
+            p_w1 = tl.make_block_ptr(w_base, (T, K), (stride_w, 1), (i_t * BT, 0), (BT, BK), (1, 0))
+            b_w = tl.load(p_w1).to(tl.float32)
+            p_v = tl.make_block_ptr(v_base, (T, V), (stride_v, 1), (i_t * BT, v_start), (BT, BV), (1, 0))
+            b_v_new_in = tl.load(p_v).to(tl.float32)
+            p_k1 = tl.make_block_ptr(k_base, (K, T), (1, stride_k), (0, i_t * BT), (BK, BT), (0, 1))
+            b_k = tl.load(p_k1).to(tl.float32)
+            if USE_GK:
+                gk_base = gk_last_exp_nh + tl.cast(i_t, tl.int64) * K
+                b_gk_last1 = tl.load(gk_base + o_k).to(tl.float32)
+
             p_h1 = tl.make_block_ptr(h_base, (K, V), (V, 1), (0, v_start), (BK, BV), (1, 0))
             tl.store(p_h1, b_h1.to(p_h1.dtype.element_ty))
 
-            p_w1 = tl.make_block_ptr(w_base, (T, K), (stride_w, 1), (i_t * BT, 0), (BT, BK), (1, 0))
-            b_w = tl.load(p_w1).to(tl.float32)
             b_v = tl.dot(b_w, b_h1.to(b_w.dtype))
 
             if USE_G:
@@ -560,8 +544,7 @@ def chunk_gated_delta_rule_h_fwd_kernel_single_slab(
                 b_g_ratio = tl.load(p_g_ratio).to(tl.float32)
                 b_g_last = tl.load(g_last_exp_ptr + i_t).to(tl.float32)
 
-            p_v = tl.make_block_ptr(v_base, (T, V), (stride_v, 1), (i_t * BT, v_start), (BT, BV), (1, 0))
-            b_v = tl.load(p_v).to(tl.float32) - b_v
+            b_v = b_v_new_in - b_v
             if SAVE_NEW_VALUE:
                 p_v_new = tl.make_block_ptr(v_new_base, (T, V), (stride_v, 1), (i_t * BT, v_start), (BT, BV), (1, 0))
                 tl.store(p_v_new, b_v.to(p_v_new.dtype.element_ty))
@@ -571,12 +554,8 @@ def chunk_gated_delta_rule_h_fwd_kernel_single_slab(
                 b_h1 *= b_g_last
 
             if USE_GK:
-                gk_base = gk_last_exp_nh + tl.cast(i_t, tl.int64) * K
-                b_gk_last1 = tl.load(gk_base + o_k).to(tl.float32)
                 b_h1 *= b_gk_last1[:, None]
 
-            p_k1 = tl.make_block_ptr(k_base, (K, T), (1, stride_k), (0, i_t * BT), (BK, BT), (0, 1))
-            b_k = tl.load(p_k1).to(tl.float32)
             b_h1 = tl.dot(b_k, b_v, b_h1)
 
         if STORE_FINAL_STATE:
@@ -759,11 +738,37 @@ def chunk_gated_delta_rule_h_bwd_kernel(
     USE_FINAL_STATE_GRADIENT: tl.constexpr,
     STATE_V_FIRST: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    T_ALIGNED: tl.constexpr,
 ):
+    """Oneslab path: a single [BK, BV] (or [BV, BK] for ``STATE_V_FIRST``) dh
+    accumulator covers all of K, with no K-slab split.
+
+    Halves the per-chunk dot count of the retired blockdim64 kernel (3 vs 6
+    dots at K=128), which is bound by per-iteration cross-pipe synchronization
+    rather than cube throughput. Covers every wrapper input: varlen
+    (per-document T via cu_seqlens/chunk_offsets), ``STATE_V_FIRST``
+    transposed states, non-power-of-two K (BK = next_pow2(K), boundary-check
+    zero padding is exact for the dot contractions), unaligned T tails and
+    inline gates when host precompute is unavailable. Dense ``T_ALIGNED``
+    inputs with K == BK and V % BV == 0 compile without boundary checks.
+    """
     core_id = tl.program_id(0)
+    DH_CS: tl.constexpr = HV * K * V
+    stride_v: tl.constexpr = HV * V
+    stride_k: tl.constexpr = H * K
+    stride_w: tl.constexpr = HV * K
+    NV: tl.constexpr = tl.cdiv(V, BV)
+    K_ALIGNED: tl.constexpr = K == BK
+    V_ALIGNED: tl.constexpr = V % BV == 0
+    BC_TK: tl.constexpr = T_ALIGNED and K_ALIGNED
+    BC_TV: tl.constexpr = T_ALIGNED and V_ALIGNED
+    BC_KV: tl.constexpr = K_ALIGNED and V_ALIGNED
     T_max = T
+    if USE_GK:
+        o_k = tl.arange(0, BK)
+
     for task_id in tl.range(core_id, task_num, num_core):
-        i_nh = task_id.to(tl.int64)
+        i_v, i_nh = task_id % NV, (task_id // NV).to(tl.int64)
         i_n, i_h = i_nh // HV, i_nh % HV
         if IS_VARLEN:
             bos, eos = (
@@ -775,13 +780,9 @@ def chunk_gated_delta_rule_h_bwd_kernel(
             boh = tl.load(chunk_offsets + i_n).to(tl.int64)
         else:
             bos = tl.cast(i_n, tl.int64) * T_max
-            eos = bos + T_max
             NT = tl.cdiv(T, BT)
             boh = tl.cast(i_n, tl.int64) * NT
-
-        stride_v = HV * V
-        stride_k = H * K
-        stride_w = HV * K
+        v_start = i_v * BV
 
         q_base = q + (bos * H + i_h // (HV // H)) * K
         k_base = k + (bos * H + i_h // (HV // H)) * K
@@ -797,305 +798,196 @@ def chunk_gated_delta_rule_h_bwd_kernel(
                 g_exp_base = g_exp + (tl.cast(i_n, tl.int64) * HV + i_h) * T_max
                 g_ratio_base = g_ratio + (tl.cast(i_n, tl.int64) * HV + i_h) * T_max
                 g_last_exp_base = g_last_exp + (tl.cast(i_n, tl.int64) * HV + i_h) * NT
-                g_base = g
             elif IS_VARLEN:
                 g_base = g + (bos + tl.cast(i_h, tl.int64) * T_max)
-                g_exp_base = g_exp
-                g_ratio_base = g_ratio
-                g_last_exp_base = g_last_exp
             else:
                 g_base = g + (tl.cast(i_n, tl.int64) * HV + i_h) * T_max
-                g_exp_base = g_exp
-                g_ratio_base = g_ratio
-                g_last_exp_base = g_last_exp
-        else:
-            g_base = g
-            g_exp_base = g_exp
-            g_ratio_base = g_ratio
-            g_last_exp_base = g_last_exp
 
-        NV = tl.cdiv(V, BV)
-        for i_v in range(NV):
-            v_start = i_v * BV
+        if STATE_V_FIRST:
+            b_dh = tl.zeros([BV, BK], dtype=tl.float32)
+        else:
+            b_dh = tl.zeros([BK, BV], dtype=tl.float32)
+        if USE_FINAL_STATE_GRADIENT:
+            dht_base = dht + i_nh * K * V
+            if STATE_V_FIRST:
+                p_dht = tl.make_block_ptr(dht_base, (V, K), (K, 1), (v_start, 0), (BV, BK), (1, 0))
+            else:
+                p_dht = tl.make_block_ptr(dht_base, (K, V), (V, 1), (0, v_start), (BK, BV), (1, 0))
+            if BC_KV:
+                b_dh += tl.load(p_dht)
+            else:
+                b_dh += tl.load(p_dht, boundary_check=(0, 1))
+
+        dh_chunk = dh_base + (NT - 1).to(tl.int64) * DH_CS
+
+        for i_t in range(NT - 1, -1, -1):
+            # Loads first: none depend on b_dh, so MTE latency overlaps the
+            # previous iteration's dot chain instead of extending it.
+            p_do = tl.make_block_ptr(do_base, (T, V), (stride_v, 1), (i_t * BT, v_start), (BT, BV), (1, 0))
+            if BC_TV:
+                b_do = tl.load(p_do)
+            else:
+                b_do = tl.load(p_do, boundary_check=(0, 1))
+            p_k = tl.make_block_ptr(k_base, (T, K), (stride_k, 1), (i_t * BT, 0), (BT, BK), (1, 0))
+            if BC_TK:
+                b_k = tl.load(p_k)
+            else:
+                b_k = tl.load(p_k, boundary_check=(0, 1))
+            p_w = tl.make_block_ptr(w_base, (K, T), (1, stride_w), (0, i_t * BT), (BK, BT), (0, 1))
+            p_q = tl.make_block_ptr(q_base, (K, T), (1, stride_k), (0, i_t * BT), (BK, BT), (0, 1))
+            if BC_TK:
+                b_w = tl.load(p_w)
+                b_q = tl.load(p_q)
+            else:
+                b_w = tl.load(p_w, boundary_check=(0, 1))
+                b_q = tl.load(p_q, boundary_check=(0, 1))
+            p_dv = tl.make_block_ptr(dv_base, (T, V), (stride_v, 1), (i_t * BT, v_start), (BT, BV), (1, 0))
+            if BC_TV:
+                b_dv_in = tl.load(p_dv)
+            else:
+                b_dv_in = tl.load(p_dv, boundary_check=(0, 1))
+            if T_ALIGNED:
+                last_idx = (i_t + 1) * BT - 1
+            else:
+                last_idx = min((i_t + 1) * BT, T) - 1
+            if USE_GK:
+                if K == BK:
+                    b_gk_last = tl.load(gk_base + last_idx * stride_w + o_k).to(tl.float32)
+                else:
+                    # 1-D loads wider than 64 with a genuinely partial boundary
+                    # (raw masked, block_ptr or clamped-index) all trip BiShengIR
+                    # ConvertLinalgRToBinary; a [1, BK] 2-D block load compiles
+                    # and zero-pads the tail, i.e. exp2(0) = 1 on padded rows.
+                    p_gk = tl.make_block_ptr(gk_base + last_idx * stride_w, (1, K), (K, 1), (0, 0), (1, BK), (1, 0))
+                    b_gk_row = tl.load(p_gk, boundary_check=(0, 1)).to(tl.float32)
+            if USE_G:
+                if USE_G_PRECOMP:
+                    bg_last_exp = tl.load(g_last_exp_base + i_t).to(tl.float32)
+                    p_g_ratio = tl.make_block_ptr(g_ratio_base, (T,), (1,), (i_t * BT,), (BT,), (0,))
+                    b_g_ratio = tl.load(p_g_ratio).to(tl.float32)
+                    p_g_exp = tl.make_block_ptr(g_exp_base, (T,), (1,), (i_t * BT,), (BT,), (0,))
+                    b_g_exp = tl.load(p_g_exp).to(tl.float32)
+                else:
+                    bg_last = tl.load(g_base + last_idx).to(tl.float32)
+                    p_g = tl.make_block_ptr(g_base, (T,), (1,), (i_t * BT,), (BT,), (0,))
+                    b_g = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
+                    bg_last_exp = exp2(bg_last)
+                    b_g_exp = exp2(b_g)
+                    b_g_ratio = exp2(bg_last - b_g)
 
             if STATE_V_FIRST:
-                b_dh1 = tl.zeros([BV, 64], dtype=tl.float32)
-                if K > 64:
-                    b_dh2 = tl.zeros([BV, 64], dtype=tl.float32)
-                if K > 128:
-                    b_dh3 = tl.zeros([BV, 64], dtype=tl.float32)
-                if K > 192:
-                    b_dh4 = tl.zeros([BV, 64], dtype=tl.float32)
+                p_dh = tl.make_block_ptr(dh_chunk, (V, K), (K, 1), (v_start, 0), (BV, BK), (1, 0))
             else:
-                b_dh1 = tl.zeros([64, BV], dtype=tl.float32)
-                if K > 64:
-                    b_dh2 = tl.zeros([64, BV], dtype=tl.float32)
-                if K > 128:
-                    b_dh3 = tl.zeros([64, BV], dtype=tl.float32)
-                if K > 192:
-                    b_dh4 = tl.zeros([64, BV], dtype=tl.float32)
+                p_dh = tl.make_block_ptr(dh_chunk, (K, V), (V, 1), (0, v_start), (BK, BV), (1, 0))
+            if BC_KV:
+                tl.store(p_dh, b_dh.to(p_dh.dtype.element_ty))
+            else:
+                tl.store(p_dh, b_dh.to(p_dh.dtype.element_ty), boundary_check=(0, 1))
 
-            if USE_FINAL_STATE_GRADIENT:
-                dht_base = dht + i_nh * K * V
-                if STATE_V_FIRST:
-                    p_dht1 = tl.make_block_ptr(dht_base, (V, K), (K, 1), (v_start, 0), (BV, 64), (1, 0))
-                else:
-                    p_dht1 = tl.make_block_ptr(dht_base, (K, V), (V, 1), (0, v_start), (64, BV), (1, 0))
-                b_dh1 += tl.load(p_dht1, boundary_check=(0, 1))
-                if K > 64:
-                    if STATE_V_FIRST:
-                        p_dht2 = tl.make_block_ptr(dht_base, (V, K), (K, 1), (v_start, 64), (BV, 64), (1, 0))
-                    else:
-                        p_dht2 = tl.make_block_ptr(dht_base, (K, V), (V, 1), (64, v_start), (64, BV), (1, 0))
-                    b_dh2 += tl.load(p_dht2, boundary_check=(0, 1))
-                if K > 128:
-                    if STATE_V_FIRST:
-                        p_dht3 = tl.make_block_ptr(dht_base, (V, K), (K, 1), (v_start, 128), (BV, 64), (1, 0))
-                    else:
-                        p_dht3 = tl.make_block_ptr(dht_base, (K, V), (V, 1), (128, v_start), (64, BV), (1, 0))
-                    b_dh3 += tl.load(p_dht3, boundary_check=(0, 1))
-                if K > 192:
-                    if STATE_V_FIRST:
-                        p_dht4 = tl.make_block_ptr(dht_base, (V, K), (K, 1), (v_start, 192), (BV, 64), (1, 0))
-                    else:
-                        p_dht4 = tl.make_block_ptr(dht_base, (K, V), (V, 1), (192, v_start), (64, BV), (1, 0))
-                    b_dh4 += tl.load(p_dht4, boundary_check=(0, 1))
-
-            if USE_GK:
-                o_k1 = tl.arange(0, 64)
-
-            DH_CS: tl.constexpr = HV * K * V
-            dh_chunk = dh_base + (NT - 1).to(tl.int64) * DH_CS
-
-            for i_t in range(NT - 1, -1, -1):
-                if STATE_V_FIRST:
-                    p_dh1 = tl.make_block_ptr(dh_chunk, (V, K), (K, 1), (v_start, 0), (BV, 64), (1, 0))
-                else:
-                    p_dh1 = tl.make_block_ptr(dh_chunk, (K, V), (V, 1), (0, v_start), (64, BV), (1, 0))
-                tl.store(p_dh1, b_dh1.to(p_dh1.dtype.element_ty), boundary_check=(0, 1))
-                if K > 64:
-                    if STATE_V_FIRST:
-                        p_dh2 = tl.make_block_ptr(dh_chunk, (V, K), (K, 1), (v_start, 64), (BV, 64), (1, 0))
-                    else:
-                        p_dh2 = tl.make_block_ptr(dh_chunk, (K, V), (V, 1), (64, v_start), (64, BV), (1, 0))
-                    tl.store(p_dh2, b_dh2.to(p_dh2.dtype.element_ty), boundary_check=(0, 1))
-                if K > 128:
-                    if STATE_V_FIRST:
-                        p_dh3 = tl.make_block_ptr(dh_chunk, (V, K), (K, 1), (v_start, 128), (BV, 64), (1, 0))
-                    else:
-                        p_dh3 = tl.make_block_ptr(dh_chunk, (K, V), (V, 1), (128, v_start), (64, BV), (1, 0))
-                    tl.store(p_dh3, b_dh3.to(p_dh3.dtype.element_ty), boundary_check=(0, 1))
-                if K > 192:
-                    if STATE_V_FIRST:
-                        p_dh4 = tl.make_block_ptr(dh_chunk, (V, K), (K, 1), (v_start, 192), (BV, 64), (1, 0))
-                    else:
-                        p_dh4 = tl.make_block_ptr(dh_chunk, (K, V), (V, 1), (192, v_start), (64, BV), (1, 0))
-                    tl.store(p_dh4, b_dh4.to(p_dh4.dtype.element_ty), boundary_check=(0, 1))
-
-                if USE_G:
-                    if USE_G_PRECOMP:
-                        bg_last_exp = tl.load(g_last_exp_base + i_t).to(tl.float32)
-                        p_g_exp = tl.make_block_ptr(g_exp_base, (T,), (1,), (i_t * BT,), (BT,), (0,))
-                        p_g_ratio = tl.make_block_ptr(g_ratio_base, (T,), (1,), (i_t * BT,), (BT,), (0,))
-                        b_g_exp = tl.load(p_g_exp, boundary_check=(0,)).to(tl.float32)
-                        b_g_ratio = tl.load(p_g_ratio, boundary_check=(0,)).to(tl.float32)
-                    else:
-                        last_idx = min((i_t + 1) * BT, T) - 1
-                        bg_last = tl.load(g_base + last_idx).to(tl.float32)
-                        p_g = tl.make_block_ptr(g_base, (T,), (1,), (i_t * BT,), (BT,), (0,))
-                        b_g = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
-                        bg_last_exp = exp2(bg_last)
-                        b_g_exp = exp2(b_g)
-                        b_g_ratio = exp2(bg_last - b_g)
-                p_dv = tl.make_block_ptr(dv_base, (T, V), (stride_v, 1), (i_t * BT, v_start), (BT, BV), (1, 0))
-                p_dv2 = tl.make_block_ptr(dv2_base, (T, V), (stride_v, 1), (i_t * BT, v_start), (BT, BV), (1, 0))
-                p_do = tl.make_block_ptr(do_base, (T, V), (stride_v, 1), (i_t * BT, v_start), (BT, BV), (1, 0))
-                b_do = tl.load(p_do, boundary_check=(0, 1))
-
-                p_k = tl.make_block_ptr(k_base, (T, K), (stride_k, 1), (i_t * BT, 0), (BT, 64), (1, 0))
-                b_k = tl.load(p_k, boundary_check=(0, 1))
-                if USE_GK:
-                    last_idx = min((i_t + 1) * BT, T) - 1
-                    b_gk_last1 = tl.load(gk_base + last_idx * stride_w + o_k1, mask=(o_k1 < K), other=0.0).to(tl.float32)
-                if STATE_V_FIRST:
-                    b_dv = tl.dot(b_dh1.to(b_k.dtype), tl.trans(b_k), allow_tf32=False)
+            if STATE_V_FIRST:
+                if K <= 64:
+                    b_dv = tl.dot(b_dh.to(b_k.dtype), tl.trans(b_k), allow_tf32=False)
                     b_dv = tl.trans(b_dv)
                 else:
-                    b_dv = tl.dot(b_k, b_dh1.to(b_k.dtype), allow_tf32=False)
-
-                if K > 64:
-                    p_k = tl.make_block_ptr(k_base, (T, K), (stride_k, 1), (i_t * BT, 64), (BT, 64), (1, 0))
-                    b_k = tl.load(p_k, boundary_check=(0, 1))
-                    if USE_GK:
-                        o_k2 = 64 + o_k1
-                        b_gk_last2 = tl.load(gk_base + last_idx * stride_w + o_k2, mask=(o_k2 < K), other=0.0).to(tl.float32)
-                    if STATE_V_FIRST:
-                        b_dv_part = tl.dot(b_dh2.to(b_k.dtype), tl.trans(b_k), allow_tf32=False)
-                        b_dv += tl.trans(b_dv_part)
-                    else:
-                        b_dv = tl.dot(b_k, b_dh2.to(b_k.dtype), b_dv, allow_tf32=False)
-
-                if K > 128:
-                    p_k = tl.make_block_ptr(k_base, (T, K), (stride_k, 1), (i_t * BT, 128), (BT, 64), (1, 0))
-                    b_k = tl.load(p_k, boundary_check=(0, 1))
-                    if USE_GK:
-                        o_k3 = 128 + o_k1
-                        b_gk_last3 = tl.load(gk_base + last_idx * stride_w + o_k3, mask=(o_k3 < K), other=0.0).to(tl.float32)
-                    if STATE_V_FIRST:
-                        b_dv_part = tl.dot(b_dh3.to(b_k.dtype), tl.trans(b_k), allow_tf32=False)
-                        b_dv += tl.trans(b_dv_part)
-                    else:
-                        b_dv = tl.dot(b_k, b_dh3.to(b_k.dtype), b_dv, allow_tf32=False)
-
-                if K > 192:
-                    p_k = tl.make_block_ptr(k_base, (T, K), (stride_k, 1), (i_t * BT, 192), (BT, 64), (1, 0))
-                    b_k = tl.load(p_k, boundary_check=(0, 1))
-                    if USE_GK:
-                        o_k4 = 192 + o_k1
-                        b_gk_last4 = tl.load(gk_base + last_idx * stride_w + o_k4, mask=(o_k4 < K), other=0.0).to(tl.float32)
-                    if STATE_V_FIRST:
-                        b_dv_part = tl.dot(b_dh4.to(b_k.dtype), tl.trans(b_k), allow_tf32=False)
-                        b_dv += tl.trans(b_dv_part)
-                    else:
-                        b_dv = tl.dot(b_k, b_dh4.to(b_k.dtype), b_dv, allow_tf32=False)
-
-                if USE_G:
-                    if USE_G_PRECOMP:
-                        b_dv *= b_g_ratio[:, None]
-                    else:
-                        m_t = (i_t * BT + tl.arange(0, BT)) < T
-                        b_dv *= tl.where(m_t, b_g_ratio, 0)[:, None]
-                b_dv += tl.load(p_dv, boundary_check=(0, 1))
+                    # The retired blockdim64 V-first path accumulated dv as one
+                    # 64-wide-K slab dot per band, each transposed and added
+                    # left-to-right; a single full-K dot rounds differently.
+                    # Reproduce the band split exactly: out-of-band products
+                    # are exact +0.0, so each masked band dot matches the
+                    # retired 64-wide slab dot bit for bit.
+                    o_kb = tl.arange(0, BK)
+                    m_kb = (o_kb < 64).to(b_k.dtype)[None, :]
+                    b_dv = tl.trans(tl.dot(b_dh.to(b_k.dtype), tl.trans(b_k * m_kb), allow_tf32=False))
+                    m_kb = ((o_kb >= 64) & (o_kb < 128)).to(b_k.dtype)[None, :]
+                    b_dv += tl.trans(tl.dot(b_dh.to(b_k.dtype), tl.trans(b_k * m_kb), allow_tf32=False))
+                    if K > 128:
+                        m_kb = ((o_kb >= 128) & (o_kb < 192)).to(b_k.dtype)[None, :]
+                        b_dv += tl.trans(tl.dot(b_dh.to(b_k.dtype), tl.trans(b_k * m_kb), allow_tf32=False))
+                    if K > 192:
+                        m_kb = (o_kb >= 192).to(b_k.dtype)[None, :]
+                        b_dv += tl.trans(tl.dot(b_dh.to(b_k.dtype), tl.trans(b_k * m_kb), allow_tf32=False))
+            else:
+                b_dv = tl.dot(b_k, b_dh.to(b_k.dtype), allow_tf32=False)
+            if USE_G:
+                if USE_G_PRECOMP:
+                    b_dv *= b_g_ratio[:, None]
+                else:
+                    m_t = (i_t * BT + tl.arange(0, BT)) < T
+                    b_dv *= tl.where(m_t, b_g_ratio, 0)[:, None]
+            b_dv += b_dv_in
+            if not T_ALIGNED:
                 # dot padding on Ascend can retain NaNs across replays with different tails.
                 # clear invalid tokens before the dH reduction: zero weights do not cancel NaNs.
                 m_t = (i_t * BT + tl.arange(0, BT)) < T
                 b_dv = tl.where(m_t[:, None], b_dv, 0.)
+            p_dv2 = tl.make_block_ptr(dv2_base, (T, V), (stride_v, 1), (i_t * BT, v_start), (BT, BV), (1, 0))
+            if BC_TV:
+                tl.store(p_dv2, b_dv.to(p_dv2.dtype.element_ty))
+            else:
                 tl.store(p_dv2, b_dv.to(p_dv2.dtype.element_ty), boundary_check=(0, 1))
-                # Ascend tl.dot clobbers lhs; b_dv is lhs in the subtract dot across K-slabs.
+            if STATE_V_FIRST:
+                # Ascend tl.dot clobbers lhs; trans(b_dv) is the lhs of the
+                # subtract dot below (single use, one pristine copy suffices).
                 b_dv_pristine = b_dv + 0.0
 
-                if USE_G:
-                    b_dh1 *= bg_last_exp
-                    if K > 64:
-                        b_dh2 *= bg_last_exp
-                    if K > 128:
-                        b_dh3 *= bg_last_exp
-                    if K > 192:
-                        b_dh4 *= bg_last_exp
-                    b_do = b_do * (b_g_exp * scale)[:, None]
-                else:
-                    b_do = b_do * scale
-                # Ascend tl.dot clobbers lhs; b_do is lhs across K-slabs (STATE_V_FIRST path).
-                b_do_c = b_do + 0.0
-                b_do_c2 = b_do + 0.0
-                b_do_c3 = b_do + 0.0
-
-                p_w = tl.make_block_ptr(w_base, (K, T), (1, stride_w), (0, i_t * BT), (64, BT), (0, 1))
-                p_q = tl.make_block_ptr(q_base, (K, T), (1, stride_k), (0, i_t * BT), (64, BT), (0, 1))
-                b_w = tl.load(p_w, boundary_check=(0, 1))
-                b_q = tl.load(p_q, boundary_check=(0, 1))
-                if USE_GK:
-                    if STATE_V_FIRST:
-                        b_dh1 *= exp2(b_gk_last1)[None, :]
-                    else:
-                        b_dh1 *= exp2(b_gk_last1[:, None])
+            if USE_G:
+                b_dh *= bg_last_exp
+                b_do = b_do * (b_g_exp * scale)[:, None]
+            else:
+                b_do = b_do * scale
+            if USE_GK:
                 if STATE_V_FIRST:
-                    b_dh1 = tl.dot(tl.trans(b_do.to(b_q.dtype)), tl.trans(b_q), b_dh1, allow_tf32=False)
-                    b_dv_i = b_dv_pristine + 0.0
-                    b_dh1 -= tl.dot(tl.trans(b_dv_i.to(b_w.dtype)), tl.trans(b_w), allow_tf32=False)
+                    if K == BK:
+                        b_dh *= exp2(b_gk_last)[None, :]
+                    else:
+                        b_dh *= exp2(b_gk_row)
                 else:
-                    b_dh1 += (
-                        tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype), allow_tf32=False)
-                        - tl.dot(b_w, b_dv.to(b_w.dtype), allow_tf32=False)
-                    )
+                    if K == BK:
+                        b_dh *= exp2(b_gk_last[:, None])
+                    else:
+                        b_dh *= exp2(tl.trans(b_gk_row))
+            if STATE_V_FIRST:
+                b_dh = tl.dot(tl.trans(b_do.to(b_q.dtype)), tl.trans(b_q), b_dh, allow_tf32=False)
+                b_dh -= tl.dot(tl.trans(b_dv_pristine.to(b_w.dtype)), tl.trans(b_w), allow_tf32=False)
+            else:
+                b_dh += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype), allow_tf32=False) - tl.dot(
+                    b_w, b_dv.to(b_w.dtype), allow_tf32=False
+                )
+            dh_chunk -= DH_CS
 
-                if K > 64:
-                    p_q = tl.make_block_ptr(q_base, (K, T), (1, stride_k), (64, i_t * BT), (64, BT), (0, 1))
-                    p_w = tl.make_block_ptr(w_base, (K, T), (1, stride_w), (64, i_t * BT), (64, BT), (0, 1))
-                    b_q = tl.load(p_q, boundary_check=(0, 1))
-                    b_w = tl.load(p_w, boundary_check=(0, 1))
-                    if USE_GK:
-                        if STATE_V_FIRST:
-                            b_dh2 *= exp2(b_gk_last2)[None, :]
-                        else:
-                            b_dh2 *= exp2(b_gk_last2[:, None])
-                    if STATE_V_FIRST:
-                        b_dh2 = tl.dot(tl.trans(b_do_c.to(b_q.dtype)), tl.trans(b_q), b_dh2, allow_tf32=False)
-                        b_dv_i = b_dv_pristine + 0.0
-                        b_dh2 -= tl.dot(tl.trans(b_dv_i.to(b_w.dtype)), tl.trans(b_w), allow_tf32=False)
-                    else:
-                        b_dh2 += (
-                            tl.dot(b_q.to(b_q.dtype), b_do_c.to(b_q.dtype), allow_tf32=False)
-                            - tl.dot(b_w, b_dv.to(b_w.dtype), allow_tf32=False)
-                        )
+        if USE_INITIAL_STATE:
+            dh0_base = dh0 + i_nh * K * V
+            if STATE_V_FIRST:
+                p_dh0 = tl.make_block_ptr(dh0_base, (V, K), (K, 1), (v_start, 0), (BV, BK), (1, 0))
+            else:
+                p_dh0 = tl.make_block_ptr(dh0_base, (K, V), (V, 1), (0, v_start), (BK, BV), (1, 0))
+            if BC_KV:
+                tl.store(p_dh0, b_dh.to(p_dh0.dtype.element_ty))
+            else:
+                tl.store(p_dh0, b_dh.to(p_dh0.dtype.element_ty), boundary_check=(0, 1))
 
-                if K > 128:
-                    p_q = tl.make_block_ptr(q_base, (K, T), (1, stride_k), (128, i_t * BT), (64, BT), (0, 1))
-                    p_w = tl.make_block_ptr(w_base, (K, T), (1, stride_w), (128, i_t * BT), (64, BT), (0, 1))
-                    b_q = tl.load(p_q, boundary_check=(0, 1))
-                    b_w = tl.load(p_w, boundary_check=(0, 1))
-                    if USE_GK:
-                        if STATE_V_FIRST:
-                            b_dh3 *= exp2(b_gk_last3)[None, :]
-                        else:
-                            b_dh3 *= exp2(b_gk_last3[:, None])
-                    if STATE_V_FIRST:
-                        b_dh3 = tl.dot(tl.trans(b_do_c2.to(b_q.dtype)), tl.trans(b_q), b_dh3, allow_tf32=False)
-                        b_dv_i = b_dv_pristine + 0.0
-                        b_dh3 -= tl.dot(tl.trans(b_dv_i.to(b_w.dtype)), tl.trans(b_w), allow_tf32=False)
-                    else:
-                        b_dh3 += (
-                            tl.dot(b_q.to(b_q.dtype), b_do_c2.to(b_q.dtype), allow_tf32=False)
-                            - tl.dot(b_w, b_dv.to(b_w.dtype), allow_tf32=False)
-                        )
 
-                if K > 192:
-                    p_q = tl.make_block_ptr(q_base, (K, T), (1, stride_k), (192, i_t * BT), (64, BT), (0, 1))
-                    p_w = tl.make_block_ptr(w_base, (K, T), (1, stride_w), (192, i_t * BT), (64, BT), (0, 1))
-                    b_q = tl.load(p_q, boundary_check=(0, 1))
-                    b_w = tl.load(p_w, boundary_check=(0, 1))
-                    if USE_GK:
-                        if STATE_V_FIRST:
-                            b_dh4 *= exp2(b_gk_last4)[None, :]
-                        else:
-                            b_dh4 *= exp2(b_gk_last4[:, None])
-                    if STATE_V_FIRST:
-                        b_dh4 = tl.dot(tl.trans(b_do_c3.to(b_q.dtype)), tl.trans(b_q), b_dh4, allow_tf32=False)
-                        b_dv_i = b_dv_pristine + 0.0
-                        b_dh4 -= tl.dot(tl.trans(b_dv_i.to(b_w.dtype)), tl.trans(b_w), allow_tf32=False)
-                    else:
-                        b_dh4 += (
-                            tl.dot(b_q.to(b_q.dtype), b_do_c3.to(b_q.dtype), allow_tf32=False)
-                            - tl.dot(b_w, b_dv.to(b_w.dtype), allow_tf32=False)
-                        )
+def _dhu_vfirst_peak_bytes(BK: int, BV: int, BT: int = _DHU_BT) -> int:
+    """STATE_V_FIRST: [BV, BK] fp32 acc plus in-kernel ``tl.trans`` copies of the
+    k/q/w/do/dv dot operands dominate the live set.
+    Assumes sequential dot phases; since the loads-before-dh-store hoist the
+    dv phase also carries the w/q tiles (~2*BK*BT*2 extra). Re-derive before
+    widening tiles for vfirst K=256.
+    """
+    dv_phase = BK * BV * 4 + 2 * BK * BT * 2 + 2 * BT * BV * 4
+    upd_phase = BK * BV * 4 + 4 * BK * BT * 2 + 3 * BT * BV * 4
+    return max(dv_phase, upd_phase) + BT * BV * 2
 
-                dh_chunk -= DH_CS
 
-            if USE_INITIAL_STATE:
-                dh0_base = dh0 + i_nh * K * V
-                if STATE_V_FIRST:
-                    p_dh0 = tl.make_block_ptr(dh0_base, (V, K), (K, 1), (v_start, 0), (BV, 64), (1, 0))
-                else:
-                    p_dh0 = tl.make_block_ptr(dh0_base, (K, V), (V, 1), (0, v_start), (64, BV), (1, 0))
-                tl.store(p_dh0, b_dh1.to(p_dh0.dtype.element_ty), boundary_check=(0, 1))
-                if K > 64:
-                    if STATE_V_FIRST:
-                        p_dh1 = tl.make_block_ptr(dh0_base, (V, K), (K, 1), (v_start, 64), (BV, 64), (1, 0))
-                    else:
-                        p_dh1 = tl.make_block_ptr(dh0_base, (K, V), (V, 1), (64, v_start), (64, BV), (1, 0))
-                    tl.store(p_dh1, b_dh2.to(p_dh1.dtype.element_ty), boundary_check=(0, 1))
-                if K > 128:
-                    if STATE_V_FIRST:
-                        p_dh2 = tl.make_block_ptr(dh0_base, (V, K), (K, 1), (v_start, 128), (BV, 64), (1, 0))
-                    else:
-                        p_dh2 = tl.make_block_ptr(dh0_base, (K, V), (V, 1), (128, v_start), (64, BV), (1, 0))
-                    tl.store(p_dh2, b_dh3.to(p_dh2.dtype.element_ty), boundary_check=(0, 1))
-                if K > 192:
-                    if STATE_V_FIRST:
-                        p_dh3 = tl.make_block_ptr(dh0_base, (V, K), (K, 1), (v_start, 192), (BV, 64), (1, 0))
-                    else:
-                        p_dh3 = tl.make_block_ptr(dh0_base, (K, V), (V, 1), (192, v_start), (64, BV), (1, 0))
-                    tl.store(p_dh3, b_dh4.to(p_dh3.dtype.element_ty), boundary_check=(0, 1))
+def _select_bwd_dhu_oneslab_tiles(K: int, V: int, state_v_first: bool = False) -> tuple[int, int]:
+    """Pick (BK, BV) for the oneslab kernel: BK covers all of K, BV maximal under UB."""
+    bk = triton.next_power_of_2(K)
+    peak = _dhu_vfirst_peak_bytes if state_v_first else _dhu_peak_bytes
+    soft_cap = int(get_ub_manager().ub_capacity_bytes * _DHU_UB_SOFT)
+    bv = min(triton.next_power_of_2(V), 256)
+    while bv > 16 and peak(bk, bv) > soft_cap:
+        bv //= 2
+    return bk, bv
 
 
 def _prepare_dhu_gate_tensors(
@@ -1170,11 +1062,10 @@ def chunk_gated_delta_rule_bwd_dhu_npu(
         BT=BT,
         cu_seqlens=cu_seqlens,
     )
-    gate_inline = g is not None and not use_g_precomp
-    BK, BV = _select_bwd_dhu_tiles(K=K, V=V, state_v_first=state_v_first, gate_inline=gate_inline)
+    BK, BV = _select_bwd_dhu_oneslab_tiles(K=K, V=V, state_v_first=state_v_first)
     _launch_core_grid(
         kernel=chunk_gated_delta_rule_h_bwd_kernel,
-        task_num=N * HV,
+        task_num=N * HV * triton.cdiv(V, BV),
         kernel_kwargs={
             "q": q,
             "k": k,
@@ -1208,6 +1099,7 @@ def chunk_gated_delta_rule_bwd_dhu_npu(
             "USE_FINAL_STATE_GRADIENT": dht is not None,
             "STATE_V_FIRST": state_v_first,
             "IS_VARLEN": cu_seqlens is not None,
+            "T_ALIGNED": cu_seqlens is None and T % BT == 0,
         },
     )
     return dh, dh0, dv2
