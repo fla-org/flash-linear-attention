@@ -259,4 +259,4 @@ def _run_chunk_gradients(rank: int, world_size: int, state_v_first: bool):
 
 @pytest.mark.parametrize('state_v_first', [False, True])
 def test_chunk_gradients(run_distributed, state_v_first: bool):
-    run_distributed(_run_chunk_gradients, world_size=2, state_v_first=state_v_first)
+    run_distributed(worker=_run_chunk_gradients, world_size=2, state_v_first=state_v_first)

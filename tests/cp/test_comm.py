@@ -13,35 +13,38 @@ import torch
 from fla.ops.cp import comm
 
 
-@pytest.mark.parametrize('rank', [0, 1, 2])
 @pytest.mark.parametrize(
-    ('forward', 'flag', 'sources'),
+    ('world_size', 'rank', 'previous', 'following'),
+    [(1, 0, None, None), (3, 0, None, 1), (3, 1, 0, 2), (3, 2, 1, None)],
+)
+@pytest.mark.parametrize(
+    ('op', 'kwargs', 'receive_previous'),
     [
-        pytest.param(True, True, [None, 0, 1], id='forward-previous'),
-        pytest.param(True, False, [1, 2, None], id='forward-next'),
-        pytest.param(False, True, [1, 2, None], id='backward-next'),
-        pytest.param(False, False, [None, 0, 1], id='backward-previous'),
+        pytest.param(comm.send_recv_fwd, {'recv_from_prev': True}, True, id='forward-previous'),
+        pytest.param(comm.send_recv_fwd, {'recv_from_prev': False}, False, id='forward-next'),
+        pytest.param(comm.send_recv_bwd, {'recv_from_next': True}, False, id='backward-next'),
+        pytest.param(comm.send_recv_bwd, {'recv_from_next': False}, True, id='backward-previous'),
+        pytest.param(comm.conv_cp_send_recv_fwd, {}, True, id='conv-forward'),
+        pytest.param(comm.conv_cp_send_recv_bwd, {}, False, id='conv-backward'),
     ],
 )
-def test_send_recv(monkeypatch, rank, forward, flag, sources):
+def test_send_recv(monkeypatch, world_size, rank, previous, following, op, kwargs, receive_previous):
     group = object()
-    gathered = torch.arange(18, dtype=torch.float32).view(3, 2, 3)
+    gathered = torch.arange(world_size * 6, dtype=torch.float32).view(world_size, 2, 3)
+    original = gathered.clone()
     send = gathered[rank].clone()
     gather = Mock(return_value=(gathered, None))
     monkeypatch.setattr(comm.dist, 'get_rank', Mock(return_value=rank))
-    monkeypatch.setattr(comm.dist, 'get_world_size', Mock(return_value=3))
+    monkeypatch.setattr(comm.dist, 'get_world_size', Mock(return_value=world_size))
     monkeypatch.setattr(comm, 'all_gather_into_tensor', gather)
 
-    if forward:
-        received = comm.send_recv_fwd(send_tensor=send, group=group, recv_from_prev=flag)
-    else:
-        received = comm.send_recv_bwd(send_tensor=send, group=group, recv_from_next=flag)
-
-    source = sources[rank]
-    expected = torch.zeros_like(send) if source is None else gathered[source].clone()
+    received = op(send, group=group, **kwargs)
+    source = previous if receive_previous else following
+    expected = torch.zeros_like(send) if source is None else gathered[source]
     assert torch.equal(received, expected)
     gather.assert_called_once_with(inp=send, group=group)
     comm.dist.get_rank.assert_called_once_with(group=group)
     comm.dist.get_world_size.assert_called_once_with(group=group)
     received.fill_(-1)
-    assert torch.equal(gathered, torch.arange(18, dtype=torch.float32).view(3, 2, 3))
+    assert torch.equal(gathered, original)
+    assert torch.equal(send, original[rank])

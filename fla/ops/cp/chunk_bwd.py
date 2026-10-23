@@ -62,13 +62,12 @@ def chunk_cp_bwd_kernel_dh(
     Both the zero-terminal-gradient response and its boundary-gradient transform scan chunks in reverse order.
     """
     i_c, i_h = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
-    i_n = 0
     if IS_VARLEN:
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens).to(tl.int64), tl.load(cu_seqlens + 1).to(tl.int64)
         T = (eos - bos).to(tl.int32)
         NT = tl.cdiv(T, BT)
     else:
-        bos, eos = (i_n * T).to(tl.int64), (i_n * T + T).to(tl.int64)
+        bos = tl.full((), 0, tl.int64)
         NT = tl.cdiv(T, BT)
 
     is_dh_part = i_c * BV < V
@@ -91,35 +90,19 @@ def chunk_cp_bwd_kernel_dh(
     if is_dh_part:
         do += ((bos * HV + i_h) * V).to(tl.int64)
         dv += ((bos * HV + i_h) * V).to(tl.int64)
-        i_v = i_c
-
-        b_dh2, b_dh3, b_dh4 = tl.full((), 0, tl.float32), tl.full((), 0, tl.float32), tl.full((), 0, tl.float32)
-        # zero terminal gradient isolates contributions from this rank's do and dv
-        b_dh1 = tl.zeros([64, BV], dtype=tl.float32)
-        if K > 64:
-            b_dh2 = tl.zeros([64, BV], dtype=tl.float32)
-        if K > 128:
-            b_dh3 = tl.zeros([64, BV], dtype=tl.float32)
-        if K > 192:
-            b_dh4 = tl.zeros([64, BV], dtype=tl.float32)
-
-        o_v = i_v * BV + tl.arange(0, BV)
+        o_v = i_c * BV + tl.arange(0, BV)
         m_v = o_v < V
-        o_k1 = tl.arange(0, 64)
-        m_k1 = o_k1 < K
-        o_k2 = 64 + o_k1
-        m_k2 = o_k2 < K
-        o_k3 = 128 + o_k1
-        m_k3 = o_k3 < K
-        o_k4 = 192 + o_k1
-        m_k4 = o_k4 < K
+        # zero terminal gradient isolates contributions from this rank's do and dv
+        b_dh = ()
+        for i_k in tl.static_range(tl.cdiv(K, 64)):
+            b_dh += (tl.zeros([64, BV], dtype=tl.float32),)
 
         for i_t in range(NT - 1, -1, -1):
+            i_t = i_t.to(tl.int64)
             last_idx = min((i_t + 1) * BT, T) - 1
             o_t = i_t * BT + tl.arange(0, BT)
 
-            # reuse the common recurrence with zero terminal gradient to form the local affine offset
-            b_dh1, b_dh2, b_dh3, b_dh4 = chunk_delta_rule_bwd_dh_state(
+            b_dh = chunk_delta_rule_bwd_dh_state(
                 q=q,
                 k=k,
                 w=w,
@@ -128,7 +111,7 @@ def chunk_cp_bwd_kernel_dh(
                 do=do,
                 dv=dv,
                 dv2=None,
-                b_dh=(b_dh1, b_dh2, b_dh3, b_dh4),
+                b_dh=b_dh,
                 o_t=o_t,
                 o_v=o_v,
                 last_idx=last_idx,
@@ -145,27 +128,20 @@ def chunk_cp_bwd_kernel_dh(
                 STATE_V_FIRST=False,
             )
 
-        p_dh1 = dhm + o_k1[:, None] * (V + K) + o_v[None, :]
-        tl.store(p_dh1, b_dh1.to(p_dh1.dtype.element_ty), mask=m_k1[:, None] & m_v[None, :])
-        if K > 64:
-            p_dh2 = dhm + o_k2[:, None] * (V + K) + o_v[None, :]
-            tl.store(p_dh2, b_dh2.to(p_dh2.dtype.element_ty), mask=m_k2[:, None] & m_v[None, :])
-        if K > 128:
-            p_dh3 = dhm + o_k3[:, None] * (V + K) + o_v[None, :]
-            tl.store(p_dh3, b_dh3.to(p_dh3.dtype.element_ty), mask=m_k3[:, None] & m_v[None, :])
-        if K > 192:
-            p_dh4 = dhm + o_k4[:, None] * (V + K) + o_v[None, :]
-            tl.store(p_dh4, b_dh4.to(p_dh4.dtype.element_ty), mask=m_k4[:, None] & m_v[None, :])
+        for i_k in tl.static_range(tl.cdiv(K, 64)):
+            o_k = i_k * 64 + tl.arange(0, 64).to(tl.int64)
+            p_dh = dhm + o_k[:, None] * (V + K) + o_v[None, :]
+            tl.store(p_dh, b_dh[i_k].to(p_dh.dtype.element_ty), mask=(o_k < K)[:, None] & m_v[None, :])
     else:
         i_k = i_c - tl.cdiv(V, BV)
 
-        o_k = tl.arange(0, BK)
+        o_k = tl.arange(0, BK).to(tl.int64)
         o_kc = tl.arange(0, BV) + i_k * BV
 
         b_m = tl.where(o_k[:, None] == o_kc[None, :], 1.0, 0.0)
 
         for _i_t in range(NT):
-            i_t = NT - 1 - _i_t
+            i_t = (NT - 1 - _i_t).to(tl.int64)
             o_t = i_t * BT + tl.arange(0, BT)
             m_t = o_t < T
 

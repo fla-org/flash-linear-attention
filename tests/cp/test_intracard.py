@@ -185,6 +185,7 @@ def test_chunk_gdn_grouped_heads(monkeypatch):
 @pytest.mark.parametrize('legacy_false', [False, True], ids=['unsupported-device', 'legacy-false'])
 def test_intracard_precision_requirement(entry, legacy_false, monkeypatch):
     monkeypatch.setattr(context, 'IS_NVIDIA', False)
+    monkeypatch.setattr(context, 'IS_NPU', False)
     x = torch.empty(1, 64, 1, 32)
     kwargs = {'use_tf32x3_affine_chain': False} if legacy_false else {}
     error = ValueError if legacy_false else RuntimeError

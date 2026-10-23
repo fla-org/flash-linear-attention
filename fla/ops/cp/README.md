@@ -173,6 +173,8 @@ This design means CP pre-processing must use the **same** tensors as the main ke
 
 The implementation separates rank metadata (`context.py`), collectives (`comm.py`), and state exchange (`chunk_delta_h.py`). Forward and backward affine summaries live in `chunk_fwd.py` and `chunk_bwd.py`; `chunk_merge.py` composes them. The summary and merge kernels are also reused by intra-card CP.
 
+Backward summaries and ordinary chunk backward share one 64-row state-gradient recurrence, including scalar and vector gates. State tiles are statically expanded for the key dimension; storage layout remains a caller-selected specialization. DPLR retains its additive state update.
+
 ### Data Flow
 
 The core challenge of CP is that each rank only sees a local chunk, but the recurrent state depends on all previous tokens. We solve this with an **all-gather + merge** pattern:

@@ -5,7 +5,6 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-
 from unittest.mock import MagicMock, Mock
 
 import pytest

@@ -210,19 +210,19 @@ def _run_chunk(
 
 
 @pytest.mark.parametrize(
-    ('world_size', 'lengths', 'safe_gate', 'op'),
+    ('world_size', 'lengths', 'op'),
     [
-        pytest.param(2, [400, 624], False, chunk_dplr_delta_rule, id='cp2-sequence-cut'),
-        pytest.param(2, [512, 512], False, chunk_dplr_delta_rule, id='cp2-boundary-aligned'),
-        pytest.param(4, [700, 324], False, chunk_dplr_delta_rule, id='cp4-sequence-cut'),
-        pytest.param(4, [1024], False, chunk_dplr_delta_rule, id='cp4-single-sequence'),
-        pytest.param(2, [100, 200, 300, 424], False, chunk_dplr_delta_rule, id='cp2-short-sequences'),
-        pytest.param(2, [400, 624], True, chunk_dplr_delta_rule, id='cp2-safe-gate'),
-        pytest.param(2, [400, 624], False, _chunk_rwkv7, id='cp2-rwkv7-sequence-cut'),
-        pytest.param(4, [1024], False, _chunk_rwkv7, id='cp4-rwkv7-single-sequence'),
+        pytest.param(2, [400, 624], chunk_dplr_delta_rule, id='cp2-sequence-cut'),
+        pytest.param(2, [512, 512], chunk_dplr_delta_rule, id='cp2-boundary-aligned'),
+        pytest.param(4, [700, 324], chunk_dplr_delta_rule, id='cp4-sequence-cut'),
+        pytest.param(4, [1024], chunk_dplr_delta_rule, id='cp4-single-sequence'),
+        pytest.param(2, [100, 200, 300, 424], chunk_dplr_delta_rule, id='cp2-short-sequences'),
+        pytest.param(2, [400, 624], _chunk_rwkv7, id='cp2-rwkv7-sequence-cut'),
+        pytest.param(4, [1024], _chunk_rwkv7, id='cp4-rwkv7-single-sequence'),
     ],
 )
-def test_chunk(run_distributed, world_size, lengths, safe_gate, op):
+@pytest.mark.parametrize('safe_gate', [False, True], ids=['gate', 'safe-gate'])
+def test_chunk(run_distributed, world_size, lengths, op, safe_gate):
     run_distributed(
         worker=_run_chunk,
         world_size=world_size,

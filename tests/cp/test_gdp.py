@@ -171,4 +171,4 @@ def _run_chunk_gradients(rank: int, world_size: int, num_householder: int):
 
 @pytest.mark.parametrize('num_householder', [2, 3], ids=['n2', 'n3'])
 def test_chunk_gradients(run_distributed, num_householder: int):
-    run_distributed(_run_chunk_gradients, world_size=2, num_householder=num_householder)
+    run_distributed(worker=_run_chunk_gradients, world_size=2, num_householder=num_householder)

@@ -7,6 +7,7 @@
 
 import logging
 import os
+from collections.abc import Callable
 from datetime import timedelta
 
 import torch
@@ -58,29 +59,38 @@ def _run_worker(rank, world_size, init_method, backend, worker, kwargs, destroy_
             dist.destroy_process_group()
 
 
-def assert_chunk_matches_cp(op, inputs, do, cu_seqlens, rank, world_size, layout='contiguous', ratio=0.006, **kwargs):
+def assert_chunk_matches_cp(
+    op: Callable,
+    inputs: dict[str, torch.Tensor],
+    do: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    rank: int,
+    world_size: int,
+    layout: str = 'contiguous',
+    ratio: float = 0.006,
+    **kwargs,
+) -> None:
+    """Compare CP outputs and every input gradient with the full-sequence chunk operator."""
     def shard(tensor):
-        return shard_tensor(tensor, rank=rank, world_size=world_size, layout=layout).contiguous()
+        return shard_tensor(tensor=tensor, rank=rank, world_size=world_size, layout=layout).contiguous()
 
-    expected, actual = [], []
-    for cp in [False, True]:
-        leaves = {
-            name: (shard(tensor) if cp else tensor).detach().clone().requires_grad_()
-            for name, tensor in inputs.items()
-        }
-        context = build_cp_context(cu_seqlens=cu_seqlens, group=dist.group.WORLD, layout=layout) if cp else None
+    def run(tensors, do, cp_context=None):
+        tensors = {name: tensor.detach().clone().requires_grad_() for name, tensor in tensors.items()}
         out, _ = op(
-            **leaves,
-            cu_seqlens=None if cp else cu_seqlens,
-            cp_context=context,
+            **tensors,
+            cu_seqlens=cu_seqlens if cp_context is None else None,
+            cp_context=cp_context,
             **kwargs,
         )
-        gradients = torch.autograd.grad(outputs=out, inputs=tuple(leaves.values()), grad_outputs=shard(do) if cp else do)
-        values = [out.detach(), *gradients]
-        if cp:
-            actual = values
-        else:
-            expected = [shard(value) for value in values]
-    for name, ref, result in zip(('o', *('d' + name for name in inputs)), expected, actual):
-        assert torch.isfinite(result).all(), name
-        assert_close(name, ref, result, ratio=ratio)
+        gradients = torch.autograd.grad(outputs=out, inputs=tuple(tensors.values()), grad_outputs=do)
+        return (out.detach(), *gradients)
+
+    ref = run(tensors=inputs, do=do)
+    context = build_cp_context(cu_seqlens=cu_seqlens, group=dist.group.WORLD, layout=layout)
+    tri = run(tensors={name: shard(tensor) for name, tensor in inputs.items()}, do=shard(do), cp_context=context)
+    names = ('o', *('d' + name for name in inputs))
+    for name, expected, actual in zip(names, ref, tri):
+        expected = shard(expected)
+        assert torch.isfinite(expected).all(), name
+        assert torch.isfinite(actual).all(), name
+        assert_close(name, expected, actual, ratio=ratio)

@@ -1415,12 +1415,32 @@ def test_chunk_gated_delta_rule_bwd_dhu_gk(D: int, state_v_first: bool):
 
     dv_local = torch.randn(B, T, HV, D, dtype=dtype, device=device)
     dh_ref, dh0_ref, dv2_ref = chunk_gated_delta_rule_bwd_dhu_ref(
-        q, k, w, u, None, h0, do, dht, dv_local, scale, BT,
-        gk=gk, state_v_first=state_v_first,
+        q=q,
+        k=k,
+        w=w,
+        u=u,
+        g=None,
+        h0=h0,
+        do=do,
+        dht=dht,
+        dv_local=dv_local,
+        scale=scale,
+        chunk_size=BT,
+        gk=gk,
+        state_v_first=state_v_first,
     )
     dh_tri, dh0_tri, dv2_tri = chunk_gated_delta_rule_bwd_dhu(
-        q=q, k=k, w=w, g=None, gk=gk, h0=h0, dht=dht, do=do, dv=dv_local,
-        scale=scale, chunk_size=BT, state_v_first=state_v_first,
+        q=q,
+        k=k,
+        w=w,
+        do=do,
+        dv=dv_local,
+        gk=gk,
+        h0=h0,
+        dht=dht,
+        scale=scale,
+        state_v_first=state_v_first,
+        chunk_size=BT,
     )
 
     assert_close('dh', dh_ref.to(dtype), dh_tri, 0.006)

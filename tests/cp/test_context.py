@@ -5,7 +5,6 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-
 from types import SimpleNamespace
 
 import pytest
@@ -95,27 +94,26 @@ def test_copy_for_backward(layout: str):
 
 @pytest.mark.parametrize('entry', [FLACPContext, get_cp_cu_seqlens, build_cp_context], ids=['context', 'partition', 'build'])
 @pytest.mark.parametrize('mode', ['omitted', 'true', 'false', 'unknown', 'positional-true', 'positional-false'])
-def test_precision_keyword(entry, mode, monkeypatch):
+def test_precision_argument(entry, mode, monkeypatch):
     monkeypatch.setattr(context.dist, 'get_world_size', lambda group: 2)
     monkeypatch.setattr(context.dist, 'get_rank', lambda group: 0)
     kwargs = dict(cu_seqlens=torch.tensor([0, 256]), group=object())
     args = ()
     if mode.startswith('positional-'):
-        mode = mode.removeprefix('positional-')
+        enabled = mode == 'positional-true'
         cu_seqlens, group = kwargs['cu_seqlens'], kwargs['group']
         if entry is FLACPContext:
-            args = (group, cu_seqlens, None, None, None, None, None, None, None, mode == 'true')
+            args = (group, cu_seqlens, None, None, None, None, None, None, None, enabled)
         elif entry is get_cp_cu_seqlens:
-            args = (cu_seqlens, None, 2, 0, group, None, mode == 'true')
+            args = (cu_seqlens, None, 2, 0, group, None, enabled)
         else:
-            args = (cu_seqlens, group, None, None, mode == 'true')
+            args = (cu_seqlens, group, None, None, enabled)
         kwargs = {}
     if mode in ('true', 'false'):
-        if not args:
-            kwargs['use_tf32x3_affine_chain'] = mode == 'true'
+        kwargs['use_tf32x3_affine_chain'] = mode == 'true'
     elif mode == 'unknown':
         kwargs['unknown_option'] = True
-    if mode == 'false':
+    if mode in ('false', 'positional-false'):
         with pytest.raises(ValueError, match='use_tf32x3_affine_chain=False'):
             entry(*args, **kwargs)
     elif mode == 'unknown':
@@ -166,6 +164,7 @@ def test_pre_process_unsupported_device(direction, monkeypatch):
     )
 
     monkeypatch.setattr(context, 'IS_NVIDIA', False)
+    monkeypatch.setattr(context, 'IS_NPU', False)
     x = torch.empty(1, 64, 1, 32)
     cp_context = FLACPContext(group=object())
     with pytest.raises(RuntimeError, match='compute capability >= 8.0'):
