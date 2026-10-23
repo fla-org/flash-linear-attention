@@ -21,10 +21,10 @@ import torch.nn.functional as F
 
 from fla.ops.cp import FLACPContext, build_cp_context
 from fla.ops.kda import chunk_kda
-from fla.utils import IS_AMD, IS_NVIDIA, assert_close, device
+from fla.utils import IS_TF32_SUPPORTED, assert_close, device
 from tests.ops.kda_graph import MAX_NUM_SEQS, VARLEN_CASES, D, H, T, make_inputs
 
-pytestmark = pytest.mark.skipif(not (IS_NVIDIA or IS_AMD), reason="direct graph capture requires CUDA or HIP")
+pytestmark = pytest.mark.skipif(not IS_TF32_SUPPORTED, reason="requires NVIDIA Ampere or newer")
 
 TOKEN_NAMES = ["q", "k", "v", "g", "beta"]
 INPUT_NAMES = TOKEN_NAMES + ["A_log", "dt_bias"]
