@@ -5,13 +5,6 @@ name: ascend-a2-ci
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-    paths:
-      - "**/*.py"
-      - "pyproject.toml"
-      - ".github/workflows/*.yml"
   pull_request:
     branches:
       - main
@@ -73,7 +66,6 @@ jobs:
     needs: changes
     if: |
       github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'push' ||
       (
         github.event_name == 'pull_request' &&
         (
