@@ -11,6 +11,7 @@ import pytest
 import torch
 
 from fla.models.cache_utils import Cache, FLACache, FLALayer, LegacyFLACache
+from fla.ops.log_linear_attn.chunk import LogLinearAttentionState
 from fla.utils import device_name
 
 
@@ -151,6 +152,29 @@ def test_batch_operations(operation):
     torch.testing.assert_close(cache[1]['attn_state'], (state[indices, :, None], state[indices, :, None] + 60))
     assert cache.get_seq_length(layer_idx=0) == 5
     assert cache.get_seq_length(layer_idx=1) == 2
+
+
+def test_log_linear_state_reorder():
+    torch.manual_seed(42)
+    state = LogLinearAttentionState(
+        ht=torch.randn(3, 1, 1, 2, 2, device=device_name),
+        offsets=torch.arange(3, device=device_name),
+        q_prev=torch.randn(3, 2, 1, 2, device=device_name),
+        k_prev=torch.randn(3, 2, 1, 2, device=device_name),
+        v_prev=torch.randn(3, 2, 1, 2, device=device_name),
+        g_prev=torch.randn(3, 2, 1, device=device_name),
+        level_scales_prev=torch.randn(3, 2, 1, 3, device=device_name),
+    )
+    cache = Cache()
+    cache.update(recurrent_state=state, layer_idx=0, offset=3)
+    indices = torch.tensor([1, 0, 1], device=device_name)
+
+    cache.reorder_cache(indices)
+
+    transformed = cache[0]['recurrent_state']
+    assert type(transformed) is LogLinearAttentionState
+    for name, value in vars(state).items():
+        torch.testing.assert_close(getattr(transformed, name), value[indices])
 
 
 @pytest.mark.parametrize('max_length', [5, -2], ids=['absolute', 'relative'])
