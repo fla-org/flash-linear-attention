@@ -11,8 +11,10 @@ import pytest
 import torch
 import triton
 
-from fla.ops.cp.chunk_delta_h import pre_process_bwd_kernel_merged
-from fla.utils import device
+from fla.ops.cp.chunk_bwd import chunk_cp_bwd_kernel_dh
+from fla.utils import IS_NPU, IS_TF32_SUPPORTED, device
+
+pytestmark = pytest.mark.skipif(not (IS_TF32_SUPPORTED or IS_NPU), reason="requires NVIDIA Ampere or newer, or Ascend")
 
 
 @pytest.mark.parametrize(
@@ -48,12 +50,12 @@ def test_chunk_bwd_gate_head(monkeypatch, tmp_path, T: int, H: int, K: int, V: i
     cu_seqlens = torch.tensor([0, T], device=device, dtype=torch.long)
 
     BK = triton.next_power_of_2(K)
-    BLOCK_SIZE = 32 if K <= 64 else 64
-    grid = (triton.cdiv(V, BLOCK_SIZE) + triton.cdiv(K, BLOCK_SIZE), H)
+    BV = 32 if K <= 64 else 64
+    grid = (triton.cdiv(V, BV) + triton.cdiv(K, BV), H)
 
     # the control run uses zero gates for every head
     dhm_a = torch.zeros(H, K, V + K, dtype=torch.float32, device=device)
-    pre_process_bwd_kernel_merged[grid](
+    chunk_cp_bwd_kernel_dh[grid](
         q=q,
         k=k,
         w=w,
@@ -70,14 +72,14 @@ def test_chunk_bwd_gate_head(monkeypatch, tmp_path, T: int, H: int, K: int, V: i
         K=K,
         V=V,
         BT=BT,
-        BK1=BK,
-        BLOCK_SIZE=BLOCK_SIZE,
+        BV=BV,
+        BK=BK,
         USE_BG=False,
     )
 
     # the second run changes only the gates for heads 1+
     dhm_b = torch.zeros(H, K, V + K, dtype=torch.float32, device=device)
-    pre_process_bwd_kernel_merged[grid](
+    chunk_cp_bwd_kernel_dh[grid](
         q=q,
         k=k,
         w=w,
@@ -94,8 +96,8 @@ def test_chunk_bwd_gate_head(monkeypatch, tmp_path, T: int, H: int, K: int, V: i
         K=K,
         V=V,
         BT=BT,
-        BK1=BK,
-        BLOCK_SIZE=BLOCK_SIZE,
+        BV=BV,
+        BK=BK,
         USE_BG=False,
     )
 
