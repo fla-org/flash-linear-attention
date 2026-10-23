@@ -5,6 +5,8 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+from unittest.mock import Mock
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -316,3 +318,32 @@ def test_momentum_deltanet_layer_default_l2():
     with torch.no_grad():
         y_chunk, _, _ = layer(torch.randn(2, 128, 256, device=device, dtype=torch.bfloat16))
         assert not torch.isnan(y_chunk).any()
+
+
+@pytest.mark.skipif(
+    device_platform == 'intel',
+    reason='Intel Triton Failure',
+)
+def test_momentum_deltanet_layer_sum_norm(monkeypatch: pytest.MonkeyPatch):
+    torch.manual_seed(42)
+    from fla.layers import MomentumDeltaNet, momentum_deltanet
+
+    layer = MomentumDeltaNet(
+        mode='fused_recurrent', hidden_size=4, num_heads=1, head_dim=4, expand_v=1.0,
+        use_short_conv=False, use_gate=False, use_output_correction=False, qk_activation='identity', qk_norm='sum',
+    ).to(device)
+    with torch.no_grad():
+        layer.q_proj.weight.copy_(torch.eye(4, device=device))
+        layer.k_proj.weight.copy_(torch.eye(4, device=device))
+    x = torch.tensor(
+        [[[1., 2., 3., 4.], [0., 0., 0., 0.], [1., -1., 2., -2.]]],
+        device=device,
+    )
+    op = Mock(return_value=(torch.zeros(1, 3, 1, 4, device=device), None))
+    monkeypatch.setattr(momentum_deltanet, 'fused_recurrent_momentum_delta_rule', op)
+
+    layer(x)
+
+    expected = F.normalize(x, p=1, dim=-1, eps=1e-6).unsqueeze(2)
+    assert_close('q', expected, op.call_args.kwargs['q'], 1e-6)
+    assert_close('k', expected, op.call_args.kwargs['k'], 1e-6)
