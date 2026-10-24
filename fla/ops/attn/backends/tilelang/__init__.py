@@ -48,8 +48,8 @@ class AttnTileLangBackend(TileLangBackend):
         chunk_indices: torch.LongTensor | None = None,
         output_dtype: torch.dtype | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        from fla.ops.attn.backends.tilelang.parallel import parallel_attn_fwd_tilelang
-        return parallel_attn_fwd_tilelang(
+        from fla.ops.attn.backends.tilelang.parallel import parallel_attn_fwd
+        return parallel_attn_fwd(
             q=q,
             k=k,
             v=v,
@@ -98,8 +98,8 @@ class AttnTileLangBackend(TileLangBackend):
         cu_seqlens: torch.LongTensor | None = None,
         chunk_indices: torch.LongTensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
-        from fla.ops.attn.backends.tilelang.parallel import parallel_attn_bwd_tilelang
-        return parallel_attn_bwd_tilelang(
+        from fla.ops.attn.backends.tilelang.parallel import parallel_attn_bwd
+        return parallel_attn_bwd(
             q=q,
             k=k,
             v=v,
@@ -110,7 +110,6 @@ class AttnTileLangBackend(TileLangBackend):
             sink_bias=sink_bias,
             scale=scale,
             window_size=window_size,
-            chunk_size=chunk_size,
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
         )
