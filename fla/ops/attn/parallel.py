@@ -647,7 +647,8 @@ def parallel_attn_bwd(
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     NV = triton.cdiv(V, BV)
 
-    delta = parallel_attn_bwd_preprocess(o, do)
+    delta = parallel_attn_bwd_preprocess(o=o, do=do)
+    do = do.to(v.dtype)
 
     dq = torch.empty(B, T, HQ, K, dtype=k.dtype if H == HQ else torch.float, device=q.device)
     dk = torch.empty(B, T, HQ, K, dtype=k.dtype if H == HQ else torch.float, device=q.device)
@@ -733,8 +734,6 @@ class ParallelAttentionFunction(torch.autograd.Function):
     @contiguous
     @autocast_custom_fwd
     def forward(ctx, q, k, v, g, sink_bias, scale, window_size, cu_seqlens, chunk_indices=None, output_dtype=None):
-        ctx.dtype = q.dtype
-
         g_cumsum = chunk_global_cumsum(g, cu_seqlens=cu_seqlens, scale=RCP_LN2) if g is not None else None
         sink_bias = sink_bias * RCP_LN2 if sink_bias is not None else None
         o, lse = parallel_attn_fwd(
@@ -767,7 +766,7 @@ class ParallelAttentionFunction(torch.autograd.Function):
             o=o,
             g_cumsum=g_cumsum,
             lse=lse,
-            do=do.to(v.dtype),
+            do=do,
             sink_bias=sink_bias,
             scale=ctx.scale,
             window_size=ctx.window_size,
@@ -826,7 +825,7 @@ def parallel_attn(
         output_dtype (torch.dtype, Optional):
             Output dtype, either `q.dtype` or `torch.float32`. Default: `None`, which preserves `q.dtype`.
             FP32 outputs are saved for the backward delta reduction without rounding to the input dtype.
-            Upstream gradients are converted to `v.dtype` before the backward calculation.
+            The delta reduction uses the incoming gradient dtype; backward matrix products use `v.dtype`.
 
     Returns:
         o (torch.Tensor):

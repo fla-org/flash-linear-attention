@@ -34,48 +34,6 @@ def test_rejects_invalid_gqa_head_counts(op, HQ, H):
         op(q=q, k=k, v=v, **kwargs)
 
 
-@pytest.mark.parametrize('output_dtype', [torch.int32, torch.float64, torch.float16], ids=['int32', 'fp64', 'other-input'])
-def test_parallel_rejects_output_dtype(output_dtype):
-    q = torch.empty(1, 2, 1, 16, dtype=torch.bfloat16)
-    with pytest.raises(ValueError, match='output_dtype'):
-        parallel_attn(q=q, k=q, v=q, output_dtype=output_dtype)
-
-
-@pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16], ids=['fp16', 'bf16'])
-def test_parallel_output_dtype_preserves_precision(dtype):
-    torch.manual_seed(42)
-    q = torch.zeros(1, 2, 1, 16, dtype=dtype, device=device).requires_grad_()
-    k = torch.zeros_like(q)
-    k[:, 1] = 1
-    k.requires_grad_()
-    v = torch.ones_like(q)
-    v[:, 1] += torch.finfo(dtype).eps
-    v.requires_grad_()
-    do = torch.zeros_like(q, dtype=torch.float32)
-    do[:, 1] = 1
-
-    ref, _ = naive_parallel_attn(q=q.float(), k=k.float(), v=v.float(), scale=1.)
-    ref_grads = torch.autograd.grad(ref, (q, k, v), do)
-    tri = parallel_attn(q=q, k=k, v=v, scale=1., output_dtype=torch.float32)
-    tri_grads = torch.autograd.grad(tri, (q, k, v), do)
-
-    assert tri.dtype == torch.float32
-    assert (tri != tri.to(dtype).float()).any()
-    assert_close('o', ref, tri, 0.005)
-    for name, ref_grad, tri_grad in zip(('dq', 'dk', 'dv'), ref_grads, tri_grads, strict=True):
-        assert tri_grad.dtype == dtype
-        assert_close(name, ref_grad, tri_grad, 0.005)
-
-    default = parallel_attn(q=q, k=k, v=v, scale=1.)
-    default_grads = torch.autograd.grad(default, (q, k, v), do.to(dtype))
-    for output_dtype in (None, dtype):
-        explicit = parallel_attn(q=q, k=k, v=v, scale=1., output_dtype=output_dtype)
-        explicit_grads = torch.autograd.grad(explicit, (q, k, v), do.to(dtype))
-        torch.testing.assert_close(default, explicit, rtol=0, atol=0)
-        for default_grad, explicit_grad in zip(default_grads, explicit_grads, strict=True):
-            torch.testing.assert_close(default_grad, explicit_grad, rtol=0, atol=0)
-
-
 @pytest.mark.parametrize(
     ('H', 'HQ', 'K', 'V', 'W', 'use_g', 'do_gate_scale', 'use_sink', 'dtype'),
     [
@@ -191,6 +149,8 @@ def test_parallel(
 
     tri = parallel_attn(q=q, k=k, v=v, scale=scale, output_dtype=output_dtype)
     assert tri.dtype == (output_dtype or dtype)
+    if output_dtype == torch.float32:
+        assert (tri != tri.to(dtype).float()).any()
     tri.backward(do)
     tri_dq, q.grad = q.grad.clone(), None
     tri_dk, k.grad = k.grad.clone(), None

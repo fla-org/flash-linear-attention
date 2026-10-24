@@ -46,10 +46,9 @@ def _build_parallel_attn_fwd_kernel(
     V,
     BT,
     BS,
-    sm_scale,
-    log2e_scale,
-    dtype_str,
-    output_dtype_str=None,
+    scale: float,
+    dtype: torch.dtype,
+    output_dtype: torch.dtype,
     USE_G=False,
     USE_WINDOW=False,
     WINDOW_SIZE=0,
@@ -59,10 +58,8 @@ def _build_parallel_attn_fwd_kernel(
     num_stages=1,
 ):
     """Build a forward kernel specialized to the batch size and head dimensions."""
-    dtype_map = {'float16': T.float16, 'bfloat16': T.bfloat16, 'float32': T.float32}
-    dtype = dtype_map[dtype_str]
-    output_dtype = dtype_map[output_dtype_str or dtype_str]
     accum_dtype = T.float32
+    scale_log2 = scale * RCP_LN2
     threads = num_warps * 32
     # pad shared buffers to satisfy WGMMA/MMA inner-dimension alignment
     BK = (K + 15) // 16 * 16
@@ -79,7 +76,7 @@ def _build_parallel_attn_fwd_kernel(
     sink_s = (HQ,)
 
     @T.macro
-    def kernel_body(q, k, v, g, sink_bias, o, lse, i_b, i_h, i_t, t_s, T_seq, bos):
+    def kernel_body(q, k, v, g, sink_bias, o, lse, i_b, i_h, t_s, T_seq, bos):
         i_hkv = i_h // G
 
         s_q = T.alloc_shared((BT, BK), dtype)
@@ -137,9 +134,9 @@ def _build_parallel_attn_fwd_kernel(
                 else:
                     mask = causal
                 if USE_G:
-                    s = b_s[i, j] * log2e_scale + s_gq[i] - s_gk[j]
+                    s = b_s[i, j] * scale_log2 + s_gq[i] - s_gk[j]
                 else:
-                    s = b_s[i, j] * log2e_scale
+                    s = b_s[i, j] * scale_log2
                 b_s[i, j] = T.if_then_else(mask, s, -T.infinity(accum_dtype))
 
             T.copy(b_m, b_m_prev)
@@ -205,7 +202,7 @@ def _build_parallel_attn_fwd_kernel(
                 eos = cu_seqlens[i_n + 1]
                 T_seq = eos - bos
                 t_s = bos + i_t_local * BT
-                kernel_body(q, k, v, g, sink_bias, o, lse, 0, i_h, i_t, t_s, T_seq, bos)
+                kernel_body(q, k, v, g, sink_bias, o, lse, 0, i_h, t_s, T_seq, bos)
     else:
         @T.prim_func
         def kernel(
@@ -219,7 +216,7 @@ def _build_parallel_attn_fwd_kernel(
         ):
             with T.Kernel(HQ, T.ceildiv(T_d, BT), B, threads=threads) as (i_h, i_t, i_b):
                 t_s = i_t * BT
-                kernel_body(q, k, v, g, sink_bias, o, lse, i_b, i_h, i_t, t_s, T_d, 0)
+                kernel_body(q, k, v, g, sink_bias, o, lse, i_b, i_h, t_s, T_d, 0)
 
     return kernel
 
@@ -251,11 +248,9 @@ def parallel_attn_fwd_tilelang(
     if chunk_indices is None and IS_VARLEN:
         chunk_indices = prepare_chunk_indices(cu_seqlens=cu_seqlens, chunk_size=BT)
 
-    sm_scale = scale if scale is not None else K ** -0.5
-    log2e_scale = sm_scale * RCP_LN2
+    scale = scale if scale is not None else K ** -0.5
 
-    dtype_str = {torch.float16: 'float16', torch.bfloat16: 'bfloat16', torch.float32: 'float32'}.get(q.dtype)
-    if dtype_str is None:
+    if q.dtype not in (torch.float16, torch.bfloat16, torch.float32):
         raise ValueError(f"Unsupported dtype {q.dtype} for TileLang backend")
 
     o = torch.empty(B, T, HQ, V, dtype=output_dtype or q.dtype, device=q.device)
@@ -272,10 +267,9 @@ def parallel_attn_fwd_tilelang(
         V=V,
         BT=BT,
         BS=BS,
-        sm_scale=sm_scale,
-        log2e_scale=log2e_scale,
-        dtype_str=dtype_str,
-        output_dtype_str=str(o.dtype).removeprefix('torch.'),
+        scale=scale,
+        dtype=q.dtype,
+        output_dtype=o.dtype,
         USE_G=USE_G,
         USE_WINDOW=USE_WINDOW,
         WINDOW_SIZE=window_size or 0,
@@ -304,9 +298,8 @@ def _build_parallel_attn_bwd_kernel(
     K,
     V,
     BT,
-    sm_scale,
-    log2e_scale,
-    dtype_str,
+    scale: float,
+    dtype: torch.dtype,
     USE_G=False,
     USE_WINDOW=False,
     WINDOW_SIZE=0,
@@ -314,9 +307,8 @@ def _build_parallel_attn_bwd_kernel(
     num_warps=4,
 ):
     """Build a backward kernel specialized to the batch size and head dimensions."""
-    dtype_map = {'float16': T.float16, 'bfloat16': T.bfloat16, 'float32': T.float32}
-    dtype = dtype_map[dtype_str]
     accum_dtype = T.float32
+    scale_log2 = scale * RCP_LN2
     threads = num_warps * 32
     # pad shared buffers to satisfy WGMMA/MMA inner-dimension alignment
     BK = (K + 15) // 16 * 16
@@ -335,7 +327,7 @@ def _build_parallel_attn_bwd_kernel(
     dvv_s = (B, T_d, H, V)
 
     @T.macro
-    def kernel_body(q, k, v, g, lse, delta, do, dq_out, dk_out, dv_out, dg, i_b, i_h, i_t, t_s, T_seq, bos):
+    def kernel_body(q, k, v, g, lse, delta, do, dq_out, dk_out, dv_out, dg, i_b, i_h, t_s, T_seq, bos):
         i_hkv = i_h // G
 
         s_k = T.alloc_shared((BT, BK), dtype)
@@ -399,9 +391,9 @@ def _build_parallel_attn_bwd_kernel(
 
             for i, j in T.Parallel(BT, BT):
                 if USE_G:
-                    b_p_t[i, j] = T.exp2(b_p_t[i, j] * log2e_scale + s_gq[j] - s_gk[i] - s_lse[j])
+                    b_p_t[i, j] = T.exp2(b_p_t[i, j] * scale_log2 + s_gq[j] - s_gk[i] - s_lse[j])
                 else:
-                    b_p_t[i, j] = T.exp2(b_p_t[i, j] * log2e_scale - s_lse[j])
+                    b_p_t[i, j] = T.exp2(b_p_t[i, j] * scale_log2 - s_lse[j])
 
             for i, j in T.Parallel(BT, BT):
                 key_pos = t_s + i
@@ -423,7 +415,7 @@ def _build_parallel_attn_bwd_kernel(
             for i, j in T.Parallel(BT, BT):
                 b_ds_t[i, j] = b_p_t[i, j] * (b_ds_t[i, j] - s_delta[j])
             for i, j in T.Parallel(BT, BT):
-                b_ds_t_cast[i, j] = b_ds_t[i, j] * sm_scale
+                b_ds_t_cast[i, j] = b_ds_t[i, j] * scale
 
             T.copy(b_ds_t_cast, b_ds)
             T.gemm(b_ds, s_q, b_dk, policy=T.GemmWarpPolicy.FullRow)
@@ -481,7 +473,7 @@ def _build_parallel_attn_bwd_kernel(
                 bos = cu_seqlens[i_n]
                 T_seq = cu_seqlens[i_n + 1] - bos
                 t_s = bos + i_t_local * BT
-                kernel_body(q, k, v, g, lse, delta, do, dq_out, dk_out, dv_out, dg, 0, i_h, i_t, t_s, T_seq, bos)
+                kernel_body(q, k, v, g, lse, delta, do, dq_out, dk_out, dv_out, dg, 0, i_h, t_s, T_seq, bos)
     else:
         @T.prim_func
         def kernel(
@@ -499,7 +491,7 @@ def _build_parallel_attn_bwd_kernel(
         ):
             with T.Kernel(HQ, T.ceildiv(T_d, BT), B, threads=threads) as (i_h, i_t, i_b):
                 t_s = i_t * BT
-                kernel_body(q, k, v, g, lse, delta, do, dq_out, dk_out, dv_out, dg, i_b, i_h, i_t, t_s, T_d, 0)
+                kernel_body(q, k, v, g, lse, delta, do, dq_out, dk_out, dv_out, dg, i_b, i_h, t_s, T_d, 0)
 
     return kernel
 
@@ -523,8 +515,7 @@ def parallel_attn_bwd_tilelang(
     H = k.shape[2]
     V = v.shape[-1]
     BT = 64
-    sm_scale = scale if scale is not None else K ** -0.5
-    log2e_scale = sm_scale * RCP_LN2
+    scale = scale if scale is not None else K ** -0.5
 
     USE_G = g_cumsum is not None
     USE_WINDOW = window_size is not None
@@ -536,6 +527,7 @@ def parallel_attn_bwd_tilelang(
     # reuse the Triton delta calculation for unpadded tensors
     from fla.ops.attn.parallel import parallel_attn_bwd_preprocess
     delta = parallel_attn_bwd_preprocess(o=o, do=do)
+    do = do.to(v.dtype)
 
     # zero-initialized fp32 outputs accumulate atomic updates across heads and key tiles
     dq = torch.zeros(B, T, HQ, K, dtype=torch.float32, device=q.device)
@@ -546,8 +538,7 @@ def parallel_attn_bwd_tilelang(
     g_kern = g_cumsum.float() if USE_G else torch.zeros(B, T, HQ, dtype=torch.float32, device=q.device)
     dg_kern = dg if USE_G else torch.zeros(B, T, HQ, dtype=torch.float32, device=q.device)
 
-    dtype_str = {torch.float16: 'float16', torch.bfloat16: 'bfloat16', torch.float32: 'float32'}.get(q.dtype)
-    if dtype_str is None:
+    if q.dtype not in (torch.float16, torch.bfloat16, torch.float32):
         raise ValueError(f"Unsupported dtype {q.dtype} for TileLang backend")
 
     kernel = _build_parallel_attn_bwd_kernel(
@@ -557,9 +548,8 @@ def parallel_attn_bwd_tilelang(
         K=K,
         V=V,
         BT=BT,
-        sm_scale=sm_scale,
-        log2e_scale=log2e_scale,
-        dtype_str=dtype_str,
+        scale=scale,
+        dtype=q.dtype,
         USE_G=USE_G,
         USE_WINDOW=USE_WINDOW,
         WINDOW_SIZE=window_size or 0,

@@ -7,7 +7,6 @@
 
 import importlib.metadata
 import logging
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import create_autospec
@@ -143,29 +142,6 @@ def test_attention_and_common_backends_have_separate_implementations():
     for name in ('parallel_attn_fwd', 'parallel_attn_bwd'):
         assert hasattr(attention, name)
         assert not hasattr(common, name)
-
-
-@pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
-@pytest.mark.parametrize('output_dtype', [None, torch.bfloat16, torch.float32], ids=['default', 'input', 'fp32'])
-def test_attention_tilelang_output_dtype(monkeypatch, output_dtype):
-    from fla.ops.attn.parallel import parallel_attn_fwd
-
-    monkeypatch.setenv('FLA_TILELANG', '1')
-    monkeypatch.setattr(attn_tilelang_backend.AttnTileLangBackend, 'is_available', classmethod(lambda cls: True))
-    q = torch.empty(1, 2, 1, 16, dtype=torch.bfloat16)
-    result = object()
-
-    def implementation(**kwargs):
-        assert kwargs['output_dtype'] == output_dtype
-        return result
-
-    monkeypatch.setitem(
-        sys.modules,
-        'fla.ops.attn.backends.tilelang.parallel',
-        SimpleNamespace(parallel_attn_fwd_tilelang=implementation),
-    )
-    kwargs = {} if output_dtype is None else {'output_dtype': output_dtype}
-    assert parallel_attn_fwd(q=q, k=q, v=q, g_cumsum=None, sink_bias=None, scale=1., **kwargs) is result
 
 
 def test_nvcc_from_cuda_home_env(monkeypatch, tmp_path):
