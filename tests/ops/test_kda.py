@@ -1030,6 +1030,7 @@ def test_chunk_use_beta_sigmoid_in_kernel(B: int, T: int, H: int, D: int, allow_
             (4, 100, 0, [0, 15, 100, 300, 1200, 2000], torch.float16, True, False, False, 64),
             (4, 256, 0, [0, 100, 300, 1200, 3000, 4096], torch.float16, False, True, True, 64),
             (4, 60, 0.1, [0, 31, 96, 160], torch.float16, True, False, True, 32),
+            (4, 60, 0.1, [0, 31, 96, 160], torch.bfloat16, True, False, True, 32),
         ]
     ],
 )
