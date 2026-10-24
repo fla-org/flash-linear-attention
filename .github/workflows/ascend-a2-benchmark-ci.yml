@@ -153,7 +153,7 @@ jobs:
           print("matplotlib savefig smoke test: ok")
           PY
 
-      - name: Benchmark chunk_gdn, fused_recurrent_gdn2, chunk_gdn2, chunk_kda, KDA graph, fused_attnres, conv1d, and chunk_precond_gdn
+      - name: Benchmark chunk_gdn, fused_recurrent_gdn2, chunk_gdn2, chunk_kda, KDA graph, fused_attnres, conv1d, chunk_precond_gdn, and chunk_ttt
         shell: bash
         env:
           FLA_BENCH_WARMUP_MS: "25"
@@ -221,9 +221,15 @@ jobs:
           pid_conv1d=$!
           status=0
           wait "$pid_conv1d" || status=1
-          ASCEND_RT_VISIBLE_DEVICES=3 python -m benchmarks.ops.run \
-            --op chunk_precond_gdn --base '' --json benchmark_chunk_precond_gdn.json \
-            > chunk_precond_gdn.log 2>&1 &
+          (
+            set -e
+            ASCEND_RT_VISIBLE_DEVICES=3 python -m benchmarks.ops.run \
+              --op chunk_precond_gdn --base '' --json benchmark_chunk_precond_gdn.json \
+              > chunk_precond_gdn.log 2>&1
+            ASCEND_RT_VISIBLE_DEVICES=3 python -m benchmarks.ops.run \
+              --op chunk_ttt --base '' --json benchmark_chunk_ttt.json \
+              > chunk_ttt.log 2>&1
+          ) &
           pid_precond_gdn=$!
 
           wait "$pid_gdn" || status=1
@@ -256,6 +262,8 @@ jobs:
           cat conv1d.log
           echo "========== chunk_precond_gdn =========="
           cat chunk_precond_gdn.log
+          echo "========== chunk_ttt =========="
+          cat chunk_ttt.log
           exit "$status"
 
       - name: Check fused-recurrent GDN2 benchmark results
@@ -294,5 +302,6 @@ jobs:
             benchmark_chunk_precond_gdn.json
             benchmark_kda_graph.json
             conv_benchmark/
+            benchmark_chunk_ttt.json
           if-no-files-found: ignore
           retention-days: 10
