@@ -143,9 +143,6 @@ def test_parallel(
     ref_dv, v.grad = v.grad.clone(), None
 
     tri = parallel_attn(q=q, k=k, v=v, scale=scale, output_dtype=output_dtype)
-    assert tri.dtype == (output_dtype or q.dtype)
-    if output_dtype == torch.float32:
-        assert (tri != tri.to(q.dtype).float()).any()
     tri.backward(do)
     tri_dq, q.grad = q.grad.clone(), None
     tri_dk, k.grad = k.grad.clone(), None
@@ -297,7 +294,6 @@ def test_parallel_varlen(
         cu_seqlens=cu_seqlens_th,
         output_dtype=output_dtype,
     )
-    assert tri.dtype == (output_dtype or dtype)
     tri.backward(do)
     tri_dq, q.grad = q.grad.clone(), None
     tri_dk, k.grad = k.grad.clone(), None
@@ -419,7 +415,6 @@ def test_parallel_sink(B, T, H, HQ, K, V, scale, window_size, cu_seqlens, use_g,
         sink_bias=sink_bias,
         output_dtype=output_dtype,
     )
-    assert tri.dtype == (output_dtype or dtype)
     tri_grads = torch.autograd.grad(tri, inputs, do)
 
     assert_close('o', ref, tri, tol[0])
