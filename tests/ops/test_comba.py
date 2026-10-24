@@ -13,7 +13,7 @@ import torch.nn.functional as F
 from einops import repeat
 
 from fla.ops.comba import chunk_comba, fused_recurrent_comba
-from fla.ops.comba.naive import naive_chunk_comba
+from fla.ops.comba.naive import naive_chunk_comba, naive_recurrent_comba
 from fla.ops.comba.utils import chunk_comba_cumsum_scalar_fwd
 from fla.utils import IS_INTEL_ALCHEMIST, assert_close, device
 
@@ -56,6 +56,44 @@ def test_cumsum_local_scalar_fwd(
     tri_0, tri_1 = chunk_comba_cumsum_scalar_fwd(s, chunk_size=chunk_size)
     assert_close("local cumsum scalar", ref_0, tri_0, 0.001 if dtype == torch.float else 0.003)
     assert_close("local cumsum scalar", ref_1, tri_1, 0.001 if dtype == torch.float else 0.003)
+
+
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'D', 'gate_logit_normalizer'),
+    [
+        pytest.param(*test, id='B{}-T{}-H{}-D{}-gate_logit_normalizer{}'.format(*test))
+        for test in [
+            (2, 64, 2, 32, 1),
+            (2, 100, 3, 64, 1),
+            (2, 128, 2, 64, 10),
+        ]
+    ],
+)
+def test_naive_recurrent(
+    B: int,
+    T: int,
+    H: int,
+    D: int,
+    gate_logit_normalizer: float,
+):
+    torch.manual_seed(42)
+    q = F.normalize(torch.randn(B, T, H, D), p=2, dim=-1)
+    k = F.normalize(torch.randn(B, T, H, D), p=2, dim=-1)
+    v = torch.randn(B, T, H, D)
+    p = F.normalize(torch.randn(B, T, H, D), p=2, dim=-1)
+    beta = torch.rand(B, T, H).sigmoid()
+    g = F.logsigmoid(torch.rand(B, T, H)) / gate_logit_normalizer
+    h0 = torch.randn(B, H, D, D)
+    q, k, v, p, beta, g, h0 = map(lambda x: x.to(device), (q, k, v, p, beta, g, h0))
+
+    ref, ref_ht = naive_chunk_comba(
+        q=q, k=k, v=v, p=p, g=g, beta=beta, initial_state=h0, output_final_state=True,
+    )
+    rec, rec_ht = naive_recurrent_comba(
+        q=q, k=k, v=v, p=p, beta=beta, g=g, initial_state=h0, output_final_state=True,
+    )
+    assert_close('o', ref, rec, 0.001)
+    assert_close('ht', ref_ht, rec_ht, 0.001)
 
 
 @pytest.mark.parametrize(
