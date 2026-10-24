@@ -29,15 +29,15 @@ def parallel_attn_fwd_kernel(
     HQ: int,
     K: int,
     V: int,
-    BT: int,
-    BS: int,
-    scale: float,
     dtype: torch.dtype,
     output_dtype: torch.dtype,
+    scale: float,
+    BT: int,
+    BS: int,
     USE_G: bool,
+    USE_SINK: bool,
     USE_WINDOW: bool,
     W: int,
-    USE_SINK: bool,
     IS_VARLEN: bool,
     num_warps: int,
     num_stages: int,
@@ -67,13 +67,15 @@ def parallel_attn_fwd_kernel(
         with T.Kernel(HQ, num_chunks if IS_VARLEN else T.ceildiv(seq_len, BT), B, threads=num_warps * 32) as (i_hq, i_t, i_b):
             if IS_VARLEN:
                 i_n = chunk_indices[i_t, 0]
+                i_t_local = chunk_indices[i_t, 1]
                 bos = cu_seqlens[i_n]
-                length = cu_seqlens[i_n + 1] - bos
-                q_start = bos + chunk_indices[i_t, 1] * BT
+                eos = cu_seqlens[i_n + 1]
             else:
+                i_t_local = i_t
                 bos = 0
-                length = seq_len
-                q_start = i_t * BT
+                eos = seq_len
+            length = eos - bos
+            q_start = bos + i_t_local * BT
             i_h = i_hq // G
 
             s_q = T.alloc_shared((BT, BK), dtype)
@@ -100,7 +102,6 @@ def parallel_attn_fwd_kernel(
             T.fill(b_l, 0)
             T.fill(b_m, -T.infinity(accum_dtype))
 
-            i_t_local = (q_start - bos) // BT
             if USE_WINDOW:
                 # include every key visible to the first query in this tile
                 loop_start = T.max(i_t_local * BT - W + 1, 0) // BS
@@ -194,10 +195,10 @@ def parallel_attn_bwd_kernel(
     HQ: int,
     K: int,
     V: int,
-    BT: int,
-    scale: float,
     dtype: torch.dtype,
     do_dtype: torch.dtype,
+    scale: float,
+    BT: int,
     USE_G: bool,
     USE_WINDOW: bool,
     W: int,
@@ -409,15 +410,15 @@ def parallel_attn_fwd(
         HQ=HQ,
         K=K,
         V=V,
-        BT=BT,
-        BS=BS,
-        scale=scale,
         dtype=q.dtype,
         output_dtype=o.dtype,
+        scale=scale,
+        BT=BT,
+        BS=BS,
         USE_G=USE_G,
+        USE_SINK=USE_SINK,
         USE_WINDOW=USE_WINDOW,
         W=window_size or 0,
-        USE_SINK=USE_SINK,
         IS_VARLEN=IS_VARLEN,
         num_warps=num_warps,
         num_stages=0 if USE_WINDOW else 1,
@@ -478,10 +479,10 @@ def parallel_attn_bwd(
         HQ=HQ,
         K=K,
         V=V,
-        BT=BT,
-        scale=scale,
         dtype=q.dtype,
         do_dtype=do.dtype,
+        scale=scale,
+        BT=BT,
         USE_G=USE_G,
         USE_WINDOW=USE_WINDOW,
         W=window_size or 0,
