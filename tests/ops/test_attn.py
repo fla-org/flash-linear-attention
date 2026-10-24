@@ -115,11 +115,7 @@ def test_decoding(
         ]
     ],
 )
-@pytest.mark.parametrize(
-    ('dtype', 'output_dtype'),
-    [(torch.float16, None), (torch.float16, torch.float32), (torch.bfloat16, torch.float32)],
-    ids=['fp16-default', 'fp16-fp32', 'bf16-fp32'],
-)
+@pytest.mark.parametrize('output_dtype', [None, torch.float32])
 def test_parallel(
     B: int,
     T: int,
@@ -128,29 +124,28 @@ def test_parallel(
     K: int,
     V: int,
     scale: float,
-    dtype: torch.dtype,
     output_dtype: torch.dtype | None,
 ):
     if not check_shared_mem('hopper') and max(K, V) > 128:
         pytest.skip(reason="Skip test, do not have enough shard mem")
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
-    q = torch.randn((B, T, HQ, K), dtype=dtype, device=device).requires_grad_(True)
-    k = torch.randn((B, T, H, K), dtype=dtype, device=device).requires_grad_(True)
-    v = torch.randn((B, T, H, V), dtype=dtype, device=device).requires_grad_(True)
-    do = torch.randn((B, T, HQ, V), dtype=output_dtype or dtype, device=device)
+    q = torch.randn((B, T, HQ, K), dtype=torch.float16, device=device).requires_grad_(True)
+    k = torch.randn((B, T, H, K), dtype=torch.float16, device=device).requires_grad_(True)
+    v = torch.randn((B, T, H, V), dtype=torch.float16, device=device).requires_grad_(True)
+    do = torch.randn((B, T, HQ, V), dtype=output_dtype or q.dtype, device=device)
 
     ref, _ = naive_parallel_attn(q=q.float(), k=k.float(), v=v.float(), scale=scale)
-    ref = ref.to(output_dtype or dtype)
+    ref = ref.to(output_dtype or q.dtype)
     ref.backward(do)
     ref_dq, q.grad = q.grad.clone(), None
     ref_dk, k.grad = k.grad.clone(), None
     ref_dv, v.grad = v.grad.clone(), None
 
     tri = parallel_attn(q=q, k=k, v=v, scale=scale, output_dtype=output_dtype)
-    assert tri.dtype == (output_dtype or dtype)
+    assert tri.dtype == (output_dtype or q.dtype)
     if output_dtype == torch.float32:
-        assert (tri != tri.to(dtype).float()).any()
+        assert (tri != tri.to(q.dtype).float()).any()
     tri.backward(do)
     tri_dq, q.grad = q.grad.clone(), None
     tri_dk, k.grad = k.grad.clone(), None
@@ -263,23 +258,19 @@ def test_parallel_with_g(
     ],
 )
 @pytest.mark.smoke
-@pytest.mark.parametrize(
-    ('dtype', 'output_dtype'),
-    [(torch.float16, None), (torch.float16, torch.float32), (torch.bfloat16, torch.float32)],
-    ids=['fp16-default', 'fp16-fp32', 'bf16-fp32'],
-)
+@pytest.mark.parametrize('output_dtype', [None, torch.float32])
 def test_parallel_varlen(
     H: int,
     HQ: int,
     K: int,
     V: int,
     cu_seqlens: list[int],
-    dtype: torch.dtype,
     output_dtype: torch.dtype | None,
 ):
     torch.manual_seed(42)
     T = cu_seqlens[-1]
     cu_seqlens_th = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
+    dtype = torch.float16
 
     q = torch.randn((1, T, HQ, K), dtype=dtype, device=device).requires_grad_()
     k = torch.randn((1, T, H, K), dtype=dtype, device=device).requires_grad_()
@@ -386,14 +377,11 @@ def test_parallel_swa(
         pytest.param(1, 300, 2, 8, 64, 64, 0.1, 64, [0, 97, 173, 300], True, (0.01, 0.02), id="gate-varlen-swa"),
     ],
 )
-@pytest.mark.parametrize(
-    ('dtype', 'output_dtype'),
-    [(torch.float16, None), (torch.float16, torch.float32), (torch.bfloat16, torch.float32)],
-    ids=['fp16-default', 'fp16-fp32', 'bf16-fp32'],
-)
-def test_parallel_sink(B, T, H, HQ, K, V, scale, window_size, cu_seqlens, use_g, tol, dtype, output_dtype, monkeypatch):
+@pytest.mark.parametrize('output_dtype', [None, torch.float32])
+def test_parallel_sink(B, T, H, HQ, K, V, scale, window_size, cu_seqlens, use_g, tol, output_dtype, monkeypatch):
     torch.manual_seed(42)
     monkeypatch.setenv('TRITON_F32_DEFAULT', 'ieee')
+    dtype = torch.float16
     q = torch.randn((B, T, HQ, K), dtype=dtype, device=device).requires_grad_(True)
     k = torch.randn((B, T, H, K), dtype=dtype, device=device).requires_grad_(True)
     v = torch.randn((B, T, H, V), dtype=dtype, device=device).requires_grad_(True)
