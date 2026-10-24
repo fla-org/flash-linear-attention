@@ -404,6 +404,8 @@ def _atk_fwd_stages_npu(
     else:
         _launch_chunk_grid(_forward_chunk_out_npu, B, H, math.ceil(T / CHUNK_LEN), out_args)
 
+    # The final state stays in the scan's FP32, as the fused recurrent kernel
+    # keeps it, so a cached prefill hands decode the state it accumulated.
     at = None
     if output_final_state:
         if is_varlen:
@@ -412,9 +414,9 @@ def _atk_fwd_stages_npu(
                 ac[i, last_chunk_indices[i]] if last_chunk_indices[i] >= 0 else
                 (initial_A_state[i] if initial_A_state is not None else k.new_zeros(H, D))
                 for i in range(N)
-            ], dim=0).to(k.dtype)
+            ], dim=0).float()
         else:
-            at = ac[:, -1, :, :].contiguous().to(k.dtype)
+            at = ac[:, -1, :, :].contiguous()
 
     return k_precond.to(k.dtype), ac, a, sa, at
 
