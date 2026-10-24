@@ -300,6 +300,7 @@ def _build_parallel_attn_bwd_kernel(
     BT,
     scale: float,
     dtype: torch.dtype,
+    do_dtype: torch.dtype,
     USE_G=False,
     USE_WINDOW=False,
     WINDOW_SIZE=0,
@@ -459,7 +460,7 @@ def _build_parallel_attn_bwd_kernel(
             g: T.Tensor(lse_s, accum_dtype),
             lse: T.Tensor(lse_s, accum_dtype),
             delta: T.Tensor(lse_s, accum_dtype),
-            do: T.Tensor(do_s, dtype),
+            do: T.Tensor(do_s, do_dtype),
             dq_out: T.Tensor(dq_s, accum_dtype),
             dk_out: T.Tensor(dkv_s, accum_dtype),
             dv_out: T.Tensor(dvv_s, accum_dtype),
@@ -483,7 +484,7 @@ def _build_parallel_attn_bwd_kernel(
             g: T.Tensor(lse_s, accum_dtype),
             lse: T.Tensor(lse_s, accum_dtype),
             delta: T.Tensor(lse_s, accum_dtype),
-            do: T.Tensor(do_s, dtype),
+            do: T.Tensor(do_s, do_dtype),
             dq_out: T.Tensor(dq_s, accum_dtype),
             dk_out: T.Tensor(dkv_s, accum_dtype),
             dv_out: T.Tensor(dvv_s, accum_dtype),
@@ -526,8 +527,7 @@ def parallel_attn_bwd_tilelang(
 
     # reuse the Triton delta calculation for unpadded tensors
     from fla.ops.attn.parallel import parallel_attn_bwd_preprocess
-    do_input = do.to(v.dtype)
-    delta = parallel_attn_bwd_preprocess(o=o, do=do_input)
+    delta = parallel_attn_bwd_preprocess(o=o, do=do)
 
     # zero-initialized fp32 outputs accumulate atomic updates across heads and key tiles
     dq = torch.zeros(B, T, HQ, K, dtype=torch.float32, device=q.device)
@@ -550,6 +550,7 @@ def parallel_attn_bwd_tilelang(
         BT=BT,
         scale=scale,
         dtype=q.dtype,
+        do_dtype=do.dtype,
         USE_G=USE_G,
         USE_WINDOW=USE_WINDOW,
         WINDOW_SIZE=window_size or 0,
@@ -557,15 +558,13 @@ def parallel_attn_bwd_tilelang(
     )
 
     if IS_VARLEN:
-        kernel(q, k, v, g_kern, lse, delta, do_input, dq, dk, dv, dg_kern, cu_seqlens.int(), chunk_indices.int())
+        kernel(q, k, v, g_kern, lse, delta, do, dq, dk, dv, dg_kern, cu_seqlens.int(), chunk_indices.int())
     else:
-        kernel(q, k, v, g_kern, lse, delta, do_input, dq, dk, dv, dg_kern)
+        kernel(q, k, v, g_kern, lse, delta, do, dq, dk, dv, dg_kern)
 
     # saved LSE includes the sink mass in the softmax normalizer
     dsink_bias = None
     if sink_bias is not None:
-        if do.dtype != v.dtype:
-            delta = parallel_attn_bwd_preprocess(o=o, do=do)
         p_sink = torch.exp2(sink_bias.float()[None, None, :] - lse.float())
         dsink_bias = -(p_sink * delta.float()).sum((0, 1))
 

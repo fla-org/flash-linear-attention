@@ -266,7 +266,7 @@ def parallel_attn_bwd_kernel_dq(
     # [BT, BK]
     b_q = tl.load(p_q, mask=m_q[:, None] & (o_d[None, :] < K), other=0.0)
     # [BT, BV]
-    b_do = tl.load(p_do, mask=m_q[:, None] & (o_v[None, :] < V), other=0.0)
+    b_do = tl.load(p_do, mask=m_q[:, None] & (o_v[None, :] < V), other=0.0).to(v.dtype.element_ty)
     # [BT]
     b_lse = tl.load(p_lse, mask=m_q, other=0.0)
     b_delta = tl.load(p_delta, mask=m_q, other=0.0)
@@ -437,7 +437,7 @@ def parallel_attn_bwd_kernel_dkv(
         # [BS, BK]
         b_q = tl.load(p_q, mask=m_q[:, None] & (o_d[None, :] < K), other=0.0)
         # [BS, BV]
-        b_do = tl.load(p_do, mask=m_q[:, None] & (o_v[None, :] < V), other=0.0)
+        b_do = tl.load(p_do, mask=m_q[:, None] & (o_v[None, :] < V), other=0.0).to(v.dtype.element_ty)
         # [BS]
         b_lse = tl.load(p_lse, mask=m_q, other=0.0)
         b_delta = tl.load(p_delta, mask=m_q, other=0.0)
@@ -482,7 +482,7 @@ def parallel_attn_bwd_kernel_dkv(
         # [BS, BK]
         b_q = tl.load(p_q, mask=m_q[:, None] & (o_d[None, :] < K), other=0.0)
         # [BS, BV]
-        b_do = tl.load(p_do, mask=m_q[:, None] & (o_v[None, :] < V), other=0.0)
+        b_do = tl.load(p_do, mask=m_q[:, None] & (o_v[None, :] < V), other=0.0).to(v.dtype.element_ty)
         # [BS]
         b_lse = tl.load(p_lse, mask=m_q, other=0.0)
         b_delta = tl.load(p_delta, mask=m_q, other=0.0)
@@ -647,8 +647,7 @@ def parallel_attn_bwd(
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     NV = triton.cdiv(V, BV)
 
-    do_input = do.to(v.dtype)
-    delta = parallel_attn_bwd_preprocess(o=o, do=do_input)
+    delta = parallel_attn_bwd_preprocess(o=o, do=do)
 
     dq = torch.empty(B, T, HQ, K, dtype=k.dtype if H == HQ else torch.float, device=q.device)
     dk = torch.empty(B, T, HQ, K, dtype=k.dtype if H == HQ else torch.float, device=q.device)
@@ -667,7 +666,7 @@ def parallel_attn_bwd(
         g_cumsum=g_cumsum,
         lse=lse,
         delta=delta,
-        do=do_input,
+        do=do,
         dq=dq,
         dg_cumsum=dg_cumsum,
         cu_seqlens=cu_seqlens,
@@ -694,7 +693,7 @@ def parallel_attn_bwd(
         g_cumsum=g_cumsum,
         lse=lse,
         delta=delta,
-        do=do_input,
+        do=do,
         dk=dk,
         dv=dv,
         dg_cumsum=dg_cumsum_k,
@@ -722,8 +721,6 @@ def parallel_attn_bwd(
 
     dsink_bias = None
     if sink_bias is not None:
-        if do.dtype != v.dtype:
-            delta = parallel_attn_bwd_preprocess(o=o, do=do)
         p_sink_bias = torch.exp2(sink_bias[None, None, :] - lse)
         dsink_bias = -(p_sink_bias * delta).sum((0, 1))
 
@@ -827,7 +824,7 @@ def parallel_attn(
         output_dtype (torch.dtype, Optional):
             Output dtype, either `q.dtype` or `torch.float32`. Default: `None`, which preserves `q.dtype`.
             FP32 outputs are saved for the backward delta reduction without rounding to the input dtype.
-            Q/K/V and gate gradients use upstream gradients converted to `v.dtype`; sink gradients use the incoming dtype.
+            The delta reduction uses the incoming gradient; backward matrix products cast it to the input dtype on load.
 
     Returns:
         o (torch.Tensor):
