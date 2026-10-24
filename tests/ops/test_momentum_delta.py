@@ -5,6 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+import math
 from unittest.mock import Mock
 
 import pytest
@@ -14,10 +15,11 @@ import torch.nn.functional as F
 from fla.ops.delta_rule import chunk_delta_rule, fused_recurrent_delta_rule
 from fla.ops.momentum_delta_rule import (
     chunk_momentum_delta_rule,
+    chunk_momentum_delta_rule_ref,
     fused_recurrent_momentum_delta_rule,
     recurrent_momentum_delta_rule_ref,
 )
-from fla.utils import assert_close, device, device_platform
+from fla.utils import assert_close, device, device_platform, get_err_ratio
 
 
 @pytest.mark.parametrize(
@@ -247,6 +249,33 @@ def test_full_momentum_chunk_recurrent_backward_parity():
         ('q', 'k', 'v', 'p', 'log_alpha', 'log_mu', 'beta', 'eta', 'S0', 'M0'), recurrent[2], chunk[2],
     ):
         assert_close(name, grad_a, grad_b, 0.02)
+
+
+@pytest.mark.parametrize('mu', [0.8, 0.135, None])
+def test_full_momentum_chunk_ref_decaying_gates(mu):
+    torch.manual_seed(0)
+    B, T, H, D = 2, 128, 2, 16
+    q, k, v, p = torch.randn(4, B, T, H, D, device=device)
+    k, p = F.normalize(k, dim=-1), F.normalize(p, dim=-1)
+    g = torch.randn(2, B, T, H, device=device)
+    # mu=None: per-token gates from the issue; 0.135 is the layer's log_mu=-2 floor
+    log_alpha = -0.1 * F.softplus(g[0]) if mu is None else torch.full_like(g[0], math.log(0.99))
+    log_mu = (-F.softplus(g[1])).clamp_min(-2) if mu is None else torch.full_like(g[1], math.log(mu))
+    beta = torch.rand(B, T, H, device=device)
+    beta[:, ::7] = 0
+    inputs = dict(q=q, k=k, v=v, p=p, log_alpha=log_alpha, log_mu=log_mu, beta=beta, eta=torch.ones_like(beta))
+    S0, M0, dS, dM = torch.randn(4, B, H, D, D, device=device)
+    do = torch.randn_like(v)
+
+    def run(op, **kwargs):
+        xs = {n: x.clone().requires_grad_() for n, x in inputs.items()}
+        o, (S, M) = op(**xs, initial_S=S0, initial_M=M0, output_final_state=True, **kwargs)
+        ((o * do).sum() + (S * dS).sum() + (M * dM).sum()).backward()
+        return {'o': o, 'S': S, 'M': M, **{f'd{n}': x.grad for n, x in xs.items()}}
+
+    ref, tri = run(recurrent_momentum_delta_rule_ref), run(chunk_momentum_delta_rule_ref, chunk_size=64)
+    for name in ref:
+        assert get_err_ratio(ref[name], tri[name]) < 1e-4, name
 
 
 @pytest.mark.skipif(
