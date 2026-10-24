@@ -29,6 +29,7 @@ class AttnTileLangBackend(TileLangBackend):
         window_size: int | None = None,
         cu_seqlens: torch.LongTensor | None = None,
         chunk_indices: torch.LongTensor | None = None,
+        output_dtype: torch.dtype | None = None,
     ) -> tuple[bool, str | None]:
         if q.dtype not in (torch.float16, torch.bfloat16, torch.float32):
             return False, f"TileLang backend does not support dtype {q.dtype}; fall back to Triton"
@@ -45,6 +46,7 @@ class AttnTileLangBackend(TileLangBackend):
         window_size: int | None = None,
         cu_seqlens: torch.LongTensor | None = None,
         chunk_indices: torch.LongTensor | None = None,
+        output_dtype: torch.dtype | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         from fla.ops.attn.backends.tilelang.parallel import parallel_attn_fwd_tilelang
         return parallel_attn_fwd_tilelang(
@@ -57,6 +59,7 @@ class AttnTileLangBackend(TileLangBackend):
             window_size=window_size,
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
+            output_dtype=output_dtype,
         )
 
     def parallel_attn_bwd_verifier(
