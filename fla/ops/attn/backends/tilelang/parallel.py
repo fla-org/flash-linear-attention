@@ -49,6 +49,7 @@ def _build_parallel_attn_fwd_kernel(
     sm_scale,
     log2e_scale,
     dtype_str,
+    output_dtype_str=None,
     USE_G=False,
     USE_WINDOW=False,
     WINDOW_SIZE=0,
@@ -60,6 +61,7 @@ def _build_parallel_attn_fwd_kernel(
     """Build a forward kernel specialized to the batch size and head dimensions."""
     dtype_map = {'float16': T.float16, 'bfloat16': T.bfloat16, 'float32': T.float32}
     dtype = dtype_map[dtype_str]
+    output_dtype = dtype_map[output_dtype_str or dtype_str]
     accum_dtype = T.float32
     threads = num_warps * 32
     # pad shared buffers to satisfy WGMMA/MMA inner-dimension alignment
@@ -169,7 +171,7 @@ def _build_parallel_attn_fwd_kernel(
             for i in T.Parallel(BT):
                 b_l[i] += T.exp2(sink_bias[i_h] - b_m[i])
 
-        s_o = T.alloc_shared((BT, BV), dtype)
+        s_o = T.alloc_shared((BT, BV), output_dtype)
         s_lse = T.alloc_shared((BT,), accum_dtype)
         for i, d in T.Parallel(BT, BV):
             b_o[i, d] = b_o[i, d] / b_l[i]
@@ -191,7 +193,7 @@ def _build_parallel_attn_fwd_kernel(
             v: T.Tensor(vv_s, dtype),
             g: T.Tensor(lse_s, accum_dtype),
             sink_bias: T.Tensor(sink_s, accum_dtype),
-            o: T.Tensor(o_s, dtype),
+            o: T.Tensor(o_s, output_dtype),
             lse: T.Tensor(lse_s, accum_dtype),
             cu_seqlens: T.Tensor((Ncu_d,), T.int32),
             chunk_indices: T.Tensor((NT_d, 2), T.int32),
@@ -212,7 +214,7 @@ def _build_parallel_attn_fwd_kernel(
             v: T.Tensor(vv_s, dtype),
             g: T.Tensor(lse_s, accum_dtype),
             sink_bias: T.Tensor(sink_s, accum_dtype),
-            o: T.Tensor(o_s, dtype),
+            o: T.Tensor(o_s, output_dtype),
             lse: T.Tensor(lse_s, accum_dtype),
         ):
             with T.Kernel(HQ, T.ceildiv(T_d, BT), B, threads=threads) as (i_h, i_t, i_b):
@@ -232,6 +234,7 @@ def parallel_attn_fwd_tilelang(
     window_size: int | None = None,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
+    output_dtype: torch.dtype | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, HQ, K = q.shape
     H = k.shape[2]
@@ -255,7 +258,7 @@ def parallel_attn_fwd_tilelang(
     if dtype_str is None:
         raise ValueError(f"Unsupported dtype {q.dtype} for TileLang backend")
 
-    o = torch.empty(B, T, HQ, V, dtype=q.dtype, device=q.device)
+    o = torch.empty(B, T, HQ, V, dtype=output_dtype or q.dtype, device=q.device)
     lse = torch.empty(B, T, HQ, dtype=torch.float32, device=q.device)
 
     g_kern = g_cumsum.float() if USE_G else torch.zeros(B, T, HQ, dtype=torch.float32, device=q.device)
@@ -272,6 +275,7 @@ def parallel_attn_fwd_tilelang(
         sm_scale=sm_scale,
         log2e_scale=log2e_scale,
         dtype_str=dtype_str,
+        output_dtype_str=str(o.dtype).removeprefix('torch.'),
         USE_G=USE_G,
         USE_WINDOW=USE_WINDOW,
         WINDOW_SIZE=window_size or 0,
