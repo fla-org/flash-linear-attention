@@ -449,8 +449,7 @@ def chunk_gla_fwd_kernel_o(
     # [BT, BV]
     b_v = tl.load(p_v, mask=m_tv, other=0.0)
     # [BT, BT]
-    b_A = tl.load(p_A, mask=m_A, other=0.0)
-    b_A = b_A.to(b_v.dtype)
+    b_A = tl.load(p_A, mask=m_A, other=0.0).to(b_v.dtype)
     b_o = tl.dot(b_A, b_v, b_o)
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=m_tv)
 
