@@ -526,8 +526,8 @@ def parallel_attn_bwd_tilelang(
 
     # reuse the Triton delta calculation for unpadded tensors
     from fla.ops.attn.parallel import parallel_attn_bwd_preprocess
-    delta = parallel_attn_bwd_preprocess(o=o, do=do)
-    do = do.to(v.dtype)
+    do_input = do.to(v.dtype)
+    delta = parallel_attn_bwd_preprocess(o=o, do=do_input)
 
     # zero-initialized fp32 outputs accumulate atomic updates across heads and key tiles
     dq = torch.zeros(B, T, HQ, K, dtype=torch.float32, device=q.device)
@@ -557,13 +557,15 @@ def parallel_attn_bwd_tilelang(
     )
 
     if IS_VARLEN:
-        kernel(q, k, v, g_kern, lse, delta, do, dq, dk, dv, dg_kern, cu_seqlens.int(), chunk_indices.int())
+        kernel(q, k, v, g_kern, lse, delta, do_input, dq, dk, dv, dg_kern, cu_seqlens.int(), chunk_indices.int())
     else:
-        kernel(q, k, v, g_kern, lse, delta, do, dq, dk, dv, dg_kern)
+        kernel(q, k, v, g_kern, lse, delta, do_input, dq, dk, dv, dg_kern)
 
     # saved LSE includes the sink mass in the softmax normalizer
     dsink_bias = None
     if sink_bias is not None:
+        if do.dtype != v.dtype:
+            delta = parallel_attn_bwd_preprocess(o=o, do=do)
         p_sink = torch.exp2(sink_bias.float()[None, None, :] - lse.float())
         dsink_bias = -(p_sink * delta.float()).sum((0, 1))
 

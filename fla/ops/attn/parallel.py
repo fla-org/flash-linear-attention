@@ -647,8 +647,8 @@ def parallel_attn_bwd(
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     NV = triton.cdiv(V, BV)
 
-    delta = parallel_attn_bwd_preprocess(o=o, do=do)
-    do = do.to(v.dtype)
+    do_input = do.to(v.dtype)
+    delta = parallel_attn_bwd_preprocess(o=o, do=do_input)
 
     dq = torch.empty(B, T, HQ, K, dtype=k.dtype if H == HQ else torch.float, device=q.device)
     dk = torch.empty(B, T, HQ, K, dtype=k.dtype if H == HQ else torch.float, device=q.device)
@@ -667,7 +667,7 @@ def parallel_attn_bwd(
         g_cumsum=g_cumsum,
         lse=lse,
         delta=delta,
-        do=do,
+        do=do_input,
         dq=dq,
         dg_cumsum=dg_cumsum,
         cu_seqlens=cu_seqlens,
@@ -694,7 +694,7 @@ def parallel_attn_bwd(
         g_cumsum=g_cumsum,
         lse=lse,
         delta=delta,
-        do=do,
+        do=do_input,
         dk=dk,
         dv=dv,
         dg_cumsum=dg_cumsum_k,
@@ -722,6 +722,8 @@ def parallel_attn_bwd(
 
     dsink_bias = None
     if sink_bias is not None:
+        if do.dtype != v.dtype:
+            delta = parallel_attn_bwd_preprocess(o=o, do=do)
         p_sink_bias = torch.exp2(sink_bias[None, None, :] - lse)
         dsink_bias = -(p_sink_bias * delta).sum((0, 1))
 
@@ -825,7 +827,7 @@ def parallel_attn(
         output_dtype (torch.dtype, Optional):
             Output dtype, either `q.dtype` or `torch.float32`. Default: `None`, which preserves `q.dtype`.
             FP32 outputs are saved for the backward delta reduction without rounding to the input dtype.
-            The delta reduction uses the incoming gradient dtype; backward matrix products use `v.dtype`.
+            Q/K/V and gate gradients use upstream gradients converted to `v.dtype`; sink gradients use the incoming dtype.
 
     Returns:
         o (torch.Tensor):
