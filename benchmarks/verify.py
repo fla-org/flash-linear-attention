@@ -5,49 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""
-Correctness-gated benchmark driver for the kernel optimization loop.
-
-This ties the two halves of an optimization iteration into one reproducible command:
-it runs the op's **frozen pytest** as a correctness gate, and only if the gate is green does it measure performance.
-A speedup is never reported on a red gate.
-See ``.agents/skills/fla-optimization-loop/SKILL.md`` for the discipline this driver supports.
-
-Why a separate driver and not just ``run.py``?
-``run.py`` measures latency but does not check correctness;
-the pytest suite checks correctness (forward AND backward, under NaN memory poisoning) but does not measure latency.
-During an optimization loop you need both, every iteration,
-and you must never let a fast kernel that silently broke gradients look like a win.
-This driver enforces that ordering.
-It reuses ``registry.py`` (inputs) and ``run.py`` (timing);
-the only correctness logic is "run the unmodified test file via pytest" —
-the test is a black box this tool may select from but never edit.
-
-Usage::
-
-    # Gate (full pytest) + benchmark vs. main
-    python -m benchmarks.ops.verify --op chunk_gla --base main
-
-    # Fast signal: gate on a shape subset (pytest -k selection, test unchanged)
-    python -m benchmarks.ops.verify --op chunk_gla --gate-k T15 --modes fwd
-
-    # Gate + benchmark + torch profiler trace
-    python -m benchmarks.ops.verify --op fused_attnres --profile
-
-    # Point the gate at an explicit test file (when the derived path is wrong)
-    python -m benchmarks.ops.verify --op chunk_gdn --test-file tests/ops/test_gdn.py
-
-    # Skip the gate entirely (loud warning; speedup is then unverified)
-    python -m benchmarks.ops.verify --op chunk_gla --no-gate
-
-    # List registered ops
-    python -m benchmarks.ops.verify --list
-
-``--gate-k`` is a pytest ``-k`` *selection* for fast iteration — it narrows which parametrized cases run,
-it does not modify the test.
-The full file is the promotion gate; a subset is only a signal.
-Promote a candidate only on a full green gate.
-"""
+"""Run the selected correctness tests before operator timing and optional profiling."""
 
 from __future__ import annotations
 
@@ -56,18 +14,10 @@ import os
 import subprocess
 import sys
 
-# Import sibling modules. Works both as a package (python -m benchmarks.ops.verify)
-# and standalone, matching run.py's import strategy.
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from registry import SHAPE_CONFIGS, get_op, list_ops  # noqa: E402
-from run import (  # noqa: E402
-    _bench_at_ref,
-    _bench_current,
-    _device_synchronize,
-    _find_project_root,
-    _format_machine_line,
-    print_results_table,
-)
+from benchmarks.configs.operators import SHAPE_CONFIGS, get_op, list_ops
+from benchmarks.utils.environment import synchronize_device
+from benchmarks.utils.reporting import compare_results, format_comparison, format_machine_info, print_results
+from benchmarks.utils.revisions import find_project_root, run_operator_benchmarks
 
 
 def derive_test_file(op_name: str) -> str:
@@ -92,7 +42,7 @@ def run_gate(op_name: str, test_file: str | None, gate_k: str | None) -> bool:
     The test file is run unmodified; ``gate_k`` only narrows selection via pytest ``-k``.
     Raises FileNotFoundError if the resolved test file does not exist (caller should surface the override hint).
     """
-    root = _find_project_root()
+    root = find_project_root()
     rel = test_file or derive_test_file(op_name)
     abs_path = rel if os.path.isabs(rel) else os.path.join(root, rel)
     if not os.path.isfile(abs_path):
@@ -117,9 +67,9 @@ def profile_op(op_name: str, modes: list[str]) -> None:
     import importlib
 
     import torch
-    from registry import generate_inputs
     from torch.profiler import ProfilerActivity, profile
 
+    from benchmarks.utils.inputs import generate_inputs
     from fla.utils import device_name
 
     config = get_op(op_name)
@@ -130,7 +80,7 @@ def profile_op(op_name: str, modes: list[str]) -> None:
     shape = next(iter(shapes.values()))
     B, T, H, D = shape['B'], shape['T'], shape['H'], shape['D']
     extra = {k: v for k, v in shape.items() if k not in ('B', 'T', 'H', 'D')}
-    inputs = generate_inputs(config, B, T, H, D, dtype=torch.bfloat16, device=device_name, **extra)
+    inputs = generate_inputs(config=config, B=B, T=T, H=H, D=D, dtype=torch.bfloat16, device=device_name, **extra)
 
     do_bwd = 'fwdbwd' in modes and not config.skip_backward
     out = op_fn(**inputs, **config.extra_kwargs)
@@ -143,11 +93,12 @@ def profile_op(op_name: str, modes: list[str]) -> None:
         if do_bwd:
             t.backward(do)
 
-    for _ in range(3):  # warm autotune before profiling
+    # warm autotune before profiling.
+    for _ in range(3):
         step()
-    _device_synchronize(device_name)
+    synchronize_device(device_name)
 
-    out_dir = os.path.join(_find_project_root(), 'profile', f'{op_name}-opt')
+    out_dir = os.path.join(find_project_root(), 'profile', f'{op_name}-opt')
     os.makedirs(out_dir, exist_ok=True)
     activities = [ProfilerActivity.CPU]
     sort_by = 'self_cpu_time_total'
@@ -156,7 +107,7 @@ def profile_op(op_name: str, modes: list[str]) -> None:
         sort_by = 'self_cuda_time_total'
     with profile(activities=activities, record_shapes=True) as prof:
         step()
-        _device_synchronize(device_name)
+        synchronize_device(device_name)
 
     trace = os.path.join(out_dir, f'{op_name}_trace.json')
     prof.export_chrome_trace(trace)
@@ -172,13 +123,8 @@ def main():
     )
     parser.add_argument('--op', help='Registered op name (see --list)')
     parser.add_argument(
-        '--kind', choices=['op', 'layer'], default='op',
-        help='Target kind. Only "op" is implemented; "layer" is a reserved '
-             'extension point. Default: op.',
-    )
-    parser.add_argument(
         '--base', default=None,
-        help='Git ref for the baseline column (e.g. "main"); reuses run.py worktree compare.',
+        help='Git ref for the baseline column (e.g. "main"); uses an isolated revision worker.',
     )
     parser.add_argument(
         '--modes', nargs='+', default=['fwd', 'fwdbwd'], choices=['fwd', 'fwdbwd'],
@@ -209,17 +155,9 @@ def main():
             print(f"  {name:30s}  [{cfg.category}]  {cfg.import_path}")
         return 0
 
-    if args.kind == 'layer':
-        raise NotImplementedError(
-            "verify.py currently covers ops only; the registry has no layer targets yet. "
-            "Layer support is a reserved extension point — register layer configs in "
-            "registry.py and add a layer input/reference path before using --kind layer."
-        )
-
     if not args.op:
         parser.error('--op is required (use --list to see available ops)')
 
-    # 1. Correctness gate (the frozen test, run unmodified). Never benchmark on a red gate.
     if args.no_gate:
         print("\n  *** WARNING: --no-gate set. Correctness is NOT verified; any "
               "speedup below is meaningless for promotion. ***")
@@ -231,7 +169,7 @@ def main():
                 f"\n  Gate test not found: {e}\n"
                 f"  The op directory name may differ from its test name. Pass "
                 f"--test-file tests/ops/test_<name>.py, or set test_file=... in "
-                f"registry.py for '{args.op}'.",
+                f"configs/operators.py for '{args.op}'.",
                 file=sys.stderr,
             )
             return 2
@@ -241,21 +179,21 @@ def main():
             return 1
         print("\n  GATE PASSED.")
 
-    # 2. Performance measurement (reuses run.py). Each ref runs in a subprocess
-    # so the parent never holds NPU/CUDA tensors across HEAD vs --base.
-    results, machine_info = _bench_current([args.op], None, args.modes)
+    results, machine_info = run_operator_benchmarks(op_names=[args.op], shapes=None, modes=args.modes)
     results = results or []
     machine_info = machine_info or {}
-    print(f"\n  {_format_machine_line(machine_info)} | "
+    print(f"\n  {format_machine_info(machine_info)} | "
           f"Triton {machine_info.get('triton_version', 'N/A')} | "
           f"{machine_info.get('git_label', 'unknown')}")
 
-    baseline, baseline_info = (None, None)
+    baseline = None
     if args.base:
-        baseline, baseline_info = _bench_at_ref(args.base, [args.op], None, args.modes)
-    print_results_table(results, machine_info, baseline=baseline, baseline_info=baseline_info)
+        baseline, _ = run_operator_benchmarks(op_names=[args.op], shapes=None, modes=args.modes, ref=args.base)
+    if baseline is not None:
+        print(format_comparison(changes=compare_results(base=baseline, head=results, threshold=5.0)))
+    else:
+        print_results(results=results)
 
-    # 3. Optional profiling.
     if args.profile:
         profile_op(args.op, args.modes)
 

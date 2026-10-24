@@ -5,61 +5,18 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""
-Benchmark script to compare CP8 and CP2TP configurations for chunk_kda.
-
-Usage:
-    # CP8 configuration (8 GPUs, no TP), 128k with backward
-    torchrun --nproc_per_node=8 benchmark_kda_cp8_vs_cp2tp.py --config cp8 --seqlen 131072 --backward
-
-    # CP8 configuration, 256k forward only
-    torchrun --nproc_per_node=8 benchmark_kda_cp8_vs_cp2tp.py --config cp8 --seqlen 262144 --forward-only
-
-    # CP8 with baseline comparison (test local 32k and scale to 128k)
-    torchrun --nproc_per_node=8 benchmark_kda_cp8_vs_cp2tp.py --config cp8 --seqlen 131072 --backward --with-baseline
-
-    # CP8 with detailed kernel profiling (rank 0 only)
-    torchrun --nproc_per_node=8 benchmark_kda_cp8_vs_cp2tp.py --config cp8 --seqlen 131072 --forward-only --profile-kernels
-
-    # CP2TP configuration
-    torchrun --nproc_per_node=8 benchmark_kda_cp8_vs_cp2tp.py --config cp2tp --seqlen 131072 --backward
-"""
-
-import argparse
-import os
 import random
 
 import torch
 import torch.distributed as dist
 
-from fla.ops.cp import build_cp_context
-from fla.ops.kda import chunk_kda
+from benchmarks.utils.distributed import all_gather, distributed_context
+from benchmarks.utils.reporting import BenchmarkResult
 
-# Configuration
 DTYPE = torch.bfloat16
 
 
-def get_args():
-    parser = argparse.ArgumentParser(description="Benchmark chunk_kda with CP8 vs CP2TP")
-    parser.add_argument("--config", type=str, choices=["cp8", "cp2tp"], default="cp8",
-                        help="Configuration: cp8 (8-way CP) or cp2tp (CP2TP)")
-    parser.add_argument("--seqlen", type=int, default=131072, help="Total sequence length (default: 128k)")
-    parser.add_argument("--batch", type=int, default=1, help="Batch size (default: 1)")
-    parser.add_argument("--heads", type=int, default=32, help="Number of heads (default: 32)")
-    parser.add_argument("--headdim", type=int, default=128, help="Head dimension (default: 128)")
-    parser.add_argument("--cp-size", type=int, default=None, help="Context parallel size (overrides config)")
-    parser.add_argument("--tp-size", type=int, default=None, help="Tensor parallel size (overrides config)")
-    parser.add_argument("--backward", action="store_true", help="Enable backward pass (default: forward only)")
-    parser.add_argument("--forward-only", action="store_true", help="Only run forward pass")
-    parser.add_argument("--with-baseline", action="store_true", help="Also test single-GPU baseline (local seqlen / cp_size)")
-    parser.add_argument("--profile-kernels", action="store_true", help="Profile individual kernels (rank 0 only)")
-    parser.add_argument("--bench", action="store_true", default=True, help="Run benchmark")
-    parser.add_argument("--steps", type=int, default=20, help="Benchmark steps")
-    parser.add_argument("--warmup", type=int, default=10, help="Warmup steps")
-    return parser.parse_args()
-
-
-def print_rank0(*args, **kwargs):
+def _print_rank0(*args, **kwargs):
     if dist.is_initialized():
         dist.barrier()
         if dist.get_rank() == 0:
@@ -69,14 +26,7 @@ def print_rank0(*args, **kwargs):
         print(*args, **kwargs)
 
 
-def all_gather(x, group=None) -> torch.Tensor:
-    world_size = dist.get_world_size(group=group)
-    y = torch.empty(world_size * x.size(0), *x.shape[1:], device=x.device, dtype=x.dtype)
-    dist.all_gather_into_tensor(y, x, group=group)
-    return y
-
-
-def bench(fn, step=20, warm_up=10, grad_to_none=None):
+def _measure_cp_tp(fn, step=20, warm_up=10, grad_to_none=None):
     """Benchmark function with CUDA events."""
     start_event = torch.cuda.Event(enable_timing=True)
     end_event = torch.cuda.Event(enable_timing=True)
@@ -100,7 +50,7 @@ def bench(fn, step=20, warm_up=10, grad_to_none=None):
     return elapsed_time / step
 
 
-def profile_kernels(fn, rank, steps=5, warmup=2):
+def _profile_kernels(fn, rank, steps=5, warmup=2):
     """Profile individual kernels using PyTorch profiler."""
     # Warmup
     for _ in range(warmup):
@@ -138,7 +88,7 @@ def profile_kernels(fn, rank, steps=5, warmup=2):
     return kernel_stats
 
 
-def format_kernel_table(kernel_stats, top_n=20):
+def _format_kernel_table(kernel_stats, top_n=20):
     """Format kernel stats as a table."""
     if not kernel_stats:
         return "No kernel data available"
@@ -160,8 +110,11 @@ def format_kernel_table(kernel_stats, top_n=20):
     return "\n".join(lines)
 
 
-def run_benchmark(args):
-    """Main benchmark function."""
+def _benchmark_cp_tp(args):
+    from fla.ops.cp import build_cp_context
+    from fla.ops.kda import chunk_kda
+
+    results = []
     device = torch.cuda.current_device()
     world_size = dist.get_world_size()
     rank = dist.get_rank()
@@ -222,18 +175,18 @@ def run_benchmark(args):
     test_baseline = args.with_baseline
     profile_kernels_flag = args.profile_kernels
 
-    print_rank0(f"\n{'='*60}")
-    print_rank0(f"Configuration: {args.config}")
-    print_rank0(f"World Size: {world_size}, CP Size: {cp_size}, TP Size: {tp_size}")
-    print_rank0(f"CP Rank: {cp_rank}, TP Rank: {tp_rank}")
-    print_rank0(f"Batch: {B}, Total Heads: {H}, Local Heads: {H_local}")
-    print_rank0(f"Head Dim: {K}, Total SeqLen: {T_total}, Local SeqLen: {T_local}")
-    print_rank0(f"Mode: {'Forward + Backward' if run_backward else 'Forward Only'}")
+    _print_rank0(f"\n{'='*60}")
+    _print_rank0(f"Configuration: {args.config}")
+    _print_rank0(f"World Size: {world_size}, CP Size: {cp_size}, TP Size: {tp_size}")
+    _print_rank0(f"CP Rank: {cp_rank}, TP Rank: {tp_rank}")
+    _print_rank0(f"Batch: {B}, Total Heads: {H}, Local Heads: {H_local}")
+    _print_rank0(f"Head Dim: {K}, Total SeqLen: {T_total}, Local SeqLen: {T_local}")
+    _print_rank0(f"Mode: {'Forward + Backward' if run_backward else 'Forward Only'}")
     if test_baseline:
-        print_rank0(f"Baseline: Single-GPU {T_baseline} (scale to {T_total})")
+        _print_rank0(f"Baseline: Single-GPU {T_baseline} (scale to {T_total})")
     if profile_kernels_flag:
-        print_rank0("Kernel Profiling: Enabled (rank 0 only)")
-    print_rank0(f"{'='*60}\n")
+        _print_rank0("Kernel Profiling: Enabled (rank 0 only)")
+    _print_rank0(f"{'='*60}\n")
 
     # No varlen for simplicity - fixed length sequences
     # Create global cu_seqlens for build_cp_context (it will compute local cu_seqlens internally)
@@ -384,82 +337,71 @@ def run_benchmark(args):
         print("Profiling CP kernels (Rank 0 only)")
         print(f"{'='*60}\n")
 
-        kernel_stats = profile_kernels(kda_with_cp, rank, steps=5, warmup=2)
-        print(format_kernel_table(kernel_stats, top_n=20))
+        kernel_stats = _profile_kernels(kda_with_cp, rank, steps=5, warmup=2)
+        print(_format_kernel_table(kernel_stats, top_n=20))
         print()
 
     # Run benchmarks
-    if args.bench:
-        print_rank0(f"\n{'='*60}")
-        print_rank0(f"Benchmarking {args.config} configuration")
-        print_rank0(f"Steps: {args.steps}, Warmup: {args.warmup}")
-        print_rank0(f"Mode: {'Forward + Backward' if run_backward else 'Forward Only'}")
-        print_rank0(f"{'='*60}\n")
+    _print_rank0(f"\n{'='*60}")
+    _print_rank0(f"Benchmarking {args.config} configuration")
+    _print_rank0(f"Steps: {args.steps}, Warmup: {args.warmup}")
+    _print_rank0(f"Mode: {'Forward + Backward' if run_backward else 'Forward Only'}")
+    _print_rank0(f"{'='*60}\n")
 
-        # Benchmark CP (with build_cp_context)
+    # Benchmark CP (with build_cp_context)
+    dist.barrier()
+    t_cp = _measure_cp_tp(kda_with_cp, step=args.steps, warm_up=args.warmup,
+                          grad_to_none=[q, k, v, g, beta] if run_backward else None)
+    dist.barrier()
+
+    # Benchmark All2All CP (all-gather approach)
+    dist.barrier()
+    t_all2all_cp = _measure_cp_tp(kda_with_all2all_cp, step=args.steps, warm_up=args.warmup,
+                                  grad_to_none=[q, k, v, g, beta] if run_backward else None)
+    dist.barrier()
+
+    # Benchmark baseline (single GPU)
+    if test_baseline:
         dist.barrier()
-        t_cp = bench(kda_with_cp, step=args.steps, warm_up=args.warmup,
-                     grad_to_none=[q, k, v, g, beta] if run_backward else None)
+        t_baseline_local = _measure_cp_tp(kda_baseline_single_gpu, step=args.steps, warm_up=args.warmup,
+                                          grad_to_none=[q_base, k_base, v_base, g_base, beta_base] if run_backward else None)
         dist.barrier()
 
-        # Benchmark All2All CP (all-gather approach)
-        dist.barrier()
-        t_all2all_cp = bench(kda_with_all2all_cp, step=args.steps, warm_up=args.warmup,
-                             grad_to_none=[q, k, v, g, beta] if run_backward else None)
-        dist.barrier()
-
-        # Benchmark baseline (single GPU)
-        if test_baseline:
-            dist.barrier()
-            t_baseline_local = bench(kda_baseline_single_gpu, step=args.steps, warm_up=args.warmup,
-                                     grad_to_none=[q_base, k_base, v_base, g_base, beta_base] if run_backward else None)
-            # Scale to total sequence length (theoretical time on single GPU)
-            t_baseline_scaled = t_baseline_local * cp_size
-            dist.barrier()
-
-        # Print results
-        if rank == 0:
-            print(f"\n{'='*60}")
-            print(f"Results for {args.config} (CP{cp_size}TP{tp_size}):")
-            print(f"SeqLen: {T_total}, Heads: {H}, HeadDim: {K}")
-            print(f"Mode: {'Forward + Backward' if run_backward else 'Forward Only'}")
-            print(f"{'='*60}")
-            print(f"CP time:                {t_cp:.3f} ms")
-            print(f"All2All CP time:        {t_all2all_cp:.3f} ms")
-            print(f"Speedup (vs All2All):   {t_all2all_cp / t_cp:.2f}x")
-            if test_baseline:
-                print(f"{'='*60}")
-                print("Single-GPU Baseline:")
-                print(f"  Local {T_baseline}:           {t_baseline_local:.3f} ms")
-                print(f"  Scaled to {T_total}:      {t_baseline_scaled:.3f} ms (est.)")
-                print(f"Speedup (vs Scaled):    {t_baseline_scaled / t_cp:.2f}x")
-            print(f"{'='*60}\n")
+    timings = [('cp', t_cp), ('all_to_all', t_all2all_cp)]
+    if test_baseline:
+        timings.append(('single_gpu', t_baseline_local))
+    for provider, elapsed in timings:
+        results.append(BenchmarkResult(
+            name='kda',
+            parameters={'provider': provider, 'B': B, 'T': T_total, 'H': H, 'K': K, 'V': V,
+                        'cp_size': cp_size, 'tp_size': tp_size, 'backward': run_backward},
+            metrics={'mean_ms': elapsed},
+            primary_metric='mean_ms',
+        ))
+    return results
 
 
-def main():
-    dist.init_process_group()
-    world_size = dist.get_world_size()
-    rank = dist.get_rank()
-    local_rank = int(os.environ.get("LOCAL_RANK", rank))
-
-    torch.manual_seed(rank + 42)
-    torch.cuda.manual_seed(rank + 42)
-    random.seed(42)
-    torch.cuda.set_device(local_rank)
-
-    args = get_args()
-
-    # Print environment info
-    if rank == 0:
-        print(f"\nPyTorch version: {torch.__version__}")
-        print(f"CUDA available: {torch.cuda.is_available()}")
-        print(f"CUDA device: {torch.cuda.get_device_name(local_rank)}")
-        print(f"World size: {world_size}\n")
-
-    run_benchmark(args)
-
-    dist.destroy_process_group()
+def add_arguments(parser):
+    parser.add_argument("--config", type=str, choices=["cp8", "cp2tp"], default="cp8",
+                        help="Configuration: cp8 (8-way CP) or cp2tp (CP2TP)")
+    parser.add_argument("--seqlen", type=int, default=131072, help="Total sequence length (default: 128k)")
+    parser.add_argument("--batch", type=int, default=1, help="Batch size (default: 1)")
+    parser.add_argument("--heads", type=int, default=32, help="Number of heads (default: 32)")
+    parser.add_argument("--headdim", type=int, default=128, help="Head dimension (default: 128)")
+    parser.add_argument("--cp-size", type=int, default=None, help="Context parallel size (overrides config)")
+    parser.add_argument("--tp-size", type=int, default=None, help="Tensor parallel size (overrides config)")
+    parser.add_argument("--backward", action="store_true", help="Enable backward pass (default: forward only)")
+    parser.add_argument("--forward-only", action="store_true", help="Only run the forward pass")
+    parser.add_argument("--with-baseline", action="store_true", help="Also test single-GPU baseline (local seqlen / cp_size)")
+    parser.add_argument("--profile-kernels", action="store_true", help="Profile individual kernels (rank 0 only)")
+    parser.add_argument("--steps", type=int, default=20, help="Benchmark steps")
+    parser.add_argument("--warmup", type=int, default=10, help="Warmup steps")
 
 
-if __name__ == '__main__':
-    main()
+def run(args):
+    with distributed_context():
+        rank = dist.get_rank()
+        torch.manual_seed(rank + 42)
+        torch.cuda.manual_seed(rank + 42)
+        random.seed(42)
+        return _benchmark_cp_tp(args)

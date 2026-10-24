@@ -51,9 +51,15 @@ jobs:
               'tests/ops/kda_graph.py',
               'tests/ops/test_kda_graph.py',
               'tests/benchmarks/test_graph_benchmark.py',
-              'benchmarks/ops/run.py',
-              'benchmarks/ops/graph_benchmark.py',
-              'benchmarks/ops/graph_registry.py',
+              'tests/benchmarks/test_run.py',
+              'tests/benchmarks/test_reporting.py',
+              'benchmarks/run.py',
+              'benchmarks/workloads/__init__.py',
+              'benchmarks/workloads/kda_graph.py',
+              'benchmarks/utils/revisions.py',
+              'benchmarks/utils/environment.py',
+              'benchmarks/utils/reporting.py',
+              'benchmarks/utils/graph.py',
             ]);
             const related = files.filter(f => npuPattern.test(f.filename) || graphPaths.has(f.filename)).map(f => f.filename);
             if (related.length > 0) {

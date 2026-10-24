@@ -5,58 +5,21 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-import argparse
-import subprocess
 import time
 
 import torch
-from accelerate import Accelerator
 from torch.cuda import max_memory_allocated, memory_allocated
 from torch.optim import AdamW
 from torch.profiler import ProfilerActivity, record_function
 from torch.profiler import profile as torch_profile
 from tqdm import trange
 from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig
-from transformers.optimization import get_cosine_schedule_with_warmup
 
 import fla
+from benchmarks.utils.reporting import BenchmarkResult, format_size
 
 classes = [getattr(fla.models, i) for i in fla.models.__all__]
 configs = {i.model_type: i() for i in classes if issubclass(i, PretrainedConfig)}
-
-
-def sizeof_fmt(num, suffix='B'):
-    for unit in ('', 'Ki', 'Mi', 'Gi', 'Ti', 'Pi', 'Ei', 'Zi'):
-        if abs(num) < 1024.0:
-            return f'{num:.2f}{unit}{suffix}'
-        num /= 1024.0
-    return f'{num:.2f}Yi{suffix}'
-
-
-def _git_describe() -> str:
-    try:
-        branch = subprocess.check_output(
-            ['git', 'rev-parse', '--abbrev-ref', 'HEAD'], stderr=subprocess.DEVNULL
-        ).decode().strip()
-        sha = subprocess.check_output(
-            ['git', 'rev-parse', '--short', 'HEAD'], stderr=subprocess.DEVNULL
-        ).decode().strip()
-        dirty = subprocess.check_output(
-            ['git', 'status', '--porcelain'], stderr=subprocess.DEVNULL
-        ).decode().strip()
-        return f"{branch} @ {sha}{' (dirty)' if dirty else ''}"
-    except Exception:
-        return "unknown"
-
-
-def _print_run_header(rows: dict) -> None:
-    title = " benchmark_training_throughput "
-    bar = "=" * 78
-    print(f"== {title} ".ljust(len(bar), '='))
-    key_w = max(len(k) for k in rows)
-    for k, v in rows.items():
-        print(f"  {k.ljust(key_w)}  {v}")
-    print(bar)
 
 
 def prepare_inputs(
@@ -85,7 +48,7 @@ def prepare_inputs(
     return tokens, cu_seqlens
 
 
-def profile(
+def benchmark_training(
     name: str,
     batch_size: int = 4,
     seq_len: int = 4096,
@@ -107,6 +70,9 @@ def profile(
     profile_steps: int = 64,
     profile_trace: str | None = None,
 ):
+    from accelerate import Accelerator
+    from transformers.optimization import get_cosine_schedule_with_warmup
+
     device = torch.device('cuda')
     config = configs[name] if name in configs else AutoConfig.from_pretrained(name)
     if num_heads is not None:
@@ -131,38 +97,14 @@ def profile(
     if num_hidden_layers is not None:
         config.num_hidden_layers = num_hidden_layers
 
-    def _mark(override):
-        return ' *' if override is not None else ''
-
-    gpu_name = torch.cuda.get_device_name(device) if torch.cuda.is_available() else 'no-cuda'
-    profile_str = (f"on (steps={profile_steps}"
-                   + (f", trace={profile_trace}" if profile_trace else "")
-                   + ")") if enable_profile else 'off'
-    arch_parts = []
-    if hasattr(config, 'num_heads'):
-        arch_parts.append(f"heads={config.num_heads}{_mark(num_heads)}")
-    if hasattr(config, 'head_dim'):
-        arch_parts.append(f"head_dim={config.head_dim}{_mark(head_dim)}")
-    arch_parts.append(f"hidden={config.hidden_size}")
-    arch_parts.append(f"layers={config.num_hidden_layers}{_mark(num_hidden_layers)}")
-    arch_parts.append(f"vocab={config.vocab_size}")
-    _print_run_header({
-        'model':    name,
-        'arch':     ' '.join(arch_parts),
-        'data':     f"B={batch_size} T={seq_len} ctx={context_len} varlen={varlen}",
-        'training': f"{dtype} (mixed={mixed_precision}) compile={compile} "
-        f"warmup={warmup_steps} steps={steps}",
-        'profile':  profile_str,
-        'env':      f"{_git_describe()} | {gpu_name} ({device}) | torch {torch.__version__}",
-    })
     model = AutoModelForCausalLM.from_config(config).cuda().to(dtype)
     if compile:
         print("Compiling the model")
         model = torch.compile(model)
     num_parameters = model.num_parameters()
     print(f"Initializing {name} model from the config:\n{config}\n{model}")
-    print(f"Number of parameters in total: {num_parameters} ({sizeof_fmt(num_parameters)})")
-    print(f"Allocated memory after initialization: {sizeof_fmt(memory_allocated(device))}")
+    print(f"Number of parameters in total: {num_parameters} ({format_size(num_parameters)})")
+    print(f"Allocated memory after initialization: {format_size(memory_allocated(device))}")
 
     accelerator = Accelerator(mixed_precision=mixed_precision)
     optimizer = AdamW(
@@ -195,7 +137,7 @@ def profile(
         optimizer.step()
         scheduler.step()
         optimizer.zero_grad()
-        bar.set_description_str(f"Max memory allocated: {sizeof_fmt(max_memory_allocated(device))}")
+        bar.set_description_str(f"Max memory allocated: {format_size(max_memory_allocated(device))}")
 
     bar = trange(steps)
     torch.cuda.synchronize(device)
@@ -223,10 +165,23 @@ def profile(
 
     bar.close()
     duration = time.time() - start
-    print(f"\nthroughput: {total_tokens / duration:.2f} tokens/s  "
-          f"({duration / steps * 1000:.2f} ms/step over {steps} steps, "
-          f"total {duration:.2f}s)")
-    print(f"peak memory: {sizeof_fmt(max_memory_allocated(device))}")
+    result = BenchmarkResult(
+        name=name,
+        parameters={
+            'B': batch_size, 'T': seq_len, 'context_len': context_len, 'varlen': varlen,
+            'num_heads': getattr(config, 'num_heads', None), 'head_dim': getattr(config, 'head_dim', None),
+            'num_hidden_layers': config.num_hidden_layers, 'dtype': str(dtype), 'compile': compile,
+            'warmup_steps': warmup_steps, 'steps': steps,
+        },
+        metrics={
+            'tokens_per_second': total_tokens / duration,
+            'step_ms': duration / steps * 1000,
+            'elapsed_s': duration,
+            'peak_memory_bytes': max_memory_allocated(device),
+        },
+        primary_metric='tokens_per_second',
+        higher_is_better=True,
+    )
 
     if enable_profile:
         print(f"\nRunning torch.profiler over {profile_steps} steps "
@@ -268,9 +223,10 @@ def profile(
             print(f"\nchrome trace written to {profile_trace}")
             print("  inspect via chrome://tracing or https://ui.perfetto.dev")
 
+    return result
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
+
+def add_arguments(parser):
     parser.add_argument("--name", default='retnet')
     parser.add_argument("--batch_size", default=4, type=int)
     parser.add_argument("--seq_len", default=4096, type=int)
@@ -284,8 +240,10 @@ if __name__ == "__main__":
     parser.add_argument("--compile", action='store_true')
     parser.add_argument("--profile", action='store_true',
                         help="run torch.profiler over a few steps after the throughput loop")
-    args = parser.parse_args()
-    profile(
+
+
+def run(args):
+    return [benchmark_training(
         name=args.name,
         batch_size=args.batch_size,
         seq_len=args.seq_len,
@@ -298,4 +256,4 @@ if __name__ == "__main__":
         steps=args.steps,
         compile=args.compile,
         enable_profile=args.profile,
-    )
+    )]

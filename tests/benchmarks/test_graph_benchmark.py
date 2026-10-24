@@ -5,24 +5,19 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-import sys
+import argparse
+from dataclasses import asdict
 
 import pytest
 import torch
 
-from benchmarks.ops.graph_benchmark import benchmark_case, print_results
-from benchmarks.ops.graph_registry import (
-    GraphBenchmarkCase,
-    get_graph_op,
-    list_graph_ops,
-    make_cu_seqlens,
-    normalize_kda_shape,
-)
+from benchmarks.utils.graph import GraphBenchmarkCase, benchmark_case
+from benchmarks.utils.reporting import print_results
+from benchmarks.workloads.kda_graph import GRAPH, make_cu_seqlens, normalize_kda_shape
 
 
 def test_kda_graph_registration_and_common_shape_defaults():
-    assert "chunk_kda" in list_graph_ops()
-    config = get_graph_op("chunk_kda")
+    config = GRAPH
     assert config.supported_modes == ("fwd", "fwdbwd")
     assert all({"B", "T", "H", "D"} <= shape.keys() for shape in config.default_shapes.values())
 
@@ -130,37 +125,6 @@ def test_benchmark_case_captures_once_validates_and_times_both_engines(mode):
     assert any(kind == "graph-replay" and args == ("live",) for kind, args in calls)
 
 
-@pytest.mark.parametrize("graph_index", [0, 2])
-def test_run_routes_graph_arguments(monkeypatch, graph_index):
-    from benchmarks.ops import graph_benchmark, run
-
-    arguments = ["--op", "chunk_kda", "--no-base", "--modes", "fwd", "fwdbwd", "--iterations", "2"]
-    forwarded = []
-    monkeypatch.setattr(graph_benchmark, "run_graph_benchmark", lambda argv: forwarded.append(argv))
-    argv = arguments.copy()
-    argv.insert(graph_index, "--graph")
-    monkeypatch.setattr(sys, "argv", ["run.py", *argv])
-    run.main()
-    assert forwarded == [arguments]
-
-
-@pytest.mark.parametrize("graph", [False, True])
-def test_run_help_and_list(monkeypatch, capsys, graph):
-    from benchmarks.ops import run
-
-    prefix = ["run.py", "--graph"] if graph else ["run.py"]
-    monkeypatch.setattr(sys, "argv", [*prefix, "--help"])
-    with pytest.raises(SystemExit) as error:
-        run.main()
-    assert error.value.code == 0
-    help_text = capsys.readouterr().out
-    assert ("--iterations" if graph else "--graph") in help_text
-
-    monkeypatch.setattr(sys, "argv", [*prefix, "--list"])
-    run.main()
-    assert "chunk_kda" in capsys.readouterr().out
-
-
 def test_benchmark_case_rejects_reusing_capture_tensor_as_live_input():
     class FakeTensor:
         def data_ptr(self):
@@ -188,72 +152,36 @@ def test_benchmark_case_rejects_reusing_capture_tensor_as_live_input():
         )
 
 
-def test_result_table_reports_base_and_graph_speedups(capsys):
-    current = [{
-        "op": "chunk_kda",
-        "shape": "small",
-        "mode": "fwdbwd",
-        "B": 1,
-        "T": 128,
-        "H": 2,
-        "D": 64,
-        "N": 2,
-        "eager": {"p50_ms": 2.0, "p95_ms": 4.0},
-        "graph": {"p50_ms": 1.0, "p95_ms": 2.0},
-    }]
-    baseline = [{
-        **current[0],
-        "eager": {"p50_ms": 3.0, "p95_ms": 6.0},
-        "graph": None,
-    }]
-    info = {"git_label": "ascend_graph[abc]", "device": "Ascend", "torch": "2.9", "torch_npu": "2.9"}
-    base_info = {"git_label": "main[def]"}
+@pytest.mark.parametrize('extra_dimensions', [False, True])
+def test_graph_workload_preserves_metrics_and_configuration(monkeypatch, capsys, extra_dimensions):
+    from benchmarks.utils import graph
 
-    print_results(current, info, baseline, base_info)
+    row = {
+        'op': 'chunk_kda', 'shape': 'custom', 'mode': 'fwdbwd',
+        'B': 1, 'T': 128, 'H': 2, 'D': 64, 'N': 2, 'dtype': 'bfloat16', 'chunk_size': 32,
+        'actual_T': 96 if extra_dimensions else 128,
+        'HV': 4 if extra_dimensions else 2, 'DV': 32 if extra_dimensions else 64,
+        'fused_options': True, 'sequence_profile': 'ragged', 'validation': 'passed',
+        'eager': {'p50_ms': 2.0, 'p95_ms': 4.0},
+        'graph': {'p50_ms': 1.0, 'p95_ms': 2.0}, 'capture_ms': 3.0,
+    }
+    monkeypatch.setattr(graph, 'benchmark_graph_op', lambda **kwargs: [row])
+    parser = argparse.ArgumentParser()
+    graph.add_graph_arguments(parser)
+    results = graph.run_graph(args=parser.parse_args([]), config=GRAPH)
+    assert len(results) == 2
+    assert results[0].metrics == row['eager']
+    assert results[1].metrics == {**row['graph'], 'capture_ms': 3.0}
+    for result, engine in zip(results, ('eager', 'graph'), strict=True):
+        assert result.name == 'chunk_kda'
+        assert result.primary_metric == 'p50_ms'
+        assert result.parameters == {
+            **{key: value for key, value in row.items() if key not in ('op', 'eager', 'graph', 'capture_ms')},
+            'engine': engine,
+        }
+    print_results(results=[asdict(result) for result in results])
     output = capsys.readouterr().out
-    assert "main[def] eager / ascend_graph[abc] eager / ascend_graph[abc] graph" in output
-    header = next(line for line in output.splitlines() if line.startswith("mode"))
-    assert header.split()[:3] == ["mode", "case", "stat"]
-    assert "graph x    config" in header
-    assert header.endswith("config")
-    assert output.count("1.50x") == 2
-    assert output.count("2.00x") == 2
-
-
-@pytest.mark.parametrize("extra_dimensions", [False, True])
-def test_result_table_reports_graph_specific_configuration(capsys, extra_dimensions):
-    current = [{
-        "op": "chunk_kda",
-        "shape": "custom",
-        "mode": "fwdbwd",
-        "B": 1,
-        "T": 128,
-        "H": 2,
-        "D": 64,
-        "N": 2,
-        "dtype": "bfloat16",
-        "chunk_size": 32,
-        "actual_T": 96 if extra_dimensions else 128,
-        "HV": 4 if extra_dimensions else 2,
-        "DV": 32 if extra_dimensions else 64,
-        "fused_options": True,
-        "sequence_profile": "ragged",
-        "eager": {"p50_ms": 2.0, "p95_ms": 2.0},
-        "graph": {"p50_ms": 1.0, "p95_ms": 1.0},
-    }]
-    info = {"git_label": "HEAD", "device": "Ascend", "torch": "2.9", "torch_npu": "2.9"}
-
-    print_results(current, info)
-    output = capsys.readouterr().out
-    assert "dtype=bfloat16" in output
-    assert "chunk_size=32" in output
-    if extra_dimensions:
-        assert "actual_T=96" in output
-        assert "HV=4" in output
-        assert "DV=32" in output
-    else:
-        assert "actual_T=" not in output
-        assert "HV=" not in output
-        assert "DV=" not in output
-    assert "fused_options=True" in output
-    assert "sequence_profile=ragged" in output
+    assert 'dtype=bfloat16' in output
+    assert f"actual_T={row['actual_T']}" in output
+    assert 'sequence_profile=ragged' in output
+    assert 'capture_ms=3' in output

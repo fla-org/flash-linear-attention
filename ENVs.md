@@ -91,7 +91,7 @@ These variables affect benchmark scripts only.
 | `FLA_BENCH_OP_WARMUP_ITERS` | `5`     | Extra forward/backward warmup iterations per shape.                       |
 | `FLA_BENCH_WARMUP_MS`       | `25`    | Triton benchmark warmup duration in milliseconds.                         |
 | `FLA_BENCH_REP_MS`          | `100`   | Triton benchmark measurement duration in milliseconds.                    |
-| `FLA_BENCH_COOLDOWN_SEC`    | `0`     | Seconds between HEAD and BASE runs in `scripts/run_benchmark_compare.py`. |
+| `FLA_BENCH_COOLDOWN_SEC`    | `0`     | Seconds between HEAD and BASE runs in `benchmarks/compare.py`.            |
 
 ## Testing & CI
 

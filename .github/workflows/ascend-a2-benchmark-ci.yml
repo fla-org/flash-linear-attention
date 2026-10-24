@@ -114,7 +114,7 @@ jobs:
           python -m pip install -U pip setuptools wheel
           # triton-ascend runtime/build deps; install before resolving [npu] extra
           python -m pip install pybind11 cmake attrs sympy pyyaml scipy decorator einops
-          # benchmark_conv plotting (Triton perf_report + benchmarks.visualize).
+          # module convolution plotting (Triton perf_report + benchmarks.visualize).
           python -m pip install matplotlib pandas
           # [npu] extra pins torch / torch_npu / torchvision / triton-ascend; osinfra index
           # hosts triton-ascend wheels (see INSTALL.md).
@@ -175,32 +175,32 @@ jobs:
 
           (
             status=0
-            run_benchmark chunk_gdn 0 python -m benchmarks.ops.run \
-              --op chunk_gdn --base '' --json benchmark_chunk_gdn.json || status=1
-            run_benchmark fused_recurrent_gdn2 0 python -m benchmarks.ops.run \
-              --op fused_recurrent_gdn2 --base '' --json benchmark_fused_recurrent_gdn2.json || status=1
+            run_benchmark chunk_gdn 0 python -m benchmarks.run operator_latency \
+              --op chunk_gdn --json benchmark_chunk_gdn.json || status=1
+            run_benchmark fused_recurrent_gdn2 0 python -m benchmarks.run operator_latency \
+              --op fused_recurrent_gdn2 --json benchmark_fused_recurrent_gdn2.json || status=1
             exit "$status"
           ) &
           pid_gdn=$!
-          run_benchmark chunk_kda 1 python -m benchmarks.ops.run \
-            --op chunk_kda --base '' --json benchmark_chunk_kda.json &
+          run_benchmark chunk_kda 1 python -m benchmarks.run operator_latency \
+            --op chunk_kda --json benchmark_chunk_kda.json &
           pid_kda=$!
           # fused_attnres finishes first in the four-card baseline; reuse its card for GDN2.
           (
             set -e
-            run_benchmark fused_attnres 2 python -m benchmarks.ops.run \
-              --op fused_attnres --base '' --json benchmark_fused_attnres.json
-            run_benchmark chunk_gdn2 2 python -m benchmarks.ops.run \
-              --op chunk_gdn2 --base '' \
+            run_benchmark fused_attnres 2 python -m benchmarks.run operator_latency \
+              --op fused_attnres --json benchmark_fused_attnres.json
+            run_benchmark chunk_gdn2 2 python -m benchmarks.run operator_latency \
+              --op chunk_gdn2 \
               --json benchmark_chunk_gdn2.json
           python - <<'PY'
           import json
 
-          from benchmarks.ops.registry import SHAPE_CONFIGS, get_op
+          from benchmarks.configs.operators import SHAPE_CONFIGS, get_op
 
           def verify(path, shapes):
               with open(path) as f:
-                  results = [r for r in json.load(f)['results'] if r['op'] == 'chunk_gdn2']
+                  results = [r['parameters'] for r in json.load(f)['results'] if r['name'] == 'chunk_gdn2']
               actual = {(r['mode'], r['B'], r['T'], r['H'], r['D']) for r in results}
               expected = {
                   (mode, shape['B'], shape['T'], shape['H'], shape['D'])
@@ -217,12 +217,12 @@ jobs:
           PY
           ) &
           pid_attnres=$!
-          run_benchmark conv1d 3 python benchmarks/modules/benchmark_conv.py &
+          run_benchmark conv1d 3 python -m benchmarks.run conv_latency --json benchmark_conv.json --save-dir conv_benchmark --plot &
           pid_conv1d=$!
           status=0
           wait "$pid_conv1d" || status=1
-          ASCEND_RT_VISIBLE_DEVICES=3 python -m benchmarks.ops.run \
-            --op chunk_precond_gdn --base '' --json benchmark_chunk_precond_gdn.json \
+          ASCEND_RT_VISIBLE_DEVICES=3 python -m benchmarks.run operator_latency \
+            --op chunk_precond_gdn --json benchmark_chunk_precond_gdn.json \
             > chunk_precond_gdn.log 2>&1 &
           pid_precond_gdn=$!
 
@@ -234,8 +234,8 @@ jobs:
           # The runner exposes devices 0-3. Reuse device 0 only after the
           # parallel benchmarks finish so graph latency is not affected by
           # another workload sharing the same NPU.
-          ASCEND_RT_VISIBLE_DEVICES=0 python -m benchmarks.ops.run --graph \
-            --op chunk_kda --no-base --modes fwdbwd \
+          ASCEND_RT_VISIBLE_DEVICES=0 python -m benchmarks.run kda_graph \
+            --modes fwdbwd \
             --custom-shapes '{"smoke": {"B": 1, "T": 128, "H": 2, "D": 64, "N": 2}}' \
             --warmup 3 --iterations 10 --json benchmark_kda_graph.json \
             > chunk_kda_graph.log 2>&1 || status=1
@@ -266,19 +266,30 @@ jobs:
           import json
           import math
 
-          from benchmarks.ops.registry import SHAPE_CONFIGS, get_op
+          from benchmarks.configs.operators import SHAPE_CONFIGS, get_op
 
           with open("benchmark_fused_recurrent_gdn2.json") as f:
               results = json.load(f)["results"]
           config = get_op("fused_recurrent_gdn2")
           shapes = config.default_shapes or SHAPE_CONFIGS
           expected = {tuple(shape[key] for key in ("B", "T", "H", "D")) for shape in shapes.values()}
-          actual = {tuple(row[key] for key in ("B", "T", "H", "D")) for row in results}
+          actual = {tuple(row["parameters"][key] for key in ("B", "T", "H", "D")) for row in results}
           assert actual == expected and len(results) == len(expected), f"Incomplete GDN2 benchmark: {actual} != {expected}"
           for row in results:
-              assert row["op"] == "fused_recurrent_gdn2" and row["mode"] == "fwd", row
-              assert all(math.isfinite(row[key]) and row[key] > 0 for key in ("median_ms", "p20_ms", "p80_ms")), row
+              assert row["name"] == "fused_recurrent_gdn2" and row["parameters"]["mode"] == "fwd", row
+              assert all(math.isfinite(row["metrics"][key]) and row["metrics"][key] > 0 for key in ("median_ms", "p20_ms", "p80_ms")), row
           PY
+
+      - name: Summarize benchmark results
+        if: always()
+        shell: bash
+        run: |
+          shopt -s nullglob
+          results=(benchmark_*.json)
+          if (( ${#results[@]} )); then
+            python -m benchmarks.summarize "${results[@]}" --output benchmark_summary.md
+            cat benchmark_summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Upload benchmark results
         if: always()
@@ -293,6 +304,8 @@ jobs:
             benchmark_fused_attnres.json
             benchmark_chunk_precond_gdn.json
             benchmark_kda_graph.json
+            benchmark_conv.json
+            benchmark_summary.md
             conv_benchmark/
           if-no-files-found: ignore
           retention-days: 10

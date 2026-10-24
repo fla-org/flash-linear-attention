@@ -25,10 +25,10 @@ Run from the repository root. Resolve the baseline to a commit SHA before compar
 
 ```bash
 FLA_BENCH_BASE=$(git rev-parse origin/main)
-FLA_CI_ENV=0 python -m benchmarks.ops.verify --op chunk_kda --base "$FLA_BENCH_BASE"
+FLA_CI_ENV=0 python -m benchmarks.verify --op chunk_kda --base "$FLA_BENCH_BASE"
 
-python benchmarks/benchmark_training_throughput.py --name kda --batch_size 2 --seq_len 8192
-python benchmarks/benchmark_training_throughput.py --name kda --batch_size 2 --seq_len 8192 --varlen
+python -m benchmarks.run training --name kda --batch_size 2 --seq_len 8192
+python -m benchmarks.run training --name kda --batch_size 2 --seq_len 8192 --varlen
 ```
 
 The verification command runs the current tests; retain the validated baseline and tests yourself. A selected subset is useful during iteration but does not replace the full relevant gate before reporting a gain.
@@ -37,17 +37,17 @@ The verification command runs the current tests; retain the validated baseline a
 
 Collect a representative changed kernel with the installed `ncu`. Check which sections and metrics that version supports.
 
-The benchmark runner launches a child process, so use `--target-processes all`. Replace the kernel filter with the changed kernel's name. `--no-base` profiles the current implementation; collect the baseline separately with the same command and workload.
+The runner measures the current checkout. Replace the kernel filter with the changed kernel's name and collect the baseline separately with the same command and workload.
 
 ```bash
 mkdir -p profile/kda
 ncu --target-processes all --set full \
   -k 'regex:chunk_kda' -c 1 -o profile/kda/full \
-  python -m benchmarks.ops.run --op chunk_kda --modes fwd --no-base
+  python -m benchmarks.run operator_latency --op chunk_kda --modes fwd
 
 ncu --target-processes all --set source --section SourceCounters \
   -k 'regex:chunk_kda' -c 1 -o profile/kda/source \
-  python -m benchmarks.ops.run --op chunk_kda --modes fwd --no-base
+  python -m benchmarks.run operator_latency --op chunk_kda --modes fwd
 ```
 
 Use duration, memory throughput, occupancy, stalls, and hot instructions to explain the bottleneck. Profiling overhead makes these runs unsuitable as the latency comparison; use the synchronized benchmark for that measurement.

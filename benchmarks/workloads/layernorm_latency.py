@@ -10,6 +10,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import triton
 
+from benchmarks.utils.perf_report import add_module_arguments, run_module_benchmark
 from fla.modules import FusedLayerNormGated, FusedRMSNormGated, GroupNorm, LayerNorm
 
 
@@ -127,10 +128,9 @@ def benchmark(T, provider):
     return results
 
 
-if __name__ == '__main__':
-    try:
-        from runner import run_module_benchmark
-    except ModuleNotFoundError:
-        from benchmarks.modules.runner import run_module_benchmark
+def add_arguments(parser):
+    add_module_arguments(parser)
 
-    run_module_benchmark(benchmark, script_file=__file__)
+
+def run(args):
+    return run_module_benchmark(mark=benchmark, save_dir=args.save_dir, plot=args.plot)

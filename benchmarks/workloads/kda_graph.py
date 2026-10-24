@@ -5,58 +5,16 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""Registry and operator adapters for graph capture benchmarks."""
-
 from __future__ import annotations
 
-from collections.abc import Callable
-from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+import torch
 
-@dataclass
-class GraphBenchmarkCase:
-    """One fully materialized eager/graph benchmark case.
+from benchmarks.utils.graph import GraphBenchmarkCase, GraphOpConfig, add_graph_arguments, run_graph
 
-    The runner owns the graph lifecycle and timing. Operator adapters own the
-    arguments, calls, and numerical comparison because those details vary
-    across operators.
-    """
-
-    eager_step: Callable
-    graph_step: Callable
-    capture_args: tuple[Any, ...]
-    eager_args: tuple[Any, ...]
-    graph_args: tuple[Any, ...]
-    run_once: Callable[[Callable, tuple[Any, ...], bool], dict[str, Any]]
-    assert_close: Callable[[dict[str, Any], dict[str, Any]], None]
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
-class GraphOpConfig:
-    name: str
-    build_case: Callable[[dict[str, Any], str, str, int], GraphBenchmarkCase]
-    default_shapes: dict[str, dict[str, Any]]
-    supported_modes: tuple[str, ...] = ("fwdbwd",)
-    category: str = ""
-
-
-_REGISTRY: dict[str, GraphOpConfig] = {}
-
-
-def register_graph_op(config: GraphOpConfig) -> None:
-    _REGISTRY[config.name] = config
-
-
-def get_graph_op(name: str) -> GraphOpConfig:
-    if name not in _REGISTRY:
-        raise KeyError(f"Graph op '{name}' is not registered. Available: {sorted(_REGISTRY)}")
-    return _REGISTRY[name]
-
-
-def list_graph_ops() -> list[str]:
-    return sorted(_REGISTRY)
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 def _as_bool(shape: dict[str, Any], name: str, default: bool = False) -> bool:
@@ -292,10 +250,18 @@ KDA_GRAPH_SHAPES = {
 }
 
 
-register_graph_op(GraphOpConfig(
+GRAPH = GraphOpConfig(
     name="chunk_kda",
     build_case=_build_kda_case,
     default_shapes=KDA_GRAPH_SHAPES,
     supported_modes=("fwd", "fwdbwd"),
     category="gate_beta",
-))
+)
+
+
+def add_arguments(parser):
+    add_graph_arguments(parser)
+
+
+def run(args):
+    return run_graph(args=args, config=GRAPH)
