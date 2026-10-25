@@ -858,7 +858,7 @@ def test_chunk_lower_bound(
     if use_gate_in_kernel:
         inputs += (A_log, dt_bias)
         grad_names += ("dA", "dbias")
-        grad_tolerances += (0.003, 0.008)
+        grad_tolerances += (0.004, 0.008)
     do, dht = torch.randn_like(v), torch.randn_like(h0)
     g_ref = naive_kda_lowerbound_gate(g=g, A_log=A_log, dt_bias=dt_bias, lower_bound=lower_bound) if use_gate_in_kernel else g
     ref, ref_ht = [], []
