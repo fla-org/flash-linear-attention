@@ -150,7 +150,7 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
         b_k0 = tl.load(p_k0, mask=m_ck0, other=0.0).to(tl.float32)
         b_g0 = tl.load(p_g0, mask=m_ck0, other=0.0).to(tl.float32)
 
-        if i_tc1 < T:
+        if NC >= 2 and i_tc1 < T:
             m_ck1 = m_tc1[:, None] & m_k[None, :]
             p_q1 = q + o_c1[:, None] * (H*K) + o_k[None, :]
             p_k1 = k + o_c1[:, None] * (H*K) + o_k[None, :]
@@ -228,7 +228,7 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
     ################################################################################
     # save off-diagonal Aqk blocks and prepare Akk
     ################################################################################
-    if i_tc1 < T:
+    if NC >= 2 and i_tc1 < T:
         p_Aqk10 = Aqk + o_c1[:, None] * (HV*BT) + o_i[None, :]
         tl.store(p_Aqk10, (b_Aqk10 * scale).to(Aqk.dtype.element_ty), mask=m_A1)
 
@@ -260,9 +260,10 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
         b_Akk32 = b_Akk32 * b_b3[:, None]
 
     p_Akk00 = Akkd + o_c0[:, None] * (HV*BC) + o_i[None, :]
-    p_Akk11 = Akkd + o_c1[:, None] * (HV*BC) + o_i[None, :]
     b_Ai00 = tl.load(p_Akk00, mask=m_A0, other=0.0).to(tl.float32)
-    b_Ai11 = tl.load(p_Akk11, mask=m_A1, other=0.0).to(tl.float32)
+    if NC >= 2:
+        p_Akk11 = Akkd + o_c1[:, None] * (HV*BC) + o_i[None, :]
+        b_Ai11 = tl.load(p_Akk11, mask=m_A1, other=0.0).to(tl.float32)
     if NC >= 3:
         p_Akk22 = Akkd + o_c2[:, None] * (HV*BC) + o_i[None, :]
         b_Ai22 = tl.load(p_Akk22, mask=m_A2, other=0.0).to(tl.float32)
@@ -279,7 +280,8 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
         m_I = o_i[:, None] == o_i[None, :]
 
         b_Ai00 = -tl.where(m_A, b_Ai00, 0)
-        b_Ai11 = -tl.where(m_A, b_Ai11, 0)
+        if NC >= 2:
+            b_Ai11 = -tl.where(m_A, b_Ai11, 0)
         if NC >= 3:
             b_Ai22 = -tl.where(m_A, b_Ai22, 0)
         if NC >= 4:
@@ -290,11 +292,12 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
             b_a00 = tl.where(o_i < i, b_a00, 0.)
             b_a00 += tl.sum(b_a00[:, None] * b_Ai00, 0)
             b_Ai00 = tl.where((o_i == i)[:, None], b_a00, b_Ai00)
-        for i in range(BC + 2, min(2*BC, T - i_tc0)):
-            b_a11 = -tl.load(Akkd + (i_tc0 + i) * HV*BC + o_i)
-            b_a11 = tl.where(o_i < i - BC, b_a11, 0.)
-            b_a11 += tl.sum(b_a11[:, None] * b_Ai11, 0)
-            b_Ai11 = tl.where((o_i == i - BC)[:, None], b_a11, b_Ai11)
+        if NC >= 2:
+            for i in range(BC + 2, min(2*BC, T - i_tc0)):
+                b_a11 = -tl.load(Akkd + (i_tc0 + i) * HV*BC + o_i)
+                b_a11 = tl.where(o_i < i - BC, b_a11, 0.)
+                b_a11 += tl.sum(b_a11[:, None] * b_Ai11, 0)
+                b_Ai11 = tl.where((o_i == i - BC)[:, None], b_a11, b_Ai11)
         if NC >= 3:
             for i in range(2*BC + 2, min(3*BC, T - i_tc0)):
                 b_a22 = -tl.load(Akkd + (i_tc0 + i) * HV*BC + o_i)
@@ -309,7 +312,8 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
                 b_Ai33 = tl.where((o_i == i - 3*BC)[:, None], b_a33, b_Ai33)
 
         b_Ai00 += m_I
-        b_Ai11 += m_I
+        if NC >= 2:
+            b_Ai11 += m_I
         if NC >= 3:
             b_Ai22 += m_I
         if NC >= 4:
@@ -320,11 +324,12 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
     ################################################################################
 
     # we used tf32 to maintain matrix inverse's precision whenever possible.
-    b_Ai10 = -tl.dot(
-        tl.dot(b_Ai11, b_Akk10, input_precision=SOLVE_TRIL_DOT_PRECISION),
-        b_Ai00,
-        input_precision=SOLVE_TRIL_DOT_PRECISION
-    )
+    if NC >= 2:
+        b_Ai10 = -tl.dot(
+            tl.dot(b_Ai11, b_Akk10, input_precision=SOLVE_TRIL_DOT_PRECISION),
+            b_Ai00,
+            input_precision=SOLVE_TRIL_DOT_PRECISION
+        )
 
     if NC >= 3:
         b_Ai21 = -tl.dot(
@@ -363,12 +368,12 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
     ################################################################################
 
     p_Akk00 = Akk + o_c0[:, None] * (HV*BT) + o_i[None, :]
-    p_Akk10 = Akk + o_c1[:, None] * (HV*BT) + o_i[None, :]
-    p_Akk11 = Akk + o_c1[:, None] * (HV*BT) + (o_i + BC)[None, :]
-
     tl.store(p_Akk00, b_Ai00.to(Akk.dtype.element_ty), mask=m_A0)
-    tl.store(p_Akk10, b_Ai10.to(Akk.dtype.element_ty), mask=m_A1)
-    tl.store(p_Akk11, b_Ai11.to(Akk.dtype.element_ty), mask=m_A1)
+    if NC >= 2:
+        p_Akk10 = Akk + o_c1[:, None] * (HV*BT) + o_i[None, :]
+        p_Akk11 = Akk + o_c1[:, None] * (HV*BT) + (o_i + BC)[None, :]
+        tl.store(p_Akk10, b_Ai10.to(Akk.dtype.element_ty), mask=m_A1)
+        tl.store(p_Akk11, b_Ai11.to(Akk.dtype.element_ty), mask=m_A1)
     if NC >= 3:
         p_Akk20 = Akk + o_c2[:, None] * (HV*BT) + o_i[None, :]
         p_Akk21 = Akk + o_c2[:, None] * (HV*BT) + (o_i + BC)[None, :]
@@ -835,35 +840,48 @@ def chunk_kda_fwd_intra(
 
     Instead, use the first cumulative gate with a fixed shift toward an estimated midpoint (natural-log units):
 
-        s = -lower_bound if lower_bound is supplied to intra, otherwise 2
+        s = -lower_bound / 2 if lower_bound is supplied, otherwise 2
         d = (BC - 1) * s / 2; C = G_0 - d
 
     For BC=16 and s=2, C = G_0 - 15. Including the RCP_LN2 conversion, the kernel's exp2 gives
     exp(G_i - G_0 + 15) for queries and exp(G_0 - G_i - 15) for keys.
-    The default 2 is a heuristic for log gates concentrated near 0, with few near the lower bound;
-    it limits the compensation to avoid over-scaling queries.
-    chunk_kda uses this default for both fused and pre-computed gates. An explicit intra lower_bound sets s instead.
+    Half the gate range estimates the per-token decay; without an explicit bound, the shift defaults to 2.
+    The same shift is used for both fused and pre-computed gates.
+    A supplied lower_bound >= -2 selects BC=32; otherwise BC=16.
     Forward/backward keep the same fixed BC even for partial blocks, so appending tokens cannot move C.
 
-    For actual log gates in [L, 0], the factor bounds are (BC=16, s=2, L=-5):
+    For actual log gates in [L, 0], take BC=32 and L=-2:
 
-        max_i exp(G_i - C) <= exp(d) = exp(15 * 2 / 2) = exp(15) ~= 3.269e6
-        max_i exp(C - G_i) <= exp(-(BC - 1) * L - d) = exp(-15 * (-5) - 15) = exp(60) ~= 1.142e26
+        s = -L / 2 = 1
+        d = (BC - 1) * s / 2 = 31 * 1 / 2 = 15.5
+        C = G_0 - d
+
+    There are at most BC - 1 = 31 gate increments between G_0 and G_i.
+    Since each increment lies in [-2, 0], cumulative gates satisfy G_0 - 62 <= G_i <= G_0:
+
+        G_i - C = (G_i - G_0) + d <= d = 15.5
+        C - G_i = (G_0 - G_i) - d <= 62 - 15.5 = 46.5
+
+    Exponentiating gives the query-side and key-side factor bounds:
+
+        max_i exp(G_i - C) <= exp(d) = exp((BC - 1) * s / 2) = exp(31 * 1 / 2) = exp(15.5) ~= 5.390e6
+        max_i exp(C - G_i) <= exp(-(BC - 1) * L - d) = exp(-31 * (-2) - 15.5) = exp(46.5) ~= 1.566e20
     """
     B, T, H, K, HV = *k.shape, gk.shape[2]
     BT = chunk_size
     if BT not in (32, 64):
         raise ValueError(f"KDA intra chunk kernel only supports chunk_size 32 or 64, got {BT}.")
-    BC = 16
+    BC = 32 if lower_bound is not None and lower_bound >= -2 else 16
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     NC = triton.cdiv(BT, BC)
+    gate_shift = -lower_bound / 2 if lower_bound is not None else 2.
 
     Aqk = torch.empty(B, T, HV, BT, device=k.device, dtype=k.dtype)
     # Akk must be zero-initialized - kernel only writes lower triangular
     Akk = torch.zeros(B, T, HV, BT, device=k.device, dtype=k.dtype)
-    # Separate fp32 buffer for diagonal 16x16 blocks (for precision in solve_tril)
+    # separate fp32 buffer for diagonal blocks (for precision in solve_tril)
     Akkd = torch.empty(B, T, HV, BC, device=k.device, dtype=torch.float32)
 
     if safe_gate:
@@ -886,7 +904,7 @@ def chunk_kda_fwd_intra(
             BT=BT,
             BC=BC,
             BK=BK,
-            GATE_SHIFT=(-lower_bound if lower_bound is not None else 2.) * RCP_LN2,
+            GATE_SHIFT=gate_shift * RCP_LN2,
             USE_GATHER=IS_GATHER_SUPPORTED,
             USE_GRAPH=use_graph,
         )
@@ -963,8 +981,9 @@ def chunk_kda_bwd_intra(
 ):
     B, T, H, K, HV = *k.shape, g.shape[2]
     BT = chunk_size
-    BC = min(16, BT)
+    BC = min(32 if lower_bound is not None and lower_bound >= -2 else 16, BT)
     BK = min(32, triton.next_power_of_2(K))
+    gate_shift = -lower_bound / 2 if lower_bound is not None else 2.
 
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
@@ -1009,7 +1028,7 @@ def chunk_kda_bwd_intra(
         BK=BK,
         NC=NC,
         SAFE_GATE=safe_gate,
-        GATE_SHIFT=(-lower_bound if lower_bound is not None else 2.) * RCP_LN2,
+        GATE_SHIFT=gate_shift * RCP_LN2,
         USE_GATHER=IS_GATHER_SUPPORTED,
         USE_GRAPH=use_graph,
     )

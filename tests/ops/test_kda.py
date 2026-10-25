@@ -695,26 +695,32 @@ def test_chunk(
 
 
 @pytest.mark.parametrize(
-    ("T", "P", "H", "D", "chunk_size", "use_gate_in_kernel"),
+    ("T", "P", "H", "D", "chunk_size", "use_gate_in_kernel", "lower_bound"),
     [
-        pytest.param(
-            *test,
-            use_gate_in_kernel,
-            id="T{}-P{}-H{}-D{}-chunk_size{}-use_gate{}".format(*test, use_gate_in_kernel),
-        )
-        for use_gate_in_kernel in [False, True]
+        pytest.param(*test, id="T{}-P{}-H{}-D{}-chunk_size{}-use_gate_in_kernel{}-lower_bound{}".format(*test))
         for test in [
-            (16, 6, 2, 64, 64),
-            (32, 6, 2, 64, 32),
-            (22, 21, 4, 128, 64),
-            (40, 33, 2, 64, 32),
-            (70, 65, 2, 64, 64),
+            # future gates within a 16-token subtile must not affect its prefix
+            (16, 6, 2, 64, 64, False, -5.0),
+            # the same invariant must hold inside a 32-token subtile with fused gates
+            (32, 6, 2, 64, 32, True, -2.0),
+            # the prefix crosses a 32-token chunk boundary
+            (40, 33, 2, 64, 32, False, -2.0),
+            # the prefix crosses a 64-token chunk boundary
+            (70, 65, 2, 64, 64, True, -2.0),
         ]
     ],
 )
 @pytest.mark.skipif(IS_NPU, reason="Ascend uses separate intra kernels whose anchors are unchanged")
-def test_chunk_causality(T: int, P: int, H: int, D: int, chunk_size: int, use_gate_in_kernel: bool):
-    """Future gates must leave prefix outputs and prefix-loss gradients unchanged."""
+def test_chunk_causality(
+    T: int,
+    P: int,
+    H: int,
+    D: int,
+    chunk_size: int,
+    use_gate_in_kernel: bool,
+    lower_bound: float,
+):
+    """Changing gates after P must preserve outputs and prefix-loss gradients before P."""
     torch.manual_seed(42)
     shape = (1, T, H, D)
     q = F.normalize(torch.randn(shape), dim=-1).bfloat16()
@@ -727,104 +733,132 @@ def test_chunk_causality(T: int, P: int, H: int, D: int, chunk_size: int, use_ga
     q, k, v, beta, A_log, dt_bias = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, beta, A_log, dt_bias))
     do = torch.randn_like(v[:, :P])
 
-    g_edited = g.clone()
+    g_perturbed = g.clone()
     if use_gate_in_kernel:
         logit = math.log(0.99 / 0.01)
-        g_edited[:, P:] = (logit / A_log.detach().exp().view(1, 1, H, 1) - dt_bias.detach().view(1, 1, H, D)).to(g.dtype)
+        gate_scale = A_log.detach().exp().view(1, 1, H, 1)
+        gate_bias = dt_bias.detach().view(1, 1, H, D)
+        g_perturbed[:, P:] = (logit / gate_scale - gate_bias).to(g.dtype)
     else:
-        g_edited[:, P:] = -4.95
-    assert not torch.equal(g[:, P:], g_edited[:, P:])
+        g_perturbed[:, P:] = 0.99 * lower_bound
+    assert not torch.equal(g[:, P:], g_perturbed[:, P:])
 
     outputs, grads = [], []
-    names = ("dq", "dk", "dv", "dg", "db") + (("dA", "dbias") if use_gate_in_kernel else ())
-    for g_i in (g, g_edited):
-        g_i = g_i.requires_grad_(True)
+    grad_names = ("dq", "dk", "dv", "dg", "db") + (("dA", "dbias") if use_gate_in_kernel else ())
+    for g_input in (g, g_perturbed):
+        g_input = g_input.requires_grad_(True)
         o, _ = chunk_kda(
             q=q,
             k=k,
             v=v,
-            g=g_i,
+            g=g_input,
             beta=beta,
             use_gate_in_kernel=use_gate_in_kernel,
             safe_gate=True,
-            lower_bound=-5.0 if use_gate_in_kernel else None,
+            lower_bound=lower_bound,
             A_log=A_log,
             dt_bias=dt_bias,
             chunk_size=chunk_size,
         )
         loss = (o[:, :P].float() * do.float()).sum()
         outputs.append(o[:, :P].detach())
-        inputs = (q, k, v, g_i, beta) + ((A_log, dt_bias) if use_gate_in_kernel else ())
+        inputs = (q, k, v, g_input, beta) + ((A_log, dt_bias) if use_gate_in_kernel else ())
         grads.append(torch.autograd.grad(outputs=loss, inputs=inputs))
 
-    ref, tri = outputs
-    assert torch.isfinite(ref).all() and torch.isfinite(tri).all()
-    assert torch.equal(ref, tri), "future gates changed prefix outputs"
-    for name, ref, tri in zip(names, *grads):
-        assert torch.isfinite(ref).all() and torch.isfinite(tri).all(), name
-        assert torch.equal(ref, tri), f"future gates changed {name} from a prefix-only loss"
+    o, o_perturbed = outputs
+    assert torch.isfinite(o).all() and torch.isfinite(o_perturbed).all()
+    assert torch.equal(o, o_perturbed), "future gates changed prefix outputs"
+    for name, grad, grad_perturbed in zip(grad_names, *grads):
+        assert torch.isfinite(grad).all() and torch.isfinite(grad_perturbed).all(), name
+        assert torch.equal(grad, grad_perturbed), f"future gates changed {name} from a prefix-only loss"
 
 
 @pytest.mark.parametrize(
-    ("lower_bound", "dtype", "use_gate_in_kernel", "cu_seqlens", "gate_pattern"),
+    (
+        "T",
+        "H",
+        "HV",
+        "D",
+        "chunk_size",
+        "use_gate_in_kernel",
+        "safe_gate",
+        "lower_bound",
+        "gate_pattern",
+        "disable_recompute",
+        "cu_seqlens",
+        "dtype",
+    ),
     [
         pytest.param(
-            lower_bound,
-            dtype,
-            use_gate_in_kernel,
-            cu_seqlens,
-            gate_pattern,
-            id=f"lower_bound{lower_bound}-{dtype}-use_gate{use_gate_in_kernel}-cu_seqlens{cu_seqlens}-{gate_pattern}",
+            *test,
+            id=(
+                "T{}-H{}-HV{}-D{}-chunk_size{}-use_gate_in_kernel{}-safe_gate{}-lower_bound{}-gate_pattern{}"
+                "-disable_recompute{}-cu_seqlens{}-dtype{}"
+            ).format(*test),
         )
-        for cu_seqlens in [None, [0, 1, 17, 38]]
-        for use_gate_in_kernel in [False, True]
-        for dtype in [torch.bfloat16, torch.float16]
-        for lower_bound in [-5.0, -2.0, -0.01]
-        for gate_pattern in (
-            ["random", "lower_bound", "zero", "mixed"] if not use_gate_in_kernel and lower_bound == -5.0 else ["random"]
-        )
+        for test in [
+            # immediately below the threshold, retain the 16-token subtile path
+            (38, 2, 2, 64, 64, False, True, -2.001, "random", False, None, torch.float16),
+            # maximal decay at the threshold stresses scaling in a single-subtile chunk
+            (97, 2, 4, 60, 32, False, True, -2.0, "lower_bound", True, None, torch.float16),
+            # zero gates exercise the no-decay limit and the one-token tail
+            (129, 2, 4, 128, 64, False, False, -2.0, "zero", False, None, torch.bfloat16),
+            # alternating gate extremes stress independent key channels across ragged segments
+            (97, 2, 4, 60, 32, False, True, -2.0, "alternating", True, [0, 1, 17, 38], torch.bfloat16),
+            # saturated fused gates with weak decay expose errors in the A_log gradient
+            (97, 2, 4, 60, 32, True, True, -0.01, "random", True, [0, 1, 17, 38], torch.bfloat16),
+        ]
     ],
 )
 @pytest.mark.skipif(IS_NPU, reason="Ascend uses separate intra kernels whose anchors are unchanged")
 def test_chunk_lower_bound(
-    lower_bound: float,
-    dtype: torch.dtype,
+    T: int,
+    H: int,
+    HV: int,
+    D: int,
+    chunk_size: int,
     use_gate_in_kernel: bool,
-    cu_seqlens: list[int] | None,
+    safe_gate: bool,
+    lower_bound: float,
     gate_pattern: str,
+    disable_recompute: bool,
+    cu_seqlens: list[int] | None,
+    dtype: torch.dtype,
 ):
     torch.manual_seed(42)
-    B, T, H, D = 1, 38, 2, 64
-    shape = (B, T, H, D)
-    q, k = (F.normalize(torch.randn(shape), dim=-1).to(dtype) for _ in range(2))
-    v = torch.randn(shape, dtype=dtype)
-    g = (10 * torch.randn(shape)).to(dtype)
+    B = 1
+    if cu_seqlens is not None and cu_seqlens[-1] < T:
+        cu_seqlens = [*cu_seqlens, T]
+    q = F.normalize(torch.randn(B, T, H, D), dim=-1).to(dtype)
+    k = F.normalize(torch.randn(B, T, H, D), dim=-1).to(dtype)
+    v = torch.randn(B, T, HV, D, dtype=dtype)
+    g = (10 * torch.randn(B, T, HV, D)).to(dtype)
     if not use_gate_in_kernel:
         g = lower_bound * g.float().sigmoid()
         if gate_pattern == "lower_bound":
             g.fill_(lower_bound)
         elif gate_pattern == "zero":
             g.zero_()
-        elif gate_pattern == "mixed":
+        elif gate_pattern == "alternating":
             g[..., ::2] = lower_bound
             g[..., 1::2] = 0.
-    beta = torch.randn(B, T, H, dtype=dtype).sigmoid()
-    A_log = torch.zeros(H)
-    dt_bias = 0.1 * torch.randn(H * D)
+    beta = torch.randn(B, T, HV, dtype=dtype).sigmoid()
+    A_log = torch.zeros(HV)
+    dt_bias = 0.1 * torch.randn(HV * D)
     N = len(cu_seqlens) - 1 if cu_seqlens is not None else B
-    h0 = torch.randn(N, H, D, D)
+    h0 = torch.randn(N, HV, D, D)
     q, k, v, g, beta, h0, A_log, dt_bias = (
         x.to(device).requires_grad_(True) for x in (q, k, v, g, beta, h0, A_log, dt_bias)
     )
     offsets = cu_seqlens if cu_seqlens is not None else [0, T]
     cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int64, device=device) if cu_seqlens is not None else None
     inputs = (q, k, v, g, beta, h0)
-    names = ("dq", "dk", "dv", "dg", "db", "dh0")
-    tolerances = (0.008, 0.008, 0.008, 0.02, 0.02, 0.008)
+    grad_names = ("dq", "dk", "dv", "dg", "db", "dh0")
+    grad_tolerances = (0.008, 0.008, 0.008, 0.02, 0.02, 0.008)
     if use_gate_in_kernel:
         inputs += (A_log, dt_bias)
-        names += ("dA", "dbias")
-        tolerances += (0.003, 0.008)
+        grad_names += ("dA", "dbias")
+        grad_tolerances += (0.003, 0.008)
     do, dht = torch.randn_like(v), torch.randn_like(h0)
     g_ref = naive_kda_lowerbound_gate(g=g, A_log=A_log, dt_bias=dt_bias, lower_bound=lower_bound) if use_gate_in_kernel else g
     ref, ref_ht = [], []
@@ -842,35 +876,31 @@ def test_chunk_lower_bound(
         ref_ht.append(ref_ht_i)
     ref, ref_ht = torch.cat(ref, dim=1), torch.cat(ref_ht, dim=0)
     ref_grads = torch.autograd.grad(outputs=(ref * do).sum() + (ref_ht * dht).sum(), inputs=inputs)
-    kwargs = dict(
-        q=q,
-        k=k,
-        v=v,
-        g=g,
-        beta=beta,
-        initial_state=h0,
-        output_final_state=True,
-        use_gate_in_kernel=use_gate_in_kernel,
-        safe_gate=True,
-        cu_seqlens=cu_seqlens,
-    )
-    if use_gate_in_kernel:
-        kwargs.update(lower_bound=lower_bound, A_log=A_log, dt_bias=dt_bias)
-    tri, tri_ht = chunk_kda(**kwargs)
-    tri_grads = torch.autograd.grad(outputs=(tri * do).sum() + (tri_ht * dht).sum(), inputs=inputs)
-    for name, ref_value, tri_value, tolerance in zip(
-        ("o", "ht") + names, (ref, ref_ht) + ref_grads, (tri, tri_ht) + tri_grads, (0.005, 0.005) + tolerances,
-    ):
-        assert torch.isfinite(tri_value).all(), name
-        assert_close(name, ref_value, tri_value, tolerance)
-    if not use_gate_in_kernel:
-        tri_bound, tri_bound_ht = chunk_kda(**kwargs, lower_bound=lower_bound)
-        tri_bound_grads = torch.autograd.grad(outputs=(tri_bound * do).sum() + (tri_bound_ht * dht).sum(), inputs=inputs)
+    bounds = [lower_bound] if use_gate_in_kernel else [None, lower_bound]
+    for bound in bounds:
+        tri, tri_ht = chunk_kda(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            initial_state=h0,
+            output_final_state=True,
+            use_gate_in_kernel=use_gate_in_kernel,
+            safe_gate=safe_gate,
+            lower_bound=bound,
+            disable_recompute=disable_recompute,
+            cu_seqlens=cu_seqlens,
+            A_log=A_log if use_gate_in_kernel else None,
+            dt_bias=dt_bias if use_gate_in_kernel else None,
+            chunk_size=chunk_size,
+        )
+        tri_grads = torch.autograd.grad(outputs=(tri * do).sum() + (tri_ht * dht).sum(), inputs=inputs)
         for name, ref_value, tri_value, tolerance in zip(
-            ("o", "ht") + names,
+            ("o", "ht") + grad_names,
             (ref, ref_ht) + ref_grads,
-            (tri_bound, tri_bound_ht) + tri_bound_grads,
-            (0.005, 0.005) + tolerances,
+            (tri, tri_ht) + tri_grads,
+            (0.005, 0.005) + grad_tolerances,
         ):
             assert torch.isfinite(tri_value).all(), name
             assert_close(name, ref_value, tri_value, tolerance)

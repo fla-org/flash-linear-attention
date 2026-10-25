@@ -370,19 +370,27 @@ Key guidelines:
 - **Always use `torch.manual_seed(42)`** for reproducibility.
 - **Use `assert_close`** from `fla.utils` with the existing per-test error thresholds.
 - **Use `device` and platform helpers from `fla.utils`** for device-agnostic tests. Reuse helpers such as `device_platform`, `IS_NVIDIA`, `IS_AMD`, and `IS_INTEL` instead of adding direct `torch.cuda` platform checks; keep vendor-specific profiling in benchmark scripts.
-- **Parametrize** with diverse shapes including non-power-of-2 sequence lengths (e.g., 63, 100, 2000).
+- **Choose representative configurations** including non-power-of-2 sequence lengths (e.g., 63, 100, 2000).
 - **Skip unsupported platforms** with helpers such as `IS_INTEL` imported from `fla.utils`, e.g. `@pytest.mark.skipif(IS_INTEL, reason="unsupported on Intel")`.
 - **Include test IDs** in parametrize for readable output.
 
 #### Test organization and naming
 
-Add coverage at the smallest suitable level:
+Give each test function a clear purpose and each case a primary failure mode to target. Focused feature tests verify one behavior; broad entry-point tests such as `test_chunk` check numerical correctness across representative shapes and feature combinations. Make each case's purpose clear from its name or a short comment.
 
-1. **Extend an existing test first.** Check whether the change can be covered by another case in its parameter matrix. Reuse the existing setup, reference, and assertions for new shapes, dtypes, flags, and boundary inputs; add only the combinations needed to cover the behavior.
+Keep each test function to **at most 10 cases**. Focused feature tests should use fewer: **at most 5, usually 2–5**. Broad entry-point tests such as `test_chunk` may use **up to 16 cases** to cover long and short sequences, batch sizes, head counts, head dimensions, and important feature switches. These are limits, not targets; every additional case must cover a distinct risk.
+
+Choose inputs that are likely to expose bugs. For shape coverage, consider odd or non-power-of-2 dimensions, grouped heads, exact tile boundaries, partial tiles, one-token tails, and short segments in variable-length batches. For a specific feature, prefer relevant extremes: gate tests can exercise zero decay, maximal decay, alternating extremes, or saturated logits.
+
+**Do not use Cartesian products of test parameters**, whether through nested loops, stacked `parametrize` decorators, or manually expanded tables. Select complete configurations deliberately and list them in a single `parametrize`. A case may exercise several dimensions together, but it must have a clear reason to exist.
+
+Place coverage at the smallest suitable level:
+
+1. **Extend an existing test first.** Reuse its setup, reference, and assertions when the new behavior fits its purpose. Add or refine a representative case within the limits above.
 2. **Add a function only when needed.** A separate test is appropriate when the behavior needs different setup, execution, or assertions that would make the existing test difficult to follow. A new shape, flag, or regression alone does not justify a new function. Do not force unrelated behaviors into one test through complex branching.
 3. **Add a file only for a distinct scope.** Keep coverage in the existing component's test file whenever it fits. A new component or a separate test setup, such as distributed execution, can warrant a new file. Avoid creating a file for each bug, PR, shape, or backend case.
 
-Follow the existing file names in the relevant test directory. Operator tests normally live in `tests/ops/test_<op>.py`; test names follow the implementation entry point, such as `test_chunk`, `test_fused_recurrent`, or `test_parallel`. Use a short behavior suffix only to distinguish a separate test, such as `test_chunk_varlen`; identify parameter values through case IDs. Match nearby FLA tests rather than inventing new naming schemes, prefixes, or helper conventions. See [tests/ops/test_gla.py](tests/ops/test_gla.py) and [tests/ops/test_gdn.py](tests/ops/test_gdn.py) for examples.
+Follow the existing file names in the relevant test directory. Operator tests normally live in `tests/ops/test_<op>.py`; function names follow the implementation entry point, such as `test_chunk`, `test_fused_recurrent`, or `test_parallel`. Add a short behavior suffix only to distinguish a separate test, such as `test_chunk_varlen`. Use the implementation's parameter names, keep case tuples and function signatures in the same order, and identify parameter values through readable case IDs. Avoid unrelated abbreviations or new naming schemes. See [tests/ops/test_gla.py](tests/ops/test_gla.py) and [tests/ops/test_kda.py](tests/ops/test_kda.py) for examples of test structure and naming.
 
 ### NaN Memory Poisoning
 

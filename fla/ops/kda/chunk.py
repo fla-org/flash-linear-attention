@@ -286,7 +286,7 @@ def chunk_kda(
             in which case the kernel computes ``2 * sigmoid(beta)`` instead of ``sigmoid(beta)``.
             Default: ``False``.
         safe_gate (bool, Optional):
-            Whether to enable M=16 TensorCore acceleration for bounded gates.
+            Whether to enable TensorCore acceleration for bounded gates.
             With ``use_gate_in_kernel=True``, requires ``lower_bound`` and bounds gates to ``[lower_bound, 0)``.
             Otherwise, the caller must provide pre-computed bounded gates.
             Default: ``False``.
