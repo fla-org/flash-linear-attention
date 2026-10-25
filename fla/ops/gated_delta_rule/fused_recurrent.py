@@ -401,8 +401,8 @@ def fused_recurrent_gated_delta_rule(
         >>> g = F.logsigmoid(torch.rand(B, T, HV, device='cuda'))
         >>> beta = torch.rand(B, T, HV, device='cuda').sigmoid()
         >>> h0 = torch.randn(B, HV, K, V, device='cuda')
-        >>> o, ht = fused_gated_recurrent_delta_rule(
-            q, k, v, g, beta,
+        >>> o, ht = fused_recurrent_gated_delta_rule(
+            q=q, k=k, v=v, g=g, beta=beta,
             initial_state=h0,
             output_final_state=True
         )
@@ -410,8 +410,8 @@ def fused_recurrent_gated_delta_rule(
         >>> q, k, v, g, beta = map(lambda x: rearrange(x, 'b t ... -> 1 (b t) ...'), (q, k, v, g, beta))
         # for a batch with 4 sequences, `cu_seqlens` with 5 start/end positions are expected
         >>> cu_seqlens = q.new_tensor([0, 2048, 4096, 6144, 8192], dtype=torch.long)
-        >>> o, ht = fused_gated_recurrent_delta_rule(
-            q, k, v, g, beta,
+        >>> o, ht = fused_recurrent_gated_delta_rule(
+            q=q, k=k, v=v, g=g, beta=beta,
             initial_state=h0,
             output_final_state=True,
             cu_seqlens=cu_seqlens
