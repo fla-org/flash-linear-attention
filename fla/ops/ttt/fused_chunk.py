@@ -9,6 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.backends import dispatch
 from fla.modules.layernorm import group_norm
 from fla.utils import IS_NVIDIA_HOPPER, autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, input_guard
 
@@ -754,6 +755,7 @@ def norm_residual(x, weight, bias, eps):
     return x
 
 
+@dispatch('ttt')
 def fused_chunk_ttt_linear(
     q: torch.Tensor,
     k: torch.Tensor,
