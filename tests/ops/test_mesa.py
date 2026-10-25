@@ -114,6 +114,74 @@ def test_chunk(
 
 
 @pytest.mark.parametrize(
+    ('dtype', 'use_initial_state'),
+    [
+        pytest.param(torch.bfloat16, False, id='bf16-no-initial-state'),
+        pytest.param(torch.float32, True, id='fp32-initial-state'),
+    ],
+)
+@pytest.mark.parametrize('grad_scale', [1, 2**-20], ids=['unit-gradient', 'small-gradient'])
+@pytest.mark.skipif(device_platform == 'intel', reason='Intel Triton Failure')
+def test_chunk_l2norm_output_only(dtype: torch.dtype, use_initial_state: bool, grad_scale: float):
+    torch.manual_seed(42)
+    B, T, H, D = 1, 67, 1, 64
+    q = (torch.randn(B, T, H, D, device=device, dtype=dtype) / 10).requires_grad_()
+    k = (torch.randn(B, T, H, D, device=device, dtype=dtype) / 10).requires_grad_()
+    v = (torch.randn(B, T, H, D, device=device, dtype=dtype) / 10).requires_grad_()
+    g = torch.empty(B, T, H, device=device, dtype=torch.float32).uniform_(0.8, 0.99).log_().requires_grad_()
+    beta = torch.randn(B, T, H, device=device, dtype=torch.float32).sigmoid().requires_grad_()
+    lamb = (torch.randn(H, D, device=device, dtype=torch.float32).sigmoid() * 0.75 + 0.25).requires_grad_()
+    inputs = (q, k, v, g, beta, lamb)
+    do = torch.rand_like(v) * grad_scale
+
+    h_kk_init = h_kv_init = None
+    if use_initial_state:
+        k_init = F.normalize(torch.randn(B, H, D, device=device, dtype=torch.float32), dim=-1)
+        h_kk_init = (k_init.unsqueeze(-1) * k_init.unsqueeze(-2)).detach().requires_grad_()
+        h_kv_init = (torch.randn(B, H, D, D, device=device, dtype=torch.float32) / 10).requires_grad_()
+        inputs += (h_kk_init, h_kv_init)
+
+    tri, _, _ = chunk_mesa_net(
+        q=q.clone(),
+        k=k.clone(),
+        v=v.clone(),
+        g=g.clone(),
+        beta=beta.clone(),
+        lamb=lamb.clone(),
+        h_kk_init=h_kk_init.clone() if h_kk_init is not None else None,
+        h_kv_init=h_kv_init.clone() if h_kv_init is not None else None,
+        output_final_state=False,
+        use_qk_l2norm_in_kernel=True,
+    )
+    (tri * do).sum().backward()
+    tri_grads = tuple(x.grad for x in inputs)
+    for x in inputs:
+        x.grad = None
+
+    # keep the reference normalization in fp32 so small gradients cannot underflow on the backward path
+    q_ref = q.float() * torch.rsqrt(q.float().square().sum(-1, keepdim=True) + 1e-6)
+    k_ref = k.float() * torch.rsqrt(k.float().square().sum(-1, keepdim=True) + 1e-6)
+    ref, _, _ = naive_mesa_net_exact(
+        q=q_ref,
+        k=k_ref,
+        v=v.clone(),
+        g=g.clone(),
+        beta=beta.clone(),
+        lamb=lamb.clone(),
+        h_kk_init=h_kk_init.clone() if h_kk_init is not None else None,
+        h_kv_init=h_kv_init.clone() if h_kv_init is not None else None,
+    )
+    (ref * do).sum().backward()
+    ref_grads = tuple(x.grad for x in inputs)
+
+    assert_close('o', ref, tri, 0.007)
+    for name, ref_grad, tri_grad in zip(('dq', 'dk', 'dv', 'dg', 'db', 'dlamb', 'dh_kk_init', 'dh_kv_init'),
+                                        ref_grads, tri_grads):
+        assert ref_grad is not None and tri_grad is not None
+        assert_close(name, ref_grad.float() / grad_scale, tri_grad.float() / grad_scale, 0.015 if name == 'dlamb' else 0.008)
+
+
+@pytest.mark.parametrize(
     ('H', 'D', 'gate_range', 'cu_seqlens', 'dtype'),
     [
         pytest.param(*test, id="H{}-D{}-gate_range{}-cu_seqlens{}-{}".format(*test))
