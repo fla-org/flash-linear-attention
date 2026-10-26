@@ -47,6 +47,7 @@ def test_utils_import_without_transformers(run_python):
         """,
     )
 
+
 @pytest.mark.parametrize('error_name', ['ImportError', 'OSError'])
 def test_causal_conv_import_with_unloadable_extension(run_python, error_name):
     run_python(
