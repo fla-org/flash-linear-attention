@@ -52,9 +52,11 @@ from .utils import (
 _CHUNK_SIZE = 64
 
 # The fused dqk/dv backward keeps two [BT, BK] FP32 accumulators live across
-# the V loop. Pre-Hopper parts spill them to local memory (~18 KB/thread) and
-# end up ~20x slower than the separate dqk/dv kernels, so use the fusion only
-# on Hopper and newer. Non-NVIDIA backends keep their existing path.
+# the V loop. Triton keeps the dot operands in registers on SM8x (mma.sync), so
+# the accumulators spill to local memory and the kernel ends up ~20x slower
+# than the separate dqk/dv kernels. Hopper and Blackwell use WGMMA/tcgen05 with
+# shared-memory or TMEM operands, so keep the fusion there. Non-NVIDIA backends
+# keep their existing path.
 USE_FUSED_DQK_DV = not IS_NVIDIA or IS_NVIDIA_HOPPER or IS_NVIDIA_BLACKWELL
 _READOUT_BWD_AUTOTUNE_CONFIGS = [
     triton.Config({'BT': bt}, num_warps=num_warps, num_stages=num_stages)
