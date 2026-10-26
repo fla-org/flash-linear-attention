@@ -448,7 +448,7 @@ def test_dispatch_disabled(run_python, disabled):
 
         for operation in [
             'attn', 'attnres', 'common', 'gated_delta_rule', 'gdn2', 'generalized_delta_rule.dplr',
-            'gla', 'kda', 'rwkv6',
+            'gla', 'kda', 'rwkv6', 'wall_attn',
         ]:
             with warnings.catch_warnings():
                 warnings.simplefilter('error', DeprecationWarning)
