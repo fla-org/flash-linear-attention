@@ -37,6 +37,7 @@ CHUNK_FWD_O_BLACKWELL_DROPPED_CONFIGS = [] if BLACKWELL_8_WARP_RACE else [
 
 _O_CONFIGS = [
     *CHUNK_FWD_O_BLACKWELL_DROPPED_CONFIGS,
+    triton.Config({'BK': 128, 'BV': 128}, num_warps=4, num_stages=3),
     triton.Config({'BK': 64, 'BV': 64}, num_warps=4, num_stages=3),
     triton.Config({'BK': 32, 'BV': 32}, num_warps=2, num_stages=3),
 ]
