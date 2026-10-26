@@ -23,7 +23,7 @@ from fla.utils import IS_AMD, autotune_cache_kwargs, deprecate_kwarg, input_guar
 try:
     from causal_conv1d import causal_conv1d_fn as causal_conv1d_fn_cuda
     from causal_conv1d import causal_conv1d_update as causal_conv1d_update_cuda
-except ImportError:
+except (ImportError, OSError):
     causal_conv1d_fn_cuda = None
     causal_conv1d_update_cuda = None
 
