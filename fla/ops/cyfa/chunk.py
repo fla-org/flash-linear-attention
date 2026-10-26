@@ -23,10 +23,12 @@ from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.cumsum import chunk_global_cumsum, chunk_local_cumsum
 from fla.ops.utils.op import exp2
 from fla.utils import (
+    IS_NVIDIA,
     IS_NVIDIA_HOPPER,
     autocast_custom_bwd,
     autocast_custom_fwd,
     autotune_cache_kwargs,
+    get_device_capability,
     get_multiprocessor_count,
     input_guard,
 )
@@ -48,6 +50,12 @@ from .utils import (
 )
 
 _CHUNK_SIZE = 64
+
+# The fused dqk/dv backward keeps two [BT, BK] FP32 accumulators live across
+# the V loop. Pre-Hopper parts spill them to local memory (~18 KB/thread) and
+# end up ~20x slower than the separate dqk/dv kernels, so use the fusion only
+# on Hopper and newer. Non-NVIDIA backends keep their existing path.
+USE_FUSED_DQK_DV = not IS_NVIDIA or get_device_capability()[0] >= 9
 _READOUT_BWD_AUTOTUNE_CONFIGS = [
     triton.Config({'BT': bt}, num_warps=num_warps, num_stages=num_stages)
     for bt in [16, 32, 64]
@@ -1500,7 +1508,7 @@ class ChunkCyFAFunction(torch.autograd.Function):
             cu_seqlens=cu_seqlens,
             chunk_size=chunk_size,
             chunk_indices=chunk_indices,
-            fuse_dv_single_k=True,
+            fuse_dv_single_k=USE_FUSED_DQK_DV,
         )
 
         if raw_logits is None:
