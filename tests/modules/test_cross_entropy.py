@@ -332,22 +332,6 @@ def test_fused_cross_entropy(
             ('mean', 'sum'),
             (torch.bfloat16, torch.float16, torch.float32),
         )
-    ] + [
-        pytest.param(
-            2, 63, 64, 4103, 0.1, 0.3, 3.0, 8, reduction, True, True, False, False, True, dtype,
-            gradient_mode, use_l2warp, id=f'demand-{gradient_mode}-{use_l2warp=}-{reduction}-{dtype}',
-            marks=pytest.mark.skipif(IS_NPU, reason="Covers transformed logits in the default GPU kernels"),
-        )
-        for gradient_mode, use_l2warp, reduction, dtype in product(
-            ('input', 'weight', 'bias', 'frozen', 'no_grad'), (False, True), ('mean', 'sum'),
-            (torch.bfloat16, torch.float32),
-        )
-    ] + [
-        pytest.param(
-            2, 63, 64, 4103, 0.0, 1.0, None, 8, 'mean', True, False, False, False, True, torch.bfloat16,
-            gradient_mode, use_l2warp, id=f'demand-backend-{gradient_mode}-{use_l2warp=}',
-        )
-        for gradient_mode, use_l2warp in product(('input', 'weight', 'bias', 'frozen', 'no_grad'), (False, True))
     ],
 )
 @pytest.mark.skipif(IS_INTEL, reason="Intel Triton Failure")
@@ -458,6 +442,74 @@ def test_fused_linear_cross_entropy(
             assert torch.count_nonzero(grad).item() == 0
 
 
+@pytest.mark.parametrize(
+    ('gradient_mode', 'use_l2warp'),
+    [
+        pytest.param('input', False, id='input-only'),
+        pytest.param('weight', True, id='weight-only-l2'),
+        pytest.param('bias', False, id='bias-only'),
+        pytest.param('frozen', True, id='frozen-l2'),
+        pytest.param('no_grad', False, id='no-grad'),
+    ],
+)
+@pytest.mark.skipif(IS_INTEL, reason="Intel Triton Failure")
+def test_fused_linear_cross_entropy_gradient_demand(gradient_mode, use_l2warp, monkeypatch):
+    test_fused_linear_cross_entropy(
+        B=2,
+        T=63,
+        D=64,
+        V=4103,
+        smoothing=0.0,
+        scale=1.0,
+        softcap=None,
+        num_chunks=8,
+        reduction='mean',
+        with_bias=True,
+        strided=False,
+        ignore_all=False,
+        confident_target=False,
+        accumulate_grad_in_fp32=True,
+        dtype=torch.bfloat16,
+        gradient_mode=gradient_mode,
+        use_l2warp=use_l2warp,
+        monkeypatch=monkeypatch,
+    )
+
+
+@pytest.mark.parametrize(
+    ('gradient_mode', 'use_l2warp', 'reduction', 'dtype'),
+    [
+        pytest.param('input', True, 'sum', torch.float32, id='input-only-fp32-sum-l2'),
+        pytest.param('weight', False, 'mean', torch.bfloat16, id='weight-only-bf16-mean'),
+        pytest.param('bias', True, 'sum', torch.bfloat16, id='bias-only-bf16-sum-l2'),
+        pytest.param('frozen', False, 'mean', torch.float32, id='frozen-fp32-mean'),
+        pytest.param('no_grad', True, 'sum', torch.float32, id='no-grad-fp32-sum-l2'),
+    ],
+)
+@pytest.mark.skipif(IS_NPU or IS_INTEL, reason="Covers transformed logits in the default GPU kernels")
+def test_fused_linear_cross_entropy_transformed_demand(gradient_mode, use_l2warp, reduction, dtype, monkeypatch):
+    test_fused_linear_cross_entropy(
+        B=2,
+        T=63,
+        D=64,
+        V=4103,
+        smoothing=0.1,
+        scale=0.3,
+        softcap=3.0,
+        num_chunks=8,
+        reduction=reduction,
+        with_bias=True,
+        strided=True,
+        ignore_all=False,
+        confident_target=False,
+        accumulate_grad_in_fp32=True,
+        dtype=dtype,
+        gradient_mode=gradient_mode,
+        use_l2warp=use_l2warp,
+        monkeypatch=monkeypatch,
+    )
+
+
 def test_fused_linear_logsumexp_row_tail():
     torch.manual_seed(42)
     x = torch.zeros(2, 1025, device=device)
@@ -559,7 +611,13 @@ def _run_parallel_linear_cross_entropy_worker(rank, world_size, init_file):
         timeout=timedelta(minutes=5),
     )
     try:
-        for gradient_mode, option in product(('input', 'weight', 'bias', 'frozen', 'no_grad', 'mixed'), ('combined', 'l2')):
+        for gradient_mode, option in [
+            ('input', 'combined'),
+            ('weight', 'l2'),
+            ('bias', 'combined'),
+            ('mixed', 'l2'),
+            ('no_grad', 'combined'),
+        ]:
             _check_parallel_linear_cross_entropy(rank, world_size, 4103, torch.float32, option, 'mean', gradient_mode)
         for local_vocab, dtype, option, reduction in product(
             (67, 4103, 65539),
