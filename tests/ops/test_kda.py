@@ -775,6 +775,7 @@ def test_chunk_causality(
 
 @pytest.mark.parametrize(
     (
+        "B",
         "T",
         "H",
         "HV",
@@ -792,26 +793,27 @@ def test_chunk_causality(
         pytest.param(
             *test,
             id=(
-                "T{}-H{}-HV{}-D{}-chunk_size{}-use_gate_in_kernel{}-safe_gate{}-lower_bound{}-gate_pattern{}"
+                "B{}-T{}-H{}-HV{}-D{}-chunk_size{}-use_gate_in_kernel{}-safe_gate{}-lower_bound{}-gate_pattern{}"
                 "-disable_recompute{}-cu_seqlens{}-dtype{}"
             ).format(*test),
         )
         for test in [
             # immediately below the threshold, retain the 16-token subtile path
-            (38, 2, 2, 64, 64, False, True, -2.001, "random", False, None, torch.float16),
+            (1, 38, 2, 2, 64, 64, False, True, -2.001, "random", False, None, torch.float16),
             # maximal decay at the threshold stresses scaling in a single-subtile chunk
-            (97, 2, 4, 60, 32, False, True, -2.0, "lower_bound", True, None, torch.float16),
-            # zero gates exercise the no-decay limit and the one-token tail
-            (129, 2, 4, 128, 64, False, False, -2.0, "zero", False, None, torch.bfloat16),
+            (1, 97, 2, 4, 60, 32, False, True, -2.0, "lower_bound", True, None, torch.float16),
+            # non-safe single-subtile solves must handle multiple batches and one-token tails
+            (2, 129, 3, 6, 128, 32, False, False, -2.0, "zero", False, None, torch.bfloat16),
             # alternating gate extremes stress independent key channels across ragged segments
-            (97, 2, 4, 60, 32, False, True, -2.0, "alternating", True, [0, 1, 17, 38], torch.bfloat16),
+            (1, 97, 2, 4, 60, 64, False, True, -2.0, "alternating", True, [0, 1, 17, 38], torch.bfloat16),
             # saturated fused gates with weak decay expose errors in the A_log gradient
-            (97, 2, 4, 60, 32, True, True, -0.01, "random", True, [0, 1, 17, 38], torch.bfloat16),
+            (1, 97, 2, 4, 60, 32, True, True, -0.01, "random", True, [0, 1, 17, 38], torch.bfloat16),
         ]
     ],
 )
 @pytest.mark.skipif(IS_NPU, reason="Ascend uses separate intra kernels whose anchors are unchanged")
 def test_chunk_lower_bound(
+    B: int,
     T: int,
     H: int,
     HV: int,
@@ -826,7 +828,6 @@ def test_chunk_lower_bound(
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
-    B = 1
     if cu_seqlens is not None and cu_seqlens[-1] < T:
         cu_seqlens = [*cu_seqlens, T]
     q = F.normalize(torch.randn(B, T, H, D), dim=-1).to(dtype)
@@ -869,7 +870,7 @@ def test_chunk_lower_bound(
             v=v[:, bos:eos],
             g=g_ref[:, bos:eos],
             beta=beta[:, bos:eos],
-            initial_state=h0[i:i+1],
+            initial_state=h0[i:i+1] if cu_seqlens is not None else h0,
             output_final_state=True,
         )
         ref.append(ref_i)
@@ -1047,19 +1048,26 @@ def test_chunk_use_beta_sigmoid_in_kernel(B: int, T: int, H: int, D: int, allow_
 
 
 @pytest.mark.parametrize(
-    ("H", "D", "mask_p", "cu_seqlens", "dtype", "use_gate_in_kernel", "safe_gate", "disable_recompute", "chunk_size"),
+    (
+        "H", "D", "mask_p", "cu_seqlens", "dtype", "use_gate_in_kernel",
+        "safe_gate", "lower_bound", "disable_recompute", "chunk_size",
+    ),
     [
         pytest.param(
             *test,
-            id=("H{}-D{}-mask_p{}-cu_seqlens{}-{}-gate{}" "-safe_gate{}-disable_recompute{}-chunk_size{}").format(*test),
+            id=(
+                "H{}-D{}-mask_p{}-cu_seqlens{}-{}-gate{}-safe_gate{}-lower_bound{}-disable_recompute{}-chunk_size{}"
+            ).format(*test),
         )
         for test in [
-            (4, 60, 0.1, [0, 15], torch.float16, True, False, False, 64),
-            (4, 64, 0.9, [0, 256, 500, 1000], torch.float16, True, False, False, 64),
-            (4, 128, 0.5, [0, 256, 500, 1000], torch.float16, False, False, False, 64),
-            (4, 100, 0, [0, 15, 100, 300, 1200, 2000], torch.float16, True, False, False, 64),
-            (4, 256, 0, [0, 100, 300, 1200, 3000, 4096], torch.float16, False, True, True, 64),
-            (4, 60, 0.1, [0, 31, 96, 160], torch.float16, True, False, True, 32),
+            (4, 60, 0.1, [0, 15], torch.float16, True, False, None, False, 64),
+            (4, 64, 0.9, [0, 256, 500, 1000], torch.float16, True, False, None, False, 64),
+            (4, 128, 0.5, [0, 256, 500, 1000], torch.float16, False, False, None, False, 64),
+            (4, 100, 0, [0, 15, 100, 300, 1200, 2000], torch.float16, True, False, None, False, 64),
+            (4, 256, 0, [0, 100, 300, 1200, 3000, 4096], torch.float16, False, True, None, True, 64),
+            (4, 60, 0.1, [0, 31, 96, 160], torch.float16, True, False, None, True, 32),
+            # non-safe 32-token diagonal inverses must survive in-place writes across ragged segments
+            (3, 60, 0.5, [0, 1, 34, 99, 164], torch.bfloat16, False, False, -2., True, 64),
         ]
     ],
 )
@@ -1072,6 +1080,7 @@ def test_chunk_varlen(
     dtype: torch.dtype,
     use_gate_in_kernel: bool,
     safe_gate: bool,
+    lower_bound: float | None,
     disable_recompute: bool,
     chunk_size: int,
 ):
@@ -1096,9 +1105,9 @@ def test_chunk_varlen(
         g = g * (torch.rand_like(g) > mask_p)
     mask = torch.rand_like(g) > mask_p
     g = g * mask + (~mask) * (-1000)
-    if safe_gate:
+    if safe_gate or lower_bound is not None:
         assert use_gate_in_kernel is False
-        g = g.clamp(-5, 0)
+        g = g.clamp(lower_bound if lower_bound is not None else -5, 0)
 
     beta = torch.rand(1, T, H, dtype=dtype).sigmoid()
     h0 = torch.randn((N, H, D, D), dtype=torch.float32)
@@ -1124,6 +1133,7 @@ def test_chunk_varlen(
         cu_seqlens_cpu=cu_seqlens_cpu,
         use_gate_in_kernel=use_gate_in_kernel,
         safe_gate=safe_gate,
+        lower_bound=lower_bound,
         disable_recompute=disable_recompute,
         chunk_size=chunk_size,
     )

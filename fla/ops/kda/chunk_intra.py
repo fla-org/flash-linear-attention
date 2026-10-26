@@ -354,7 +354,6 @@ def chunk_kda_fwd_kernel_inter_solve32x32(
     BT: tl.constexpr,
     BK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    USE_SAFE_GATE: tl.constexpr,
     USE_GRAPH: tl.constexpr = False,
 ):
     i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
@@ -407,80 +406,23 @@ def chunk_kda_fwd_kernel_inter_solve32x32(
         b_b = tl.load(beta + o_c1 * HV, mask=m_c1, other=0.).to(tl.float32)
         b_Akk *= b_b[:, None]
 
-    o_s = tl.arange(0, 16)
-    m_A = o_s[:, None] > o_s[None, :]
-    m_I = o_s[:, None] == o_s[None, :]
-    m_s0 = i_tc + o_s[:, None] < T
-    m_s1 = i_tc + 16 + o_s[:, None] < T
-    if USE_SAFE_GATE:
-        p_A00 = Akkd + (i_tc + o_s[:, None]) * (HV*32) + o_s[None, :]
-        b_Ai00 = tl.load(p_A00, mask=m_s0, other=0.)
-        b_Ai10 = tl.load(p_A00 + 16 * HV*32, mask=m_s1, other=0.)
-        b_Ai11 = tl.load(p_A00 + 16 * HV*32 + 16, mask=m_s1, other=0.)
-    else:
-        b_Ai00, b_Ai10, b_Ai11 = solve32x32(
-            A=Akkd + i_tc * HV*32,
-            T=T - i_tc,
-            H=HV,
-            m_A=m_A,
-            m_I=m_I,
-            DOT_PRECISION=SOLVE_TRIL_DOT_PRECISION,
-        )
-
-    p_Aii = Akk + (i_tc + o_s[:, None]) * (HV*BT) + o_s[None, :]
-    tl.store(p_Aii, b_Ai00, mask=m_s0)
-    tl.store(p_Aii + 16 * HV*BT, b_Ai10, mask=m_s1)
-    tl.store(p_Aii + 16 * HV*BT + 16, b_Ai11, mask=m_s1)
-
+    o_i = tl.arange(0, 32)
+    o_c0 = i_tc + o_i
+    p_A00 = Akkd + o_c0[:, None] * (HV*32) + o_i[None, :]
+    b_Ai00 = tl.load(p_A00, mask=o_c0[:, None] < T, other=0.)
+    tl.store(Akk + o_c0[:, None] * (HV*BT) + o_i[None, :], b_Ai00, mask=o_c0[:, None] < T)
     if BT == 64 and i_tc + 32 < T:
-        m_s2 = i_tc + 32 + o_s[:, None] < T
-        m_s3 = i_tc + 48 + o_s[:, None] < T
-        if USE_SAFE_GATE:
-            p_A11 = Akkd + (i_tc + 32 + o_s[:, None]) * (HV*32) + o_s[None, :]
-            b_Ai22 = tl.load(p_A11, mask=m_s2, other=0.)
-            b_Ai32 = tl.load(p_A11 + 16 * HV*32, mask=m_s3, other=0.)
-            b_Ai33 = tl.load(p_A11 + 16 * HV*32 + 16, mask=m_s3, other=0.)
-        else:
-            b_Ai22, b_Ai32, b_Ai33 = solve32x32(
-                A=Akkd + (i_tc + 32) * HV*32,
-                T=T - i_tc - 32,
-                H=HV,
-                m_A=m_A,
-                m_I=m_I,
-                DOT_PRECISION=SOLVE_TRIL_DOT_PRECISION,
-            )
-
-        o_r = tl.broadcast_to(o_s[:, None], (16, 32))
-        o_c = tl.broadcast_to(o_s[None, :], (16, 16))
-        b_A0 = gather(b_Akk, o_r, axis=0)
-        b_A1 = gather(b_Akk, o_r + 16, axis=0)
-        b_A20 = gather(b_A0, o_c, axis=1)
-        b_A21 = gather(b_A0, o_c + 16, axis=1)
-        b_A30 = gather(b_A1, o_c, axis=1)
-        b_A31 = gather(b_A1, o_c + 16, axis=1)
-
-        # retain 16-token blocks so the triangular inverses do not multiply zero blocks
-        b_A20 = (tl.dot(b_A20, b_Ai00, input_precision=SOLVE_TRIL_DOT_PRECISION) +
-                 tl.dot(b_A21, b_Ai10, input_precision=SOLVE_TRIL_DOT_PRECISION))
-        b_A21 = tl.dot(b_A21, b_Ai11, input_precision=SOLVE_TRIL_DOT_PRECISION)
-        b_A30 = (tl.dot(b_A30, b_Ai00, input_precision=SOLVE_TRIL_DOT_PRECISION) +
-                 tl.dot(b_A31, b_Ai10, input_precision=SOLVE_TRIL_DOT_PRECISION))
-        b_A31 = tl.dot(b_A31, b_Ai11, input_precision=SOLVE_TRIL_DOT_PRECISION)
-        b_Ai20 = -tl.dot(b_Ai22, b_A20, input_precision=SOLVE_TRIL_DOT_PRECISION)
-        b_Ai21 = -tl.dot(b_Ai22, b_A21, input_precision=SOLVE_TRIL_DOT_PRECISION)
-        b_Ai30 = -(tl.dot(b_Ai32, b_A20, input_precision=SOLVE_TRIL_DOT_PRECISION) +
-                   tl.dot(b_Ai33, b_A30, input_precision=SOLVE_TRIL_DOT_PRECISION))
-        b_Ai31 = -(tl.dot(b_Ai32, b_A21, input_precision=SOLVE_TRIL_DOT_PRECISION) +
-                   tl.dot(b_Ai33, b_A31, input_precision=SOLVE_TRIL_DOT_PRECISION))
-        p_A20 = Akk + (i_tc + 32 + o_s[:, None]) * (HV*BT) + o_s[None, :]
-        p_A30 = Akk + (i_tc + 48 + o_s[:, None]) * (HV*BT) + o_s[None, :]
-        tl.store(p_A20, b_Ai20, mask=m_s2)
-        tl.store(p_A20 + 16, b_Ai21, mask=m_s2)
-        tl.store(p_A20 + 32, b_Ai22, mask=m_s2)
-        tl.store(p_A30, b_Ai30, mask=m_s3)
-        tl.store(p_A30 + 16, b_Ai31, mask=m_s3)
-        tl.store(p_A30 + 32, b_Ai32, mask=m_s3)
-        tl.store(p_A30 + 48, b_Ai33, mask=m_s3)
+        o_c1 = i_tc + 32 + o_i
+        p_A11 = Akkd + o_c1[:, None] * (HV*32) + o_i[None, :]
+        b_Ai11 = tl.load(p_A11, mask=o_c1[:, None] < T, other=0.)
+        b_Ai10 = -tl.dot(
+            b_Ai11,
+            tl.dot(b_Akk, b_Ai00, input_precision=SOLVE_TRIL_DOT_PRECISION),
+            input_precision=SOLVE_TRIL_DOT_PRECISION,
+        )
+        p_A10 = Akk + o_c1[:, None] * (HV*BT) + o_i[None, :]
+        tl.store(p_A10, b_Ai10, mask=o_c1[:, None] < T)
+        tl.store(p_A10 + 32, b_Ai11, mask=o_c1[:, None] < T)
 
 
 @triton.heuristics({
@@ -1004,6 +946,62 @@ def chunk_kda_fwd_kernel_intra_sub_chunk_32(
     tl.store(p_Aii + 16 * HV*BC + 16, b_Ai11, mask=m_s1)
 
 
+@triton.heuristics({
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
+})
+@triton.jit(do_not_specialize=['T'])
+def chunk_kda_fwd_kernel_solve32x32(
+    Akkd,
+    Akk,
+    cu_seqlens,
+    chunk_indices,
+    T,
+    H: tl.constexpr,
+    BT: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
+):
+    i_t, i_i, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_b, i_h = i_bh // H, i_bh % H
+    if IS_VARLEN:
+        i_n = tl.load(chunk_indices + i_t * 2).to(tl.int32)
+        if USE_GRAPH and i_n < 0:
+            return
+        i_t = tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = eos - bos
+    else:
+        bos = i_b * T
+
+    i_ti = i_t * BT + i_i * 32
+    if i_ti >= T:
+        return
+
+    Akkd += ((bos + i_ti) * H + i_h) * 32
+    Akk += ((bos + i_ti) * H + i_h) * 32
+
+    o_s = tl.arange(0, 16).to(tl.int64)
+    m_A = o_s[:, None] > o_s[None, :]
+    m_I = o_s[:, None] == o_s[None, :]
+    m_s0 = i_ti + o_s[:, None] < T
+    m_s1 = i_ti + o_s[:, None] + 16 < T
+    b_Ai00, b_Ai10, b_Ai11 = solve32x32(
+        A=Akkd,
+        T=T - i_ti,
+        H=H,
+        m_A=m_A,
+        m_I=m_I,
+        DOT_PRECISION=SOLVE_TRIL_DOT_PRECISION,
+    )
+    p_Aii = Akk + o_s[:, None] * (H*32) + o_s[None, :]
+    # Akk can alias the raw fp32 input in Akkd
+    tl.debug_barrier()
+    tl.store(p_Aii, b_Ai00, mask=m_s0)
+    tl.store(p_Aii + 16, 0., mask=m_s0)
+    tl.store(p_Aii + 16 * H*32, b_Ai10, mask=m_s1)
+    tl.store(p_Aii + 16 * H*32 + 16, b_Ai11, mask=m_s1)
+
+
 @dispatch('kda')
 def chunk_kda_fwd_intra(
     q: torch.Tensor,
@@ -1123,9 +1121,23 @@ def chunk_kda_fwd_intra(
             use_graph=use_graph,
         )
 
-    if not safe_gate or NC > 1:
+    if BC == 32 and not safe_gate:
+        chunk_kda_fwd_kernel_solve32x32[(NT, NC, B * HV)](
+            Akkd=Akkd,
+            Akk=Akk if NC == 1 else Akkd,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+            T=T,
+            H=HV,
+            BT=BT,
+            USE_GRAPH=use_graph,
+            num_warps=1,
+        )
+
+    if NC > 1:
         grid = (NT, B * HV)
         inter_kernel = chunk_kda_fwd_kernel_inter_solve32x32 if BC == 32 else chunk_kda_fwd_kernel_inter_solve16x16
+        inter_kwargs = {"USE_SAFE_GATE": safe_gate} if BC == 16 else {}
         inter_kernel[grid](
             q=q,
             k=k,
@@ -1142,7 +1154,7 @@ def chunk_kda_fwd_intra(
             HV=HV,
             K=K,
             BT=BT,
-            USE_SAFE_GATE=safe_gate,
+            **inter_kwargs,
             USE_GRAPH=use_graph,
         )
     w, u, qg, kg = recompute_w_u_fwd(
