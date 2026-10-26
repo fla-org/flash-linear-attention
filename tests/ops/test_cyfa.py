@@ -85,6 +85,16 @@ def test_chunk(B, T, H, K, V, M, dtype, initial_state, checkpoint_level):
     compare_chunk(make_inputs(B, T, H, K, V, M, dtype, initial_state), checkpoint_level)
 
 
+@pytest.mark.smoke
+@pytest.mark.parametrize('checkpoint_level', [0, 1])
+def test_chunk_split_dqk_dv(monkeypatch, checkpoint_level):
+    # Pre-Hopper parts route K <= 128 to the separate dqk/dv kernels; force that
+    # branch here so the Hopper CI part exercises it too.
+    monkeypatch.setattr('fla.ops.cyfa.chunk.USE_FUSED_DQK_DV', False)
+    torch.manual_seed(42)
+    compare_chunk(make_inputs(1, 64, 1, 128, 128, 128, torch.bfloat16, True), checkpoint_level)
+
+
 @pytest.mark.parametrize('checkpoint_level', [0, 1])
 @pytest.mark.parametrize('initial_state', [False, True])
 @pytest.mark.parametrize(
