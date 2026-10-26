@@ -115,6 +115,7 @@ def test_decoding(
         ]
     ],
 )
+@pytest.mark.parametrize('output_dtype', [None, torch.float32])
 def test_parallel(
     B: int,
     T: int,
@@ -123,6 +124,7 @@ def test_parallel(
     K: int,
     V: int,
     scale: float,
+    output_dtype: torch.dtype | None,
 ):
     if not check_shared_mem('hopper') and max(K, V) > 128:
         pytest.skip(reason="Skip test, do not have enough shard mem")
@@ -131,16 +133,16 @@ def test_parallel(
     q = torch.randn((B, T, HQ, K), dtype=torch.float16, device=device).requires_grad_(True)
     k = torch.randn((B, T, H, K), dtype=torch.float16, device=device).requires_grad_(True)
     v = torch.randn((B, T, H, V), dtype=torch.float16, device=device).requires_grad_(True)
-    do = torch.randn((B, T, HQ, V), dtype=torch.float16, device=device)
+    do = torch.randn((B, T, HQ, V), dtype=output_dtype or q.dtype, device=device)
 
     ref, _ = naive_parallel_attn(q=q.float(), k=k.float(), v=v.float(), scale=scale)
-    ref = ref.to(q.dtype)
+    ref = ref.to(output_dtype or q.dtype)
     ref.backward(do)
     ref_dq, q.grad = q.grad.clone(), None
     ref_dk, k.grad = k.grad.clone(), None
     ref_dv, v.grad = v.grad.clone(), None
 
-    tri = parallel_attn(q=q, k=k, v=v, scale=scale)
+    tri = parallel_attn(q=q, k=k, v=v, scale=scale, output_dtype=output_dtype)
     tri.backward(do)
     tri_dq, q.grad = q.grad.clone(), None
     tri_dk, k.grad = k.grad.clone(), None
@@ -253,12 +255,14 @@ def test_parallel_with_g(
     ],
 )
 @pytest.mark.smoke
+@pytest.mark.parametrize('output_dtype', [None, torch.float32])
 def test_parallel_varlen(
     H: int,
     HQ: int,
     K: int,
     V: int,
     cu_seqlens: list[int],
+    output_dtype: torch.dtype | None,
 ):
     torch.manual_seed(42)
     T = cu_seqlens[-1]
@@ -268,16 +272,16 @@ def test_parallel_varlen(
     q = torch.randn((1, T, HQ, K), dtype=dtype, device=device).requires_grad_()
     k = torch.randn((1, T, H, K), dtype=dtype, device=device).requires_grad_()
     v = torch.randn((1, T, H, V), dtype=dtype, device=device).requires_grad_()
-    do = torch.randn((1, T, HQ, V), dtype=dtype, device=device)
+    do = torch.randn((1, T, HQ, V), dtype=output_dtype or dtype, device=device)
 
-    ref = q.new_empty(1, T, HQ, V)
+    ref = q.new_empty(1, T, HQ, V, dtype=output_dtype or dtype)
     for bos, eos in zip(cu_seqlens[:-1], cu_seqlens[1:], strict=False):
         ref[:, bos:eos], _ = naive_parallel_attn(
             q=q[:, bos:eos].float(),
             k=k[:, bos:eos].float(),
             v=v[:, bos:eos].float(),
         )
-    ref = ref.to(dtype)
+    ref = ref.to(output_dtype or dtype)
     ref.backward(do)
     ref_dq, q.grad = q.grad.clone(), None
     ref_dk, k.grad = k.grad.clone(), None
@@ -288,6 +292,7 @@ def test_parallel_varlen(
         k=k,
         v=v,
         cu_seqlens=cu_seqlens_th,
+        output_dtype=output_dtype,
     )
     tri.backward(do)
     tri_dq, q.grad = q.grad.clone(), None
@@ -368,7 +373,8 @@ def test_parallel_swa(
         pytest.param(1, 300, 2, 8, 64, 64, 0.1, 64, [0, 97, 173, 300], True, (0.01, 0.02), id="gate-varlen-swa"),
     ],
 )
-def test_parallel_sink(B, T, H, HQ, K, V, scale, window_size, cu_seqlens, use_g, tol, monkeypatch):
+@pytest.mark.parametrize('output_dtype', [None, torch.float32])
+def test_parallel_sink(B, T, H, HQ, K, V, scale, window_size, cu_seqlens, use_g, tol, output_dtype, monkeypatch):
     torch.manual_seed(42)
     monkeypatch.setenv('TRITON_F32_DEFAULT', 'ieee')
     dtype = torch.float16
@@ -377,7 +383,7 @@ def test_parallel_sink(B, T, H, HQ, K, V, scale, window_size, cu_seqlens, use_g,
     v = torch.randn((B, T, H, V), dtype=dtype, device=device).requires_grad_(True)
     g = torch.empty((B, T, HQ), dtype=dtype, device=device).uniform_(-0.1, -0.01).requires_grad_(True) if use_g else None
     sink_bias = torch.randn((HQ,), dtype=torch.float32, device=device).requires_grad_(True)
-    do = torch.randn((B, T, HQ, V), dtype=dtype, device=device)
+    do = torch.randn((B, T, HQ, V), dtype=output_dtype or dtype, device=device)
     inputs = (q, k, v, sink_bias) if g is None else (q, k, v, sink_bias, g)
     names = ('dq', 'dk', 'dv', 'dsink') if g is None else ('dq', 'dk', 'dv', 'dsink', 'dg')
 
@@ -394,11 +400,21 @@ def test_parallel_sink(B, T, H, HQ, K, V, scale, window_size, cu_seqlens, use_g,
             sink_bias=sink_bias,
         )
         outputs.append(o)
-    ref = torch.cat(outputs, dim=1).to(dtype)
+    ref = torch.cat(outputs, dim=1).to(output_dtype or dtype)
     ref_grads = torch.autograd.grad(ref, inputs, do)
 
     cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device) if cu_seqlens is not None else None
-    tri = parallel_attn(q=q, k=k, v=v, g=g, scale=scale, window_size=window_size, cu_seqlens=cu_seqlens, sink_bias=sink_bias)
+    tri = parallel_attn(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        scale=scale,
+        window_size=window_size,
+        cu_seqlens=cu_seqlens,
+        sink_bias=sink_bias,
+        output_dtype=output_dtype,
+    )
     tri_grads = torch.autograd.grad(tri, inputs, do)
 
     assert_close('o', ref, tri, tol[0])

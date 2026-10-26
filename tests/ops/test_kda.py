@@ -159,8 +159,15 @@ def test_fused_recurrent(
 
 
 @pytest.mark.smoke
-@pytest.mark.parametrize('packed', [False, True])
-@pytest.mark.parametrize('supplied_output', [False, True])
+@pytest.mark.parametrize(
+    ('packed', 'supplied_output'),
+    [
+        pytest.param(False, False, id='dense-allocated'),
+        pytest.param(False, True, id='dense-supplied'),
+        pytest.param(True, False, id='packed-zero-tail'),
+        pytest.param(True, True, id='packed-preserved-tail'),
+    ],
+)
 def test_fused_recurrent_output_buffer(packed, supplied_output):
     torch.manual_seed(42)
     H, HV, D = 2, 4, 60
@@ -208,6 +215,70 @@ def test_fused_recurrent_output_buffer(packed, supplied_output):
         pytest.fail('Out-of-place recurrence changed the input state')
     assert_close('o', expected_output, output, 0.005)
     assert_close('ht', torch.cat(expected_states), state, 0.005)
+
+
+@pytest.mark.parametrize('state_v_first', [False, True], ids=['kv', 'vk'])
+def test_fused_recurrent_empty_varlen_state(state_v_first):
+    torch.manual_seed(42)
+    N, T, H, D = 3, 3, 1, 16
+    q = torch.rand(1, T, H, D, device=device)
+    k = torch.rand(1, T, H, D, device=device)
+    v = torch.rand(1, T, H, D, device=device)
+    g = F.logsigmoid(torch.randn(1, T, H, D, device=device))
+    beta = torch.rand(1, T, H, device=device)
+    h0 = torch.randn(N, H, D, D, device=device)
+    if state_v_first:
+        h0 = h0.transpose(-1, -2).contiguous()
+    h0_ref = h0.clone()
+    cu_seqlens = torch.tensor([0, 1, 1, T], dtype=torch.long, device=device)
+
+    for initial_state in (None, h0):
+        _, ht = fused_recurrent_kda(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            initial_state=initial_state,
+            output_final_state=True,
+            state_v_first=state_v_first,
+            cu_seqlens=cu_seqlens,
+        )
+        expected = torch.zeros_like(h0_ref[1]) if initial_state is None else h0_ref[1]
+        torch.testing.assert_close(ht[1], expected, rtol=0, atol=0)
+    assert torch.equal(h0, h0_ref)
+
+
+def test_fused_recurrent_empty_spec_decoding():
+    torch.manual_seed(42)
+    H, D = 1, 16
+    q = torch.zeros(1, 1, H, D, device=device)
+    k = torch.zeros_like(q)
+    v = torch.zeros_like(q)
+    g = torch.zeros_like(q)
+    beta = torch.zeros(1, 1, H, device=device)
+    state = torch.randn(1, H, D, D, device=device)
+    state_ref = state.clone()
+    invalid_state_guard = 1 << 30
+    state_indices = torch.tensor([invalid_state_guard, 0], dtype=torch.int32, device=device)[1:]
+
+    o, ht = fused_recurrent_kda_fwd(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        beta=beta,
+        initial_state=state,
+        output_final_state=False,
+        inplace_final_state=True,
+        cu_seqlens=torch.tensor([0, 0], dtype=torch.int32, device=device),
+        ssm_state_indices=state_indices,
+        num_accepted_tokens=torch.zeros(1, dtype=torch.int32, device=device),
+    )
+
+    assert ht is state
+    assert torch.equal(o, torch.zeros_like(o))
+    assert torch.equal(state, state_ref)
 
 
 @pytest.mark.parametrize(

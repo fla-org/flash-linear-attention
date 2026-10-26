@@ -22,7 +22,7 @@ from fla.ops.momentum_delta_rule import chunk_momentum_delta_rule, fused_recurre
 
 
 def sum_norm(x):
-    return (x / x.sum(-1, keepdim=True)).to(x)
+    return F.normalize(x, p=1, dim=-1, eps=1e-6).to(x)
 
 
 class MomentumDeltaNet(nn.Module):

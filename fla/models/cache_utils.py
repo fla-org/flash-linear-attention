@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from dataclasses import fields, is_dataclass
 from typing import Any
 
 import torch
@@ -156,6 +157,8 @@ class FLALayer(CacheLayerMixin):
                 return tuple(apply(item) for item in value)
             if isinstance(value, list):
                 return [apply(item) for item in value]
+            if is_dataclass(value):
+                return type(value)(**{field.name: apply(getattr(value, field.name)) for field in fields(value)})
             if value is None or isinstance(value, (int, float, bool, str)):
                 return value
             raise NotImplementedError(f"Cache transformations are not supported for {type(value).__name__} states.")

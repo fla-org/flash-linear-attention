@@ -39,7 +39,7 @@ class DeltaFormerConfig(AttentionConfigBase, PreTrainedConfig):
         rope_theta: float = 10000.,
         rope_max_position_embeddings: int | None = None,
         attn: AttentionConfig = None,
-        use_cache: bool = True,
+        use_cache: bool = False,
         pad_token_id: int | None = None,
         bos_token_id: int = 1,
         eos_token_id: int = 2,
