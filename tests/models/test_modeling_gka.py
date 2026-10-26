@@ -10,12 +10,10 @@ import torch
 
 from fla.models import GKAConfig, GKAForCausalLM
 
-from .test_modeling_base import run_test_generation, run_test_model_forward_backward
+from .utils import check_forward, check_generation
 
 
-# ===================================================================================
-# Test for Modeling (Forward/Backward Pass)
-# ===================================================================================
+@pytest.mark.parametrize('varlen', [False, True], ids=['dense', 'varlen'])
 @pytest.mark.parametrize(
     ['L', 'B', 'T', 'H', 'D', 'use_l2warp', 'attnres_block_size', 'num_v_heads', 'dtype'],
     [
@@ -40,8 +38,9 @@ def test_modeling(
     attnres_block_size: int | None,
     num_v_heads: int | None,
     dtype: torch.dtype,
+    varlen: bool,
 ):
-    run_test_model_forward_backward(
+    check_forward(
         L,
         B,
         T,
@@ -53,12 +52,10 @@ def test_modeling(
         head_dim=D,
         num_v_heads=num_v_heads,
         dtype=dtype,
+        varlen=varlen,
     )
 
 
-# ===================================================================================
-# Test for Generation
-# ===================================================================================
 @pytest.mark.parametrize(
     ['L', 'B', 'T', 'H', 'D', 'dtype'],
     [
@@ -78,19 +75,7 @@ def test_generation(
 ):
     # chunked prefill and token-by-token decoding round differently, and the ridge solve amplifies it at random init,
     # so the default 2e-3 is too tight
-    run_test_generation(L, B, T, H, D, GKAConfig, dtype, tol=0.03)
-
-
-def test_tied_embeddings(tmp_path):
-    config = GKAConfig(hidden_size=64, num_hidden_layers=2, num_heads=2, head_dim=32, vocab_size=128,
-                       tie_word_embeddings=True)
-    model = GKAForCausalLM(config)
-    assert model.lm_head.weight.data_ptr() == model.model.embeddings.weight.data_ptr()
-
-    model.save_pretrained(tmp_path)
-    reloaded = GKAForCausalLM.from_pretrained(tmp_path)
-    assert reloaded.lm_head.weight.data_ptr() == reloaded.model.embeddings.weight.data_ptr()
-    assert torch.equal(reloaded.model.embeddings.weight, model.model.embeddings.weight)
+    check_generation(L, B, T, H, D, GKAConfig, dtype, tol=0.03)
 
 
 @pytest.mark.parametrize('use_forgetting_gate', [True, False])

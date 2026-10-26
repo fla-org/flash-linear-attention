@@ -23,7 +23,7 @@ from fla.ops.gka import chunk_gka, fused_recurrent_gka
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
-    from fla.models.utils import Cache
+    from fla.models.cache_utils import Cache
 
 
 class GatedKalmaNet(nn.Module):
