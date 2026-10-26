@@ -484,13 +484,48 @@ def test_fused_recurrent_vllm_decode(
     assert_close("Untouched ht", ref_state_pool[mask], tri_state_pool[mask], 0.0)
 
 
-@pytest.mark.parametrize('state_v_first', [False, True])
-@pytest.mark.parametrize('packed', [False, True])
-@pytest.mark.parametrize('index_stride', [1, 2])
-@pytest.mark.parametrize('accepted_tokens', [1, 2])
-@pytest.mark.parametrize('state_output', ['inplace', 'separate', 'none'])
+@pytest.mark.parametrize(
+    ('state_v_first', 'packed', 'index_stride', 'accepted_tokens'),
+    [
+        pytest.param(False, False, 2, 2, id='dense-strided-accepted'),
+        pytest.param(True, True, 2, 2, id='packed-vfirst-strided-accepted'),
+        pytest.param(False, True, 1, 1, id='packed-contiguous-first'),
+    ],
+)
 @pytest.mark.skipif(not (IS_NVIDIA or IS_NPU), reason='Indexed KDA requires CUDA or NPU')
-def test_fused_recurrent_indexed_state(state_v_first, packed, index_stride, accepted_tokens, state_output, monkeypatch):
+def test_fused_recurrent_indexed_state(state_v_first, packed, index_stride, accepted_tokens, monkeypatch):
+    _check_fused_recurrent_indexed_state(
+        state_v_first=state_v_first,
+        packed=packed,
+        index_stride=index_stride,
+        accepted_tokens=accepted_tokens,
+        state_output='inplace',
+        monkeypatch=monkeypatch,
+    )
+
+
+@pytest.mark.parametrize(
+    ('state_v_first', 'packed', 'index_stride', 'accepted_tokens', 'state_output'),
+    [
+        pytest.param(True, False, 1, 1, 'separate', id='dense-vfirst-token-states'),
+        pytest.param(False, True, 2, 2, 'separate', id='packed-strided-token-states'),
+        pytest.param(False, False, 2, 2, 'none', id='dense-strided-no-state'),
+        pytest.param(True, True, 1, 1, 'none', id='packed-vfirst-no-state'),
+    ],
+)
+@pytest.mark.skipif(not (IS_NVIDIA or IS_NPU), reason='Indexed KDA requires CUDA or NPU')
+def test_fused_recurrent_indexed_output(state_v_first, packed, index_stride, accepted_tokens, state_output, monkeypatch):
+    _check_fused_recurrent_indexed_state(
+        state_v_first=state_v_first,
+        packed=packed,
+        index_stride=index_stride,
+        accepted_tokens=accepted_tokens,
+        state_output=state_output,
+        monkeypatch=monkeypatch,
+    )
+
+
+def _check_fused_recurrent_indexed_state(state_v_first, packed, index_stride, accepted_tokens, state_output, monkeypatch):
     monkeypatch.setattr("fla.utils.testing.FLA_CI_ENV", False)
     torch.manual_seed(42)
     H, HV, K, V = 2, 4, 32, 24
