@@ -84,7 +84,7 @@ _FUSED_READOUT_FWD_AUTOTUNE_CONFIGS = [
         num_warps=num_warps,
         num_stages=num_stages,
     )
-    for bk in [128]
+    for bk in [64, 128]
     for br in [16, 32]
     for num_warps in NUM_WARPS
     for num_stages in [2, 3, 4]
@@ -1064,7 +1064,9 @@ def _scalar_decay_fused_readout_fwd(
 
 @fla_cache_autotune(
     configs=_READOUT_BWD_AUTOTUNE_CONFIGS,
-    key=['M', 'C'],
+    # The tile choice follows the token count: with few tokens a small `BT`
+    # exposes more blocks, while long sequences prefer one block per 32 tokens.
+    key=['M', 'C', 'N', 'H'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['N'])
@@ -1214,7 +1216,9 @@ def _prune_table_grad_configs(configs, nargs, **kwargs):
 
 @fla_cache_autotune(
     configs=_TABLE_GRAD_AUTOTUNE_CONFIGS,
-    key=['M', 'C'],
+    # `n_splits` and hence the grid are derived from `T`; larger outputs favor
+    # 64x64 tiles, while short sequences only fill the smaller ones.
+    key=['M', 'C', 'T', 'H'],
     prune_configs_by={'early_config_prune': _prune_table_grad_configs},
     **autotune_cache_kwargs,
 )
