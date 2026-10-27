@@ -68,6 +68,14 @@ def _prune_cp_configs(configs, nargs, **kwargs):
     return configs
 
 
+def _prune_cp_summary_configs(configs, nargs, **kwargs):
+    args = {**nargs, **kwargs}
+    # keep single-stage K128 tiles; multi-stage TF32x3 can exhaust shared memory and force register spilling
+    if args['K'] <= 128:
+        return configs
+    return [config for config in configs if config.num_warps <= 4]
+
+
 @triton.heuristics({
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'USE_H_SEQ_IDX': lambda args: args['h_seq_idx'] is not None,
