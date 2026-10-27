@@ -249,8 +249,8 @@ def chunk_gdn2_fwd_kernel_intra_direct_leaf_npu(
                 b_Aqk_j = tl.sum(b_q * b_kgj, axis=1)
                 b_Akk_j = tl.sum((b_b * b_k) * b_kgj, axis=1)
                 m_column = o_j[None, :] == leaf_start[:, None] + j
-                b_Aqk_leaf += tl.where(m_column & (row_in_leaf[:, None] >= j), b_Aqk_j[:, None], 0.0)
-                b_Akk_leaf += tl.where(m_column & (row_in_leaf[:, None] > j), b_Akk_j[:, None], 0.0)
+                b_Aqk_leaf += tl.where(m_column, b_Aqk_j[:, None], 0.0)
+                b_Akk_leaf += tl.where(m_column, b_Akk_j[:, None], 0.0)
 
         col_in_subchunk = o_j[None, :]
         p_Aqk_leaf = (
@@ -262,12 +262,12 @@ def chunk_gdn2_fwd_kernel_intra_direct_leaf_npu(
         p_Akk_leaf = Akk_l + row_t[:, None] * (H * BC) + col_in_subchunk
         tl.store(
             p_Aqk_leaf,
-            (b_Aqk_leaf * scale).to(Aqk.dtype.element_ty),
+            tl.where(o_r[:, None] >= o_j[None, :], b_Aqk_leaf * scale, 0.0).to(Aqk.dtype.element_ty),
             mask=m_row[:, None],
         )
         tl.store(
             p_Akk_leaf,
-            b_Akk_leaf.to(Akk.dtype.element_ty),
+            tl.where(o_r[:, None] > o_j[None, :], b_Akk_leaf, 0.0).to(Akk.dtype.element_ty),
             mask=m_row[:, None],
         )
 
