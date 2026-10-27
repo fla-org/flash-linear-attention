@@ -83,13 +83,7 @@ def parallel_attn_fwd_kernel(
             s_v = T.alloc_shared((BS, BV), dtype)
 
             b_s = T.alloc_fragment((BT, BS), accum_dtype)
-            # same-dtype fragment copies between GEMMs with different layout requirements
-            # fail tilelang layout inference (tile-ai/tilelang#3669); route the fp32 cast
-            # through shared memory only, keeping half-precision kernels unchanged
-            if dtype == torch.float32:
-                b_p = T.alloc_shared((BT, BS), dtype)
-            else:
-                b_p = T.alloc_fragment((BT, BS), dtype)
+            b_p = T.alloc_fragment((BT, BS), dtype)
             b_o = T.alloc_fragment((BT, BV), accum_dtype)
 
             b_m = T.alloc_fragment((BT,), accum_dtype)
@@ -259,15 +253,9 @@ def parallel_attn_bwd_kernel(
                 T.copy(g[i_b, k_start:k_start + BT, i_hq], s_gk)
 
             b_p = T.alloc_fragment((BT, BT), accum_dtype)
-            if dtype == torch.float32:
-                b_p_cast = T.alloc_shared((BT, BT), dtype)
-            else:
-                b_p_cast = T.alloc_fragment((BT, BT), dtype)
+            b_p_cast = T.alloc_fragment((BT, BT), dtype)
             b_ds = T.alloc_fragment((BT, BT), accum_dtype)
-            if dtype == torch.float32:
-                b_ds_cast = T.alloc_shared((BT, BT), dtype)
-            else:
-                b_ds_cast = T.alloc_fragment((BT, BT), dtype)
+            b_ds_cast = T.alloc_fragment((BT, BT), dtype)
 
             b_dv = T.alloc_fragment((BT, BV), accum_dtype)
             b_dk = T.alloc_fragment((BT, BK), accum_dtype)

@@ -174,8 +174,8 @@ def test_parallel_fp32(
     scale: float,
 ):
     # Regression test for #1590: float32 inputs used to make the TileLang backend
-    # fail at kernel-build time ("Layout infer conflict"). Head dims are kept
-    # multiples of 16; unaligned fp32 shapes fall back to Triton via the verifier.
+    # fail at kernel-build time ("Layout infer conflict"). The verifier now rejects
+    # float32 so dispatch falls back to Triton; this test pins that fallback path.
     torch.manual_seed(42)
     os.environ["TRITON_F32_DEFAULT"] = "ieee"
     q = torch.randn((B, T, HQ, K), dtype=torch.float32, device=device).requires_grad_(True)

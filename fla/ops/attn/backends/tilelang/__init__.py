@@ -31,12 +31,11 @@ class AttnTileLangBackend(TileLangBackend):
         chunk_indices: torch.LongTensor | None = None,
         output_dtype: torch.dtype | None = None,
     ) -> tuple[bool, str | None]:
-        if q.dtype not in (torch.float16, torch.bfloat16, torch.float32):
+        if q.dtype not in (torch.float16, torch.bfloat16):
+            # float32 fails tilelang layout inference at kernel-build time
+            # (see #1590, tile-ai/tilelang#3669); fall back to Triton until
+            # the upstream limitation is fixed
             return False, f"TileLang backend does not support dtype {q.dtype}; fall back to Triton"
-        # fp32 with head dims that are not multiples of 16 still fails in tilelang
-        # bulk-copy lowering on the padded shared buffers (see #1590)
-        if q.dtype == torch.float32 and (q.shape[-1] % 16 or v.shape[-1] % 16):
-            return False, "TileLang backend does not support float32 with head dims not multiples of 16; fall back to Triton"
         return True, None
 
     def parallel_attn_fwd(
@@ -82,12 +81,11 @@ class AttnTileLangBackend(TileLangBackend):
         cu_seqlens: torch.LongTensor | None = None,
         chunk_indices: torch.LongTensor | None = None,
     ) -> tuple[bool, str | None]:
-        if q.dtype not in (torch.float16, torch.bfloat16, torch.float32):
+        if q.dtype not in (torch.float16, torch.bfloat16):
+            # float32 fails tilelang layout inference at kernel-build time
+            # (see #1590, tile-ai/tilelang#3669); fall back to Triton until
+            # the upstream limitation is fixed
             return False, f"TileLang backend does not support dtype {q.dtype}; fall back to Triton"
-        # fp32 with head dims that are not multiples of 16 still fails in tilelang
-        # bulk-copy lowering on the padded shared buffers (see #1590)
-        if q.dtype == torch.float32 and (q.shape[-1] % 16 or v.shape[-1] % 16):
-            return False, "TileLang backend does not support float32 with head dims not multiples of 16; fall back to Triton"
         return True, None
 
     def parallel_attn_bwd(
