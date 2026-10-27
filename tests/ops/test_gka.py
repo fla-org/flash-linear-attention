@@ -13,13 +13,18 @@ from fla.ops.gka import chunk_gka, fused_recurrent_gka, naive_recurrent_gka, nai
 from fla.utils import assert_close, device
 
 
+def tol(base: float, dtype: torch.dtype) -> float:
+    # bf16 rounds 8x more coarsely than fp16 (7 vs 10 mantissa bits), and the errors scale with it
+    return base * 8 if dtype == torch.bfloat16 else base
+
+
 def make_inputs(B, T, H, K, V, gates, use_alpha, use_initial_state, dtype, N=None):
     N = B if N is None else N
     q = F.normalize(torch.randn(B, T, H, K), p=2, dim=-1)
     k = F.normalize(torch.randn(B, T, H, K), p=2, dim=-1) * torch.rand(B, T, H, 1).sigmoid()
     v = torch.randn(B, T, H, V)
-    g = torch.empty(B, T, H).uniform_(0.8, 0.99).log() if gates in ('tied', 'g_only') else None
-    gk = g if gates == 'tied' else None
+    g = torch.empty(B, T, H).uniform_(0.8, 0.99).log() if gates in ('tied', 'g_only', 'separate') else None
+    gk = g if gates == 'tied' else (torch.empty(B, T, H).uniform_(0.8, 0.99).log() if gates == 'separate' else None)
     alpha = torch.rand(B, T, H).sigmoid() if use_alpha else None
     initial_state = None
     if use_initial_state:
@@ -43,6 +48,9 @@ def make_inputs(B, T, H, K, V, gates, use_alpha, use_initial_state, dtype, N=Non
             (2, 256, 4, 100, 64, 'none', True, False, torch.float),
             (2, 1024, 4, 128, 128, 'tied', True, True, torch.float16),
             (2, 500, 4, 64, 64, 'g_only', True, True, torch.float16),
+            (2, 256, 4, 64, 64, 'separate', True, True, torch.float),
+            (2, 1024, 4, 128, 128, 'tied', True, True, torch.bfloat16),
+            (2, 500, 4, 64, 64, 'separate', True, True, torch.bfloat16),
         ]
     ],
 )
@@ -70,9 +78,9 @@ def test_chunk_fwd(
         )
 
     # compare in float32: the RMS in `assert_close` overflows when taken in float16
-    assert_close('o', ref.float(), tri.float(), 0.01)
-    assert_close('h_kk_final', ref_hkk, tri_hkk, 0.005)
-    assert_close('h_kv_final', ref_hkv, tri_hkv, 0.005)
+    assert_close('o', ref.float(), tri.float(), tol(0.01, dtype))
+    assert_close('h_kk_final', ref_hkk, tri_hkk, tol(0.005, dtype))
+    assert_close('h_kv_final', ref_hkv, tri_hkv, tol(0.005, dtype))
 
 
 @pytest.mark.parametrize(
@@ -84,6 +92,8 @@ def test_chunk_fwd(
             (4, 64, 'tied', [0, 14, 121, 421, 500], torch.float),
             (4, 100, 'g_only', [0, 256, 500, 1000], torch.float),
             (4, 128, 'none', [0, 15, 100, 300, 1200, 2000], torch.float16),
+            (4, 64, 'separate', [0, 14, 121, 421, 500], torch.float),
+            (4, 128, 'tied', [0, 15, 100, 300, 1200, 2000], torch.bfloat16),
         ]
     ],
 )
@@ -118,9 +128,9 @@ def test_chunk_varlen_fwd(
             ref_hkks.append(ref_hkk)
             ref_hkvs.append(ref_hkv)
 
-    assert_close('o', torch.cat(refs, 1).float(), tri.float(), 0.01)
-    assert_close('h_kk_final', torch.cat(ref_hkks, 0), tri_hkk, 0.005)
-    assert_close('h_kv_final', torch.cat(ref_hkvs, 0), tri_hkv, 0.005)
+    assert_close('o', torch.cat(refs, 1).float(), tri.float(), tol(0.01, dtype))
+    assert_close('h_kk_final', torch.cat(ref_hkks, 0), tri_hkk, tol(0.005, dtype))
+    assert_close('h_kv_final', torch.cat(ref_hkvs, 0), tri_hkv, tol(0.005, dtype))
 
 
 def _leaves(q, k, v, g, gk, alpha, initial_state):
@@ -168,6 +178,9 @@ def _random_dht(N, H, K, V):
             (2, 256, 4, 64, 100, 'g_only', True, True, torch.float),
             (2, 256, 4, 100, 64, 'none', True, True, torch.float),
             (2, 256, 4, 128, 128, 'tied', True, True, torch.float16),
+            (2, 256, 4, 64, 64, 'separate', True, True, torch.float),
+            (2, 256, 4, 128, 128, 'tied', True, True, torch.bfloat16),
+            (2, 256, 4, 64, 64, 'separate', True, True, torch.bfloat16),
         ]
     ],
 )
@@ -191,11 +204,11 @@ def test_chunk_bwd(
     _, (tri_hkk, tri_hkv), tri = _grads(chunk_gka, *inputs, do, dht)
     _, (ref_hkk, ref_hkv), ref = _grads(naive_recurrent_gka, *inputs, do, dht)
 
-    assert_close('h_kk_final', ref_hkk, tri_hkk, 0.005)
-    assert_close('h_kv_final', ref_hkv, tri_hkv, 0.005)
+    assert_close('h_kk_final', ref_hkk, tri_hkk, tol(0.005, dtype))
+    assert_close('h_kv_final', ref_hkv, tri_hkv, tol(0.005, dtype))
     assert ref.keys() == tri.keys()
     for name in ref:
-        assert_close(name, ref[name].float(), tri[name].float(), 0.02 if name in ('dg', 'dgk', 'dh0_kk') else 0.01)
+        assert_close(name, ref[name].float(), tri[name].float(), tol(0.02 if name in ('dg', 'dgk', 'dh0_kk') else 0.01, dtype))
 
 
 @pytest.mark.parametrize(
@@ -207,6 +220,8 @@ def test_chunk_bwd(
             (4, 64, 'tied', [0, 14, 121, 300, 400], torch.float),
             (4, 100, 'g_only', [0, 200, 256, 500], torch.float),
             (4, 128, 'tied', [0, 15, 100, 300], torch.float16),
+            (4, 64, 'separate', [0, 14, 121, 300, 400], torch.float),
+            (4, 128, 'tied', [0, 15, 100, 300], torch.bfloat16),
         ]
     ],
 )
@@ -248,7 +263,7 @@ def test_chunk_varlen_bwd(
 
     assert ref.keys() == tri.keys()
     for name in ref:
-        assert_close(name, ref[name].float(), tri[name].float(), 0.02 if name in ('dg', 'dgk', 'dh0_kk') else 0.01)
+        assert_close(name, ref[name].float(), tri[name].float(), tol(0.02 if name in ('dg', 'dgk', 'dh0_kk') else 0.01, dtype))
 
 
 @pytest.mark.parametrize(
@@ -260,6 +275,7 @@ def test_chunk_varlen_bwd(
             (2, 300, 4, 64, 'tied', 128),
             (2, 300, 4, 100, 'g_only', 37),
             (2, 300, 4, 64, 'none', 200),
+            (2, 300, 4, 64, 'separate', 100),
         ]
     ],
 )
@@ -351,6 +367,8 @@ def test_chunk_bwd_split_matches_fused(
             (2, 100, 4, 128, 128, 'tied', False, True, torch.float),
             (2, 50, 4, 100, 64, 'none', True, False, torch.float),
             (2, 64, 4, 64, 100, 'g_only', True, True, torch.float16),
+            (2, 64, 4, 64, 64, 'separate', True, True, torch.float),
+            (2, 100, 4, 128, 128, 'tied', True, True, torch.bfloat16),
         ]
     ],
 )
@@ -376,9 +394,10 @@ def test_fused_recurrent(
         q=q, k=k, v=v, g=g, gk=gk, alpha=alpha, initial_state=initial_state, output_final_state=True,
     )
 
-    assert_close('o', ref.float(), tri.float(), 0.002)
-    assert_close('h_kk_final', ref_hkk, tri_hkk, 0.001)
-    assert_close('h_kv_final', ref_hkv, tri_hkv, 0.001)
+    # fp16 needs 3e-3 for `o` at K = 128 (measured 2.3e-3), and bf16 rounds 8x more coarsely
+    assert_close('o', ref.float(), tri.float(), 0.024 if dtype == torch.bfloat16 else 0.002)
+    assert_close('h_kk_final', ref_hkk, tri_hkk, tol(0.001, dtype))
+    assert_close('h_kv_final', ref_hkv, tri_hkv, tol(0.001, dtype))
 
 
 @pytest.mark.parametrize(
@@ -388,6 +407,8 @@ def test_fused_recurrent(
         for test in [
             (4, 64, 'tied', [0, 1, 8, 40, 100], torch.float),
             (4, 100, 'g_only', [0, 30, 31, 90], torch.float16),
+            (4, 64, 'separate', [0, 1, 8, 40, 100], torch.float),
+            (4, 100, 'g_only', [0, 30, 31, 90], torch.bfloat16),
         ]
     ],
 )
@@ -420,9 +441,10 @@ def test_fused_recurrent_varlen(
         ref_hkks.append(ref_hkk)
         ref_hkvs.append(ref_hkv)
 
-    assert_close('o', torch.cat(refs, 1).float(), tri.float(), 0.002)
-    assert_close('h_kk_final', torch.cat(ref_hkks, 0), tri_hkk, 0.001)
-    assert_close('h_kv_final', torch.cat(ref_hkvs, 0), tri_hkv, 0.001)
+    # fp16 needs 3e-3 for `o` at K = 128 (measured 2.3e-3), and bf16 rounds 8x more coarsely
+    assert_close('o', torch.cat(refs, 1).float(), tri.float(), 0.024 if dtype == torch.bfloat16 else 0.002)
+    assert_close('h_kk_final', torch.cat(ref_hkks, 0), tri_hkk, tol(0.001, dtype))
+    assert_close('h_kv_final', torch.cat(ref_hkvs, 0), tri_hkv, tol(0.001, dtype))
 
 
 @pytest.mark.parametrize(
