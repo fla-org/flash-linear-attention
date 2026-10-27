@@ -157,8 +157,19 @@ def test_chunk_bwd_summary(monkeypatch, T, H, HV, K, V, gate, use_bg, num_warps,
         monkeypatch.setattr(chunk_cp_bwd_kernel_dh.fn, 'configs', [
             triton.Config({}, num_warps=num_warps, num_stages=num_stages),
         ])
-    chunk_cp_bwd_dh(q=q, k=k, w=w, do=do, dv=dv, dhm=actual, g=g, gk=gk, bg=bg,
-                    scale=K ** -0.5, cu_seqlens=cu_seqlens)
+    chunk_cp_bwd_dh(
+        q=q,
+        k=k,
+        w=w,
+        do=do,
+        dv=dv,
+        dhm=actual,
+        g=g,
+        gk=gk,
+        bg=bg,
+        scale=K ** -0.5,
+        cu_seqlens=cu_seqlens,
+    )
 
     reference = torch.empty_like(actual, dtype=torch.float64)
     for head in range(HV):
