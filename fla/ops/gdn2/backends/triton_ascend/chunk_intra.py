@@ -16,7 +16,7 @@ import triton.language as tl
 from fla.ops.gdn2.wy_fast import recompute_w_u_fwd_gdn2
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp2
-from fla.utils import ascend_compile_kwargs, input_guard
+from fla.utils import TRITON_ABOVE_3_6_0, ascend_compile_kwargs, input_guard
 from fla.utils.ascend_ub_manager import compute_row_tile_block_size, get_npu_properties, iter_axis_launch_chunks
 
 _BC = 16
@@ -32,9 +32,9 @@ _BWD_MEM_MULT = 24.0
 _BWD_SAFETY_MARGIN = 0.75
 _MAX_BWD_BK = 32
 # keep the two dot accumulators and their input tiles below the CANN 9.1 UB envelope.
-_DIAG_COMPILE_KWARGS = ascend_compile_kwargs(blacklist_auto_blockify=True)
-# Disable auto-multi-buffer and AutoBlockify on the inter kernels for CANN 9.1.
-_INTER_COMPILE_KWARGS = ascend_compile_kwargs(blacklist_auto_blockify=True)
+_DIAG_COMPILE_KWARGS = ascend_compile_kwargs(blacklist_auto_blockify=not TRITON_ABOVE_3_6_0)
+# triton-ascend 3.6 ignores the AutoBlockify override.
+_INTER_COMPILE_KWARGS = ascend_compile_kwargs(blacklist_auto_blockify=not TRITON_ABOVE_3_6_0)
 
 
 def _get_diag_bk(K: int) -> int:
@@ -210,13 +210,13 @@ def chunk_gdn2_fwd_kernel_intra_direct_leaf_npu(
         Akk_l = Akk + (bos * H + i_h) * BC
 
         o_r = tl.arange(0, BC)
-        o_j = tl.arange(0, BL)
+        o_j = tl.arange(0, BC)
         row_in_leaf = o_r % BL
         leaf_start = o_r // BL * BL
         row_t = i_ts + o_r
         m_row = row_t < T_cur
-        b_Aqk_leaf = tl.zeros([BC, BL], dtype=tl.float32)
-        b_Akk_leaf = tl.zeros([BC, BL], dtype=tl.float32)
+        b_Aqk_leaf = tl.zeros([BC, BC], dtype=tl.float32)
+        b_Akk_leaf = tl.zeros([BC, BC], dtype=tl.float32)
         for i_k in range(tl.cdiv(K, BK)):
             o_k = i_k * BK + tl.arange(0, BK)
             m_k = o_k < K
@@ -248,11 +248,11 @@ def chunk_gdn2_fwd_kernel_intra_direct_leaf_npu(
                 b_kgj = tl.where(m_pairk, b_kj * exp2(b_delta), 0.0)
                 b_Aqk_j = tl.sum(b_q * b_kgj, axis=1)
                 b_Akk_j = tl.sum((b_b * b_k) * b_kgj, axis=1)
-                b_Aqk_leaf += tl.where(o_j[None, :] == j, b_Aqk_j[:, None], 0.0)
-                b_Akk_leaf += tl.where(o_j[None, :] == j, b_Akk_j[:, None], 0.0)
+                m_column = o_j[None, :] == leaf_start[:, None] + j
+                b_Aqk_leaf += tl.where(m_column & (row_in_leaf[:, None] >= j), b_Aqk_j[:, None], 0.0)
+                b_Akk_leaf += tl.where(m_column & (row_in_leaf[:, None] > j), b_Akk_j[:, None], 0.0)
 
-        col_in_subchunk = leaf_start[:, None] + o_j[None, :]
-        m_leaf_pair = m_row[:, None] & ((i_ts + col_in_subchunk) < T_cur)
+        col_in_subchunk = o_j[None, :]
         p_Aqk_leaf = (
             Aqk_l
             + row_t[:, None] * (H * BT)
@@ -263,12 +263,12 @@ def chunk_gdn2_fwd_kernel_intra_direct_leaf_npu(
         tl.store(
             p_Aqk_leaf,
             (b_Aqk_leaf * scale).to(Aqk.dtype.element_ty),
-            mask=m_leaf_pair & (row_in_leaf[:, None] >= o_j[None, :]),
+            mask=m_row[:, None],
         )
         tl.store(
             p_Akk_leaf,
             b_Akk_leaf.to(Akk.dtype.element_ty),
-            mask=m_leaf_pair & (row_in_leaf[:, None] > o_j[None, :]),
+            mask=m_row[:, None],
         )
 
 
@@ -388,9 +388,13 @@ def chunk_gdn2_fwd_kernel_intra_cross_leaf_npu(
             Aqk_l + (i_ts + o_i)[:, None] * (H * BT) + (i_i * BC + o_i)[None, :]
         )
         p_Akk_cross = Akk_l + (i_ts + o_i)[:, None] * (H * BC) + o_i[None, :]
-        m_cross = m_dst[:, None] & m_src[None, :]
-        tl.store(p_Aqk_cross, (b_Aqk_cross * scale).to(Aqk.dtype.element_ty), mask=m_cross)
-        tl.store(p_Akk_cross, b_Akk_cross.to(Akk.dtype.element_ty), mask=m_cross)
+        # each task owns complete destination rows, avoiding discrete-store locks.
+        b_Aqk_direct = tl.load(p_Aqk_cross, mask=m_dst[:, None], other=0.0)
+        b_Akk_direct = tl.load(p_Akk_cross, mask=m_dst[:, None], other=0.0)
+        b_Aqk_rows = tl.where(m_src[None, :], b_Aqk_cross * scale, b_Aqk_direct)
+        b_Akk_rows = tl.where(m_src[None, :], b_Akk_cross, b_Akk_direct)
+        tl.store(p_Aqk_cross, b_Aqk_rows.to(Aqk.dtype.element_ty), mask=m_dst[:, None])
+        tl.store(p_Akk_cross, b_Akk_rows.to(Akk.dtype.element_ty), mask=m_dst[:, None])
 
 
 @triton.jit(do_not_specialize=['T', 'NT_OFFSET', 'NC_OFFSET', 'BH_OFFSET'])
