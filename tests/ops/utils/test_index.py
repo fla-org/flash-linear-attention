@@ -5,13 +5,17 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+import warnings
+
 import pytest
 import torch
 import torch._dynamo
+import triton
 from torch._dynamo.utils import counters
 
-import fla.utils as fu
+from fla import utils
 from fla.ops.utils.index import (
+    get_max_num_splits,
     prepare_chunk_indices,
     prepare_chunk_offsets,
     prepare_position_ids,
@@ -84,7 +88,7 @@ HELPERS = [
 HELPER_IDS = [h[0] for h in HELPERS]
 
 skip_npu_compile = pytest.mark.skipif(
-    fu.IS_NPU,
+    utils.IS_NPU,
     reason='torch.compile graph-count contract is not supported on NPU yet',
 )
 
@@ -102,9 +106,9 @@ def count_unique_graphs(impl, seqlens_cases):
     memoises by tensor identity, so it is disabled here to force every call back
     into the compiled body. Both globals are restored on exit.
     """
-    cache_disabled = fu.FLA_DISABLE_TENSOR_CACHE
+    cache_disabled = utils.FLA_DISABLE_TENSOR_CACHE
     capture = torch._dynamo.config.capture_dynamic_output_shape_ops
-    fu.FLA_DISABLE_TENSOR_CACHE = True
+    utils.FLA_DISABLE_TENSOR_CACHE = True
     torch._dynamo.config.capture_dynamic_output_shape_ops = True
     try:
         torch._dynamo.reset()
@@ -115,7 +119,7 @@ def count_unique_graphs(impl, seqlens_cases):
             torch.testing.assert_close(compiled(cu_seqlens).long(), impl(cu_seqlens).long())
         return counters["stats"].get("unique_graphs", 0)
     finally:
-        fu.FLA_DISABLE_TENSOR_CACHE = cache_disabled
+        utils.FLA_DISABLE_TENSOR_CACHE = cache_disabled
         torch._dynamo.config.capture_dynamic_output_shape_ops = capture
 
 
@@ -198,3 +202,35 @@ def test_single_vs_multi_segment_specializes_once(name, impl, ref):
     shapes = [[64], [5, 7, 8], [32], [7, 7, 7], [100], [3, 5]]
     n = count_unique_graphs(impl, shapes)
     assert n == 2, f"{name}: expected 2 graphs (single- vs multi-segment specialization), got {n}."
+
+
+@pytest.mark.parametrize("seqlens", [[16], [5, 7, 8, 13, 14], [64, 1, 300]])
+@pytest.mark.parametrize("chunk_size", [16, 64])
+def test_max_num_splits_matches_reference(seqlens, chunk_size):
+    cu_seqlens = make_cu_seqlens(seqlens)
+    expected = triton.cdiv(max(seqlens), chunk_size)
+    assert get_max_num_splits(cu_seqlens, chunk_size) == expected
+    assert get_max_num_splits(cu_seqlens, chunk_size, cu_seqlens.cpu()) == expected
+
+
+@pytest.mark.skipif(device != 'cuda', reason="Host-sync counting relies on torch.cuda.set_sync_debug_mode")
+def test_max_num_splits_syncs_once_regardless_of_batch():
+    """The longest sequence must come from one device reduction.
+
+    Walking `cu_seqlens` on the host instead costs a kernel launch and a host synchronization per
+    sequence, which serializes the host against the GPU as the batch grows.
+    """
+    def count_syncs(n_seqs):
+        cu_seqlens = make_cu_seqlens([64] * n_seqs)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            torch.cuda.set_sync_debug_mode('warn')
+            try:
+                get_max_num_splits(cu_seqlens, 16)
+            finally:
+                torch.cuda.set_sync_debug_mode('default')
+        # enabling the mode warns about itself, so match only the per-operation warning
+        return sum('called a synchronizing' in str(w.message) for w in caught)
+
+    few, many = count_syncs(4), count_syncs(64)
+    assert few == many, f"syncs grew with the batch: {few} for 4 sequences, {many} for 64"

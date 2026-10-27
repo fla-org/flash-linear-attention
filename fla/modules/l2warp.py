@@ -39,13 +39,12 @@ class L2Wrap(torch.autograd.Function):
         return loss
 
     @staticmethod
-    def backward(ctx, grad_output: torch.Tensor):
+    def backward(ctx, dloss: torch.Tensor):
         maxx, ids = ctx.saved_tensors
-        glogits = torch.zeros(ctx.logits_shape, device=grad_output.device, dtype=grad_output.dtype)
-        # an autograd.Function must scale its input gradients by the upstream gradient; fold the
-        # scalar grad_output into the sparse maxx to avoid a second full-size logits allocation
-        glogits.scatter_(-1, ids, maxx * grad_output)
-        return grad_output, glogits, None
+        dlogits = torch.zeros(ctx.logits_shape, device=dloss.device, dtype=maxx.dtype)
+        # scale before scattering to avoid another full-size logits allocation
+        dlogits.scatter_(-1, ids, (maxx * dloss).to(maxx.dtype))
+        return dloss, dlogits, None
 
 
 l2_warp = L2Wrap.apply

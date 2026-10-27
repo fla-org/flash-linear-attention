@@ -5,20 +5,22 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-import warnings
+from transformers.configuration_utils import PreTrainedConfig
 
-from transformers.configuration_utils import PretrainedConfig
+from fla.models.configuration_utils import (
+    AttentionConfig,
+    AttentionConfigBase,
+    validate_loss_config,
+)
 
-from fla.models.hybrid import HybridAttentionConfig, _HybridAttentionConfigMixin
 
-
-class RodimusConfig(_HybridAttentionConfigMixin, PretrainedConfig):
+class RodimusConfig(AttentionConfigBase, PreTrainedConfig):
 
     model_type = 'rodimus'
     keys_to_ignore_at_inference = ['past_key_values']
 
-    def _normalize_hybrid_attention_config(self, attn: HybridAttentionConfig) -> HybridAttentionConfig:
-        attn = super()._normalize_hybrid_attention_config(attn)
+    def _parse_attention_config(self, attn: AttentionConfig) -> AttentionConfig:
+        attn = super()._parse_attention_config(attn)
         specs = [attn] if isinstance(attn, dict) else attn
         if specs is not None:
             for attn_spec in specs:
@@ -43,7 +45,7 @@ class RodimusConfig(_HybridAttentionConfigMixin, PretrainedConfig):
         max_position_embeddings: int = 2048,
         norm_eps: float = 1e-5,
         k_norm_eps: float | None = None,
-        attn: HybridAttentionConfig = None,
+        attn: AttentionConfig = None,
         ska_attn: dict | None = None,
         use_cache: bool = True,
         pad_token_id: int | None = None,
@@ -89,16 +91,7 @@ class RodimusConfig(_HybridAttentionConfigMixin, PretrainedConfig):
         self.use_l2warp = use_l2warp
         self.vocab_size = vocab_size
 
-        if fuse_cross_entropy and fuse_linear_cross_entropy:
-            raise ValueError(
-                "`fuse_cross_entropy` and `fuse_linear_cross_entropy` cannot be True at the same time.",
-            )
-        if fuse_linear_cross_entropy:
-            warnings.warn(
-                "`fuse_linear_cross_entropy` is enabled, which can improves memory efficiency "
-                "at the potential cost of reduced precision. "
-                "If you observe issues like loss divergence, consider disabling this setting.",
-            )
+        validate_loss_config(fuse_cross_entropy=fuse_cross_entropy, fuse_linear_cross_entropy=fuse_linear_cross_entropy)
 
         if ska_attn is not None:
             if not isinstance(ska_attn, dict):

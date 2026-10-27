@@ -72,6 +72,11 @@ def chunk_kda_fwd_kernel_intra_token_parallel_npu(
     i_hg = tl.program_id(1) + HG_OFFSET
 
     if IS_VARLEN:
+        # graph replay can leave unused token slots in the fixed grid;
+        # skip them before sequence lookup, which would yield i_n=N and read cu_seqlens[N+1] out of bounds.
+        actual_t = tl.load(cu_seqlens + N).to(tl.int64)
+        if tl.cast(i_tg, tl.int64) >= actual_t:
+            return
         i_n = 0
         left, right = 0, N
 
@@ -150,12 +155,14 @@ def chunk_kda_fwd_intra_token_parallel_npu(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     sub_chunk_size: int = 16,
+    use_graph: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Token-parallel NPU implementation: each token gets its own thread block.
     Supports both fixed-length and variable-length sequences (GVA: HV >= H).
 
     Writes directly to Aqk and Akk tensors (in-place).
+    ``use_graph`` preserves the dispatch signature; token bounds come from ``cu_seqlens[N]`` in both modes.
     """
     B, T, H, K, HV = *q.shape, gk.shape[2]
     N = len(cu_seqlens) - 1 if cu_seqlens is not None else B

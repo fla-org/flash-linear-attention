@@ -22,7 +22,7 @@ from fla.ops.attn.decoding import attn_decoding_one_step
 from fla.ops.forgetting_attn.parallel import parallel_forgetting_attn
 
 if TYPE_CHECKING:
-    from fla.models.utils import Cache
+    from fla.models.cache_utils import Cache
 
 logger = logging.get_logger(__name__)
 
@@ -124,6 +124,7 @@ class ForgettingAttention(nn.Module):
 
         indices_q = None
         if cu_seqlens is None and attention_mask is not None:
+            attention_mask = attention_mask[:, -k.shape[1]:]
             q, (k, v, f), indices_q, cu_seqlens, max_seq_lens = unpad_input(q, (k, v, f), attention_mask, q_len, keepdim=True)
             _, cu_seqlens_k = cu_seqlens
             cu_seqlens = cu_seqlens_k

@@ -17,15 +17,12 @@ from torch.nn import functional as F
 
 from fla.layers.utils import get_layer_cache, update_layer_cache
 from fla.modules import FusedRMSNormGated, RMSNorm, ShortConvolution
+from fla.modules.activations import elu_p1
 from fla.ops.momentum_delta_rule import chunk_momentum_delta_rule, fused_recurrent_momentum_delta_rule
 
 
-def elu_p1(x):
-    return (F.elu(x, 1., False) + 1.).to(x)
-
-
 def sum_norm(x):
-    return (x / x.sum(-1, keepdim=True)).to(x)
+    return F.normalize(x, p=1, dim=-1, eps=1e-6).to(x)
 
 
 class MomentumDeltaNet(nn.Module):

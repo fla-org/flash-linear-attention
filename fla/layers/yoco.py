@@ -32,7 +32,7 @@ from fla.ops.simple_gla import chunk_simple_gla, fused_recurrent_simple_gla
 from fla.ops.utils.index import prepare_lens_from_mask
 
 if TYPE_CHECKING:
-    from fla.models.utils import Cache
+    from fla.models.cache_utils import Cache
 
 logger = logging.get_logger(__name__)
 
@@ -182,7 +182,7 @@ class YOCOGatedRetention(nn.Module):
             seqlen_offset = past_key_values.get_seq_length(self.layer_idx)
             max_seqlen = q.shape[1] + seqlen_offset
 
-            if attention_mask is not None and seqlen_offset > 0:
+            if indices is not None and attention_mask is not None and seqlen_offset > 0:
                 seqlen_offset = seqlen_offset + prepare_lens_from_mask(attention_mask) - attention_mask.shape[-1]
                 max_seqlen = attention_mask.shape[-1]
 
@@ -300,7 +300,7 @@ class YOCOSharedKVBuilder(nn.Module):
             if seqlen_offset > 0:
                 assert q_len == 1, "only support q_len == 1 for decoding"
 
-        if attention_mask is not None and (past_key_values is None or use_cache):
+        if cu_seqlens is None and attention_mask is not None and (past_key_values is None or use_cache):
             # Left-padded prefills should use the same effective RoPE positions as the unpadded sequence.
             seqlen_offset = seqlen_offset + prepare_lens_from_mask(attention_mask) - attention_mask.shape[-1]
             max_seqlen = attention_mask.shape[-1]
@@ -397,7 +397,7 @@ class YOCOCrossAttention(nn.Module):
         seqlen_offset = shared_k.shape[1] - q_len
         max_seqlen = shared_k.shape[1]
 
-        if attention_mask is not None:
+        if cu_seqlens is None and attention_mask is not None:
             seqlen_offset = seqlen_offset + prepare_lens_from_mask(attention_mask) - attention_mask.shape[-1]
             max_seqlen = max(max_seqlen, attention_mask.shape[-1])
         if self.max_position_embeddings is not None:
@@ -410,7 +410,7 @@ class YOCOCrossAttention(nn.Module):
             cu_seqlens=rotary_cu_seqlens,
         )
 
-        if attention_mask is not None:
+        if cu_seqlens is None and attention_mask is not None:
             q, (shared_k, shared_v), indices_q, cu_seqlens, max_seq_lens = unpad_input(
                 q,
                 (shared_k, shared_v),

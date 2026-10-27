@@ -23,7 +23,7 @@ from fla.ops.comba import chunk_comba, fused_recurrent_comba
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
-    from fla.models.utils import Cache
+    from fla.models.cache_utils import Cache
 
 
 class Comba(nn.Module):
@@ -269,12 +269,12 @@ class Comba(nn.Module):
         q, k = map(lambda x: rearrange(x, '... (h d) -> ... h d', d=self.head_k_dim), (q, k))
 
         if self.use_inner_decay:
-            p = k * self.decay[None, None, :, None].sigmoid()
+            p = (k * self.decay[None, None, :, None].sigmoid()).to(k.dtype)
         else:
             p = k
 
         if self.use_output_correction:
-            q = q - self.D[None, None, :, None] * p
+            q = (q - self.D[None, None, :, None] * p).to(q.dtype)
 
         v = rearrange(v, '... (h d) -> ... h d', d=self.head_v_dim)
 

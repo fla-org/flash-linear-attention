@@ -12,10 +12,13 @@ import triton.language as tl
 from fla.ops.precond_kda.chunk_intra_token_parallel import chunk_precond_kda_fwd_intra_token_parallel
 from fla.ops.precond_kda.wy_fast import recompute_w_u_fwd
 from fla.ops.utils import chunk_local_cumsum, prepare_chunk_indices
-from fla.ops.utils.op import exp2, gather
-from fla.utils import IS_GATHER_SUPPORTED, IS_TF32_SUPPORTED, autotune_cache_kwargs
+from fla.ops.utils.constant import RCP_LN2
+from fla.ops.utils.op import exp2, gather, unflatten_program_id
+from fla.utils import IS_GATHER_SUPPORTED, IS_NPU, IS_TF32_SUPPORTED, TRITON_ABOVE_3_6_0, autotune_cache_kwargs
 
 DEFAULT_SOLVE_TRIL_PRECISION = 'tf32x3' if IS_TF32_SUPPORTED else 'ieee'
+# TF32 rounding makes safe-gate gradient error grow with context length; bf16x3 reduces it and runs faster than TF32.
+SAFE_GATE_DOT_PRECISION = tl.constexpr('bf16x3' if TRITON_ABOVE_3_6_0 and not IS_NPU else 'ieee')
 
 
 ################################################################################
@@ -398,6 +401,7 @@ def chunk_precond_kda_fwd_kernel_intra_sub_chunk(
     BC: tl.constexpr,
     BK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    GATE_SHIFT: tl.constexpr,
     USE_GATHER: tl.constexpr,
 ):
     """
@@ -405,7 +409,7 @@ def chunk_precond_kda_fwd_kernel_intra_sub_chunk(
     Computes diagonal Aqk and Akk blocks using block-level dot products.
     Key difference from symmetric KDA: column side uses k_precond.
     """
-    i_t, i_i, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    i_t, i_i, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
 
     if IS_VARLEN:
@@ -431,7 +435,8 @@ def chunk_precond_kda_fwd_kernel_intra_sub_chunk(
     Akk = Akk + (bos * H + i_h) * BC
 
     o_k = tl.arange(0, BK)
-    m_ck = m_c[:, None] & (o_k[None, :] < K)
+    m_k = o_k < K
+    m_ck = m_c[:, None] & m_k[None, :]
     p_q = q + o_c[:, None] * (H*K) + o_k[None, :]
     p_k = k + o_c[:, None] * (H*K) + o_k[None, :]
     p_kp = k_precond + o_c[:, None] * (H*K) + o_k[None, :]
@@ -444,15 +449,11 @@ def chunk_precond_kda_fwd_kernel_intra_sub_chunk(
     b_beta = tl.load(beta + o_c*H, mask=m_c, other=0.0)
 
     if USE_GATHER:
-        b_gn = gather(b_g, tl.full([1, BK], min(BC//2, T - i_ti - 1), dtype=tl.int16), axis=0)
+        b_gn = gather(b_g, tl.zeros([1, BK], dtype=tl.int16), axis=0)
     else:
-        # calculate offset
-        p_gn = g + (i_ti + min(BC // 2, T - i_ti - 1)) * H*K + tl.arange(0, BK)
-        b_gn = tl.load(p_gn, mask=tl.arange(0, BK) < K, other=0.0)
-        b_gn = b_gn[None, :]
+        b_gn = tl.load(g + i_ti * H*K + o_k, mask=m_k, other=0.0)[None, :]
+    b_gn = b_gn - 0.5 * (BC - 1) * GATE_SHIFT
 
-    # current block, keep numerical stability by subtracting the left boundary
-    # less than 85 to avoid overflow in exp2
     b_gm = (b_g - b_gn).to(tl.float32)
 
     b_gq = tl.where(m_c[:, None], exp2(b_gm), 0.)
@@ -506,6 +507,7 @@ def chunk_precond_kda_fwd_intra(
     chunk_indices: torch.LongTensor | None = None,
     solve_tril_precision: str | None = None,
     safe_gate: bool = False,
+    lower_bound: float | None = None,
 ):
     """
     Forward pass for preconditioned KDA intra-chunk.
@@ -565,6 +567,7 @@ def chunk_precond_kda_fwd_intra(
             BT=BT,
             BC=BC,
             BK=BK,
+            GATE_SHIFT=(-lower_bound if lower_bound is not None else 2.) * RCP_LN2,
             USE_GATHER=IS_GATHER_SUPPORTED,
         )
     else:
@@ -662,6 +665,7 @@ def chunk_precond_kda_bwd_kernel_intra(
     NC: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     SAFE_GATE: tl.constexpr = False,
+    GATE_SHIFT: tl.constexpr = 2. * RCP_LN2,
     USE_GATHER: tl.constexpr = False,
 ):
     """
@@ -677,7 +681,8 @@ def chunk_precond_kda_bwd_kernel_intra(
         Aqk[t, s] = q[t] @ k_precond[s]^T * exp(g[t] - g[s]) * beta[s]  (for t >= s)
         Akk[t, s] = k[t] @ k_precond[s]^T * exp(g[t] - g[s]) * beta[s]  (for t > s)
     """
-    i_kc, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_kc, i_t = unflatten_program_id(tl.cdiv(K, BK) * NC)
+    i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     i_k = i_kc // NC
     i_i = i_kc % NC
@@ -763,10 +768,10 @@ def chunk_precond_kda_bwd_kernel_intra(
     if SAFE_GATE:
         # Vectorized upper diagonal (dq2/dk2): column side uses k_precond
         if USE_GATHER:
-            b_gn = gather(b_g, tl.full([1, BK], min(BC//2, T - i_ti - 1), dtype=tl.int16), axis=0)
+            b_gn = gather(b_g, tl.zeros([1, BK], dtype=tl.int16), axis=0)
         else:
-            p_gn = g + (i_ti + min(BC // 2, T - i_ti - 1)) * H*K + o_k
-            b_gn = tl.load(p_gn, mask=m_k, other=0)[None, :]
+            b_gn = tl.load(g + i_ti * H*K + o_k, mask=m_k, other=0)[None, :]
+        b_gn = b_gn - 0.5 * (BC - 1) * GATE_SHIFT
 
         p_kp_diag = k_precond + o_ti[:, None] * (H*K) + o_k[None, :]
         b_kp_diag = tl.load(p_kp_diag, mask=m_ti[:, None] & m_k[None, :], other=0.0).to(tl.float32)
@@ -787,8 +792,8 @@ def chunk_precond_kda_bwd_kernel_intra(
 
         # Asymmetric: column side uses k_precond
         b_kp_exp_diag_qk = b_kp_diag * exp_neg_b_g_diag_qk
-        b_dq2 += tl.dot(b_dAqk_diag_qk, b_kp_exp_diag_qk) * exp_b_g_diag_qk
-        b_dk2 += tl.dot(b_dAkk_diag_qk, b_kp_exp_diag_qk) * exp_b_g_diag_qk
+        b_dq2 += tl.dot(b_dAqk_diag_qk, b_kp_exp_diag_qk, input_precision=SAFE_GATE_DOT_PRECISION) * exp_b_g_diag_qk
+        b_dk2 += tl.dot(b_dAkk_diag_qk, b_kp_exp_diag_qk, input_precision=SAFE_GATE_DOT_PRECISION) * exp_b_g_diag_qk
     else:
         for j in range(0, min(BC, T - i_t * BT - i_i * BC)):
             b_dAqk_val = tl.load(dAqk + o_dA + j, mask=m_dA, other=0).to(tl.float32)
@@ -821,9 +826,9 @@ def chunk_precond_kda_bwd_kernel_intra(
     tl.debug_barrier()
     b_dkt = tl.zeros([BC, BK], dtype=tl.float32)  # Final dk_precond (with beta from rows)
 
-    # cast back to int32: `i_t` is int64 for pointer arithmetic, but the loop
-    # counter below must match the type of its int32 initial value `i_i + 1`
-    NC_actual = min(NC, tl.cdiv(T - i_t * BT, BC)).to(tl.int32)
+    # keep int64: `i_t` is int64 for pointer arithmetic, and the loop
+    # counter below must match the type of its int64 initial value `i_i + 1`
+    NC_actual = min(NC, tl.cdiv(T - i_t * BT, BC))
     if i_i < NC_actual - 1:
         p_gn_t = g + (min(i_ti + BC, T) - 1) * H*K + o_k
         b_gn_t = tl.load(p_gn_t, mask=m_k, other=0).to(tl.float32)
@@ -864,10 +869,10 @@ def chunk_precond_kda_bwd_kernel_intra(
     if SAFE_GATE:
         # Vectorized lower diagonal (dkt): row side uses q and k*beta
         if USE_GATHER:
-            b_gn_t2 = gather(b_g, tl.full([1, BK], min(BC//2, T - i_ti - 1), dtype=tl.int16), axis=0)
+            b_gn_t2 = gather(b_g, tl.zeros([1, BK], dtype=tl.int16), axis=0)
         else:
-            p_gn_t2 = g + (i_ti + min(BC // 2, T - i_ti - 1)) * H*K + o_k
-            b_gn_t2 = tl.load(p_gn_t2, mask=m_k, other=0).to(tl.float32)[None, :]
+            b_gn_t2 = tl.load(g + i_ti * H*K + o_k, mask=m_k, other=0).to(tl.float32)[None, :]
+        b_gn_t2 = b_gn_t2 - 0.5 * (BC - 1) * GATE_SHIFT
         p_q_diag = q + o_ti[:, None] * (H*K) + o_k[None, :]
         b_q_diag = tl.load(p_q_diag, mask=m_ti[:, None] & m_k[None, :], other=0.0).to(tl.float32)
         b_b_diag = tl.load(beta + o_ti*H, mask=m_ti, other=0.0).to(tl.float32)
@@ -892,8 +897,8 @@ def chunk_precond_kda_bwd_kernel_intra(
         b_q_exp = b_q_diag * exp_b_g_diag_kk
         b_kb_exp = b_k * b_b_diag[:, None] * exp_b_g_diag_kk
 
-        b_dkt += tl.dot(b_dAqk_diag_kk, b_q_exp) * exp_neg_b_g_diag_kk
-        b_dkt += tl.dot(b_dAkk_diag_kk, b_kb_exp) * exp_neg_b_g_diag_kk
+        b_dkt += tl.dot(b_dAqk_diag_kk, b_q_exp, input_precision=SAFE_GATE_DOT_PRECISION) * exp_neg_b_g_diag_kk
+        b_dkt += tl.dot(b_dAkk_diag_kk, b_kb_exp, input_precision=SAFE_GATE_DOT_PRECISION) * exp_neg_b_g_diag_kk
     else:
         o_dA_t = i_ti * H*BT + i_i * BC + o_i
         p_qj = q + i_ti * H*K + o_k
@@ -958,6 +963,7 @@ def chunk_precond_kda_bwd_intra(
     chunk_indices: torch.LongTensor | None = None,
     chunk_size: int = 64,
     safe_gate: bool = False,
+    lower_bound: float | None = None,
 ):
     """
     Asymmetric intra backward for preconditioned KDA.
@@ -979,7 +985,7 @@ def chunk_precond_kda_bwd_intra(
     db2 = beta.new_empty(NK, *beta.shape, dtype=torch.float)
     dg2 = torch.empty_like(dg, dtype=torch.float)
 
-    grid = (NK * NC, NT, B * H)
+    grid = (NK * NC * NT, B * H)
     chunk_precond_kda_bwd_kernel_intra[grid](
         q=q,
         k=k,
@@ -1008,6 +1014,7 @@ def chunk_precond_kda_bwd_intra(
         BK=BK,
         NC=NC,
         SAFE_GATE=safe_gate,
+        GATE_SHIFT=(-lower_bound if lower_bound is not None else 2.) * RCP_LN2,
         USE_GATHER=IS_GATHER_SUPPORTED,
     )
 

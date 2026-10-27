@@ -27,7 +27,7 @@ def prepare_position_ids_kernel(
     cu_seqlens,
     B: tl.constexpr,
 ):
-    i_n = tl.program_id(0)
+    i_n = tl.program_id(0).to(tl.int64)
     bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
     T = eos - bos
 
@@ -178,9 +178,11 @@ def get_max_num_splits(
     chunk_size: int,
     cu_seqlens_cpu: torch.LongTensor | None = None
 ) -> int:
+    # reduce over the lengths: the builtin max() iterates the tensor, so a CUDA `cu_seqlens` costs
+    # one kernel launch and one host synchronization per sequence.
     if cu_seqlens_cpu is not None:
-        return triton.cdiv(int(max(prepare_lens(cu_seqlens_cpu))), chunk_size)
-    return triton.cdiv(int(max(prepare_lens(cu_seqlens))), chunk_size)
+        return triton.cdiv(int(prepare_lens(cu_seqlens_cpu).max()), chunk_size)
+    return triton.cdiv(int(prepare_lens(cu_seqlens).max()), chunk_size)
 
 
 def prepare_chunk_indices_static(

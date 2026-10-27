@@ -16,7 +16,7 @@ from einops import rearrange, repeat
 from fla.models import Mamba2Config, Mamba2ForCausalLM
 from fla.utils import device
 
-from .test_modeling_base import run_test_generation
+from .utils import check_generation
 
 
 @pytest.fixture(autouse=True)
@@ -24,9 +24,6 @@ def set_conv_backend(monkeypatch):
     monkeypatch.setenv('FLA_CONV_BACKEND', 'cuda')
 
 
-# ===================================================================================
-# Test for Modeling (Forward/Backward Pass)
-# ===================================================================================
 @pytest.mark.parametrize(
     ['L', 'B', 'T', 'H', 'D', 'use_l2warp', 'dtype', 'conv_backend'],
     [
@@ -88,9 +85,6 @@ def test_modeling(
     print(f"Test test_modeling passed with H={H}, D={D}, backend={conv_backend}.")
 
 
-# ===================================================================================
-# Test for Generation
-# ===================================================================================
 @pytest.mark.parametrize(
     ['L', 'B', 'T', 'H', 'D', 'dtype', 'conv_backend'],
     [
@@ -123,12 +117,39 @@ def test_generation(
         vocab_size=1000,
     )
     model = Mamba2ForCausalLM(config).to(device=device, dtype=dtype)
-    run_test_generation(L, B, T, H, D, Mamba2Config, dtype, model=model, config=config)
+    check_generation(L, B, T, H, D, Mamba2Config, dtype, model=model, config=config)
 
 
-# ===================================================================================
-# Layer-level: Custom fla.layers.mamba2.Mamba2 vs Official mamba_ssm.Mamba2
-# ===================================================================================
+@pytest.mark.skipif(device != 'cuda', reason='Mamba2 fast path requires CUDA')
+def test_mamba2_triton_conv_prefill_and_cached_decode(monkeypatch):
+    pytest.importorskip("mamba_ssm")
+    from fla.layers import mamba2
+    from fla.models.cache_utils import Cache
+
+    monkeypatch.delenv('FLA_CONV_BACKEND', raising=False)
+    torch.manual_seed(42)
+    layer = mamba2.Mamba2(
+        hidden_size=32,
+        num_heads=1,
+        head_dim=64,
+        state_size=16,
+        layer_idx=0,
+        backend='triton',
+    ).to(device=device, dtype=torch.float32).eval()
+    hidden_states = torch.randn(2, 4, 32, device=device)
+
+    results = []
+    for fast_path in (False, True):
+        monkeypatch.setattr(mamba2, 'is_fast_path_available', fast_path)
+        cache = Cache()
+        with torch.no_grad():
+            prefill, _, cache = layer(hidden_states[:, :3], past_key_values=cache, use_cache=True)
+            decode, _, cache = layer(hidden_states[:, 3:], past_key_values=cache, use_cache=True)
+        results.append((prefill, decode, cache[0]['conv_state'], cache[0]['recurrent_state']))
+
+    for actual, reference in zip(results[1], results[0]):
+        torch.testing.assert_close(actual, reference, rtol=1e-4, atol=1e-4)
+
 
 def _copy_params(src, dst):
     """Copy parameters with matching names and shapes from src to dst."""
@@ -343,7 +364,7 @@ def test_mamba2_layer_vs_official_inference(
     conv_state = torch.zeros(B, custom.conv_dim, custom.conv_kernel_size, device=device, dtype=dtype)
     ssm_state = torch.zeros(B, nheads, headdim, d_state, device=device, dtype=dtype)
 
-    from fla.models.utils import Cache
+    from fla.models.cache_utils import Cache
     cache = Cache()
 
     for i in range(T):

@@ -19,6 +19,8 @@ from fla.utils import assert_close, device
         pytest.param(*test, id="B{}-T{}-H{}-D{}-{}".format(*test))
         for test in [
             (1, 63, 1, 60, torch.float),
+            (1, 65, 2, 512, torch.float16),
+            (1, 65, 2, 513, torch.bfloat16),
             (2, 500, 4, 64, torch.float),
             (2, 1000, 2, 100, torch.float),
             (3, 1024, 4, 128, torch.float),

@@ -21,7 +21,6 @@ def fused_recurrent_lightning_attn(
     output_final_state: bool = False,
     reverse: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
-    **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
@@ -56,10 +55,6 @@ def fused_recurrent_lightning_attn(
         final_state (torch.Tensor):
             Final state of shape `[N, H, K, V]` if `output_final_state=True` else `None`.
     """
-    if 'head_first' in kwargs:
-        raise DeprecationWarning(
-            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
-        )
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(
@@ -71,8 +66,8 @@ def fused_recurrent_lightning_attn(
                 f"The number of initial states is expected to be equal to the number of input sequences, "
                 f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}.",
             )
-    H = q.shape[2]
-    g_gamma = -(8 / H * (1 - layer_idx / num_layers)) * q.new_tensor(range(H), dtype=torch.float)
+    H, L = q.shape[2], num_layers
+    g_gamma = -(8 / H * (1 - layer_idx / L)) * torch.arange(H, dtype=torch.float, device=q.device)
     return fused_recurrent_simple_gla(
         q=q,
         k=k,
