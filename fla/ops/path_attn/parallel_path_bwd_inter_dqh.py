@@ -18,7 +18,7 @@ from fla.utils import check_shared_mem
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
     'USE_GATE': lambda args: args['g_cumsum'] is not None,
 })
-@triton.jit(do_not_specialize=['T'])
+@triton.jit(do_not_specialize=['T', 'NUM_BLOCKS'])
 def parallel_path_bwd_dq_kernel(
     q,
     k,
@@ -46,11 +46,11 @@ def parallel_path_bwd_dq_kernel(
     BK: tl.constexpr,
     BV: tl.constexpr,
     S: tl.constexpr,  # aka larger chunk size
-    NUM_BLOCKS: tl.constexpr,
+    NUM_BLOCKS,
     IS_VARLEN: tl.constexpr,
     USE_GATE: tl.constexpr,
 ):
-    i_t, i_nh = tl.program_id(0).to(tl.int64), tl.program_id(1)
+    i_t, i_nh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_n, i_hq = i_nh // HQ, i_nh % HQ
     i_h = i_hq // G
 

@@ -20,7 +20,7 @@ from fla.ops.moba import parallel_moba
 from fla.ops.utils.index import prepare_lens_from_mask
 
 if TYPE_CHECKING:
-    from fla.models.utils import Cache
+    from fla.models.cache_utils import Cache
 
 try:
     from flash_attn import flash_attn_func, flash_attn_varlen_func
@@ -182,7 +182,7 @@ class MoBA(nn.Module):
             seqlen_offset = past_key_values.get_seq_length(self.layer_idx)
             max_seqlen = q.shape[1] + seqlen_offset
 
-            if attention_mask is not None:
+            if cu_seqlens is None and attention_mask is not None:
                 # to eliminate the offsets of padding tokens
                 seqlen_offset = seqlen_offset + prepare_lens_from_mask(attention_mask) - attention_mask.shape[-1]
                 max_seqlen = q.shape[1] + max(seqlen_offset)

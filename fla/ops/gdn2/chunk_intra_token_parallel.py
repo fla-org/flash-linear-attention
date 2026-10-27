@@ -58,7 +58,7 @@ def chunk_gdn2_fwd_kernel_intra_token_parallel(
     BH: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_tg, i_hg = tl.program_id(0).to(tl.int64), tl.program_id(1)
+    i_tg, i_hg = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
 
     if IS_VARLEN:
         i_n = 0

@@ -18,7 +18,7 @@ from fla.modules import RMSNorm, RotaryEmbedding
 from fla.ops.deltaformer import deltaformer_attn
 
 if TYPE_CHECKING:
-    from fla.models.utils import Cache
+    from fla.models.cache_utils import Cache
 
 logger = logging.get_logger(__name__)
 

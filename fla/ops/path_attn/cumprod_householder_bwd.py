@@ -31,7 +31,7 @@ def chunk_cumprod_householder_bwd_kernel(
     HQ: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_ss, i_hq = tl.program_id(0), tl.program_id(1)
+    i_ss, i_hq = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_h = i_hq // G
 
     if IS_VARLEN:

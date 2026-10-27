@@ -31,7 +31,13 @@ class StatefulNormalizeFunction(torch.autograd.Function):
         o_out = o / denom
         if cu_seqlens is not None:
             idx = (cu_seqlens[:-1] if reverse else cu_seqlens[1:] - 1).to(torch.long)
-            z_state_out = k_cum[0, idx].unsqueeze(1).contiguous()
+            nonempty = (cu_seqlens[1:] > cu_seqlens[:-1])[:, None, None, None]
+            if k.shape[1] > 0:
+                z_state_out = k_cum[0, idx.clamp(0, k.shape[1] - 1)].unsqueeze(1)
+            else:
+                z_state_out = k_cum.new_zeros(len(cu_seqlens) - 1, 1, *k.shape[2:])
+            # empty sequences retain their initial key sum
+            z_state_out = torch.where(nonempty, z_state_out, z_init if z_init is not None else 0).contiguous()
         else:
             z_state_out = (k_cum[:, :1] if reverse else k_cum[:, -1:]).contiguous()
 
@@ -58,8 +64,11 @@ class StatefulNormalizeFunction(torch.autograd.Function):
 
         if dz_state is not None:
             if cu_seqlens is not None:
-                idx = (cu_seqlens[:-1] if reverse else cu_seqlens[1:] - 1).to(torch.long)
-                dk_cum[0].index_add_(0, idx, dz_state.squeeze(1).to(dk_cum.dtype))
+                if k_cum.shape[1] > 0:
+                    idx = (cu_seqlens[:-1] if reverse else cu_seqlens[1:] - 1).to(torch.long)
+                    nonempty = (cu_seqlens[1:] > cu_seqlens[:-1])[:, None, None]
+                    dz = dz_state.squeeze(1).to(dk_cum.dtype).masked_fill(~nonempty, 0)
+                    dk_cum[0].index_add_(0, idx.clamp(0, k_cum.shape[1] - 1), dz)
             elif reverse:
                 dk_cum[:, :1].add_(dz_state.to(dk_cum.dtype))
             else:
@@ -79,6 +88,9 @@ class StatefulNormalizeFunction(torch.autograd.Function):
                 )
                 dz_init.index_add_(0, seg_id, flat)
                 dz_init = dz_init.unsqueeze(1)
+                if dz_state is not None:
+                    nonempty = (seq_lens > 0)[:, None, None, None]
+                    dz_init = dz_init + dz_state.masked_fill(nonempty, 0)
             else:
                 dz_init = dk_cum.sum(dim=1, keepdim=True)
 

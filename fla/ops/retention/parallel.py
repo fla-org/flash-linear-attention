@@ -17,7 +17,6 @@ def parallel_retention(
     scale: float | None = None,
     output_attentions: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
-    **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
@@ -42,16 +41,12 @@ def parallel_retention(
         attn (torch.Tensor):
             Attention scores of shape `[B, H, T, T]` if `output_attentions=True` else `None`.
     """
-    if 'head_first' in kwargs:
-        raise DeprecationWarning(
-            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
-        )
     if cu_seqlens is not None and q.shape[0] != 1:
         raise ValueError(
             f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`. "
             f"Please flatten variable-length inputs before processing.",
         )
-    s = (1 - q.new_tensor(2., dtype=torch.float).pow(-5. - q.new_tensor(range(q.shape[2]), dtype=torch.float))).log()
+    s = (1 - 2.0 ** (-5.0 - torch.arange(q.shape[2], dtype=torch.float, device=q.device))).log()
     g = s[None, None, :].expand(q.shape[0], q.shape[1], q.shape[2])
 
     o, attn = parallel_simple_gla(

@@ -22,7 +22,7 @@ from fla.modules.layernorm_gated import RMSNormGated, rmsnorm_fn
 from fla.ops.log_linear_attn.chunk import LogLinearAttentionState, chunk_log_linear_attn
 
 if TYPE_CHECKING:
-    from fla.models.utils import Cache
+    from fla.models.cache_utils import Cache
 
 logger = logging.get_logger(__name__)
 
@@ -113,6 +113,7 @@ def hmamba_chunk_scan_combined(
         initial_state=initial_states,
         output_final_state=return_final_states,
         cu_seqlens=cu_seqlens,
+        scale=1.0,
     )
 
     if D is not None:

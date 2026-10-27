@@ -6,10 +6,12 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
+
+from fla.models.configuration_utils import validate_attnres_config
 
 
-class YOCOConfig(PretrainedConfig):
+class YOCOConfig(PreTrainedConfig):
     model_type = 'yoco'
     keys_to_ignore_at_inference = ['past_key_values']
 
@@ -107,12 +109,7 @@ class YOCOConfig(PretrainedConfig):
             raise ValueError("self_decoder_attn['window_size'] must be set when self_decoder_attn['type']='swa'")
         if self.cross_decoder_attn['rope_inv_freq'] not in {'fla', 'yoco'}:
             raise ValueError("cross_decoder_attn['rope_inv_freq'] must be one of {'fla', 'yoco'}")
-        if attnres_block_size is not None and attnres_block_size != 1:
-            if attnres_block_size < 2 or attnres_block_size % 2 != 0:
-                raise ValueError(
-                    "`attnres_block_size` must be `None`, `1` (full mode), or an even integer (one block "
-                    f"contains `attnres_block_size // 2` transformer layers); got {attnres_block_size}."
-                )
+        validate_attnres_config(attnres_block_size=attnres_block_size)
         super().__init__(
             pad_token_id=pad_token_id,
             bos_token_id=bos_token_id,

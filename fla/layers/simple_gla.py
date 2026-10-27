@@ -21,7 +21,7 @@ from fla.modules.activations import ACT2FN
 from fla.ops.simple_gla import chunk_simple_gla, fused_recurrent_simple_gla
 
 if TYPE_CHECKING:
-    from fla.models.utils import Cache
+    from fla.models.cache_utils import Cache
 
 
 class SimpleGatedLinearAttention(nn.Module):
@@ -234,6 +234,10 @@ class SimpleGatedLinearAttention(nn.Module):
         else:
             k, v = (rearrange(x, '... (h d) -> ... h d', h=self.num_kv_heads) for x in (k, v))
         gk = F.logsigmoid(gk) / self.gate_logit_normalizer
+        if attention_mask is not None:
+            # zero the decay logit so a padded step neutrally passes the state through
+            # (exp(0) == 1) instead of applying a real, content-derived decay to it
+            gk = gk.mul_(attention_mask[:, -gk.shape[-2]:, None])
 
         recurrent_state = last_state['recurrent_state'] if last_state is not None else None
         if mode == 'chunk':

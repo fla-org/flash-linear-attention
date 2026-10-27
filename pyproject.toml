@@ -18,7 +18,7 @@ requires-python = ">=3.10"
 # torch and triton are NOT in base deps. Pick a backend extra
 # ([cuda] / [rocm] / [xpu] / [cpu]) plus the matching --extra-index-url.
 dependencies = [
-    "transformers>=4.45.0",
+    "transformers>=5.6.2,<6",
     "einops",
 ]
 
@@ -29,10 +29,10 @@ cuda = ["torch>=2.7.0", "triton>=3.3"]
 # on stable, triton-rocm on nightly, etc.).
 rocm = ["torch>=2.7.0"]
 xpu  = ["torch>=2.7.0"]
-npu  = ["torch==2.9.0", "torch_npu==2.9.0.post6", "torchvision==0.24.0", "triton-ascend==3.2.2"]
+npu  = ["torch==2.10.0", "torch_npu==2.10.0.post7", "torchvision==0.25.0", "triton-ascend==3.6.0"]
 cpu  = ["torch>=2.7.0", "triton>=3.3"]
 tilelang = ["tilelang>=0.1.9"]
-conv1d = ["causal-conv1d>=1.4.0"]
+conv1d = ["causal-conv1d>=1.7.0"]
 benchmark = ["matplotlib", "pandas", "datasets>=3.3.0"]
 test = ["pytest", "pytest-xdist"]
 

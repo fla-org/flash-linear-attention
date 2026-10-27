@@ -21,7 +21,7 @@ from fla.modules.fused_bitlinear import FusedBitLinear
 from fla.ops.utils.index import prepare_lens_from_mask
 
 if TYPE_CHECKING:
-    from fla.models.utils import Cache
+    from fla.models.cache_utils import Cache
 
 try:
     from flash_attn import flash_attn_func, flash_attn_varlen_func
@@ -103,7 +103,7 @@ class BitAttention(nn.Module):
             seqlen_offset = past_key_values.get_seq_length(self.layer_idx)
             max_seqlen = q.shape[1] + seqlen_offset
 
-            if attention_mask is not None:
+            if cu_seqlens is None and attention_mask is not None:
                 # to eliminate the offsets of padding tokens
                 seqlen_offset = seqlen_offset + prepare_lens_from_mask(attention_mask) - attention_mask.shape[-1]
                 max_seqlen = q.shape[1] + max(seqlen_offset)
@@ -116,22 +116,30 @@ class BitAttention(nn.Module):
             cache_has_content = past_key_values.get_seq_length(self.layer_idx) > 0
             assert cu_seqlens is None or not cache_has_content, \
                 "cu_seqlens should not be provided when past_key_values has content"
+            attn_state = (k.flatten(-2, -1), v.flatten(-2, -1))
+            cached_attn_state = past_key_values[self.layer_idx]['attn_state'] if cache_has_content else None
             k_cached, v_cached = past_key_values.update(
-                attn_state=(k.flatten(-2, -1), v.flatten(-2, -1)),
+                attn_state=attn_state,
                 layer_idx=self.layer_idx,
                 offset=q_len,
                 cache_kwargs=dict(window_size=self.window_size),
             )['attn_state']
-            if cache_has_content:
-                k, v = k_cached, v_cached
-                k = rearrange(k, '... (h d) -> ... h d', d=self.head_dim)
-                v = rearrange(v, '... (h d) -> ... h d', d=self.head_dim)
+            if self.window_size is not None and q_len > 1 and attention_mask is None and cached_attn_state is not None:
+                k_cached, v_cached = cached_attn_state
+                k = torch.cat([rearrange(k_cached, '... (h d) -> ... h d', d=self.head_dim), k], dim=1)
+                v = torch.cat([rearrange(v_cached, '... (h d) -> ... h d', d=self.head_dim), v], dim=1)
+                k = k[:, -(self.window_size + q_len - 1):]
+                v = v[:, -(self.window_size + q_len - 1):]
+            elif cache_has_content:
+                k = rearrange(k_cached, '... (h d) -> ... h d', d=self.head_dim)
+                v = rearrange(v_cached, '... (h d) -> ... h d', d=self.head_dim)
 
         if flash_attn_func is None:
             raise ImportError("Please install Flash Attention via `pip install flash-attn --no-build-isolation` first")
 
         # Contains at least one padding token in the sequence
         if cu_seqlens is None and attention_mask is not None:
+            attention_mask = attention_mask[:, -k.shape[1]:]
             q, (k, v), indices_q, cu_seqlens, max_seq_lens = unpad_input(q, (k, v), attention_mask, q_len)
             cu_seqlens_q, cu_seqlens_k = cu_seqlens
             max_seqlen_q, max_seqlen_k = max_seq_lens

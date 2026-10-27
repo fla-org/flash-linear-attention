@@ -338,7 +338,6 @@ def parallel_delta_rule(
     beta: torch.Tensor,
     scale: float | None = None,
     output_attentions: bool = False,
-    **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
@@ -362,10 +361,6 @@ def parallel_delta_rule(
         attn (torch.Tensor):
             Attention scores of shape `[B, H, T, T]` if `output_attentions=True` else `None`.
     """
-    if 'head_first' in kwargs:
-        raise DeprecationWarning(
-            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
-        )
     o, attn = ParallelDeltaRuleFunction.apply(q, k, v, beta, scale, output_attentions)
     return o, attn
 

@@ -11,7 +11,7 @@ import triton.language as tl
 
 from fla.ops.attn.parallel import parallel_attn_bwd_preprocess
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets, prepare_token_indices
-from fla.ops.utils.op import exp, log
+from fla.ops.utils.op import exp, log, unflatten_program_id
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, check_shared_mem, contiguous
 
 
@@ -51,7 +51,7 @@ def parallel_nsa_compression_fwd_kernel(
     BV: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_t, i_v, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    i_t, i_v, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
 
     if IS_VARLEN:
@@ -161,7 +161,7 @@ def parallel_nsa_compression_bwd_kernel_dq(
     BV: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_t, i_v, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    i_t, i_v, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
 
     all = B * T.to(tl.int64)
@@ -303,9 +303,8 @@ def parallel_nsa_compression_bwd_kernel_dkv(
     BQ: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_c, i_bh = (tl.program_id(0).to(tl.int64),
-                      tl.program_id(1).to(tl.int64),
-                      tl.program_id(2).to(tl.int64))
+    i_v, i_c = unflatten_program_id(tl.cdiv(V, BV))
+    i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
 
     T, TC = T.to(tl.int64), TC.to(tl.int64)
@@ -500,7 +499,7 @@ def parallel_nsa_compression_bwd(
     dk = torch.empty(NV, *k.shape, dtype=k.dtype if NV == 1 else torch.float, device=q.device)
     dv = torch.empty(v.shape, dtype=v.dtype, device=q.device)
 
-    grid = (NV, NC, B * H)
+    grid = (NV * NC, B * H)
     parallel_nsa_compression_bwd_kernel_dkv[grid](
         q=q,
         k=k,
@@ -618,6 +617,9 @@ def parallel_nsa_compression(
     scale: float = None,
     cu_seqlens: torch.LongTensor | tuple[torch.LongTensor, torch.LongTensor] | None = None
 ):
+    HQ, H = q.shape[2], k.shape[2]
+    if H == 0 or HQ % H != 0:
+        raise ValueError(f"The number of query heads ({HQ}) must be divisible by the number of key/value heads ({H}).")
     if scale is None:
         scale = k.shape[-1] ** -0.5
     return ParallelNSACompressionFunction.apply(

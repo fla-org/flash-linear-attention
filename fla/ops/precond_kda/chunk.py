@@ -9,7 +9,7 @@
 
 import torch
 
-from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
+from fla.modules.norm.l2norm import l2norm_bwd, l2norm_fwd
 from fla.ops.atk.chunk_atk_bwd import chunk_atk_bwd
 from fla.ops.atk.chunk_atk_fwd import chunk_atk_fwd, recompute_atk_fwd
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu, chunk_gated_delta_rule_fwd_h
@@ -42,6 +42,7 @@ def chunk_precond_kda_fwd(
     chunk_indices: torch.LongTensor | None = None,
     solve_tril_precision: str | None = None,
     safe_gate: bool = False,
+    lower_bound: float | None = None,
     x: float = 1.5,
     eps: float = 1e-6,
     log_atk_scale: torch.Tensor = None,
@@ -100,6 +101,7 @@ def chunk_precond_kda_fwd(
         chunk_indices=chunk_indices,
         solve_tril_precision=solve_tril_precision,
         safe_gate=safe_gate,
+        lower_bound=lower_bound,
     )
 
     # Step 3: Hidden state update (uses kg which is k_precond gated)
@@ -156,6 +158,7 @@ def chunk_precond_kda_bwd(
     log_atk_scale: torch.Tensor = None,
     transpose_state_layout: bool = False,
     safe_gate: bool = False,
+    lower_bound: float | None = None,
     disable_recompute: bool = False,
     w: torch.Tensor | None = None,
     u: torch.Tensor | None = None,
@@ -297,6 +300,7 @@ def chunk_precond_kda_bwd(
         chunk_indices=chunk_indices,
         chunk_size=chunk_size,
         safe_gate=safe_gate,
+        lower_bound=lower_bound,
     )
 
     dk_precond_total = dk_precond2
@@ -411,6 +415,7 @@ class ChunkPrecondKDAFunction(torch.autograd.Function):
             chunk_indices=chunk_indices,
             solve_tril_precision=solve_tril_precision,
             safe_gate=safe_gate,
+            lower_bound=lower_bound,
             x=x,
             eps=eps,
             log_atk_scale=log_atk_scale,
@@ -497,6 +502,7 @@ class ChunkPrecondKDAFunction(torch.autograd.Function):
             log_atk_scale=log_atk_scale,
             transpose_state_layout=ctx.transpose_state_layout,
             safe_gate=ctx.safe_gate,
+            lower_bound=ctx.lower_bound,
             disable_recompute=ctx.disable_recompute,
             w=w,
             u=u,

@@ -34,7 +34,7 @@ with warnings.catch_warnings():
     is_fast_path_available = selective_state_update is not None
 
 if TYPE_CHECKING:
-    from fla.models.utils import Cache
+    from fla.models.cache_utils import Cache
 
 logger = logging.get_logger(__name__)
 
@@ -309,13 +309,22 @@ class Mamba2(nn.Module):
             )
 
             # 2. Convolution sequence transformation
-            hidden_states_B_C = self.causal_conv1d_update(
-                hidden_states_B_C.contiguous(),
-                conv_state,
-                self.conv1d.weight.squeeze(1),
-                self.conv1d.bias,
-                self.activation,
-            )
+            if self.backend == 'triton':
+                hidden_states_B_C, conv_state = self.causal_conv1d_update(
+                    x=hidden_states_B_C.contiguous(),
+                    cache=conv_state,
+                    weight=self.conv1d.weight.squeeze(1),
+                    bias=self.conv1d.bias,
+                    activation=self.activation,
+                )
+            else:
+                hidden_states_B_C = self.causal_conv1d_update(
+                    hidden_states_B_C.contiguous(),
+                    conv_state,
+                    self.conv1d.weight.squeeze(1),
+                    self.conv1d.bias,
+                    self.activation,
+                )
 
             hidden_states, B, C = torch.split(
                 hidden_states_B_C,
@@ -411,7 +420,7 @@ class Mamba2(nn.Module):
                     )
                 else:
                     _conv1d_output = self.causal_conv1d_fn(
-                        x=hidden_states_B_C.transpose(1, 2).contiguous(),
+                        x=hidden_states_B_C if self.backend == 'triton' else hidden_states_B_C.transpose(1, 2).contiguous(),
                         weight=self.conv1d.weight.squeeze(1),
                         bias=self.conv1d.bias,
                         activation=self.activation,
@@ -421,7 +430,6 @@ class Mamba2(nn.Module):
                         hidden_states_B_C = hidden_states_B_C.transpose(1, 2)
                     elif self.backend == 'triton':
                         hidden_states_B_C, _ = _conv1d_output
-                        hidden_states_B_C = hidden_states_B_C.transpose(1, 2).contiguous()
                     else:
                         raise ValueError(f"Unsupported backend: {self.backend}")
 
