@@ -11,10 +11,12 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+import fla.ops.gated_delta_product.chunk as gdp_chunk
 from fla.ops.gated_delta_product import chunk_gated_delta_product
 from fla.ops.gated_delta_product.chunk_ref import chunk_gated_delta_product_ref
 from fla.ops.gated_delta_product.naive import naive_recurrent_gated_delta_product
-from fla.utils import IS_INTEL_ALCHEMIST, assert_close, device
+from fla.utils import IS_INTEL_ALCHEMIST, IS_TF32_SUPPORTED, assert_close, device
+from fla.utils.testing import get_err_ratio
 
 
 @pytest.mark.parametrize(
@@ -215,6 +217,120 @@ def test_chunk_varlen(
     assert_close('db', ref_dbeta, tri_dbeta, 0.015)
     assert_close('dg', ref_dg, tri_dg, 0.015)
     assert_close('dh0', ref_dh0, tri_dh0, 0.007)
+
+
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'K', 'V', 'num_householder', 'gate_logit_normalizer', 'beta_scale', 'use_qk_l2norm_in_kernel',
+     'cu_seqlens', 'noncontiguous', 'dtype'),
+    [
+        pytest.param(
+            *test,
+            id="B{}-T{}-H{}-K{}-V{}-num_householder{}-gate_logit_normalizer{}-beta_scale{}-l2norm{}-cu_seqlens{}"
+            "-noncontiguous{}-{}"
+            .format(*test),
+        )
+        for test in [
+            (1, 63, 1, 64, 64, 2, 1, 1, False, None, False, torch.bfloat16),
+            (2, 200, 3, 60, 100, 2, 1, 2, False, None, False, torch.float16),
+            (2, 1000, 4, 64, 128, 3, 1, 1, True, None, False, torch.bfloat16),
+            (2, 1000, 4, 64, 64, 2, 0.1, 2, False, None, False, torch.bfloat16),
+            (2, 1024, 4, 32, 64, 4, None, 1, False, None, False, torch.bfloat16),
+            (2, 1024, 4, 32, 64, 4, None, 1, False, None, False, torch.float16),
+            (1, 1500, 2, 64, 64, 2, 1, 1, False, [0, 63, 100, 100, 1000, 1500], False, torch.bfloat16),
+            (1, 1000, 2, 64, 128, 3, None, 1, False, [0, 1, 64, 65, 1000], False, torch.float16),
+            (1, 300, 2, 128, 128, 2, 1, 1, False, None, False, torch.bfloat16),
+            (1, 300, 2, 64, 256, 2, 1, 1, False, None, False, torch.bfloat16),
+            (1, 300, 2, 64, 64, 1, 1, 1, False, None, False, torch.bfloat16),
+            (1, 500, 2, 64, 64, 2, 1, 1, True, None, True, torch.float16),
+        ]
+    ],
+)
+def test_chunk_no_grad(
+    B: int,
+    T: int,
+    H: int,
+    K: int,
+    V: int,
+    num_householder: int,
+    gate_logit_normalizer: float | None,
+    beta_scale: float,
+    use_qk_l2norm_in_kernel: bool,
+    cu_seqlens: list[int] | None,
+    noncontiguous: bool,
+    dtype: torch.dtype,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # the varlen tests above leave TRITON_F32_DEFAULT=ieee; compile this path under the production default
+    monkeypatch.delenv('TRITON_F32_DEFAULT', raising=False)
+    torch.manual_seed(42)
+    N = B if cu_seqlens is None else len(cu_seqlens) - 1
+    if cu_seqlens is not None:
+        cu_seqlens = torch.LongTensor(cu_seqlens).to(device)
+
+    q = torch.randn(B, T, H, K, dtype=dtype)
+    k = torch.randn(B, T * num_householder, H, K, dtype=dtype)
+    v = torch.randn(B, T * num_householder, H, V, dtype=dtype)
+    beta = torch.rand(B, T * num_householder, H, dtype=dtype).sigmoid() * beta_scale
+    g = F.logsigmoid(torch.rand(B, T, H, dtype=torch.float32)) / gate_logit_normalizer if gate_logit_normalizer else None
+    h0 = torch.randn(N, H, K, V, dtype=torch.float32)
+    if not use_qk_l2norm_in_kernel:
+        q, k = F.normalize(q, p=2, dim=-1), F.normalize(k, p=2, dim=-1)
+    if noncontiguous:
+        # strided q/k must reach l2norm only after the route's input guard, like on the grad-enabled path
+        q = q.transpose(1, 2).contiguous().transpose(1, 2)
+        k = k.transpose(1, 2).contiguous().transpose(1, 2)
+    q, k, v, beta, h0 = map(lambda x: x.to(device), (q, k, v, beta, h0))
+    g = g.to(device) if g is not None else None
+    scale = K ** -0.5
+
+    calls = []
+    compact_fwd = gdp_chunk.chunk_gated_delta_product_fwd_compact
+    monkeypatch.setattr(gdp_chunk, 'chunk_gated_delta_product_fwd_compact', lambda **kw: calls.append(1) or compact_fwd(**kw))
+    kwargs = dict(
+        q=q.clone(),
+        k=k.clone(),
+        v=v.clone(),
+        g=g.clone() if g is not None else None,
+        beta=beta.clone(),
+        num_householder=num_householder,
+        scale=scale,
+        initial_state=h0.clone(),
+        output_final_state=True,
+        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+        cu_seqlens=cu_seqlens,
+    )
+    with torch.no_grad():
+        tri, tri_ht = chunk_gated_delta_product(**kwargs)
+    routed = IS_TF32_SUPPORTED and num_householder >= 2 and K <= 64 and V <= 128
+    assert len(calls) == int(routed)
+    if routed:
+        monkeypatch.setattr(gdp_chunk, 'is_compact_fwd_supported', lambda *a, **kw: False)
+        with torch.no_grad():
+            fb, fb_ht = chunk_gated_delta_product(**kwargs)
+
+    ref, ref_ht = naive_recurrent_gated_delta_product(
+        q=F.normalize(q, p=2, dim=-1) if use_qk_l2norm_in_kernel else q,
+        k=F.normalize(k, p=2, dim=-1) if use_qk_l2norm_in_kernel else k,
+        v=v,
+        g=g,
+        beta=beta,
+        scale=scale,
+        cu_seqlens=cu_seqlens,
+        initial_state=h0,
+        output_final_state=True,
+        num_householder=num_householder,
+    )
+    # compare in fp32 so squared fp16 differences do not underflow
+    if routed and dtype == torch.bfloat16:
+        # no chunked path reaches 0.005 against the oracle in bf16 at nh >= 3;
+        # the fallback output is the reference and the route must not be less accurate
+        assert_close('o', fb.float(), tri.float(), 0.01)
+        assert_close('ht', fb_ht.float(), tri_ht.float(), 0.01)
+        assert get_err_ratio(ref.float(), tri.float()) <= 1.5 * get_err_ratio(ref.float(), fb.float())
+        assert get_err_ratio(ref_ht.float(), tri_ht.float()) <= 1.5 * get_err_ratio(ref_ht.float(), fb_ht.float())
+    else:
+        assert_close('o', ref.float(), tri.float(), 0.005)
+        assert_close('ht', ref_ht, tri_ht, 0.005)
 
 
 def test_naive_varlen():
