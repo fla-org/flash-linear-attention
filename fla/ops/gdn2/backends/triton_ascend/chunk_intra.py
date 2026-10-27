@@ -384,17 +384,20 @@ def chunk_gdn2_fwd_kernel_intra_cross_leaf_npu(
                 allow_tf32=False,
             )
 
-        p_Aqk_cross = (
-            Aqk_l + (i_ts + o_i)[:, None] * (H * BT) + (i_i * BC + o_i)[None, :]
-        )
-        p_Akk_cross = Akk_l + (i_ts + o_i)[:, None] * (H * BC) + o_i[None, :]
         # each task owns complete destination rows, avoiding discrete-store locks.
-        b_Aqk_direct = tl.load(p_Aqk_cross, mask=m_dst[:, None], other=0.0)
-        b_Akk_direct = tl.load(p_Akk_cross, mask=m_dst[:, None], other=0.0)
-        b_Aqk_rows = tl.where(m_src[None, :], b_Aqk_cross * scale, b_Aqk_direct)
-        b_Akk_rows = tl.where(m_src[None, :], b_Akk_cross, b_Akk_direct)
-        tl.store(p_Aqk_cross, b_Aqk_rows.to(Aqk.dtype.element_ty), mask=m_dst[:, None])
-        tl.store(p_Akk_cross, b_Akk_rows.to(Akk.dtype.element_ty), mask=m_dst[:, None])
+        for row in tl.static_range(BL):
+            dst_row = leaf_start + row
+            row_t = i_ts + dst_row
+            b_qk_row = tl.sum(tl.where(o_i[:, None] == dst_row, b_Aqk_cross, 0.0), axis=0)
+            b_kk_row = tl.sum(tl.where(o_i[:, None] == dst_row, b_Akk_cross, 0.0), axis=0)
+            p_qk_row = Aqk_l + row_t * (H * BT) + i_i * BC + o_i
+            p_kk_row = Akk_l + row_t * (H * BC) + o_i
+            b_qk_direct = tl.load(p_qk_row, mask=row_t < T_cur, other=0.0)
+            b_kk_direct = tl.load(p_kk_row, mask=row_t < T_cur, other=0.0)
+            b_qk_row = tl.where(m_src, b_qk_row * scale, b_qk_direct)
+            b_kk_row = tl.where(m_src, b_kk_row, b_kk_direct)
+            tl.store(p_qk_row, b_qk_row.to(Aqk.dtype.element_ty), mask=row_t < T_cur)
+            tl.store(p_kk_row, b_kk_row.to(Akk.dtype.element_ty), mask=row_t < T_cur)
 
 
 @triton.jit(do_not_specialize=['T', 'NT_OFFSET', 'NC_OFFSET', 'BH_OFFSET'])
