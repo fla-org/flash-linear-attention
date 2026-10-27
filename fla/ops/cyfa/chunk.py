@@ -1569,7 +1569,13 @@ class ChunkCyFAFunction(torch.autograd.Function):
                 phase_force[:, -1, :].add_(dlt)
             else:
                 end_indices = cu_seqlens[1:].to(device=phase_force.device, dtype=torch.long) - 1
-                phase_force[0].index_add_(0, end_indices, dlt)
+                nonempty = (cu_seqlens[1:] > cu_seqlens[:-1])[:, None]
+                if phase_force.shape[1] > 0:
+                    phase_force[0].index_add_(
+                        0,
+                        end_indices.clamp(0, phase_force.shape[1] - 1),
+                        dlt.masked_fill(~nonempty, 0),
+                    )
         ddelta = chunk_global_cumsum(
             phase_force,
             reverse=True,
@@ -1581,6 +1587,9 @@ class ChunkCyFAFunction(torch.autograd.Function):
             if initial_lambda is None
             else segment_sum(phase_force, cu_seqlens=cu_seqlens)
         )
+        if dlt is not None and cu_seqlens is not None and initial_lambda is not None:
+            empty = (cu_seqlens[1:] == cu_seqlens[:-1])[:, None]
+            dlambda0 += dlt.masked_fill(~empty, 0)
         dg_force = dg_force_v.add_(dg_force_k)
         dg = chunk_local_cumsum(
             dg_force,

@@ -214,7 +214,6 @@ def fused_recurrent_gsa_bwd(
         initial_state=hv0,
         reverse=reverse,
         cu_seqlens=cu_seqlens,
-        gate_grad_dtype=torch.float32,
     )
     dok = softmax_bwd(qv, dqv, dtype=torch.float32)
     dq, dk, dsk, _, _, dgk, dhk0 = fused_recurrent_bwd(
@@ -229,7 +228,6 @@ def fused_recurrent_gsa_bwd(
         initial_state=hk0,
         reverse=reverse,
         cu_seqlens=cu_seqlens,
-        gate_grad_dtype=torch.float32,
     )
     return dq, dk, dv, dsk.add_(dsv), dgk.add_(dgv), dhk0, dhv0
 

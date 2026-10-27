@@ -79,9 +79,9 @@ def test_cu_seqlens_rejected_with_non_empty_cache(layer_cls: type, layer_kwargs:
     cu_seqlens = torch.tensor([0, 7, 16], device=device, dtype=torch.int32)
 
     cache = Cache()
-    layer(hidden_states=packed_states, past_key_values=cache, cu_seqlens=cu_seqlens, use_cache=True)
+    layer(hidden_states=packed_states, attention_mask=None, past_key_values=cache, cu_seqlens=cu_seqlens, use_cache=True)
 
     cache = Cache()
-    layer(hidden_states=prefill_states, past_key_values=cache, use_cache=True)
+    layer(hidden_states=prefill_states, attention_mask=None, past_key_values=cache, use_cache=True)
     with pytest.raises(AssertionError, match="cu_seqlens should not be provided"):
-        layer(hidden_states=packed_states, past_key_values=cache, cu_seqlens=cu_seqlens, use_cache=True)
+        layer(hidden_states=packed_states, attention_mask=None, past_key_values=cache, cu_seqlens=cu_seqlens, use_cache=True)

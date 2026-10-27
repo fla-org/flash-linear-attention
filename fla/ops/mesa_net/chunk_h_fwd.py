@@ -153,7 +153,7 @@ def chunk_mesa_fwd_h(
     h = k.new_empty(B, NS, H, K, V, dtype=torch.float)
     h_kv = k.new_empty(B, NS, H, K, V, dtype=torch.bfloat16 if not states_in_fp32 else torch.float)
     h_final = k.new_empty(N, H, K, V, dtype=torch.float) if output_final_state else None
-    h_kv_final = k.new_empty(N, H, K, V, dtype=torch.float)
+    h_kv_final = k.new_empty(N, H, K, V, dtype=torch.float) if output_final_state else None
 
     def grid(meta): return (triton.cdiv(K, 64) * triton.cdiv(V, 64) * N * H,)
 

@@ -492,7 +492,6 @@ def fused_recurrent_bwd(
     reverse: bool = False,
     state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
-    gate_grad_dtype: torch.dtype | None = None,
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
@@ -559,18 +558,15 @@ def fused_recurrent_bwd(
     if g is not None:
         if NK*NV > 1:
             dg = dg.sum(0)
-        if gate_grad_dtype != torch.float32:
-            dg = dg.to(gate_grad_dtype or g.dtype)
+        dg = dg.to(g)
     if gk is not None:
         if NV > 1:
             dgk = dgk.sum(0)
-        if gate_grad_dtype != torch.float32:
-            dgk = dgk.to(gate_grad_dtype or gk.dtype)
+        dgk = dgk.to(gk)
     if gv is not None:
         if NK > 1:
             dgv = dgv.sum(0)
-        if gate_grad_dtype != torch.float32:
-            dgv = dgv.to(gate_grad_dtype or gv.dtype)
+        dgv = dgv.to(gv)
 
     return dq, dk, dv, dg, dgk, dgv, dh0
 

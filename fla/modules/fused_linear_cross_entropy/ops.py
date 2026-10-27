@@ -67,6 +67,7 @@ def logsumexp_fwd_kernel(
         b_x = b_x * scale
     if HAS_SOFTCAPPING:
         b_x = softcapping * tanh(b_x / softcapping)
+    b_x = tl.where(m_d, b_x, -float('inf'))
     b_m = tl.max(b_x, 0)
     b_z = log(tl.sum(exp(b_x - b_m), 0)) + b_m
     tl.store(z + i_n * tl.cdiv(D, BD) + i_d, b_z)
