@@ -25,11 +25,13 @@ CyFAState = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
 def _cyfa_clock_cumsum_kernel(
     delta,
     clock,
+    clock_total,
     cu_seqlens,
     T,
     H: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     BT: tl.constexpr,
+    HAS_TOTAL: tl.constexpr,
 ):
     i_nh = tl.program_id(0).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
@@ -47,15 +49,23 @@ def _cyfa_clock_cumsum_kernel(
         prefix = tl.cumsum(values, 0) + total
         total += tl.sum(values, 0)
         tl.store(clock + indices, prefix, mask=offsets < length)
+    if HAS_TOTAL:
+        tl.store(clock_total + i_nh, total)
 
 
-def cyfa_clock_cumsum(delta: torch.Tensor, cu_seqlens: torch.Tensor | None = None) -> torch.Tensor:
+def cyfa_clock_cumsum(
+    delta: torch.Tensor,
+    cu_seqlens: torch.Tensor | None = None,
+    *,
+    clock_total: torch.Tensor | None = None,
+) -> torch.Tensor:
     # a fixed scan geometry keeps the cyclic phase identical for dense and packed layouts.
     B, T, H = delta.shape
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
     clock = torch.empty_like(delta, dtype=torch.float32)
     _cyfa_clock_cumsum_kernel[(N * H,)](
-        delta, clock, cu_seqlens, T=T, H=H, IS_VARLEN=cu_seqlens is not None,
+        delta, clock, clock_total, cu_seqlens, T=T, H=H,
+        IS_VARLEN=cu_seqlens is not None, HAS_TOTAL=clock_total is not None,
         BT=256, num_warps=4, num_stages=1,
     )
     return clock
@@ -178,14 +188,6 @@ def add_segment_initial(
     for i, (start, end) in enumerate(zip(boundaries[:-1], boundaries[1:], strict=True)):
         out[:, start:end] += initial[i][None, None, :]
     return out
-
-
-def segment_sum(x: torch.Tensor, cu_seqlens: torch.Tensor | None) -> torch.Tensor:
-    x = x.float()
-    if cu_seqlens is None:
-        return x.sum(dim=1)
-    boundaries = cu_seqlens.detach().cpu().tolist()
-    return torch.stack([x[:, start:end].sum(dim=1).squeeze(0) for start, end in zip(boundaries[:-1], boundaries[1:], strict=True)])
 
 
 def validate_initial_state(
