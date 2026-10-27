@@ -34,7 +34,7 @@ This bounds the condition number of $`\mathbf{H}_t + \lambda_t\mathbf{I}`$ by $`
 
 The matrix $`\mathbf{A}_t = \mathbf{H}_t + \lambda_t\mathbf{I}`$ is symmetric positive definite, with eigenvalues in $`[\mu, L] = [\lambda_t, \lambda_t + \lVert\mathbf{H}_t\rVert_F]`$.
 The kernels solve $`\mathbf{A}_t\mathbf{x} = \mathbf{q}_t`$ with a fixed number of Chebyshev iteration steps.
-Starting from $`\omega_0 = 2`$, $`\boldsymbol{\xi}_{-1} = \mathbf{0}`$ and $`\boldsymbol{\xi}_0 = 2\mathbf{q}_t/(L + \mu)`$, step $`n \ge 1`$ computes
+Starting from $`\omega_0 = 2`$, $`\boldsymbol{\xi}_{-1} = \mathbf{0}`$, and $`\boldsymbol{\xi}_0 = 2\mathbf{q}_t/(L + \mu)`$, step $`n \ge 1`$ computes
 
 ```math
 \omega_n = \frac{4}{4 - \rho^2\omega_{n-1}}, \qquad

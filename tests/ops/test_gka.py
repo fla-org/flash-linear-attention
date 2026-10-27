@@ -287,7 +287,7 @@ def test_chunk_state_chaining(
     gates: str,
     split: int,
 ):
-    """Two calls chained through the final states must match one call: covers dh0, dht and the tail chunk."""
+    """Two calls chained through the final states must match one call, which covers dh0, dht, and the tail chunk."""
     torch.manual_seed(42)
     inputs = make_inputs(B, T, H, K, K, gates, True, True, torch.float)
     do = torch.randn(B, T, H, K, device=device)
