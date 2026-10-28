@@ -123,6 +123,7 @@
 | 2026 | Preconditioned KDA            | [Preconditioned DeltaNet: Curvature-aware Sequence Modeling for Linear Recurrences](https://arxiv.org/abs/2604.21100)                         | [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/ops/precond_kda)                |
 | 2026 | CAT                           | [Controllably Efficient Language Models](https://arxiv.org/abs/2511.05313)                                                                    | [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/models/cat)                     |
 | 2026 | CyFA                          | [CyFA: Linear Sequence Modeling with Relative-Time-Partitioned Memory](https://arxiv.org/abs/2609.36259)                                      | [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/models/cyfa)                    |
+| 2026 | MemoryAttention               | [Memory Attention](https://arxiv.org/abs/2609.28399)                                                                                         | [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/models/memory_attn)             |
 
 ## Installation
 
