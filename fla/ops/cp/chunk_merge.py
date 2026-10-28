@@ -70,7 +70,7 @@ def _prune_cp_configs(configs, nargs, **kwargs):
 
 def _prune_cp_summary_configs(configs, nargs, **kwargs):
     args = {**nargs, **kwargs}
-    # keep single-stage K128 tiles; multi-stage TF32x3 can exhaust shared memory and force register spilling
+    # retain single-stage summaries when multi-stage TF32x3 tiles exceed shared memory
     if args['K'] <= 128:
         return configs
     return [config for config in configs if config.num_warps <= 4]

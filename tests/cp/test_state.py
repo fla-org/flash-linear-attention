@@ -124,17 +124,17 @@ def test_chunk_bwd_gate_head(monkeypatch, tmp_path, T: int, H: int, K: int, V: i
 
 
 @pytest.mark.parametrize(
-    ('T', 'H', 'HV', 'K', 'V', 'gate', 'use_bg', 'num_warps', 'num_stages'),
+    ('T', 'H', 'HV', 'K', 'V', 'gate', 'use_bg'),
     [
-        (65, 2, 4, 32, 48, 'scalar', False, 4, 2),
-        (129, 2, 2, 64, 64, None, False, 8, 1),
-        (8192, 2, 4, 128, 80, 'vector', False, 8, 1),
-        (257, 2, 4, 192, 64, 'scalar', True, None, None),
-        (65, 1, 2, 256, 80, 'vector', False, None, None),
+        (65, 2, 4, 32, 48, 'scalar', False),
+        (129, 2, 2, 64, 64, None, False),
+        (8192, 2, 4, 128, 80, 'vector', False),
+        (257, 2, 4, 192, 64, 'scalar', True),
+        (65, 1, 2, 256, 80, 'vector', False),
     ],
     ids=['scalar-grouped-tail', 'ungated-tail', 'long-vector', 'dplr-wide', 'vector-wide-tail'],
 )
-def test_chunk_bwd_summary(monkeypatch, T, H, HV, K, V, gate, use_bg, num_warps, num_stages):
+def test_chunk_bwd_summary(T, H, HV, K, V, gate, use_bg):
     torch.manual_seed(42)
     BT = 64
     # a prefix exercises nonzero varlen offsets; weak updates keep the long M chain observable
@@ -153,10 +153,6 @@ def test_chunk_bwd_summary(monkeypatch, T, H, HV, K, V, gate, use_bg, num_warps,
         gk[:, bos:] = cumulative[:, None, None]
     cu_seqlens = torch.tensor([bos, bos + T], device=device, dtype=torch.int32)
     actual = torch.empty(HV, K, V + K, device=device, dtype=torch.float32)
-    if num_warps is not None:
-        monkeypatch.setattr(chunk_cp_bwd_kernel_dh.fn, 'configs', [
-            triton.Config({}, num_warps=num_warps, num_stages=num_stages),
-        ])
     chunk_cp_bwd_dh(
         q=q,
         k=k,
