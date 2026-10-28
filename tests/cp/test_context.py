@@ -118,3 +118,5 @@ def test_summary_single_stage_configs(kernel, K, eight_warps):
     # multi-stage K128 TF32x3 tiles can exceed shared memory and leave only spilling two-warp kernels
     assert any(config.num_stages == 1 and config.num_warps >= 4 for config in configs)
     assert any(config.num_stages == 1 and config.num_warps == 8 for config in configs) == eight_warps
+    if not eight_warps:
+        assert configs == [config for config in autotuner.configs if config.num_warps in (2, 4)]

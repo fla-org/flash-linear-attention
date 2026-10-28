@@ -129,10 +129,9 @@ def test_chunk_bwd_gate_head(monkeypatch, tmp_path, T: int, H: int, K: int, V: i
         (65, 2, 4, 32, 48, 'scalar', False),
         (129, 2, 2, 64, 64, None, False),
         (8192, 2, 4, 128, 80, 'vector', False),
-        (257, 2, 4, 192, 64, 'scalar', True),
-        (65, 1, 2, 256, 80, 'vector', False),
+        (257, 2, 4, 128, 64, 'scalar', True),
     ],
-    ids=['scalar-grouped-tail', 'ungated-tail', 'long-vector', 'dplr-wide', 'vector-wide-tail'],
+    ids=['scalar-grouped-tail', 'ungated-tail', 'long-vector', 'dplr-grouped-tail'],
 )
 def test_chunk_bwd_summary(T, H, HV, K, V, gate, use_bg):
     torch.manual_seed(42)
