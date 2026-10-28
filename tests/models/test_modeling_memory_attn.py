@@ -69,7 +69,14 @@ def test_modeling():
     expected_loss = F.cross_entropy(dense.logits[:, :-1].float().reshape(-1, 128), ids[:, 1:].reshape(-1))
     assert_close('loss', expected_loss, dense.loss.float(), 0.006)
     cu_seqlens = torch.tensor([0, 63, 126], device=device, dtype=torch.int32)
-    packed = model(input_ids=ids.reshape(1, -1), cu_seqlens=cu_seqlens, use_cache=False)
+    attention_mask = torch.ones(1, 126, device=device, dtype=torch.long)
+    attention_mask[:, [0, 1, 2, 63, 64, 65]] = 0
+    packed = model(
+        input_ids=ids.reshape(1, -1),
+        attention_mask=attention_mask,
+        cu_seqlens=cu_seqlens,
+        use_cache=True,
+    )
     assert_close('packed logits', dense.logits.reshape(1, 126, 128), packed.logits, 0.006)
     dense.loss.backward()
     for name, parameter in model.named_parameters():
@@ -120,3 +127,21 @@ def test_generation(window_size):
     cached = torch.cat(outputs, dim=1)
     assert torch.isfinite(cached).all()
     assert_close('cached logits', full[mask.bool()], cached[mask.bool()], 0.006)
+
+
+@pytest.mark.parametrize('continuation_length', [3, 20], ids=['chunk', 'chunk-larger-than-window'])
+@torch.no_grad()
+def test_cached_continuation(continuation_length):
+    torch.manual_seed(42)
+    model = _create_model().eval()
+    for layer in model.model.layers:
+        layer.attn.window_size = 16
+    ids = torch.randint(3, 128, (1, 64), device=device)
+    full = model(input_ids=ids, use_cache=False).logits
+    prefill = model(input_ids=ids[:, :24], use_cache=True)
+    cached = model(
+        input_ids=ids[:, 24:24 + continuation_length],
+        past_key_values=prefill.past_key_values,
+        use_cache=True,
+    ).logits
+    assert_close('cached continuation', full[:, 24:24 + continuation_length], cached, 0.006)
