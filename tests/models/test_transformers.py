@@ -9,7 +9,7 @@ import re
 
 import pytest
 import torch
-from safetensors.torch import save_file
+from safetensors.torch import load_file, save_file
 from torch import nn
 from transformers import AutoConfig, AutoModelForCausalLM
 
@@ -137,9 +137,12 @@ def test_initialization(config_class, block_size, make_model):
 
 @pytest.mark.parametrize('model_class', [GLAModel, GLAForCausalLM])
 @pytest.mark.parametrize(('mode', 'legacy'), [
-    ('standard', False), ('standard', True), ('attnres', False), ('attnres', True), ('mhc', False),
+    (None, False), ('standard', False), ('standard', True), ('standard_defer', False), ('standard_defer', True),
+    ('attnres', False), ('attnres', True), ('mhc', False),
 ])
-def test_gla_checkpoint(model_class, mode, legacy, tmp_path):
+@pytest.mark.parametrize('fuse_norm', [False, True])
+@pytest.mark.parametrize('save_original_format', [False, True])
+def test_gla_checkpoint(model_class, mode, legacy, fuse_norm, save_original_format, tmp_path):
     torch.manual_seed(42)
     config = models.GLAConfig(
         hidden_size=64,
@@ -147,7 +150,7 @@ def test_gla_checkpoint(model_class, mode, legacy, tmp_path):
         num_hidden_layers=2,
         intermediate_size=128,
         vocab_size=64,
-        fuse_norm=False,
+        fuse_norm=fuse_norm,
         residual_mode=mode,
     )
     model = model_class(config)
@@ -167,15 +170,28 @@ def test_gla_checkpoint(model_class, mode, legacy, tmp_path):
     config.save_pretrained(tmp_path)
     save_file(saved, tmp_path / 'model.safetensors', metadata={'format': 'pt'})
     restored, info = model_class.from_pretrained(tmp_path, output_loading_info=True)
+    assert restored.config.residual_mode == model.config.residual_mode
     assert not info['missing_keys'] and not info['unexpected_keys'] and not info['mismatched_keys']
     for name, value in restored.state_dict().items():
         torch.testing.assert_close(value, state[name], rtol=0, atol=0)
         torch.testing.assert_close(model.state_dict()[name], state[name], rtol=0, atol=0)
 
+    resaved_path = tmp_path / 'resaved'
+    restored.save_pretrained(resaved_path, save_original_format=save_original_format)
+    resaved_state = load_file(resaved_path / 'model.safetensors')
+    assert resaved_state.keys() == (saved.keys() if save_original_format else state.keys())
+    reloaded, info = model_class.from_pretrained(resaved_path, output_loading_info=True)
+    assert not info['missing_keys'] and not info['unexpected_keys'] and not info['mismatched_keys']
+    reloaded.load_state_dict(reloaded.state_dict(), strict=True)
+    for name, value in reloaded.state_dict().items():
+        torch.testing.assert_close(value, state[name], rtol=0, atol=0)
+
 
 @pytest.mark.parametrize('missing', [None, 'scale', 'projection.weight', 'norm.weight'])
 def test_gla_custom_residual(missing, make_model, monkeypatch, tmp_path):
     class ProjectedResidual(StandardResidual):
+        supports_reentrant_checkpointing = False
+
         def __init__(self, hidden_size, scale=0.25, **kwargs):
             super().__init__(hidden_size=hidden_size, **kwargs)
             self.initial_scale = scale
@@ -188,8 +204,9 @@ def test_gla_custom_residual(missing, make_model, monkeypatch, tmp_path):
             nn.init.constant_(self.scale, self.initial_scale)
             nn.init.zeros_(self.projection.weight)
 
-        def post(self, state, branch_output, context=None):
-            return state + self.scale * branch_output + self.projection(branch_output)
+        def post(self, state: torch.Tensor, branch_output: torch.Tensor, context: None = None) -> torch.Tensor:
+            branch_output = self.scale * branch_output + self.projection(branch_output)
+            return super().post(state, branch_output, context)
 
     torch.manual_seed(42)
     monkeypatch.setattr(residuals, '_RESIDUAL_CLASSES', residuals._RESIDUAL_CLASSES.copy())
@@ -197,10 +214,19 @@ def test_gla_custom_residual(missing, make_model, monkeypatch, tmp_path):
     with pytest.raises(ValueError, match='already registered'):
         register_residual('test.projected', ProjectedResidual)
     model = make_model(models.GLAConfig, num_hidden_layers=2, residual_mode='test.projected', residual_kwargs={'scale': 0.5})
+    with pytest.raises(ValueError, match='use_reentrant=False'):
+        model.gradient_checkpointing_enable({'use_reentrant': True})
+    assert not model.is_gradient_checkpointing
     missing_key = f'model.layers.0.residual_attn.{missing}' if missing else None
     defaults = {name: value.clone() for name, value in model.state_dict().items()}
+    model.load_state_dict(defaults, strict=True)
     residual = model.model.layers[0].residual_attn
     assert residual.scale.item() == 0.5 and residual.projection.weight.count_nonzero() == 0
+    x, branch = torch.randn(2, 7, 64), torch.randn(2, 7, 64)
+    residual_state = residual.initialize(x)
+    _, context = residual.pre(residual_state)
+    residual_state = residual.post(residual_state, branch, context)
+    torch.testing.assert_close(residual.get_hidden_state(residual_state), x + 0.5 * branch)
     state = {name: torch.randn_like(value) for name, value in defaults.items() if name != missing_key}
     model.config.save_pretrained(tmp_path)
     save_file(state, tmp_path / 'model.safetensors', metadata={'format': 'pt'})

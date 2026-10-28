@@ -12,8 +12,14 @@ from fla.modules.residuals.base import BaseResidual
 from fla.ops.attnres import fused_attnres
 
 
-class AttentionResidual(BaseResidual):
-    """Read completed blocks and the partial sum using this sublayer's learned query."""
+class AttentionResidual(BaseResidual[list[torch.Tensor], None]):
+    """Read completed blocks and the partial sum using this sublayer's learned query.
+
+    State transitions return new lists without mutating the incoming history; per-call context is `None`.
+    Gradient checkpointing requires `use_reentrant=False`.
+    """
+
+    supports_reentrant_checkpointing = False
 
     def __init__(self, hidden_size: int, block_size: int = 1, **kwargs):
         super().__init__(hidden_size=hidden_size, **kwargs)
@@ -45,7 +51,7 @@ class AttentionResidual(BaseResidual):
         )
         return output, None
 
-    def post(self, state: list[torch.Tensor], branch_output: torch.Tensor, context=None) -> list[torch.Tensor]:
+    def post(self, state: list[torch.Tensor], branch_output: torch.Tensor, context: None = None) -> list[torch.Tensor]:
         # all sources passed to fused_attnres must share the first branch's dtype.
         if self.sub_layer_idx == 0:
             state = [state[0].to(branch_output.dtype)]

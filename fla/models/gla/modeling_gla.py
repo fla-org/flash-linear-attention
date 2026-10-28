@@ -8,10 +8,12 @@
 from __future__ import annotations
 
 import re
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn as nn
+from torch.utils._pytree import tree_flatten, tree_unflatten
 from transformers.modeling_layers import GradientCheckpointingLayer
 
 from fla.layers.gla import GatedLinearAttention
@@ -19,8 +21,7 @@ from fla.models.generation_utils import FLAUnsupportedCacheGenerationMixin
 from fla.models.gla.configuration_gla import GLAConfig
 from fla.models.modeling_utils import FLAForCausalLM, FLAModel, FLAPreTrainedModel, get_attention
 from fla.modules import GatedMLP as GLAMLP
-from fla.modules import RMSNorm
-from fla.modules.residuals import AttentionResidual, BaseResidual, StandardResidual, get_residual_class
+from fla.modules.residuals import BaseResidual, get_residual_class
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
@@ -37,6 +38,20 @@ _RESIDUAL_KEY_MAPPING = {
     r'^(model\.|)res_proj\.': r'\1residual_output.query.',
     r'^(model\.|)res_norm\.': r'\1residual_output.key_norm.',
 }
+
+
+def _checkpoint_with_flattened_state(function, *args, checkpoint_func):
+    flat_args, input_spec = tree_flatten(args)
+    output_spec = None
+
+    def forward(*flat_args):
+        nonlocal output_spec
+        outputs = function(*tree_unflatten(flat_args, input_spec))
+        flat_outputs, output_spec = tree_flatten(outputs)
+        return tuple(flat_outputs)
+
+    outputs = checkpoint_func(forward, *flat_args)
+    return tree_unflatten(outputs, output_spec)
 
 
 class GLABlock(GradientCheckpointingLayer):
@@ -79,7 +94,6 @@ class GLABlock(GradientCheckpointingLayer):
         residual_cls = get_residual_class(config.residual_mode)
         self.residual_attn = residual_cls(**config.get_residual_kwargs(sub_layer_idx=layer_idx * 2))
         self.residual_mlp = residual_cls(**config.get_residual_kwargs(sub_layer_idx=layer_idx * 2 + 1))
-        self.fuse_residual = residual_cls is StandardResidual and isinstance(self.residual_mlp.norm, RMSNorm)
 
     def forward(
         self,
@@ -99,12 +113,9 @@ class GLABlock(GradientCheckpointingLayer):
             output_attentions=output_attentions,
             **kwargs,
         )
-        if self.fuse_residual:
-            # preserve fused add/norm rounding for existing Standard checkpoints.
-            hidden_states, state = self.residual_mlp.norm(hidden_states, state, prenorm=True)
-        else:
-            state = self.residual_attn.post(state, hidden_states, context)
-            hidden_states, context = self.residual_mlp.pre(state)
+        state = self.residual_attn.post(state, hidden_states, context)
+
+        hidden_states, context = self.residual_mlp.pre(state)
         hidden_states = self.mlp(hidden_states, **kwargs)
         state = self.residual_mlp.post(state, hidden_states, context)
         return state, attentions, past_key_values
@@ -128,10 +139,19 @@ class GLAPreTrainedModel(FLAPreTrainedModel):
 
     def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
         checkpoint_kwargs = {'use_reentrant': False, **(gradient_checkpointing_kwargs or {})}
+        if checkpoint_kwargs['use_reentrant'] is None:
+            checkpoint_kwargs['use_reentrant'] = False
         residual_cls = get_residual_class(self.config.residual_mode)
-        if checkpoint_kwargs['use_reentrant'] and issubclass(residual_cls, AttentionResidual):
-            raise ValueError('AttentionResidual requires gradient checkpointing with use_reentrant=False')
-        return super().gradient_checkpointing_enable(gradient_checkpointing_kwargs=checkpoint_kwargs)
+        if checkpoint_kwargs['use_reentrant'] and not residual_cls.supports_reentrant_checkpointing:
+            raise ValueError(f'{residual_cls.__name__} requires gradient checkpointing with use_reentrant=False')
+        super().gradient_checkpointing_enable(gradient_checkpointing_kwargs=checkpoint_kwargs)
+        if checkpoint_kwargs['use_reentrant']:
+            for module in self.modules():
+                if isinstance(module, GLABlock):
+                    module._gradient_checkpointing_func = partial(
+                        _checkpoint_with_flattened_state,
+                        checkpoint_func=module._gradient_checkpointing_func,
+                    )
 
     def _initialize_weights(self, module: nn.Module, *args, **kwargs):
         if getattr(module, '_is_residual_child', False):
@@ -158,8 +178,7 @@ class GLAModel(GLAPreTrainedModel, FLAModel):
         residual_cls = get_residual_class(config.residual_mode)
         output_kwargs = config.get_residual_kwargs(sub_layer_idx=2 * config.num_hidden_layers, is_output=True)
         if not self.layers:
-            residual_cls = StandardResidual
-            output_kwargs = dict(hidden_size=config.hidden_size, norm_eps=config.norm_eps, fuse_norm=config.fuse_norm)
+            raise ValueError('GLA requires at least one layer (num_hidden_layers >= 1)')
         self.residual_output = residual_cls(**output_kwargs)
         for residual in self.modules():
             if isinstance(residual, BaseResidual):

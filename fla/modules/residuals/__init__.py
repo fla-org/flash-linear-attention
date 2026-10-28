@@ -6,33 +6,38 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 from inspect import isabstract
+from typing import Any
 
 from fla.modules.residuals.attnres import AttentionResidual
 from fla.modules.residuals.base import BaseResidual
 from fla.modules.residuals.mhc import ManifoldHyperConnection
 from fla.modules.residuals.standard import StandardResidual
+from fla.modules.residuals.standard_defer import StandardDeferredResidual
 
 __all__ = [
     'AttentionResidual',
     'BaseResidual',
     'ManifoldHyperConnection',
+    'StandardDeferredResidual',
     'StandardResidual',
     'get_residual_class',
     'register_residual',
 ]
 
 
-_RESIDUAL_CLASSES: dict[str, type[BaseResidual]] = {
+_RESIDUAL_CLASSES: dict[str, type[BaseResidual[Any, Any]]] = {
     'standard': StandardResidual,
+    'standard_defer': StandardDeferredResidual,
     'attnres': AttentionResidual,
     'mhc': ManifoldHyperConnection,
 }
 
 
-def register_residual(name: str, residual_cls: type[BaseResidual]) -> None:
+def register_residual(name: str, residual_cls: type[BaseResidual[Any, Any]]) -> None:
     """Register a residual before constructing or loading its model in each process.
 
     Custom classes implement `pre`, `post`, and `reset_parameters`, including initialization of owned children.
+    Bind their state and context types with `BaseResidual[StateT, ContextT]` when subclassing directly.
     Checkpoints store the registered name and parameters; they do not store the class implementation.
     """
     if not isinstance(name, str) or not name or any(char.isspace() for char in name):
@@ -44,7 +49,7 @@ def register_residual(name: str, residual_cls: type[BaseResidual]) -> None:
     _RESIDUAL_CLASSES[name] = residual_cls
 
 
-def get_residual_class(name: str) -> type[BaseResidual]:
+def get_residual_class(name: str) -> type[BaseResidual[Any, Any]]:
     try:
         return _RESIDUAL_CLASSES[name]
     except KeyError:

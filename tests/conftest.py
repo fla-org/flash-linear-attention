@@ -20,7 +20,12 @@ from unittest.mock import patch
 
 import pytest
 import torch
+import torch.nn.functional as F
 
+from fla.modules.residuals import attnres, base, mhc
+from fla.ops.attnres import naive_attnres
+from fla.ops.hc import naive_hc_post, naive_hc_pre
+from fla.ops.utils.sinkhorn import naive_sinkhorn
 from fla.utils import device_torch_lib
 
 try:
@@ -53,6 +58,31 @@ def run_python():
         assert result.returncode == 0, result.stdout + result.stderr
 
     return run
+
+
+class ReferenceRMSNorm(torch.nn.RMSNorm):
+    """PyTorch add/norm reference preserving the input and residual dtype contracts."""
+
+    def __init__(self, hidden_size, **kwargs):
+        super().__init__(hidden_size, **kwargs)
+
+    def forward(self, x, residual=None, prenorm=False):
+        value = x.float() if residual is None else x.float() + residual.float()
+        output = F.rms_norm(value, self.normalized_shape, self.weight.float(), self.eps).to(x.dtype)
+        if prenorm:
+            return output, value.to(x.dtype if residual is None else residual.dtype)
+        return output
+
+
+@pytest.fixture
+def reference_residual_ops(monkeypatch):
+    """Use CPU references to check residual state contracts separately from native kernels."""
+    monkeypatch.setattr(base, 'RMSNorm', ReferenceRMSNorm)
+    monkeypatch.setattr(attnres, 'fused_attnres', torch.autocast(device_type='cpu', enabled=False)(naive_attnres))
+    monkeypatch.setattr(mhc, 'fused_hc_pre', naive_hc_pre)
+    monkeypatch.setattr(mhc, 'fused_hc_post', naive_hc_post)
+    monkeypatch.setattr(mhc, 'sinkhorn', naive_sinkhorn)
+    return ReferenceRMSNorm
 
 
 def _is_called_from_fla():
