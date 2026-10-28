@@ -129,7 +129,7 @@ def iso_kdn_gain_fwd_kernel_carry(
     STORE_FINAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_n, i_h = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
+    i_n, i_h = tl.program_id(0).to(tl.int64) // H, tl.program_id(0).to(tl.int64) % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
@@ -270,7 +270,7 @@ def iso_kdn_gain_bwd_kernel_carry(
     USE_FINAL_STATE_GRADIENT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_n, i_h = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
+    i_n, i_h = tl.program_id(0).to(tl.int64) // H, tl.program_id(0).to(tl.int64) % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
@@ -422,7 +422,7 @@ def iso_kdn_gain_fwd(
         H=H,
         BT=BT,
     )
-    iso_kdn_gain_fwd_kernel_carry[(N, H)](
+    iso_kdn_gain_fwd_kernel_carry[(N * H,)](
         m=m,
         p0=p0,
         h0=initial_state,
@@ -496,7 +496,7 @@ def iso_kdn_gain_bwd(
         H=H,
         BT=BT,
     )
-    iso_kdn_gain_bwd_kernel_carry[(N, H)](
+    iso_kdn_gain_bwd_kernel_carry[(N * H,)](
         m=m,
         lam=lam,
         h0=initial_state,
