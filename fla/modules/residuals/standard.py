@@ -10,11 +10,23 @@ import torch
 from fla.modules.residuals.base import BaseResidual
 
 
-class StandardResidual(BaseResidual):
-    """Normalize the current residual stream and add the sublayer output."""
+class StandardResidual(BaseResidual[torch.Tensor, None]):
+    """Keep the accumulated residual as a Tensor and add each branch output immediately.
+
+    `pre` normalizes the current state and returns no context; `post` adds the branch output to that state.
+    Addition follows PyTorch dtype promotion rules, with no pending branch stored between sublayers.
+    The output module normalizes the final accumulated Tensor.
+    """
+
+    def initialize(self, x: torch.Tensor) -> torch.Tensor:
+        return x
 
     def pre(self, state: torch.Tensor) -> tuple[torch.Tensor, None]:
         return self.norm(state), None
 
-    def post(self, state: torch.Tensor, branch_output: torch.Tensor, context=None) -> torch.Tensor:
+    def post(self, state: torch.Tensor, branch_output: torch.Tensor, context: None = None) -> torch.Tensor:
         return state + branch_output
+
+    @staticmethod
+    def get_hidden_state(state: torch.Tensor) -> torch.Tensor:
+        return state

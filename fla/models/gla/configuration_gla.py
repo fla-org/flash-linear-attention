@@ -16,6 +16,13 @@ from fla.models.configuration_utils import (
 
 
 class GLAConfig(AttentionConfigBase, PreTrainedConfig):
+    """Configure GLA attention and residual implementations.
+
+    An explicit `residual_mode` is preserved.
+    With no explicit mode or legacy AttnRes option, choose `standard_defer` when residual normalization is fused,
+    otherwise choose `standard`. `residual_kwargs` overrides normalization defaults for the residual modules only.
+    Clearing the legacy `attnres_block_size` option restores this automatic standard selection.
+    """
 
     model_type = 'gla'
     keys_to_ignore_at_inference = ['past_key_values']
@@ -94,13 +101,13 @@ class GLAConfig(AttentionConfigBase, PreTrainedConfig):
         if residual_kwargs is not None and not isinstance(residual_kwargs, dict):
             raise TypeError('residual_kwargs must be a dict or None')
         self.residual_kwargs = dict(residual_kwargs or {})
-        reserved = {'hidden_size', 'sub_layer_idx', 'is_output'} & self.residual_kwargs.keys()
+        reserved = {'hidden_size', 'sub_layer_idx', 'num_sublayers', 'is_output'} & self.residual_kwargs.keys()
         if reserved:
             raise ValueError(f'{sorted(reserved)} are supplied by the model, not residual_kwargs')
 
         validate_attnres_config(attnres_block_size=attnres_block_size)
         if residual_mode is None:
-            residual_mode = 'standard' if attnres_block_size is None else 'attnres'
+            residual_mode = self._get_default_residual_mode() if attnres_block_size is None else 'attnres'
         if attnres_block_size is not None:
             if residual_mode != 'attnres' or self.residual_kwargs.get('block_size', attnres_block_size) != attnres_block_size:
                 raise ValueError('attnres_block_size conflicts with residual_mode or residual_kwargs')
@@ -119,6 +126,9 @@ class GLAConfig(AttentionConfigBase, PreTrainedConfig):
             **kwargs,
         )
 
+    def _get_default_residual_mode(self) -> str:
+        return 'standard_defer' if self.residual_kwargs.get('fuse_norm', self.fuse_norm) else 'standard'
+
     @property
     def attnres_block_size(self) -> int | None:
         """Expose the legacy option while serializing only the canonical residual fields."""
@@ -127,7 +137,7 @@ class GLAConfig(AttentionConfigBase, PreTrainedConfig):
     @attnres_block_size.setter
     def attnres_block_size(self, value: int | None) -> None:
         validate_attnres_config(attnres_block_size=value)
-        self.residual_mode = 'standard' if value is None else 'attnres'
+        self.residual_mode = self._get_default_residual_mode() if value is None else 'attnres'
         self.residual_kwargs = dict(self.residual_kwargs)
         if value is None:
             self.residual_kwargs.pop('block_size', None)
@@ -142,5 +152,6 @@ class GLAConfig(AttentionConfigBase, PreTrainedConfig):
         ) | self.residual_kwargs | dict(
             hidden_size=self.hidden_size,
             sub_layer_idx=sub_layer_idx,
+            num_sublayers=2 * self.num_hidden_layers,
             is_output=is_output,
         )
