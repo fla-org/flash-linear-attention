@@ -136,7 +136,7 @@ def fused_chunk_ttt_linear_fwd_kernel(
         b_o = tl.dot(b_q, b_h.to(b_q.dtype), b_o, allow_tf32=False)
         b_e_last = tl.load(p_e_last)
         b_h = b_h - tl.dot(b_e_last * b_k, b_v2.to(b_k.dtype), allow_tf32=False)
-        b_hb = b_hb - tl.sum(b_e_last * b_v2.to(b_k.dtype), axis=0)
+        b_hb = b_hb - tl.sum(b_e_last * tl.where(m_v, b_v2, 0.0).to(b_k.dtype), axis=0)
         b_h = tl.where((v_i < V)[None, :], b_h, 0.)
         b_hb = tl.where((v_i < V), b_hb, 0.)
         tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=m_v)
@@ -269,7 +269,7 @@ def fused_chunk_ttt_linear_bwd_kernel_h(
 
         b_e_last = tl.load(p_e_last)
         b_h = b_h - tl.dot(b_e_last * b_k, b_v2.to(b_k.dtype), allow_tf32=False)
-        b_hb = b_hb - tl.sum(b_e_last * b_v2.to(b_k.dtype), axis=0)
+        b_hb = b_hb - tl.sum(b_e_last * tl.where(m_v, b_v2, 0.0).to(b_k.dtype), axis=0)
         b_h = tl.where((v_i < V)[None, :], b_h, 0.)
         b_hb = tl.where((v_i < V), b_hb, 0.)
         tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), mask=m_q)
