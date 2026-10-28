@@ -109,7 +109,9 @@ def benchmark_case(
             with inference_context():
                 case.run_once(case.eager_step, case.eager_args, False)
 
+        eager_started = time.perf_counter()
         result["eager"] = _measure(eager_invocation, synchronize, warmup, iterations, clock_ns)
+        print(f"  Eager warmup and measurement: {time.perf_counter() - eager_started:.2f}s", flush=True)
 
     graphed_step = None
     if "graph" in engines:
@@ -127,21 +129,26 @@ def benchmark_case(
             graphed_step = graph_factory(case.graph_step, case.capture_args)
         synchronize()
         result["capture_ms"] = (clock_ns() - capture_start) / 1e6
+        print(f"  Graph capture: {result['capture_ms'] / 1000:.2f}s", flush=True)
 
         # A graph result is only reported after an eager numerical reference
         # has passed. This check is outside all timed regions.
+        validation_started = time.perf_counter()
         with inference_context():
             reference = case.run_once(case.eager_step, case.eager_args, True)
             actual = case.run_once(graphed_step, case.graph_args, True)
         synchronize()
         case.assert_close(actual, reference)
         result["validation"] = "passed"
+        print(f"  Graph validation: {time.perf_counter() - validation_started:.2f}s", flush=True)
 
         def graph_invocation():
             with inference_context():
                 case.run_once(graphed_step, case.graph_args, False)
 
+        replay_started = time.perf_counter()
         result["graph"] = _measure(graph_invocation, synchronize, warmup, iterations, clock_ns)
+        print(f"  Graph replay warmup and measurement: {time.perf_counter() - replay_started:.2f}s", flush=True)
 
     return result
 
@@ -219,7 +226,11 @@ def benchmark_graph_op(
         for mode in modes:
             if progress:
                 print(f"  [{op_name}] {shape_name} {mode}: building case", flush=True)
+            build_started = time.perf_counter()
             case = config.build_case(shape, mode, device, seed + shape_index * 10)
+            if progress:
+                build_elapsed = time.perf_counter() - build_started
+                print(f"  [{op_name}] {shape_name} {mode}: case built in {build_elapsed:.2f}s", flush=True)
             measured = benchmark_case(
                 case=case,
                 mode=mode,
