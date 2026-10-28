@@ -14,7 +14,7 @@ from fla.ops.cp import build_cp_context
 from fla.ops.gated_delta_product import chunk_gated_delta_product
 from fla.ops.gated_delta_product.naive import naive_recurrent_gated_delta_product
 from fla.utils import IS_NPU, IS_TF32_SUPPORTED, assert_close, device
-from tests.cp.utils import gather_global, shard_tensor
+from tests.cp.utils import assert_chunk_matches_cp, gather_global, shard_tensor
 
 pytestmark = pytest.mark.skipif(not (IS_TF32_SUPPORTED or IS_NPU), reason="requires NVIDIA Ampere or newer, or Ascend")
 
@@ -144,3 +144,31 @@ def _run_chunk(
 @pytest.mark.parametrize("num_householder", [2, 3], ids=["n2", "n3"])
 def test_chunk(run_distributed, num_householder: int) -> None:
     run_distributed(worker=_run_chunk, world_size=2, num_householder=num_householder)
+
+
+def _run_chunk_gradients(rank: int, world_size: int, num_householder: int):
+    torch.manual_seed(42)
+    current_device = torch.device(device, rank)
+    T, H, K, V = 256, 2, 64, 80
+    q = F.normalize(torch.randn(1, T, H, K, device=current_device), dim=-1).to(torch.bfloat16)
+    k = F.normalize(torch.randn(1, T * num_householder, H, K, device=current_device), dim=-1).to(torch.bfloat16)
+    v = torch.randn(1, T * num_householder, H, V, device=current_device, dtype=torch.bfloat16)
+    g = F.logsigmoid(torch.randn(1, T, H, device=current_device))
+    beta = torch.randn(1, T * num_householder, H, device=current_device, dtype=torch.bfloat16).sigmoid()
+    do = torch.randn(1, T, H, V, device=current_device, dtype=torch.bfloat16)
+    cu_seqlens = torch.tensor([0, 80, 190, T], device=current_device)
+    assert_chunk_matches_cp(
+        op=chunk_gated_delta_product,
+        inputs=dict(q=q, k=k, v=v, g=g, beta=beta),
+        do=do,
+        cu_seqlens=cu_seqlens,
+        rank=rank,
+        world_size=world_size,
+        num_householder=num_householder,
+        ratio=0.005,
+    )
+
+
+@pytest.mark.parametrize('num_householder', [2, 3], ids=['n2', 'n3'])
+def test_chunk_gradients(run_distributed, num_householder: int):
+    run_distributed(worker=_run_chunk_gradients, world_size=2, num_householder=num_householder)

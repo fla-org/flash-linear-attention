@@ -20,7 +20,7 @@ from fla.ops.gdn2 import chunk_gdn2
 from fla.ops.gdn2.naive import naive_recurrent_gdn2
 from fla.ops.kda.gate import naive_kda_lowerbound_gate
 from fla.utils import IS_NPU, IS_TF32_SUPPORTED, assert_close, device
-from tests.cp.utils import gather_global, shard_tensor
+from tests.cp.utils import assert_chunk_matches_cp, gather_global, shard_tensor
 
 pytestmark = pytest.mark.skipif(not (IS_TF32_SUPPORTED or IS_NPU), reason="requires NVIDIA Ampere or newer, or Ascend")
 
@@ -232,3 +232,31 @@ def test_chunk(run_distributed, world_size, lengths, disable_recompute, state_v_
         disable_recompute=disable_recompute,
         state_v_first=state_v_first,
     )
+
+
+def _run_chunk_gradients(rank: int, world_size: int, state_v_first: bool):
+    torch.manual_seed(42)
+    current_device = torch.device(device, rank)
+    T, H, K, V = 256, 2, 64, 80
+    q, k = [torch.randn(1, T, H, K, dtype=torch.bfloat16, device=current_device) for _ in range(2)]
+    v = torch.randn(1, T, H, V, dtype=torch.bfloat16, device=current_device)
+    g = torch.full_like(k, -0.01)
+    b = torch.randn_like(k).sigmoid()
+    w = torch.randn_like(v).sigmoid()
+    do = torch.randn_like(v)
+    cu_seqlens = torch.tensor([0, 80, 190, T], device=current_device)
+    assert_chunk_matches_cp(
+        op=chunk_gdn2,
+        inputs=dict(q=q, k=k, v=v, g=g, b=b, w=w),
+        do=do,
+        cu_seqlens=cu_seqlens,
+        rank=rank,
+        world_size=world_size,
+        use_qk_l2norm_in_kernel=True,
+        state_v_first=state_v_first,
+    )
+
+
+@pytest.mark.parametrize('state_v_first', [False, True])
+def test_chunk_gradients(run_distributed, state_v_first: bool):
+    run_distributed(worker=_run_chunk_gradients, world_size=2, state_v_first=state_v_first)

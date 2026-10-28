@@ -114,6 +114,7 @@ def _run_chunk(
     D: int,
     lengths: list[int],
     dtype,
+    safe_gate: bool = True,
     op=chunk_dplr_delta_rule,
     op_chunk_size: int = 64,
     assert_tilelang: bool = False,
@@ -177,7 +178,7 @@ def _run_chunk(
             a=a_local,
             b=b_local,
             gk=gk_local,
-            safe_gate=True,
+            safe_gate=safe_gate,
             chunk_size=op_chunk_size,
             cp_context=context,
         )
@@ -220,8 +221,18 @@ def _run_chunk(
         pytest.param(4, [1024], _chunk_rwkv7, id='cp4-rwkv7-single-sequence'),
     ],
 )
-def test_chunk(run_distributed, world_size, lengths, op):
-    run_distributed(worker=_run_chunk, world_size=world_size, H=4, D=64, lengths=lengths, dtype=torch.bfloat16, op=op)
+@pytest.mark.parametrize('safe_gate', [False, True], ids=['gate', 'safe-gate'])
+def test_chunk(run_distributed, world_size, lengths, op, safe_gate):
+    run_distributed(
+        worker=_run_chunk,
+        world_size=world_size,
+        H=4,
+        D=64,
+        lengths=lengths,
+        dtype=torch.bfloat16,
+        safe_gate=safe_gate,
+        op=op,
+    )
 
 
 @pytest.mark.skipif(os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") == "1", reason="backend dispatch disabled")

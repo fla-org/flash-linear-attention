@@ -71,7 +71,7 @@ o_local, _ = chunk_kda(
 
 CP context stores **rank-local** varlen metadata that tracks how sequences are distributed:
 
-- `FLACPContext.cu_seqlens` — rank-local cumulative sequence lengths, on GPU (`int64`)
+- `FLACPContext.cu_seqlens` — rank-local cumulative sequence lengths, on the input device (`int32` when built by `build_cp_context`)
 - `FLACPContext.cu_seqlens_cpu` — same data on CPU for host-side indexing
 
 Variable-length inputs start as global `cu_seqlens` **before** partitioning; `build_cp_context` converts them into rank-local metadata automatically.
@@ -170,6 +170,10 @@ This design means CP pre-processing must use the **same** tensors as the main ke
 ---
 
 ## CP Architecture
+
+The implementation separates rank metadata (`context.py`), collectives (`comm.py`), and state exchange (`chunk_delta_h.py`). Forward and backward affine summaries live in `chunk_fwd.py` and `chunk_bwd.py`; `chunk_merge.py` composes them. The summary and merge kernels are also reused by intra-card CP.
+
+Backward summaries and ordinary chunk backward share one 64-row state-gradient recurrence, including scalar and vector gates. State tiles are statically expanded for the key dimension; storage layout remains a caller-selected specialization. DPLR retains its additive state update.
 
 ### Data Flow
 
@@ -373,6 +377,8 @@ $$\mathbf{S}_r = \mathbf{M}_{r-1} (\mathbf{M}_{r-2} (\cdots \mathbf{S}_{\text{ex
 
 > [!IMPORTANT]
 > The $\mathbf{M}$ chain multiply must stay in **fp32** to avoid accumulated precision loss. In bf16, repeatedly casting fp32 accumulators back to bf16 between iterations causes significant error growth over many chunks.
+
+Affine-chain products automatically use `tf32x3` on NVIDIA GPUs with compute capability ≥ 8.0 and `ieee` on Ascend. This applies to forward/backward summaries and state merging, including intra-card CP. State storage and accumulation remain FP32.
 
 ---
 

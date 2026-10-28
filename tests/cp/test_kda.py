@@ -24,7 +24,7 @@ from fla.ops.kda import chunk_kda
 from fla.ops.kda.gate import naive_kda_lowerbound_gate
 from fla.ops.kda.naive import naive_recurrent_kda
 from fla.utils import IS_NPU, IS_TF32_SUPPORTED, assert_close, device
-from tests.cp.utils import gather_global, shard_tensor
+from tests.cp.utils import assert_chunk_matches_cp, gather_global, shard_tensor
 
 pytestmark = pytest.mark.skipif(not (IS_TF32_SUPPORTED or IS_NPU), reason="requires NVIDIA Ampere or newer, or Ascend")
 
@@ -141,7 +141,6 @@ def _run_chunk(
     safe_gate: bool = False,
     lower_bound: float | None = None,
     state_v_first: bool = False,
-    use_tf32x3_affine_chain: bool | None = None,
     layout: str = 'contiguous',
 ):
     T = sum(lengths)
@@ -184,7 +183,6 @@ def _run_chunk(
         cu_seqlens=cu_seqlens_global,
         group=dist.group.WORLD,
         layout=layout,
-        **({'use_tf32x3_affine_chain': use_tf32x3_affine_chain} if use_tf32x3_affine_chain is not None else {}),
     )
 
     q_local = shard_tensor(q_global, rank=rank, world_size=world_size, layout=layout).clone().detach().requires_grad_(True)
@@ -239,43 +237,27 @@ def _run_chunk(
 
 
 @pytest.mark.parametrize(
-    ('world_size', 'lengths', 'use_gate_in_kernel', 'safe_gate',
-     'disable_recompute', 'state_v_first', 'use_tf32x3_affine_chain', 'layout'),
+    ('world_size', 'lengths', 'options'),
     [
-        pytest.param(2, [3000, 4000, 3240], True, True, False, False, None, 'contiguous', id='cp2-sequence-cut'),
-        pytest.param(2, [5120, 5120], True, True, False, False, None, 'contiguous', id='cp2-boundary-aligned'),
-        pytest.param(4, [7000, 3240], True, True, False, False, None, 'contiguous', id='cp4-sequence-cut'),
-        pytest.param(4, [10240], True, True, False, False, None, 'contiguous', id='cp4-single-sequence'),
-        pytest.param(8, [65536], True, True, False, False, None, 'contiguous', id='cp8-single-sequence'),
-        pytest.param(2, [1000, 1500, 2000, 2500, 1240, 1000, 1000], True, True,
-                     False, False, None, 'contiguous', id='cp2-short-sequences'),
-        pytest.param(2, [3000, 4000, 3240], True, True, True, False, None, 'contiguous', id='cp2-no-recompute'),
-        pytest.param(2, [3000, 4000, 3240], False, False, False, False, None, 'contiguous', id='cp2-pregated'),
-        pytest.param(2, [3000, 4000, 3240], False, True, False, False, None, 'contiguous', id='cp2-pregated-safe'),
-        pytest.param(2, [3000, 4000, 3240], True, True, False, True, None, 'contiguous', id='cp2-v-first'),
-        pytest.param(4, [10240], True, True, False, True, None, 'contiguous', id='cp4-v-first'),
-        pytest.param(2, [3000, 4000, 3240], True, True, False, False, True, 'contiguous',
-                     id='cp2-sequence-cut-legacy-precision-true'),
-        pytest.param(4, [10240], True, True, False, False, True, 'contiguous', id='cp4-single-sequence-legacy-precision-true'),
-        pytest.param(2, [3000, 4000, 3240], True, True, False, True, True,
-                     'contiguous', id='cp2-v-first-legacy-precision-true'),
-        pytest.param(2, [10240], True, True, False, False, None, 'zigzag', id='cp2-zigzag-single-sequence'),
-        pytest.param(2, [3000, 4000, 3240], True, True, False, False, None, 'zigzag', id='cp2-zigzag-sequence-cut'),
-        pytest.param(4, [1500, 2600, 3000, 3140], True, True, False, False, None, 'zigzag', id='cp4-zigzag-sequence-cut'),
-        pytest.param(4, [2560, 2560, 2560, 2560], True, True, False, False, None, 'zigzag', id='cp4-zigzag-boundary-aligned'),
+        pytest.param(2, [3000, 4000, 3240], {}, id='cp2-sequence-cut'),
+        pytest.param(2, [5120, 5120], {}, id='cp2-boundary-aligned'),
+        pytest.param(4, [7000, 3240], {}, id='cp4-sequence-cut'),
+        pytest.param(4, [10240], {}, id='cp4-single-sequence'),
+        pytest.param(8, [65536], {}, id='cp8-single-sequence'),
+        pytest.param(2, [1000, 1500, 2000, 2500, 1240, 1000, 1000], {}, id='cp2-short-sequences'),
+        pytest.param(2, [3000, 4000, 3240], {'disable_recompute': True}, id='cp2-no-recompute'),
+        pytest.param(2, [3000, 4000, 3240], {'use_gate_in_kernel': False, 'safe_gate': False}, id='cp2-pregated'),
+        pytest.param(2, [3000, 4000, 3240], {'use_gate_in_kernel': False}, id='cp2-pregated-safe'),
+        pytest.param(2, [3000, 4000, 3240], {'state_v_first': True}, id='cp2-v-first'),
+        pytest.param(4, [10240], {'state_v_first': True}, id='cp4-v-first'),
+        pytest.param(2, [10240], {'layout': 'zigzag'}, id='cp2-zigzag-single-sequence'),
+        pytest.param(2, [3000, 4000, 3240], {'layout': 'zigzag'}, id='cp2-zigzag-sequence-cut'),
+        pytest.param(4, [1500, 2600, 3000, 3140], {'layout': 'zigzag'}, id='cp4-zigzag-sequence-cut'),
+        pytest.param(4, [2560, 2560, 2560, 2560], {'layout': 'zigzag'}, id='cp4-zigzag-boundary-aligned'),
     ],
 )
-def test_chunk(
-    run_distributed,
-    world_size,
-    lengths,
-    use_gate_in_kernel,
-    safe_gate,
-    disable_recompute,
-    state_v_first,
-    use_tf32x3_affine_chain,
-    layout,
-):
+def test_chunk(run_distributed, world_size, lengths, options):
+    options = {'use_gate_in_kernel': True, 'safe_gate': True, **options}
     run_distributed(
         worker=_run_chunk,
         world_size=world_size,
@@ -283,11 +265,36 @@ def test_chunk(
         D=128,
         lengths=lengths,
         dtype=torch.bfloat16,
-        disable_recompute=disable_recompute,
-        use_gate_in_kernel=use_gate_in_kernel,
-        safe_gate=safe_gate,
-        lower_bound=-5.0 if safe_gate else None,
-        state_v_first=state_v_first,
-        use_tf32x3_affine_chain=use_tf32x3_affine_chain,
-        layout=layout,
+        lower_bound=-5.0 if options['safe_gate'] else None,
+        **options,
     )
+
+
+def _run_chunk_gradients(rank: int, world_size: int, layout: str, state_v_first: bool):
+    torch.manual_seed(42)
+    current_device = torch.device(device, rank)
+    T, H, K, V = 256, 2, 64, 80
+    q, k = [torch.randn(1, T, H, K, dtype=torch.bfloat16, device=current_device) for _ in range(2)]
+    v = torch.randn(1, T, H, V, dtype=torch.bfloat16, device=current_device)
+    g = torch.full_like(k, -0.01)
+    beta = torch.randn(1, T, H, dtype=torch.bfloat16, device=current_device).sigmoid()
+    do = torch.randn_like(v)
+    cu_seqlens = torch.tensor([0, 80, 190, T], device=current_device)
+
+    assert_chunk_matches_cp(
+        op=chunk_kda,
+        inputs=dict(q=q, k=k, v=v, g=g, beta=beta),
+        do=do,
+        cu_seqlens=cu_seqlens,
+        rank=rank,
+        world_size=world_size,
+        layout=layout,
+        use_qk_l2norm_in_kernel=True,
+        state_v_first=state_v_first,
+    )
+
+
+@pytest.mark.parametrize('layout', ['contiguous', 'zigzag'])
+@pytest.mark.parametrize('state_v_first', [False, True])
+def test_chunk_gradients(run_distributed, layout: str, state_v_first: bool):
+    run_distributed(worker=_run_chunk_gradients, world_size=2, layout=layout, state_v_first=state_v_first)
