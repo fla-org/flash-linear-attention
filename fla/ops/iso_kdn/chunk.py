@@ -124,9 +124,11 @@ def chunk_iso_kdn(
     """
     if kwargs.get('cp_context') is not None:
         raise NotImplementedError("Context parallelism is not supported for IsoKDN yet.")
-    for key in ('use_beta_sigmoid_in_kernel', 'allow_neg_eigval', 'safe_gate', 'lower_bound',
-                'return_intermediate_states', 'use_graph', 'max_num_seqs'):
-        if kwargs.pop(key, False):
+    # options of `chunk_kda` that IsoKDN does not support, each of which must keep its default
+    for key, default in (('use_beta_sigmoid_in_kernel', False), ('allow_neg_eigval', False), ('safe_gate', False),
+                         ('lower_bound', None), ('return_intermediate_states', False), ('use_graph', False),
+                         ('max_num_seqs', None)):
+        if kwargs.pop(key, default) is not default:
             raise ValueError(f"`{key}` is not supported by IsoKDN.")
     if use_gate_in_kernel and A_log is None:
         raise ValueError("`A_log` must be provided when `use_gate_in_kernel=True`.")
