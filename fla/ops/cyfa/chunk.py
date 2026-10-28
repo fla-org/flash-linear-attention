@@ -24,6 +24,7 @@ from fla.ops.utils.cumsum import chunk_global_cumsum, chunk_local_cumsum
 from fla.ops.utils.op import exp2
 from fla.utils import (
     IS_NVIDIA_HOPPER,
+    IS_NVIDIA_SM100,
     autocast_custom_bwd,
     autocast_custom_fwd,
     autotune_cache_kwargs,
@@ -1191,15 +1192,15 @@ def _readout_backward(
 def _prune_table_grad_configs(configs, nargs, **kwargs):
     args = {**(nargs or {}), **kwargs}
     right_a = args.get('right_a')
-    if not IS_NVIDIA_HOPPER or right_a is None or right_a.dtype != torch.float32:
+    if not (IS_NVIDIA_HOPPER or IS_NVIDIA_SM100) or right_a is None or right_a.dtype != torch.float32:
         return configs
-    # Triton 3.4 rejects this four-warp FP32 dot layout on SM90 during compilation.
+    # this FP32 dot layout fails with four warps on SM90 and four/eight warps on SM100.
     return [
         config for config in configs
         if not (
             config.kwargs['BR'] == 64
             and config.kwargs['BC'] == 64
-            and config.num_warps == 4
+            and (config.num_warps == 4 or (IS_NVIDIA_SM100 and config.num_warps == 8))
         )
     ]
 
