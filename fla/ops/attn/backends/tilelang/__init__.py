@@ -31,7 +31,10 @@ class AttnTileLangBackend(TileLangBackend):
         chunk_indices: torch.LongTensor | None = None,
         output_dtype: torch.dtype | None = None,
     ) -> tuple[bool, str | None]:
-        if q.dtype not in (torch.float16, torch.bfloat16, torch.float32):
+        if q.dtype not in (torch.float16, torch.bfloat16):
+            # float32 fails tilelang layout inference at kernel-build time
+            # (see #1590, tile-ai/tilelang#3669); fall back to Triton until
+            # the upstream limitation is fixed
             return False, f"TileLang backend does not support dtype {q.dtype}; fall back to Triton"
         return True, None
 
@@ -78,7 +81,10 @@ class AttnTileLangBackend(TileLangBackend):
         cu_seqlens: torch.LongTensor | None = None,
         chunk_indices: torch.LongTensor | None = None,
     ) -> tuple[bool, str | None]:
-        if q.dtype not in (torch.float16, torch.bfloat16, torch.float32):
+        if q.dtype not in (torch.float16, torch.bfloat16):
+            # float32 fails tilelang layout inference at kernel-build time
+            # (see #1590, tile-ai/tilelang#3669); fall back to Triton until
+            # the upstream limitation is fixed
             return False, f"TileLang backend does not support dtype {q.dtype}; fall back to Triton"
         return True, None
 

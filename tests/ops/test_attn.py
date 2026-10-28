@@ -154,6 +154,53 @@ def test_parallel(
     assert_close("dv", ref_dv, tri_dv, 0.005)
 
 
+@pytest.mark.parametrize(
+    ("B", "T", "H", "HQ", "K", "V", "scale"),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-HQ{}-K{}-V{}-scale{}".format(*test))
+        for test in [
+            (1, 63, 2, 2, 64, 64, 1.0),
+            (2, 127, 2, 8, 64, 64, 0.1),
+        ]
+    ],
+)
+def test_parallel_fp32(
+    B: int,
+    T: int,
+    H: int,
+    HQ: int,
+    K: int,
+    V: int,
+    scale: float,
+):
+    # Regression test for #1590: float32 inputs used to make the TileLang backend
+    # fail at kernel-build time ("Layout infer conflict"). The verifier now rejects
+    # float32 so dispatch falls back to Triton; this test pins that fallback path.
+    torch.manual_seed(42)
+    os.environ["TRITON_F32_DEFAULT"] = "ieee"
+    q = torch.randn((B, T, HQ, K), dtype=torch.float32, device=device).requires_grad_(True)
+    k = torch.randn((B, T, H, K), dtype=torch.float32, device=device).requires_grad_(True)
+    v = torch.randn((B, T, H, V), dtype=torch.float32, device=device).requires_grad_(True)
+    do = torch.randn((B, T, HQ, V), dtype=torch.float32, device=device)
+
+    ref, _ = naive_parallel_attn(q=q.float(), k=k.float(), v=v.float(), scale=scale)
+    ref.backward(do)
+    ref_dq, q.grad = q.grad.clone(), None
+    ref_dk, k.grad = k.grad.clone(), None
+    ref_dv, v.grad = v.grad.clone(), None
+
+    tri = parallel_attn(q=q, k=k, v=v, scale=scale)
+    tri.backward(do)
+    tri_dq, q.grad = q.grad.clone(), None
+    tri_dk, k.grad = k.grad.clone(), None
+    tri_dv, v.grad = v.grad.clone(), None
+
+    assert_close(" o", ref, tri, 0.005)
+    assert_close("dq", ref_dq, tri_dq, 0.005)
+    assert_close("dk", ref_dk, tri_dk, 0.005)
+    assert_close("dv", ref_dv, tri_dv, 0.005)
+
+
 def test_parallel_bwd_full_value_reduction(monkeypatch):
     """Regression test: the backward must not split the value dim (NV == 1).
 
