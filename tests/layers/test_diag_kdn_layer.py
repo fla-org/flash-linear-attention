@@ -32,3 +32,12 @@ def test_cache_without_state_uses_learned_prior(T: int, use_short_conv: bool):
     layer(torch.randn(2, T, 128, device=device), past_key_values=cache, use_cache=False)
     actual = layer(x, past_key_values=cache, use_cache=False)[0]
     assert_close('o', expected, actual, 1e-6)
+
+
+@pytest.mark.parametrize(
+    ('option', 'value'),
+    [('omega_min', -0.1), ('r_min', 0.0), ('r_min', -0.01), ('info_scale', 0.0), ('info_scale', -1.0)],
+)
+def test_invalid_config(option: str, value: float):
+    with pytest.raises(ValueError, match=f'`{option}`'):
+        DiagonalKalmanDeltaNetwork(hidden_size=128, head_dim=64, num_heads=2, **{option: value})
