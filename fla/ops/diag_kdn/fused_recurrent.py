@@ -79,6 +79,8 @@ def fused_recurrent_diag_kdn(
             Final memory of shape ``[N, H, K, V]`` and precision of shape ``[N, H, K]``
             if ``output_final_state=True`` else `None`.
     """
+    if kwargs.pop('cp_context', None) is not None:
+        raise NotImplementedError("Context parallelism is not supported for DiagKDN yet.")
     # the recurrent kernel does not need the CPU copy of the sequence lengths
     kwargs.pop('cu_seqlens_cpu', None)
     if kwargs:
