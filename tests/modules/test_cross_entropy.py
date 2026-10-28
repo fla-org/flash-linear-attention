@@ -5,9 +5,11 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+import inspect
 import math
 from datetime import timedelta
 from itertools import product
+from unittest.mock import MagicMock, Mock
 
 import pytest
 import torch
@@ -15,46 +17,139 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 import torch.nn.functional as F
 
+from fla import backends
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
+from fla.modules.fused_linear_cross_entropy.ops import logsumexp_fwd as fused_linear_logsumexp_fwd
 from fla.modules.l2warp import l2_warp
+from fla.ops.utils.logsumexp import logsumexp_fwd
 from fla.utils import IS_INTEL, IS_NPU, IS_NVIDIA, assert_close, device, device_torch_lib
 
 
 @pytest.mark.parametrize(
-    ('N', 'V', 'smoothing', 'scale', 'softcap', 'z_scale', 'strided', 'inplace_backward', 'reduction', 'dtype'),
+    ('N', 'V', 'smoothing', 'scale', 'z_scale', 'softcap', 'strided', 'ignore_all', 'inplace_backward', 'reduction', 'dtype'),
     [
-        pytest.param(1024, 32000, 0.0, 1.0, None, 0.0, False, False, 'mean', torch.bfloat16, id='basic'),
-        pytest.param(63, 131071, 0.0, 1.0, None, 0.0, False, True, 'mean', torch.bfloat16, id='large_vocab'),
+        pytest.param(1024, 32000, 0.0, 1.0, 0.0, None, False, False, False, 'mean', torch.bfloat16, id='basic'),
+        pytest.param(63, 131071, 0.0, 1.0, 0.0, None, False, False, True, 'mean', torch.bfloat16, id='large_vocab'),
         pytest.param(
-            127, 4103, 0.1, 0.3, None, 0.0, True, True, 'none', torch.float16,
+            127,
+            4103,
+            0.1,
+            0.3,
+            0.0,
+            None,
+            True,
+            False,
+            True,
+            'none',
+            torch.float16,
             id='strided_tail',
             marks=pytest.mark.skipif(IS_NPU, reason="Covers the default Triton GPU kernels"),
         ),
         pytest.param(
-            2047, 65539, 0.1, 0.5, 3.0, 0.0, False, True, 'mean', torch.bfloat16,
+            2047,
+            65539,
+            0.1,
+            0.5,
+            0.0,
+            3.0,
+            False,
+            False,
+            True,
+            'mean',
+            torch.bfloat16,
             id='softcap_tail',
             marks=pytest.mark.skipif(IS_NPU, reason="Covers the default Triton GPU kernels"),
         ),
         pytest.param(
-            1025, 32000, 0.1, 0.3, None, 0.01, False, False, 'sum', torch.bfloat16,
+            1025,
+            32000,
+            0.1,
+            0.3,
+            0.01,
+            None,
+            False,
+            False,
+            False,
+            'sum',
+            torch.bfloat16,
             id='smoothing',
             marks=pytest.mark.skipif(IS_NPU, reason="Covers the default Triton GPU kernels"),
         ),
         pytest.param(
-            511, 32003, 0.1, 0.3, 3.0, 0.01, True, False, 'mean', torch.float32,
+            511,
+            32003,
+            0.1,
+            0.3,
+            0.01,
+            3.0,
+            True,
+            False,
+            False,
+            'mean',
+            torch.float32,
             id='z_loss',
             marks=pytest.mark.skipif(IS_NPU, reason="Covers the default Triton GPU kernels"),
         ),
         pytest.param(
-            255, 65537, 0.1, 0.0, None, 0.0, False, False, 'mean', torch.bfloat16,
+            255,
+            65537,
+            0.1,
+            0.0,
+            0.0,
+            None,
+            False,
+            False,
+            False,
+            'mean',
+            torch.bfloat16,
             id='zero_scale',
             marks=pytest.mark.skipif(IS_NPU, reason="Covers the default Triton GPU kernels"),
         ),
         pytest.param(
-            65, 65537, 0.0, -0.5, 3.0, 0.0, True, True, 'none', torch.float32,
+            65,
+            65537,
+            0.0,
+            -0.5,
+            0.0,
+            3.0,
+            True,
+            False,
+            True,
+            'none',
+            torch.float32,
             id='negative_scale',
             marks=pytest.mark.skipif(IS_NPU, reason="Covers the default Triton GPU kernels"),
         ),
+        pytest.param(2, 1, 0.0, 1.0, 0.0, None, False, False, False, 'sum', torch.float32, id='single_class'),
+        pytest.param(
+            7,
+            129,
+            0.1,
+            0.5,
+            0.01,
+            3.0,
+            False,
+            True,
+            True,
+            'none',
+            torch.float16,
+            id='ignored',
+            marks=pytest.mark.skipif(IS_NPU, reason="Covers the default Triton GPU kernels"),
+        ),
+        pytest.param(7, 16384, 0.1, 0.5, 0.01, None, True, False, True, 'none', torch.bfloat16, id='gluon_full_row'),
+        pytest.param(7, 16385, 0.1, 0.5, 0.01, None, True, False, True, 'none', torch.float32, id='gluon_split_row'),
+        pytest.param(7, 65536, 0.0, 1.0, 0.0, None, False, False, False, 'sum', torch.bfloat16, id='split_boundary'),
+        pytest.param(3, 1025, 0.1, 0.5, 0.01, 3.0, False, False, True, 'none', torch.float16, id='row_tail_softcap'),
+        pytest.param(5, 8193, 0.1, 1.0, 0.01, None, False, False, False, 'sum', torch.float32, id='row_tail_split'),
+    ],
+)
+@pytest.mark.parametrize(
+    ('backend', 'backward_backend', 'autocast'),
+    [
+        pytest.param('triton', 'triton', False, id='triton'),
+        pytest.param('gluon', 'gluon', False, id='gluon'),
+        pytest.param('triton', 'gluon', True, id='autocast-triton-gluon'),
+        pytest.param('gluon', 'triton', True, id='autocast-gluon-triton'),
     ],
 )
 @pytest.mark.skipif(IS_INTEL, reason="Intel Triton Failure")
@@ -63,14 +158,34 @@ def test_fused_cross_entropy(
     V: int,
     smoothing: float,
     scale: float,
-    softcap: float | None,
     z_scale: float,
+    softcap: float | None,
     strided: bool,
+    ignore_all: bool,
     inplace_backward: bool,
     reduction: str,
     dtype: torch.dtype,
+    backend: str,
+    backward_backend: str,
+    autocast: bool,
+    monkeypatch,
 ):
     """Match CE loss, optional z-loss, and logits gradients against PyTorch."""
+    from fla.backends import _DISPATCH_DISABLED, GluonBackend
+
+    monkeypatch.setenv('FLA_GLUON', '0')
+    monkeypatch.setenv('FLA_CE_GLUON', '1' if backend == 'gluon' else '0')
+    calls = []
+    if 'gluon' in (backend, backward_backend):
+        if not GluonBackend.is_available() or _DISPATCH_DISABLED:
+            pytest.skip("Gluon dispatch is unavailable")
+        from fla.modules.fused_cross_entropy import ops
+
+        for entry in (ops.cross_entropy_fwd, ops.cross_entropy_bwd):
+            candidate = backends._function_registries[inspect.unwrap(entry)]._backends['gluon']
+            call = Mock(wraps=candidate.implementation)
+            monkeypatch.setattr(candidate, 'implementation', call)
+            calls.append(call)
     torch.manual_seed(42)
     logits = torch.randn(N, 2 * V if strided else V, device=device, dtype=dtype)
     if strided:
@@ -79,11 +194,13 @@ def test_fused_cross_entropy(
     target = torch.randint(V, (N,), device=device)
     target[::3] = -100
     target[1] = V - 1
+    if ignore_all:
+        target.fill_(-100)
 
     transformed = logits.float() * scale
     if softcap is not None:
         transformed = softcap * torch.tanh(transformed / softcap)
-    ref = F.cross_entropy(transformed, target, reduction=reduction, label_smoothing=smoothing)
+    ref = F.cross_entropy(input=transformed, target=target, reduction=reduction, label_smoothing=smoothing)
     if z_scale > 0:
         z_loss = (z_scale * transformed.logsumexp(-1).square()).masked_fill(target == -100, 0)
         if reduction == 'mean':
@@ -92,8 +209,9 @@ def test_fused_cross_entropy(
             z_loss = z_loss.sum()
         ref = ref + z_loss
     do = torch.randn_like(ref)
-    ref_grad, = torch.autograd.grad(ref, logits, grad_outputs=do)
-    tri = FusedCrossEntropyLoss(
+    ref_grad, = torch.autograd.grad(outputs=ref, inputs=logits, grad_outputs=do)
+    logits_before = logits.detach().clone() if not inplace_backward else None
+    criterion = FusedCrossEntropyLoss(
         reduction=reduction,
         label_smoothing=smoothing,
         logit_scale=scale,
@@ -101,15 +219,30 @@ def test_fused_cross_entropy(
         logit_softcapping=softcap,
         inplace_backward=inplace_backward,
         return_z_loss=z_scale > 0,
-    )(logits, target)
+    )
+    with torch.autocast(device_type=device, dtype=torch.bfloat16, enabled=autocast):
+        tri = criterion(input=logits, target=target)
     if z_scale > 0:
         tri, tri_z_loss = tri
-    tri_grad, = torch.autograd.grad(tri, logits, grad_outputs=do)
+    monkeypatch.setenv('FLA_CE_GLUON', '1' if backward_backend == 'gluon' else '0')
+    tri_grad, = torch.autograd.grad(outputs=tri, inputs=logits, grad_outputs=do)
 
+    for call, expected in zip(calls, (backend, backward_backend)):
+        assert call.call_count == int(expected == 'gluon')
+    if inplace_backward and not strided:
+        assert tri_grad.data_ptr() == logits.data_ptr()
+    if not inplace_backward:
+        torch.testing.assert_close(logits, logits_before, rtol=0, atol=0)
+    if ignore_all:
+        assert torch.count_nonzero(tri) == torch.count_nonzero(tri_grad) == 0
+    assert tri.dtype == torch.float32
+    assert tri_grad.dtype == dtype
     assert_close("loss", ref, tri, ratio=1e-2)
     assert_close("dlogits", ref_grad, tri_grad, ratio=1e-2)
     if z_scale > 0:
         assert not tri_z_loss.requires_grad
+        if ignore_all:
+            assert torch.count_nonzero(tri_z_loss) == 0
         assert_close("z_loss", z_loss, tri_z_loss, ratio=1e-2)
 
 
@@ -118,31 +251,79 @@ def test_fused_cross_entropy(
      'with_bias', 'strided', 'ignore_all', 'confident_target', 'accumulate_grad_in_fp32', 'dtype'),
     [
         pytest.param(
-            2, T, D, V, 0.0, scale, softcap, 8, 'mean', True, False, False, False, fp32_grad, torch.bfloat16,
+            2,
+            T,
+            D,
+            V,
+            0.0,
+            scale,
+            softcap,
+            8,
+            'mean',
+            True,
+            False,
+            False,
+            False,
+            fp32_grad,
+            torch.bfloat16,
             id=f'T{T}-D{D}-V{V}-{scale=}-{softcap=}-{fp32_grad=}',
         )
         for T, D, V, (scale, softcap, fp32_grad) in product(
-            (512, 1024), (1024, 2048), (32000, 100000),
+            (512, 1024),
+            (1024, 2048),
+            (32000, 100000),
             ((1.0, None, False), (0.5, None, False), (1.0, None, True), (0.5, None, True), (1.0, 30.0, True)),
         )
     ] + [
         pytest.param(
-            3, 7, 32, V, smoothing, scale, softcap, 8, reduction, with_bias, True, ignore_all, False, True, dtype,
+            3,
+            7,
+            32,
+            V,
+            smoothing,
+            scale,
+            softcap,
+            8,
+            reduction,
+            with_bias,
+            True,
+            ignore_all,
+            False,
+            True,
+            dtype,
             id=f'V{V}-{smoothing=}-{scale=}-{softcap=}-{with_bias=}-{reduction}-{dtype}',
             marks=pytest.mark.skipif(IS_NPU, reason="Covers the default Triton GPU kernels"),
         )
         for (V, smoothing, scale, softcap, ignore_all), with_bias, reduction, dtype in product(
             ((4103, 0.1, 0.3, None, False), (65539, 0.1, 0.5, 3.0, False), (129, 0.0, 1.0, None, True)),
-            (False, True), ('mean', 'sum'), (torch.bfloat16, torch.float16, torch.float32),
+            (False, True),
+            ('mean', 'sum'),
+            (torch.bfloat16, torch.float16, torch.float32),
         )
     ] + [
         pytest.param(
-            1, T, 64, V, 0.0, 1.0, None, num_chunks, reduction, True, False, False, True, True, dtype,
+            1,
+            T,
+            64,
+            V,
+            0.0,
+            1.0,
+            None,
+            num_chunks,
+            reduction,
+            True,
+            False,
+            False,
+            True,
+            True,
+            dtype,
             id=f'T{T}-V{V}-confident_target-{num_chunks=}-{reduction}-{dtype}',
             marks=pytest.mark.skipif(IS_NPU, reason="Covers the default Triton GPU kernels"),
         )
         for (T, V), num_chunks, reduction, dtype in product(
-            ((128, 128), (63, 4103), (63, 65539)), (1, 8), ('mean', 'sum'),
+            ((128, 128), (63, 4103), (63, 65539)),
+            (1, 8),
+            ('mean', 'sum'),
             (torch.bfloat16, torch.float16, torch.float32),
         )
     ],
@@ -164,8 +345,12 @@ def test_fused_linear_cross_entropy(
     confident_target: bool,
     accumulate_grad_in_fp32: bool,
     dtype: torch.dtype,
+    monkeypatch,
 ):
     """Match linear CE loss and input/parameter gradients against the reference implementations."""
+    if IS_NVIDIA:
+        # reduced-precision GEMM accumulation depends on the row chunk size
+        monkeypatch.setattr(torch.backends.cuda.matmul, 'allow_bf16_reduced_precision_reduction', False)
     torch.manual_seed(42)
     if confident_target:
         x = torch.zeros(B * T, D, device=device, dtype=dtype)
@@ -227,6 +412,23 @@ def test_fused_linear_cross_entropy(
             assert torch.count_nonzero(grad).item() == 0
 
 
+def test_fused_linear_logsumexp_row_tail():
+    torch.manual_seed(42)
+    x = torch.zeros(2, 1025, device=device)
+    softcap = 0.5
+    ref = (softcap * torch.tanh(x / softcap)).logsumexp(-1)
+    tri = fused_linear_logsumexp_fwd(x, scale=1.0, softcapping=softcap)
+    assert_close("lse", ref, tri, ratio=1e-2)
+
+
+def test_logsumexp_row_tail_zero_scale():
+    torch.manual_seed(42)
+    x = torch.zeros(2, 1025, device=device)
+    ref = (x * 0.0).logsumexp(-1)
+    tri = logsumexp_fwd(x, scale=0.0)
+    assert_close("lse", ref, tri, ratio=1e-2)
+
+
 def _check_parallel_linear_cross_entropy(rank, world_size, local_vocab, dtype, option, reduction):
     torch.manual_seed(42)
     N, H, V = 63, 64, world_size * local_vocab
@@ -279,9 +481,7 @@ def _check_parallel_linear_cross_entropy(rank, world_size, local_vocab, dtype, o
     local_weight = weight[start:end].detach().clone().requires_grad_()
     local_bias = bias[start:end].detach().clone().requires_grad_() if with_bias else None
     local_inputs = (local_x, local_weight, local_bias) if with_bias else (local_x, local_weight)
-    tri = FusedLinearCrossEntropyLoss(process_group=dist.group.WORLD, **kwargs)(
-        local_x, target, local_weight, local_bias,
-    )
+    tri = FusedLinearCrossEntropyLoss(process_group=dist.group.WORLD, **kwargs)(local_x, target, local_weight, local_bias)
     tri_grads = torch.autograd.grad(tri * 2, local_inputs)
     expected_grads = (ref_grads[0],) + tuple(grad[start:end] for grad in ref_grads[1:])
     for name, expected, actual in zip(('loss', 'dx', 'dw', 'db'), (ref, *expected_grads), (tri, *tri_grads)):
@@ -292,6 +492,7 @@ def _check_parallel_linear_cross_entropy(rank, world_size, local_vocab, dtype, o
 def _run_parallel_linear_cross_entropy_worker(rank, world_size, init_file):
     device_torch_lib.set_device(rank)
     torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
     dist.init_process_group(
         backend='nccl',
         init_method=f'file://{init_file}',
@@ -328,29 +529,127 @@ def test_fused_linear_cross_entropy_parallel(world_size, tmp_path):
     )
 
 
-@pytest.mark.parametrize(('name', 'legacy_name'), [('fwd', 'forward'), ('bwd', 'backward')])
-def test_fused_linear_cross_entropy_backend_dispatch(monkeypatch, name, legacy_name):
-    from fla.modules import fused_linear_cross_entropy
-    from fla.modules.backends.triton_ascend import TritonAscendBackend
-    from fla.ops.backends import _DISPATCH_DISABLED
-
-    if _DISPATCH_DISABLED:
-        pytest.skip("Backend dispatch was disabled before import")
-    method = f'fused_linear_cross_entropy_{name}'
-    assert hasattr(TritonAscendBackend, method)
-    result = object()
-    monkeypatch.setattr(TritonAscendBackend, 'is_available', classmethod(lambda cls: True))
-    monkeypatch.setattr(TritonAscendBackend, 'is_enabled', classmethod(lambda cls: True))
-    monkeypatch.setattr(TritonAscendBackend, method, lambda self, **kwargs: result)
-    args = dict(x=None, target=None, weight=None) if name == 'fwd' else dict(do=None, dx=None, dw=None, db=None)
-
-    assert getattr(fused_linear_cross_entropy, method)(**args) is result
-    assert getattr(fused_linear_cross_entropy, f'fused_linear_cross_entropy_{legacy_name}')(**args) is result
-
-
 def test_fused_linear_cross_entropy_parallel_ascend_rejection(monkeypatch):
-    from fla.modules.backends.triton_ascend import TritonAscendBackend
+    from triton.language import math as triton_math
+
+    # rejection happens before any Ascend kernel is executed.
+    if not hasattr(triton_math, 'tanh'):
+        monkeypatch.setattr(triton_math, 'tanh', None, raising=False)
+    from fla.modules.fused_linear_cross_entropy.triton_ascend import fused_linear_cross_entropy_fwd_npu
 
     monkeypatch.setattr(dist, 'get_world_size', lambda group: 2)
     with pytest.raises(NotImplementedError, match="Vocabulary-parallel"):
-        TritonAscendBackend().fused_linear_cross_entropy_fwd(x=None, target=None, weight=None, process_group=object())
+        fused_linear_cross_entropy_fwd_npu(x=None, target=None, weight=None, process_group=object())
+
+
+@pytest.mark.parametrize(
+    ('route', 'defaults'),
+    [('gluon', True), ('gluon', False), ('device', True), ('dtype', True), ('target_device', True)],
+)
+@pytest.mark.parametrize('direction', ['fwd', 'bwd'])
+@pytest.mark.skipif(not IS_NVIDIA, reason="Gluon requires NVIDIA GPUs")
+def test_cross_entropy_gluon_dispatch(route: str, defaults: bool, direction: str, monkeypatch):
+    from fla.backends import _DISPATCH_DISABLED, GluonBackend
+    from fla.modules.fused_cross_entropy import ops
+
+    if not GluonBackend.is_available() or _DISPATCH_DISABLED:
+        pytest.skip("Gluon dispatch is unavailable")
+    monkeypatch.setenv('FLA_GLUON', '0')
+    monkeypatch.setenv('FLA_CE_GLUON', '1')
+    entry = getattr(ops, f'cross_entropy_{direction}')
+    registry = backends._function_registries[inspect.unwrap(entry)]
+    implementation = Mock()
+    monkeypatch.setattr(registry._backends['gluon'], 'implementation', implementation)
+    kernel = MagicMock()
+    kernel.__getitem__.return_value.side_effect = RuntimeError('Triton fallback')
+    monkeypatch.setattr(ops, f'cross_entropy_{direction}_kernel', kernel)
+    logits = torch.empty(
+        7,
+        129,
+        device='cpu' if route == 'device' else device,
+        dtype=torch.float64 if route == 'dtype' else torch.float32,
+    )
+    target = torch.empty(7, device='cpu' if route == 'target_device' else device, dtype=torch.long)
+    kwargs = dict(logits=logits, target=target)
+    if direction == 'bwd':
+        kwargs.update(lse=torch.empty(7, device=device), dloss=torch.empty(7, device=device))
+    if not defaults:
+        kwargs.update(label_smoothing=0.1, logit_scale=0.5, lse_square_scale=0.01, logit_softcapping=3.0, ignore_index=-7)
+        if direction == 'bwd':
+            kwargs.update(total_classes=258, class_start_idx=129, inplace_backward=True)
+    if route == 'gluon':
+        assert entry(**kwargs) is implementation.return_value
+        implementation.assert_called_once_with(**kwargs)
+        kernel.__getitem__.assert_not_called()
+    else:
+        with pytest.raises(RuntimeError, match='Triton fallback'):
+            entry(**kwargs)
+        kernel.__getitem__.return_value.assert_called_once()
+        implementation.assert_not_called()
+
+
+def run_parallel_cross_entropy_worker(rank: int, world_size: int, init_file: str, backend: str):
+    from fla.modules.fused_cross_entropy import ops
+
+    calls = []
+    if backend == 'gluon':
+        for entry in (ops.cross_entropy_fwd, ops.cross_entropy_bwd):
+            registry = backends._function_registries[inspect.unwrap(entry)]
+            candidate = registry._backends['gluon']
+            candidate.implementation = Mock(wraps=candidate.implementation)
+            calls.append(candidate.implementation)
+    device_torch_lib.set_device(rank)
+    dist.init_process_group(
+        backend='nccl',
+        init_method=f'file://{init_file}',
+        rank=rank,
+        world_size=world_size,
+        timeout=timedelta(minutes=5),
+    )
+    try:
+        for V, dtype in product((128, 129, 32000, 65539), (torch.float16, torch.bfloat16, torch.float32)):
+            for call in calls:
+                call.reset_mock()
+            torch.manual_seed(42)
+            logits = torch.randn(7, world_size * V, device=device, dtype=dtype).requires_grad_()
+            target = torch.randint(world_size * V, (7,), device=device)
+            target[0], target[1], target[2] = -100, V - 1, V
+            transformed = 3 * torch.tanh(logits.float() * 0.5 / 3)
+            z_loss = (0.01 * transformed.logsumexp(-1).square()).masked_fill(target == -100, 0)
+            ref = F.cross_entropy(input=transformed, target=target, reduction='none', label_smoothing=0.1) + z_loss
+            dloss = torch.randn_like(ref)
+            ref_grad, = torch.autograd.grad(outputs=ref, inputs=logits, grad_outputs=dloss)
+            local = logits[:, rank * V:(rank + 1) * V].detach().clone().requires_grad_()
+            loss, actual_z = ops.cross_entropy_loss(
+                logits=local,
+                target=target,
+                label_smoothing=0.1,
+                logit_scale=0.5,
+                lse_square_scale=0.01,
+                logit_softcapping=3.,
+                inplace_backward=True,
+                process_group=dist.group.WORLD,
+            )
+            assert loss.dtype == actual_z.dtype == torch.float32
+            grad, = torch.autograd.grad(outputs=loss, inputs=local, grad_outputs=dloss)
+            for call in calls:
+                call.assert_called_once()
+            assert_close('loss', ref, loss, ratio=1e-2)
+            assert_close('z_loss', z_loss, actual_z, ratio=1e-2)
+            assert_close('grad', ref_grad[:, rank * V:(rank + 1) * V], grad, ratio=1e-2)
+    finally:
+        dist.destroy_process_group()
+
+
+@pytest.mark.parametrize('backend', ['triton', 'gluon'])
+@pytest.mark.skipif(not IS_NVIDIA, reason="Vocabulary-parallel CE uses NCCL")
+def test_cross_entropy_loss_parallel(backend: str, tmp_path, monkeypatch):
+    from fla.backends import _DISPATCH_DISABLED, GluonBackend
+
+    if backend == 'gluon' and (not GluonBackend.is_available() or _DISPATCH_DISABLED):
+        pytest.skip("Gluon dispatch is unavailable")
+    if device_torch_lib.device_count() < 2:
+        pytest.skip("Requires 2 devices")
+    monkeypatch.setenv('FLA_GLUON', '0')
+    monkeypatch.setenv('FLA_CE_GLUON', '1' if backend == 'gluon' else '0')
+    mp.spawn(fn=run_parallel_cross_entropy_worker, args=(2, str(tmp_path / 'init'), backend), nprocs=2, join=True)

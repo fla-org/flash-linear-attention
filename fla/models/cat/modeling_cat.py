@@ -18,24 +18,23 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, repeat
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask, flex_attention
+from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
-from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
 from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.models.cat.configuration_cat import CATConfig
-from fla.models.utils import Cache, FLAGenerationMixin
-from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm, RotaryEmbedding
+from fla.models.generation_utils import FLAGenerationMixin
+from fla.models.modeling_utils import FLAForCausalLM, FLAPreTrainedModel
 from fla.modules import GatedMLP as CATMLP
+from fla.modules import RMSNorm, RotaryEmbedding
 from fla.modules.rotary import rotary_embedding
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
-try:
-    from transformers.modeling_layers import GradientCheckpointingLayer
-except ImportError:
-    from fla.models.modeling_layers import GradientCheckpointingLayer
+    from fla.models.cache_utils import Cache
+
 
 # Adaptive CAT cycles power-of-two chunk sizes, each with a different FlexAttention
 # sequence length / block mask. Raise Dynamo limits so those shapes stay compiled
@@ -360,7 +359,7 @@ class CATBlock(GradientCheckpointingLayer):
         return residual + hidden_states
 
 
-class CATPreTrainedModel(PreTrainedModel):
+class CATPreTrainedModel(FLAPreTrainedModel):
     """Base class for CAT models."""
 
     config_class = CATConfig
@@ -418,12 +417,6 @@ class CATModel(CATPreTrainedModel):
         self.register_buffer('_train_chunk_size_step', torch.zeros((), dtype=torch.long), persistent=True)
 
         self.post_init()
-
-    def get_input_embeddings(self):
-        return self.embeddings
-
-    def set_input_embeddings(self, value):
-        self.embeddings = value
 
     def _build_train_chunk_sizes(self) -> tuple[int, ...]:
         if self.config.train_chunk_size_schedule != "power_of_2":
@@ -554,7 +547,7 @@ class CATModel(CATPreTrainedModel):
             raise ValueError("CAT does not support variable-length `cu_seqlens` inputs yet; use fixed-length batches.")
 
         output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = return_dict if return_dict is not None else self.config.return_dict
 
         chunk_size = self._resolve_chunk_size(chunk_size)
         if chunk_size <= 0:
@@ -644,15 +637,10 @@ class CATModel(CATPreTrainedModel):
         )
 
 
-class CATForCausalLM(CATPreTrainedModel, FLAGenerationMixin):
+class CATForCausalLM(CATPreTrainedModel, FLAForCausalLM, FLAGenerationMixin):
     """CAT model with a language modeling head."""
 
-    # transformers 5 requires target-to-source mappings, while 4.x uses a list of tied keys
-    _tied_weights_keys = (
-        {"lm_head.weight": "model.embeddings.weight"}
-        if hasattr(PreTrainedModel, 'get_expanded_tied_weights_keys')
-        else ["lm_head.weight"]
-    )
+    _tied_weights_keys = {"lm_head.weight": "model.embeddings.weight"}
 
     def __init__(self, config: CATConfig):
         super().__init__(config)
@@ -664,24 +652,6 @@ class CATForCausalLM(CATPreTrainedModel, FLAGenerationMixin):
 
         self.post_init()
 
-    def get_input_embeddings(self):
-        return self.model.embeddings
-
-    def set_input_embeddings(self, value):
-        self.model.embeddings = value
-
-    def get_output_embeddings(self):
-        return self.lm_head
-
-    def set_output_embeddings(self, new_embeddings):
-        self.lm_head = new_embeddings
-
-    def set_decoder(self, decoder):
-        self.model = decoder
-
-    def get_decoder(self):
-        return self.model
-
     @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
     def prepare_inputs_for_generation(
         self,
@@ -690,7 +660,7 @@ class CATForCausalLM(CATPreTrainedModel, FLAGenerationMixin):
         attention_mask: torch.Tensor | None = None,
         inputs_embeds: torch.Tensor | None = None,
         use_cache: bool = False,
-        logits_to_keep: int | None = None,
+        logits_to_keep: int | torch.Tensor | None = None,
         cache_position: torch.LongTensor | None = None,
         chunk_size: int | None = None,
         **kwargs,
@@ -719,13 +689,14 @@ class CATForCausalLM(CATPreTrainedModel, FLAGenerationMixin):
         output_attentions: bool | None = None,
         output_hidden_states: bool | None = None,
         return_dict: bool | None = None,
-        logits_to_keep: int | None = 0,
+        logits_to_keep: int | torch.Tensor | None = 0,
         chunk_size: int | None = None,
+        num_items_in_batch: int | torch.Tensor | None = None,
         **kwargs: Unpack[Any],
     ) -> tuple | CausalLMOutputWithPast:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = return_dict if return_dict is not None else self.config.return_dict
 
         outputs = self.model(
             input_ids=input_ids,
@@ -742,29 +713,13 @@ class CATForCausalLM(CATPreTrainedModel, FLAGenerationMixin):
 
         hidden_states = outputs[0]
 
-        logits = None if self.config.fuse_linear_cross_entropy and labels is not None else self.lm_head(
-            hidden_states if logits_to_keep is None else hidden_states[:, -logits_to_keep:]
+        loss, logits = self._compute_logits_and_loss(
+            hidden_states=hidden_states,
+            labels=labels,
+            logits_to_keep=logits_to_keep,
+            num_items_in_batch=num_items_in_batch,
+            use_l2warp=False,
         )
-
-        loss = None
-        if labels is not None:
-            if getattr(self, 'criterion', None) is None:
-                if self.config.fuse_linear_cross_entropy:
-                    criterion = FusedLinearCrossEntropyLoss()
-                elif self.config.fuse_cross_entropy:
-                    criterion = FusedCrossEntropyLoss(inplace_backward=True)
-                else:
-                    criterion = nn.CrossEntropyLoss()
-            else:
-                criterion = self.criterion
-
-            labels = labels.to(hidden_states.device)
-            labels = torch.cat((labels[..., 1:], torch.full_like(labels[:, :1], criterion.ignore_index)), 1)
-
-            if self.config.fuse_linear_cross_entropy:
-                loss = criterion(hidden_states, labels, self.lm_head.weight, self.lm_head.bias)
-            else:
-                loss = criterion(logits.view(labels.numel(), -1), labels.view(-1))
 
         if not return_dict:
             output = (logits,) + outputs[1:]

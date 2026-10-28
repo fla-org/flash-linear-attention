@@ -6,26 +6,33 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import os
+from unittest.mock import Mock
 
 import pytest
 import torch
 import torch.nn.functional as F
 
+from fla.layers import mesa_net
+from fla.layers.mesa_net import MesaNet
+from fla.models.cache_utils import Cache
 from fla.ops.mesa_net import chunk_mesa_net, mesa_net_decoding_one_step, naive_mesa_net_decoding_one_step, naive_mesa_net_exact
 from fla.utils import IS_INTEL_ALCHEMIST, assert_close, device, device_platform
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'D', 'gate_range', 'dtype'),
+    ('B', 'T', 'H', 'D', 'gate_range', 'grad_scale', 'dtype'),
     [
-        pytest.param(*test, id="B{}-T{}-H{}-D{}-gate_range{}-{}".format(*test))
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-gate_range{}-grad_scale{}-{}".format(*test))
         for test in [
-            (1, 63, 1, 64, [0.8, 0.99], torch.float16),
-            (2, 500, 4, 60, [0.8, 0.99], torch.float16),
-            (2, 1024, 8, 128, [0.8, 0.99], torch.float16),
-            (2, 1024, 8, 128, [0.01, 0.1], torch.float16),
-            (2, 1024, 8, 128, [1, 1], torch.float16),
-            (4, 2048, 8, 64, [0.8, 0.99], torch.float16),
+            (1, 63, 1, 64, [0.8, 0.99], 1, torch.float16),
+            (2, 500, 4, 60, [0.8, 0.99], 1, torch.float16),
+            (2, 1024, 8, 128, [0.8, 0.99], 1, torch.float16),
+            (2, 1024, 8, 128, [0.01, 0.1], 1, torch.float16),
+            (2, 1024, 8, 128, [1, 1], 1, torch.float16),
+            (4, 2048, 8, 64, [0.8, 0.99], 1, torch.float16),
+            (2, 1024, 8, 128, [0.8, 0.99], 2**-10, torch.float16),
+            (2, 500, 4, 60, [0.8, 0.99], 2**-20, torch.bfloat16),
+            (2, 1024, 8, 128, [0.01, 0.1], 2**-20, torch.bfloat16),
         ]
     ],
 )
@@ -39,6 +46,7 @@ def test_chunk(
     H: int,
     D: int,
     gate_range: tuple[float, float],
+    grad_scale: float,
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
@@ -50,13 +58,14 @@ def test_chunk(
     g = torch.rand(B, T, H, dtype=dtype).float().uniform_(lower_gate, upper_gate).log()
     lamb = torch.rand(H, D, dtype=dtype).sigmoid() * 0.75 + 0.25
     q, k, v, beta, g, lamb = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, beta, g, lamb))
-    do = torch.rand_like(v)
+    # small upstream gradients, as produced by a loss averaged over many tokens, must not degrade the backward
+    do = torch.rand_like(v) * grad_scale
 
     k_init_rand = torch.nn.functional.normalize(torch.rand(B, H, D, device=device, dtype=dtype), dim=-1, p=2)
     h_kk_init = (k_init_rand.unsqueeze(-1) * k_init_rand.unsqueeze(-2)).detach().clone().float().requires_grad_(True)
     h_kv_init = torch.rand(B, H, D, D, dtype=torch.float32, device=device).requires_grad_(True)
-    d_h_kk_final = torch.rand_like(h_kk_init)
-    d_h_kv_final = torch.rand_like(h_kv_init)
+    d_h_kk_final = torch.rand_like(h_kk_init) * grad_scale
+    d_h_kv_final = torch.rand_like(h_kv_init) * grad_scale
 
     tri, tri_kk_final, tri_kv_final = chunk_mesa_net(
         q=q.clone(),
@@ -96,14 +105,113 @@ def test_chunk(
     assert_close('o', ref, tri, 0.007)
     assert_close('h_kk_final', ref_hkk_final, tri_kk_final, 0.008)
     assert_close('h_kv_final', ref_hkv_final, tri_kv_final, 0.008)
-    assert_close('dq', ref_dq, tri_dq, 0.008)
-    assert_close('dk', ref_dk, tri_dk, 0.008)
-    assert_close('dv', ref_dv, tri_dv, 0.008)
-    assert_close('db', ref_dbeta, tri_dbeta, 0.008)
-    assert_close('dg', ref_dg, tri_dg, 0.008)
-    assert_close('dlamb', ref_dlamb, tri_dlamb, 0.015)
-    assert_close('dh_kk_init', ref_dh_kk_init, tri_dh_kk_init, 0.008)
-    assert_close('dh_kv_init', ref_dh_kv_init, tri_dh_kv_init, 0.008)
+    # compare gradients at unit scale so the absolute tolerance of assert_close cannot hide errors;
+    # grad_scale is a power of two, so this division is exact
+    assert_close('dq', ref_dq / grad_scale, tri_dq / grad_scale, 0.008)
+    assert_close('dk', ref_dk / grad_scale, tri_dk / grad_scale, 0.008)
+    assert_close('dv', ref_dv / grad_scale, tri_dv / grad_scale, 0.008)
+    assert_close('db', ref_dbeta / grad_scale, tri_dbeta / grad_scale, 0.008)
+    assert_close('dg', ref_dg / grad_scale, tri_dg / grad_scale, 0.008)
+    assert_close('dlamb', ref_dlamb / grad_scale, tri_dlamb / grad_scale, 0.015)
+    assert_close('dh_kk_init', ref_dh_kk_init / grad_scale, tri_dh_kk_init / grad_scale, 0.008)
+    assert_close('dh_kv_init', ref_dh_kv_init / grad_scale, tri_dh_kv_init / grad_scale, 0.008)
+
+
+@pytest.mark.parametrize(
+    ('dtype', 'use_initial_state'),
+    [
+        pytest.param(torch.bfloat16, False, id='bf16-no-initial-state'),
+        pytest.param(torch.float32, True, id='fp32-initial-state'),
+    ],
+)
+@pytest.mark.parametrize('grad_scale', [1, 2**-20], ids=['unit-gradient', 'small-gradient'])
+@pytest.mark.skipif(device_platform == 'intel', reason='Intel Triton Failure')
+def test_chunk_l2norm_output_only(dtype: torch.dtype, use_initial_state: bool, grad_scale: float):
+    torch.manual_seed(42)
+    B, T, H, D = 1, 67, 1, 64
+    q = (torch.randn(B, T, H, D, device=device, dtype=dtype) / 10).requires_grad_()
+    k = (torch.randn(B, T, H, D, device=device, dtype=dtype) / 10).requires_grad_()
+    v = (torch.randn(B, T, H, D, device=device, dtype=dtype) / 10).requires_grad_()
+    g = torch.empty(B, T, H, device=device, dtype=torch.float32).uniform_(0.8, 0.99).log_().requires_grad_()
+    beta = torch.randn(B, T, H, device=device, dtype=torch.float32).sigmoid().requires_grad_()
+    lamb = (torch.randn(H, D, device=device, dtype=torch.float32).sigmoid() * 0.75 + 0.25).requires_grad_()
+    inputs = (q, k, v, g, beta, lamb)
+    do = torch.rand_like(v) * grad_scale
+
+    h_kk_init = h_kv_init = None
+    if use_initial_state:
+        k_init = F.normalize(torch.randn(B, H, D, device=device, dtype=torch.float32), dim=-1)
+        h_kk_init = (k_init.unsqueeze(-1) * k_init.unsqueeze(-2)).detach().requires_grad_()
+        h_kv_init = (torch.randn(B, H, D, D, device=device, dtype=torch.float32) / 10).requires_grad_()
+        inputs += (h_kk_init, h_kv_init)
+
+    tri, _, _ = chunk_mesa_net(
+        q=q.clone(),
+        k=k.clone(),
+        v=v.clone(),
+        g=g.clone(),
+        beta=beta.clone(),
+        lamb=lamb.clone(),
+        h_kk_init=h_kk_init.clone() if h_kk_init is not None else None,
+        h_kv_init=h_kv_init.clone() if h_kv_init is not None else None,
+        output_final_state=False,
+        use_qk_l2norm_in_kernel=True,
+    )
+    (tri * do).sum().backward()
+    tri_grads = tuple(x.grad for x in inputs)
+    for x in inputs:
+        x.grad = None
+
+    # keep the reference normalization in fp32 so small gradients cannot underflow on the backward path
+    q_ref = q.float() * torch.rsqrt(q.float().square().sum(-1, keepdim=True) + 1e-6)
+    k_ref = k.float() * torch.rsqrt(k.float().square().sum(-1, keepdim=True) + 1e-6)
+    ref, _, _ = naive_mesa_net_exact(
+        q=q_ref,
+        k=k_ref,
+        v=v.clone(),
+        g=g.clone(),
+        beta=beta.clone(),
+        lamb=lamb.clone(),
+        h_kk_init=h_kk_init.clone() if h_kk_init is not None else None,
+        h_kv_init=h_kv_init.clone() if h_kv_init is not None else None,
+    )
+    (ref * do).sum().backward()
+    ref_grads = tuple(x.grad for x in inputs)
+
+    assert_close('o', ref, tri, 0.007)
+    for name, ref_grad, tri_grad in zip(('dq', 'dk', 'dv', 'dg', 'db', 'dlamb', 'dh_kk_init', 'dh_kv_init'),
+                                        ref_grads, tri_grads):
+        assert ref_grad is not None and tri_grad is not None
+        assert_close(name, ref_grad.float() / grad_scale, tri_grad.float() / grad_scale, 0.015 if name == 'dlamb' else 0.008)
+
+
+@pytest.mark.skipif(
+    device_platform == 'intel',
+    reason='Intel Triton Failure',
+)
+def test_chunk_without_final_state():
+    torch.manual_seed(42)
+    B, T, H, D = 1, 15, 1, 64
+    q = torch.rand(B, T, H, D, dtype=torch.float16, device=device) / 10
+    k = F.normalize(torch.rand(B, T, H, D, dtype=torch.float32, device=device), p=2, dim=-1).to(torch.float16)
+    v = torch.rand(B, T, H, D, dtype=torch.float16, device=device) / 10
+    beta = torch.rand(B, T, H, dtype=torch.float16, device=device).sigmoid()
+    g = torch.rand(B, T, H, dtype=torch.float16, device=device).float().uniform_(0.8, 0.99).log()
+    lamb = torch.rand(H, D, dtype=torch.float16, device=device).sigmoid() * 0.75 + 0.25
+
+    o, h_kk_final, h_kv_final = chunk_mesa_net(
+        q=q,
+        k=k,
+        v=v,
+        beta=beta,
+        g=g,
+        lamb=lamb,
+        output_final_state=False,
+    )
+
+    assert torch.isfinite(o).all()
+    assert h_kk_final is None
+    assert h_kv_final is None
 
 
 @pytest.mark.parametrize(
@@ -281,3 +389,148 @@ def test_decoding_one_step(
     assert_close('o', o, o_ref, 0.005)
     assert_close('curr_h_kk', curr_h_kk, curr_h_kk_re, 0.005)
     assert_close('curr_h_kv', curr_h_kv, curr_h_kv_re, 0.005)
+
+
+@torch.no_grad()
+def test_cached_multi_token_continuation(monkeypatch):
+    torch.manual_seed(42)
+    chunk = Mock(wraps=mesa_net.chunk_mesa_net)
+    decoding = Mock(wraps=mesa_net.mesa_net_decoding_one_step)
+    monkeypatch.setattr(mesa_net, 'chunk_mesa_net', chunk)
+    monkeypatch.setattr(mesa_net, 'mesa_net_decoding_one_step', decoding)
+    layer = MesaNet(
+        hidden_size=64,
+        num_heads=1,
+        head_dim=64,
+        max_cg_step_training=5,
+        max_cg_step_decoding=1,
+        layer_idx=0,
+    ).to(device=device, dtype=torch.float16).eval()
+    prefix = torch.randn(2, 4, 64, device=device, dtype=torch.float16)
+    continuation = torch.randn(2, 3, 64, device=device, dtype=torch.float16)
+    expected_cache, actual_cache = Cache(), Cache()
+    expected = layer(torch.cat((prefix, continuation), dim=1), past_key_values=expected_cache, use_cache=True)[0]
+    layer(prefix, past_key_values=actual_cache, use_cache=True)
+    chunk.reset_mock()
+    decoding.reset_mock()
+    actual = layer(continuation, past_key_values=actual_cache, use_cache=True)[0]
+
+    chunk.assert_called_once()
+    decoding.assert_not_called()
+    assert chunk.call_args.kwargs['max_CG_iteration'] == layer.max_cg_step_training
+    assert_close('o', expected[:, 4:], actual, 0.02)
+    for expected_state, actual_state in zip(expected_cache[0]['recurrent_state'], actual_cache[0]['recurrent_state']):
+        assert_close('recurrent_state', expected_state, actual_state, 0.02)
+
+
+@pytest.mark.parametrize('layout', ['dense', 'packed', 'masked'])
+@torch.no_grad()
+def test_cached_singleton_continuation(layout, monkeypatch):
+    torch.manual_seed(42)
+    chunk = Mock(wraps=mesa_net.chunk_mesa_net)
+    decoding = Mock(wraps=mesa_net.mesa_net_decoding_one_step)
+    monkeypatch.setattr(mesa_net, 'chunk_mesa_net', chunk)
+    monkeypatch.setattr(mesa_net, 'mesa_net_decoding_one_step', decoding)
+    layer = MesaNet(
+        hidden_size=64,
+        num_heads=1,
+        head_dim=64,
+        max_cg_step_training=1,
+        max_cg_step_decoding=5,
+        layer_idx=0,
+    ).to(device=device, dtype=torch.float16).eval()
+    prefix = torch.randn(2, 4, 64, device=device, dtype=torch.float16)
+    continuation = torch.randn(2, 64, device=device, dtype=torch.float16)
+    actual_cache = Cache()
+    layer(prefix, past_key_values=actual_cache, use_cache=True)
+    expected, expected_caches = [], []
+    for i in range(2):
+        expected_cache = Cache()
+        layer(prefix[i:i+1], past_key_values=expected_cache, use_cache=True)
+        expected.append(layer(continuation[i:i+1].unsqueeze(0), past_key_values=expected_cache, use_cache=True)[0].squeeze(0))
+        expected_caches.append(expected_cache)
+    expected = torch.cat(expected)
+    chunk.reset_mock()
+    decoding.reset_mock()
+
+    if layout == 'dense':
+        actual = layer(continuation.unsqueeze(1), past_key_values=actual_cache, use_cache=True)[0].squeeze(1)
+    elif layout == 'packed':
+        cu_seqlens = torch.arange(3, device=device, dtype=torch.int32)
+        actual = layer(
+            continuation.unsqueeze(0),
+            past_key_values=actual_cache,
+            use_cache=True,
+            cu_seqlens=cu_seqlens,
+        )[0].squeeze(0)
+    else:
+        mask = torch.tensor([[False, True, False], [False, False, True]], device=device)
+        padded = continuation.new_zeros(2, 3, 64)
+        padded[mask] = continuation
+        actual = layer(padded, attention_mask=mask, past_key_values=actual_cache, use_cache=True)[0][mask]
+
+    chunk.assert_not_called()
+    decoding.assert_called_once()
+    assert decoding.call_args.kwargs['max_CG_iteration'] == layer.max_cg_step_decoding
+    assert_close('o', expected, actual, 0.02)
+    for i, expected_cache in enumerate(expected_caches):
+        for name, expected_state, actual_state in zip(
+            ('h_kk', 'h_kv'),
+            expected_cache[0]['recurrent_state'],
+            actual_cache[0]['recurrent_state'],
+        ):
+            assert_close(name, expected_state, actual_state[i:i+1], 0.02)
+
+
+@torch.no_grad()
+def test_cached_packed_zero_length_continuation(monkeypatch):
+    torch.manual_seed(42)
+    chunk = Mock(wraps=mesa_net.chunk_mesa_net)
+    decoding = Mock(wraps=mesa_net.mesa_net_decoding_one_step)
+    monkeypatch.setattr(mesa_net, 'chunk_mesa_net', chunk)
+    monkeypatch.setattr(mesa_net, 'mesa_net_decoding_one_step', decoding)
+    layer = MesaNet(
+        hidden_size=64,
+        num_heads=1,
+        head_dim=64,
+        max_cg_step_training=1,
+        max_cg_step_decoding=5,
+        layer_idx=0,
+    ).to(device=device, dtype=torch.float16).eval()
+    prefix = torch.randn(2, 4, 64, device=device, dtype=torch.float16)
+    continuation = torch.randn(2, 64, device=device, dtype=torch.float16)
+    actual_cache = Cache()
+    layer(prefix, past_key_values=actual_cache, use_cache=True)
+    expected, expected_caches = [], []
+    for i in range(2):
+        expected_cache = Cache()
+        layer(prefix[i:i+1], past_key_values=expected_cache, use_cache=True)
+        if i == 0:
+            expected.append(continuation.new_empty(0, 64))
+        else:
+            expected.append(
+                layer(continuation.unsqueeze(0), past_key_values=expected_cache, use_cache=True)[0].squeeze(0)
+            )
+        expected_caches.append(expected_cache)
+    expected = torch.cat(expected)
+    chunk.reset_mock()
+    decoding.reset_mock()
+    cu_seqlens = torch.tensor([0, 0, 2], device=device, dtype=torch.int32)
+    actual = layer(
+        continuation.unsqueeze(0),
+        past_key_values=actual_cache,
+        use_cache=True,
+        cu_seqlens=cu_seqlens,
+    )[0].squeeze(0)
+
+    chunk.assert_called_once()
+    decoding.assert_not_called()
+    assert chunk.call_args.kwargs['max_CG_iteration'] == layer.max_cg_step_training
+    assert_close('o', expected, actual, 0.02)
+    for i, expected_cache in enumerate(expected_caches):
+        for name, expected_state, actual_state in zip(
+            ('h_kk', 'h_kv'),
+            expected_cache[0]['recurrent_state'],
+            actual_cache[0]['recurrent_state'],
+        ):
+            assert_close(name, expected_state, actual_state[i:i+1], 0.02)

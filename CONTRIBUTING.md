@@ -117,6 +117,8 @@ FLA_CI_ENV=0 pytest tests/
 
 ## Project Structure
 
+Organize code by responsibility. Use one file for a self-contained component and a package when it needs multiple cohesive implementation files. Keep each backend with its owning operation; add shared code only for behavior that is actually shared. Avoid wrapper-only layers and directories reserved for hypothetical extensions.
+
 ```
 fla/
 ├── layers/          # PyTorch attention layer implementations
@@ -134,7 +136,7 @@ fla/
 └── utils/           # Global utilities and decorators
 
 tests/
-├── context_parallel/   # Context-parallel tests
+├── cp/                 # Context-parallel tests
 ├── layers/             # Layer tests
 ├── models/             # Model tests
 ├── modules/            # Module tests
@@ -179,7 +181,7 @@ Key rules:
 - Use `TYPE_CHECKING` for imports only needed at type-check time
 - **Line width**: use the full 127 characters before reaching for a line break — a statement that fits on one line stays on one line.
 - **Calls**: prefer keyword arguments over positional ones. A call that fits within the limit stays on one line; a call that overflows breaks with a hanging indent, **one keyword argument per line** — never several.
-- **Parameter order**: keep related parameters adjacent, and pass keyword arguments at call sites in the same order they appear in the signature.
+- **Parameter order**: group related parameters in function and constructor signatures, and keep corresponding interfaces consistent. Pass keyword arguments in signature order. Preserve established positional APIs when refactoring.
 
 ### Imports
 
@@ -238,6 +240,12 @@ Never treated as excess comments: the license header required by `scripts/check_
 
 ### Prose and Markdown
 
+Write documentation and skills with a clear purpose, logical order, and concise language. State the scope first, group related guidance under descriptive headings, and present steps in the order readers need them. Use lists for steps or parallel points and tables for comparisons; avoid deep nesting and fragmented sections. Keep terminology and formatting consistent with the surrounding documentation. Include examples only when they clarify a decision or show supported usage.
+
+Document the current design, supported usage, and constraints the reader needs. Do not turn READMEs or workflow guides into development retrospectives, migration diaries, or inventories of compatibility patches. Put temporary migration details in the PR or release notes. Keep shared rules in one authoritative document and link to them; omit implementation details that do not help readers use or change the code.
+
+A skill should make its scope, workflow, and essential constraints easy to find. Keep the entry point focused on decisions needed for the task; link substantial task-specific details from supporting references where they become relevant. Skills supplement this guide and `AGENTS.md`; they should not duplicate shared policies or introduce competing conventions. See the [skill index](.agents/skills/README.md) for the directory layout.
+
 Don't hard-wrap prose at an arbitrary short column — this covers Markdown files, Python docstrings (including `Args:` / `Returns:` descriptions), and comment paragraphs. Either keep a paragraph on a single line, or break **only at sentence or clause boundaries** (after a `.`, `,`, `;`, or `—`), never mid-clause. In Python files the 127-character limit still applies, so wrap a docstring or comment at a clause boundary before it reaches the limit. Format Markdown tables with aligned columns so the `|` separators line up; table rows are exempt from the line limit.
 
 ### Triton Kernels
@@ -248,8 +256,8 @@ Don't hard-wrap prose at an arbitrary short column — this covers Markdown file
   plain `tl.load` / `tl.store`. Masked loads must cover every dimension that
   can overrun at any call site, with `other=` where masked lanes matter; assert
   any divisibility you rely on. Do not use `tl.make_block_ptr` / `tl.advance`:
-  deprecated upstream and removed in triton main. (`backends/triton_ascend/` is
-  exempt — triton-ascend still requires block pointers.)
+  deprecated upstream and removed in triton main. `triton_ascend/` and
+  `triton_ascend.py` are exempt — triton-ascend still requires block pointers.
 - `tl.make_tensor_descriptor` (TMA) is an opt-in optimization for hot-path tiles, not a default substitute for block access. Availability is `IS_TMA_SUPPORTED` in `fla/utils/hardware.py`, which covers Nvidia Hopper and newer plus AMD gfx1250, and is gated behind `FLA_USE_TMA=1` on every backend. The AMD side is an arch allowlist rather than a version floor — gfx942 and gfx950 have no such lowering — so extend `IS_AMD_TMA_ARCH` explicitly when another arch gains it, and don't assume a higher `gfx` number implies support. Note that no CI runner currently has a TMA-capable AMD arch, so that path is only exercised by local runs.
 - Descriptors require 16-byte-aligned bases and stride multiples, a stride-1 innermost dim, no transposed blocks, and a registered allocator for device-side descriptors. Nothing verifies the alignment for you and a violation faults at launch rather than failing to compile, so derive a guard on the host from the dtype and the shapes the op is actually tested at, and fall back to the plain-pointer path when it fails — a head dim of `K=60` in fp16, as KDA is tested at, is 120 bytes per row and cannot back a descriptor. Descriptor stores are also asynchronous, so a kernel must never read back a location it just stored through a descriptor.
 - Use TMA when a per-kernel benchmark in the PR shows it pays off, behind a `USE_TMA: tl.constexpr` flag that keeps the plain-pointer path intact, as in `fla/ops/utils/solve_tril.py`. A benchmark on one vendor does not carry over to the other: the descriptor path in `solve_tril` was tuned on Hopper and has not been measured on gfx1250.
@@ -312,6 +320,8 @@ FLA_CI_ENV=0 pytest tests/ops/test_delta.py::test_chunk -v
 
 ### Writing Tests
 
+Read the existing tests for the affected operator, module, layer, or model before adding coverage. Follow their naming, setup, fixtures, parameterization, reference comparisons, and assertion style, together with this guide. Extend the established FLA pattern instead of introducing a separate style for the change.
+
 Tests compare optimized implementations against differentiable naive or recurrent references. The simplified pattern below assumes a tensor-only return; adapt it to the actual return tuple, gates, and initial/final states. See `test_chunk` in [tests/ops/test_delta.py](tests/ops/test_delta.py) for a complete output, state, and gradient comparison. Reuse the operator's existing tolerances rather than treating the example threshold as a universal budget.
 
 ```python
@@ -360,15 +370,31 @@ Key guidelines:
 - **Always use `torch.manual_seed(42)`** for reproducibility.
 - **Use `assert_close`** from `fla.utils` with the existing per-test error thresholds.
 - **Use `device` and platform helpers from `fla.utils`** for device-agnostic tests. Reuse helpers such as `device_platform`, `IS_NVIDIA`, `IS_AMD`, and `IS_INTEL` instead of adding direct `torch.cuda` platform checks; keep vendor-specific profiling in benchmark scripts.
-- **Parametrize** with diverse shapes including non-power-of-2 sequence lengths (e.g., 63, 100, 2000).
+- **Choose representative configurations** including non-power-of-2 sequence lengths (e.g., 63, 100, 2000).
 - **Skip unsupported platforms** with helpers such as `IS_INTEL` imported from `fla.utils`, e.g. `@pytest.mark.skipif(IS_INTEL, reason="unsupported on Intel")`.
 - **Include test IDs** in parametrize for readable output.
 
-**Naming and structure.** Name the file `tests/ops/test_<op>.py`, and name each test after the implementation entry point it exercises — `test_chunk`, `test_fused_recurrent`, `test_parallel` — mirroring the functions in `fla/ops/<op>/`. Distinguish a genuinely different code path with a short suffix (`test_chunk_varlen`, `test_fused_recurrent_state_v_first`). Prefer adding a new shape, dtype, or flag as a `@parametrize` case on an existing test rather than writing a new function; only add a new function when the path or purpose is clearly different — varlen vs. dense, a specific feature flag, or a separate entry point. See `tests/ops/test_gla.py` and `tests/ops/test_gdn.py` for the pattern.
+#### Test organization and naming
+
+Give each test function a clear purpose and each case a primary failure mode to target. Focused feature tests verify one behavior; broad entry-point tests such as `test_chunk` check numerical correctness across representative shapes and feature combinations. Make each case's purpose clear from its name or a short comment.
+
+Keep each test function to **at most 10 cases**. Focused feature tests should use fewer: **at most 5, usually 2–5**. Broad entry-point tests such as `test_chunk` may use **up to 16 cases** to cover long and short sequences, batch sizes, head counts, head dimensions, and important feature switches. These are limits, not targets; every additional case must cover a distinct risk.
+
+Choose inputs that are likely to expose bugs. For shape coverage, consider odd or non-power-of-2 dimensions, grouped heads, exact tile boundaries, partial tiles, one-token tails, and short segments in variable-length batches. For a specific feature, prefer relevant extremes: gate tests can exercise zero decay, maximal decay, alternating extremes, or saturated logits.
+
+**Do not use Cartesian products of test parameters**, whether through nested loops, stacked `parametrize` decorators, or manually expanded tables. Select complete configurations deliberately and list them in a single `parametrize`. A case may exercise several dimensions together, but it must have a clear reason to exist.
+
+Place coverage at the smallest suitable level:
+
+1. **Extend an existing test first.** Reuse its setup, reference, and assertions when the new behavior fits its purpose. Add or refine a representative case within the limits above.
+2. **Add a function only when needed.** A separate test is appropriate when the behavior needs different setup, execution, or assertions that would make the existing test difficult to follow. A new shape, flag, or regression alone does not justify a new function. Do not force unrelated behaviors into one test through complex branching.
+3. **Add a file only for a distinct scope.** Keep coverage in the existing component's test file whenever it fits. A new component or a separate test setup, such as distributed execution, can warrant a new file. Avoid creating a file for each bug, PR, shape, or backend case.
+
+Follow the existing file names in the relevant test directory. Operator tests normally live in `tests/ops/test_<op>.py`; function names follow the implementation entry point, such as `test_chunk`, `test_fused_recurrent`, or `test_parallel`. Add a short behavior suffix only to distinguish a separate test, such as `test_chunk_varlen`. Use the implementation's parameter names, keep case tuples and function signatures in the same order, and identify parameter values through readable case IDs. Avoid unrelated abbreviations or new naming schemes. See [tests/ops/test_gla.py](tests/ops/test_gla.py) and [tests/ops/test_kda.py](tests/ops/test_kda.py) for examples of test structure and naming.
 
 ### NaN Memory Poisoning
 
-The fixture in `tests/conftest.py` poisons eligible floating-point and complex allocations made by FLA through `torch.empty`, `torch.empty_like`, and `Tensor.new_empty` during operator and module tests. It excludes allocations made directly by tests, gradient-requiring tensors, and compilation paths. This catches uninitialized reads; kernels must initialize every output element they expose. No manual opt-in is needed for covered tests.
+The fixture in `tests/conftest.py` poisons eligible floating-point and complex allocations made by FLA through `torch.empty`, `torch.empty_like`, and `Tensor.new_empty` during operator and module tests, including the single-rank CP graph and intra-card cache tests moved into `tests/cp/`. It excludes allocations made directly by tests, gradient-requiring tensors, and compilation paths. This catches uninitialized reads; kernels must initialize every output element they expose. No manual opt-in is needed for covered tests.
 
 ## Benchmarking
 
@@ -421,7 +447,7 @@ Open pull requests against `main`. Search existing issues and PRs before startin
 
 One PR should solve one concrete problem or deliver one concrete capability. State that outcome in a sentence: what input or use case is affected, and what changes for the user. "Fix cached KDA state updates when caching is disabled" is a scope; "various attention improvements" is not. Changes sharing a directory or a broad label such as "cleanup" or "performance" are not necessarily one task.
 
-Keep implementation, regression tests, and documentation for the same outcome together. Split unrelated fixes, speculative helpers, and independent optimizations into separate PRs. For a larger feature, prefer independently reviewable steps that each work and pass their relevant tests; link their dependencies.
+Keep implementation, regression tests, and documentation for the same outcome together. Split unrelated fixes, speculative helpers, and independent optimizations into separate PRs. For a larger feature with dependent steps, use a GitHub native PR stack: each PR presents only its increment over the layer below and must work and pass relevant tests together with its prerequisites, without needing a later layer to fix it. Changes without dependencies should target the trunk separately. See the [PR stacks skill](.agents/skills/fla-pr-stacks/SKILL.md) for choosing boundaries, reusing existing PRs, and creating and verifying the stack.
 
 The default limit is **500 changed lines**, counted as additions plus deletions in the complete PR diff against its base. A replaced line counts twice. Tests, documentation, renames with edits, and generated files count as GitHub reports them; the limit is not per commit. Do not remove tests, compress code, or hide generated changes to fit the limit.
 

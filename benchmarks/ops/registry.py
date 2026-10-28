@@ -14,6 +14,7 @@ See ``benchmarks/ops/run.py`` docstring for full usage and how to register new o
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -34,6 +35,10 @@ def shape_BTHD(B, T, H, D, **kw):
 
 def shape_BTH(B, T, H, D, **kw):
     return (B, T, H)
+
+
+def shape_BHDD(B, T, H, D, **kw):
+    return (B, H, D, D)
 
 
 def shape_BTD(B, T, H, D, **kw):
@@ -57,6 +62,10 @@ def shape_LBTD(B, T, H, D, L=None, **kw):
     if L is None:
         raise ValueError("shape_LBTD requires the 'L' shape config key")
     return (L, B, T, D)
+
+
+def shape_BTHNN(B, T, H, D, N, **kw):
+    return (B, T, H, N, N)
 
 
 def shape_q_hq(B, T, H, D, HQ=None, **kw):
@@ -336,6 +345,36 @@ register_op(OpConfig(
     category='elem_gate',
 ))
 
+
+def _gsa_slot_shape(B, T, H, D, M=None, **kw):
+    return (B, T, H, D if M is None else M)
+
+
+def _gsa_post_init(inputs, B, T, H, D, varlen=False, **kw):
+    g = (inputs['g'].detach() / 8).requires_grad_()
+    inputs['g'] = g
+    inputs['s'] = (1 - g.detach().exp()).requires_grad_()
+    if varlen:
+        inputs.update({name: x.detach().flatten(0, 1).unsqueeze(0).requires_grad_() for name, x in inputs.items()})
+        inputs['cu_seqlens'] = torch.arange(B + 1, device=g.device, dtype=torch.int32) * T
+
+
+for _gsa_mode, _gsa_lengths in [('chunk', [65, 1024, 8192]), ('fused_recurrent', [1, 16, 64])]:
+    register_op(OpConfig(
+        name=f'{_gsa_mode}_gsa',
+        import_path='fla.ops.gsa',
+        inputs={
+            'q': TensorSpec(shape_BTHD, transform=F.silu),
+            'k': TensorSpec(shape_BTHD, transform=F.silu),
+            'v': TensorSpec(shape_BTHD, transform=F.silu),
+            'g': TensorSpec(_gsa_slot_shape, transform=logsigmoid),
+        },
+        post_init=_gsa_post_init,
+        extra_kwargs={'scale': 1.},
+        category='slot_gate',
+        default_shapes={f'B2_T{T}_H8_D64_M64': {'B': 2, 'T': T, 'H': 8, 'D': 64, 'M': 64} for T in _gsa_lengths},
+    ))
+
 # --- +beta (beta=[B,T,H] with sigmoid) ---
 
 register_op(OpConfig(
@@ -396,6 +435,54 @@ register_op(OpConfig(
     extra_kwargs={'use_qk_l2norm_in_kernel': True, 'safe_gate': True, 'lower_bound': -5},
     category='gate_beta',
 ))
+
+
+def _recurrent_kda_post_init(inputs, B, T, H, D, packed=False, **kw):
+    inputs['A_log'].uniform_(1, 16).log_()
+    dt = inputs['dt_bias'].uniform_(math.log(1e-3), math.log(1e-1)).exp_()
+    inputs['dt_bias'] = (dt + torch.log(-torch.expm1(-dt))).reshape(-1)
+    if packed:
+        for name in ('q', 'k', 'v', 'g', 'beta'):
+            tensor = inputs[name]
+            inputs[name] = tensor.reshape(1, B * T, *tensor.shape[2:])
+        offsets = torch.arange(B + 1, dtype=torch.long, device=inputs['q'].device) * T
+        offsets[1:-1] -= torch.arange(1, B, device=offsets.device) % 2 * (T // 2)
+        inputs['cu_seqlens'] = offsets
+
+
+_recurrent_kda_shapes = {
+    'B1_T1_H16_D128': {'B': 1, 'T': 1, 'H': 16, 'D': 128},
+    'B8_T1_H16_D128': {'B': 8, 'T': 1, 'H': 16, 'D': 128},
+    'B32_T1_H32_D128': {'B': 32, 'T': 1, 'H': 32, 'D': 128},
+    'B8_T4_H16_D128': {'B': 8, 'T': 4, 'H': 16, 'D': 128},
+    'B2_T16_H4_D64': {'B': 2, 'T': 16, 'H': 4, 'D': 64},
+}
+
+for _name, _packed in (('fused_recurrent_kda', False), ('fused_recurrent_kda_varlen', True)):
+    register_op(OpConfig(
+        name=_name,
+        import_path='fla.ops.kda',
+        func_name='fused_recurrent_kda',
+        inputs={
+            **{name: TensorSpec(shape_BTHD, requires_grad=False) for name in ('q', 'k', 'v', 'g')},
+            'beta': TensorSpec(shape_BTH, requires_grad=False),
+            'A_log': TensorSpec(shape_H, requires_grad=False, dtype='float32'),
+            'dt_bias': TensorSpec(shape_HD, requires_grad=False, dtype='float32'),
+            'initial_state': TensorSpec(shape_BHDD, requires_grad=False, dtype='float32'),
+        },
+        extra_kwargs={
+            'use_qk_l2norm_in_kernel': True,
+            'use_gate_in_kernel': True,
+            'use_beta_sigmoid_in_kernel': True,
+            'output_final_state': True,
+            'state_v_first': True,
+        },
+        skip_backward=True,
+        post_init=_recurrent_kda_post_init,
+        default_shapes={name: {**shape, 'packed': _packed} for name, shape in _recurrent_kda_shapes.items()},
+        category='gate_beta',
+    ))
+
 
 register_op(OpConfig(
     name='fused_recurrent_gdn2',
@@ -564,6 +651,38 @@ register_op(OpConfig(
     category='attn',
 ))
 
+# --- Wall attention (per-channel multiplicative-decay attention) ---
+
+
+def wall_log_decay(t):
+    """Small-negative per-channel log-decay gate for Wall attention (``g <= 0``)."""
+    return -t.abs() * 0.05
+
+
+# Wall attention is quadratic in T with per-channel gates, so the global shape
+# matrix (up to T=16384 / H=96 / D=256) is too heavy for the NPU benchmark CI;
+# use a bounded per-op matrix (dense only, fwd + fwdbwd).
+_wall_attn_default_shapes = {
+    'B1_T1024_H8_D64':   {'B': 1, 'T': 1024, 'H': 8,  'D': 64},
+    'B1_T2048_H8_D128':  {'B': 1, 'T': 2048, 'H': 8,  'D': 128},
+    'B2_T1024_H16_D128': {'B': 2, 'T': 1024, 'H': 16, 'D': 128},
+    'B1_T4096_H4_D128':  {'B': 1, 'T': 4096, 'H': 4,  'D': 128},
+}
+
+register_op(OpConfig(
+    name='parallel_wall_attn',
+    import_path='fla.ops.wall_attn',
+    inputs={
+        'q': TensorSpec(shape_BTHD),
+        'k': TensorSpec(shape_BTHD),
+        'v': TensorSpec(shape_BTHD),
+        'g': TensorSpec(shape_BTHD, transform=wall_log_decay),
+    },
+    output_is_tuple=False,
+    category='attn',
+    default_shapes=_wall_attn_default_shapes,
+))
+
 
 register_op(OpConfig(
     name='flash_attn',
@@ -624,6 +743,41 @@ register_op(OpConfig(
     default_shapes=_layer_default_shapes,
     category='naive_attnres',
 ))
+
+_sinkhorn_default_shapes = {
+    'B1_T8K_H1_N4':  {'B': 1, 'T': 8192,  'H': 1, 'N': 4, 'D': 1},
+    'B1_T8K_H1_N8':  {'B': 1, 'T': 8192,  'H': 1, 'N': 8, 'D': 1},
+    'B1_T32K_H1_N4': {'B': 1, 'T': 32768, 'H': 1, 'N': 4, 'D': 1},
+    'B1_T32K_H1_N8': {'B': 1, 'T': 32768, 'H': 1, 'N': 8, 'D': 1},
+}
+
+_sinkhorn_inputs = {
+    'logits': TensorSpec(shape_fn=shape_BTHNN, dtype='float32'),
+}
+
+register_op(OpConfig(
+    name='sinkhorn',
+    import_path='fla.ops.utils.sinkhorn',
+    inputs=_sinkhorn_inputs,
+    output_is_tuple=False,
+    category='sinkhorn',
+    test_file='tests/ops/utils/test_sinkhorn.py',
+    dim_constraints={'H': [1]},
+    default_shapes=_sinkhorn_default_shapes,
+    backend_env={'gluon': 'FLA_GLUON', 'tilelang': 'FLA_TILELANG'},
+))
+
+register_op(OpConfig(
+    name='naive_sinkhorn',
+    import_path='fla.ops.utils.sinkhorn',
+    inputs=_sinkhorn_inputs,
+    output_is_tuple=False,
+    category='sinkhorn',
+    test_file='tests/ops/utils/test_sinkhorn.py',
+    dim_constraints={'H': [1]},
+    default_shapes=_sinkhorn_default_shapes,
+))
+
 
 # --- NSA (native sparse attention) — GQA + structured block selection ---
 # q carries HQ query heads while k/v carry H kv heads (GQA; HQ/H a power of two

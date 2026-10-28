@@ -77,3 +77,16 @@ def test_chunk_with_chunk_size(
     assert_close(f'dk@{chunk_size}', ref_dk, tri_dk, 0.005)
     assert_close(f'dv@{chunk_size}', ref_dv, tri_dv, 0.005)
     assert_close(f'dh0@{chunk_size}', ref_dh0, tri_dh0, 0.005)
+
+
+@pytest.mark.skipif(device != 'cuda', reason="Host-sync detection relies on torch.cuda.set_sync_debug_mode")
+@pytest.mark.parametrize('fn', [chunk_lightning_attn, fused_recurrent_lightning_attn], ids=['chunk', 'fused_recurrent'])
+def test_no_host_sync(fn):
+    """The per-head decay is built on the device; building it from host data blocked every call on a copy."""
+    q, k, v = (torch.randn(1, 64, 2, 32, device=device, dtype=torch.bfloat16) for _ in range(3))
+    fn(q, k, v, layer_idx=0, num_layers=2)
+    torch.cuda.set_sync_debug_mode('error')
+    try:
+        fn(q, k, v, layer_idx=0, num_layers=2)
+    finally:
+        torch.cuda.set_sync_debug_mode('default')

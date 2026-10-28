@@ -101,6 +101,45 @@ def test_chunk_varlen(cu_seqlens, dtype, initial_state, checkpoint_level):
 
 
 @pytest.mark.parametrize('checkpoint_level', [0, 1])
+@pytest.mark.parametrize('empty_idx', [0, 1, 2], ids=['first', 'middle', 'last'])
+def test_chunk_varlen_empty_gradient(checkpoint_level, empty_idx):
+    torch.manual_seed(42)
+    cu = torch.tensor([0, 3, 6], dtype=torch.int32, device=device)
+    cu = torch.cat((cu[:empty_idx + 1], cu[empty_idx:]))
+    inputs = make_inputs(1, 6, 1, 32, 32, 128, torch.float16, True, cu)
+    nonempty = [i for i in range(3) if i != empty_idx]
+    ref, ref_state = naive_recurrent_cyfa(
+        **{
+            **inputs,
+            'cu_seqlens': torch.tensor([0, 3, 6], dtype=torch.int32, device=device),
+            'initial_state': tuple(x.index_select(0, torch.tensor(nonempty, device=device)) for x in inputs['initial_state']),
+        }
+    )
+    ref_state = tuple(
+        torch.cat((state[:empty_idx], initial[empty_idx:empty_idx + 1], state[empty_idx:]))
+        for state, initial in zip(ref_state, inputs['initial_state'], strict=True)
+    )
+    do = torch.randn_like(ref)
+    ds = tuple(torch.randn_like(s) for s in ref_state)
+    named_inputs = [(name, x) for name, x in inputs.items() if isinstance(x, torch.Tensor) and x.requires_grad]
+    named_inputs.extend(zip(('hk0', 'hv0', 'lambda0'), inputs['initial_state'], strict=True))
+    tensors = [x for _, x in named_inputs]
+    ref_loss = (ref * do).sum() + sum((s * d).sum() for s, d in zip(ref_state, ds, strict=True))
+    ref_grads = torch.autograd.grad(ref_loss, tensors)
+
+    actual, actual_state = chunk_cyfa(**inputs, checkpoint_level=checkpoint_level)
+    actual_loss = (actual * do).sum() + sum((s * d).sum() for s, d in zip(actual_state, ds, strict=True))
+    actual_grads = torch.autograd.grad(actual_loss, tensors)
+    for name, expected, result in [('o', ref, actual), *zip(('hkt', 'hvt', 'lambda'), ref_state, actual_state, strict=True)]:
+        assert torch.isfinite(result).all(), name
+        assert_close(name, expected.float(), result.float(), 0.006)
+    for (name, _), expected, result in zip(named_inputs, ref_grads, actual_grads, strict=True):
+        assert torch.isfinite(result).all(), name
+        tol = 0.02 if name in ('g', 'delta', 'beta', 'lambda0') else 0.012
+        assert_close('d' + name, expected.float(), result.float(), tol)
+
+
+@pytest.mark.parametrize('checkpoint_level', [0, 1])
 @pytest.mark.parametrize('dtype', [torch.float32, torch.float16, torch.bfloat16])
 def test_chunk_without_final_state(dtype, checkpoint_level):
     torch.manual_seed(42)

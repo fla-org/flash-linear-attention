@@ -5,13 +5,17 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+import warnings
+
 import pytest
 import torch
 import torch._dynamo
+import triton
 from torch._dynamo.utils import counters
 
 from fla import utils
 from fla.ops.utils.index import (
+    get_max_num_splits,
     prepare_chunk_indices,
     prepare_chunk_offsets,
     prepare_position_ids,
@@ -198,3 +202,35 @@ def test_single_vs_multi_segment_specializes_once(name, impl, ref):
     shapes = [[64], [5, 7, 8], [32], [7, 7, 7], [100], [3, 5]]
     n = count_unique_graphs(impl, shapes)
     assert n == 2, f"{name}: expected 2 graphs (single- vs multi-segment specialization), got {n}."
+
+
+@pytest.mark.parametrize("seqlens", [[16], [5, 7, 8, 13, 14], [64, 1, 300]])
+@pytest.mark.parametrize("chunk_size", [16, 64])
+def test_max_num_splits_matches_reference(seqlens, chunk_size):
+    cu_seqlens = make_cu_seqlens(seqlens)
+    expected = triton.cdiv(max(seqlens), chunk_size)
+    assert get_max_num_splits(cu_seqlens, chunk_size) == expected
+    assert get_max_num_splits(cu_seqlens, chunk_size, cu_seqlens.cpu()) == expected
+
+
+@pytest.mark.skipif(device != 'cuda', reason="Host-sync counting relies on torch.cuda.set_sync_debug_mode")
+def test_max_num_splits_syncs_once_regardless_of_batch():
+    """The longest sequence must come from one device reduction.
+
+    Walking `cu_seqlens` on the host instead costs a kernel launch and a host synchronization per
+    sequence, which serializes the host against the GPU as the batch grows.
+    """
+    def count_syncs(n_seqs):
+        cu_seqlens = make_cu_seqlens([64] * n_seqs)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            torch.cuda.set_sync_debug_mode('warn')
+            try:
+                get_max_num_splits(cu_seqlens, 16)
+            finally:
+                torch.cuda.set_sync_debug_mode('default')
+        # enabling the mode warns about itself, so match only the per-operation warning
+        return sum('called a synchronizing' in str(w.message) for w in caught)
+
+    few, many = count_syncs(4), count_syncs(64)
+    assert few == many, f"syncs grew with the batch: {few} for 4 sequences, {many} for 64"

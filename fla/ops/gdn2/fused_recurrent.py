@@ -40,7 +40,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.backends import dispatch
+from fla.backends import dispatch
 from fla.ops.utils.op import exp
 from fla.ops.utils.softplus import softplus
 from fla.utils import input_guard
@@ -121,7 +121,7 @@ def fused_recurrent_gdn2_fwd_kernel(
     else:
         bos, eos = i_n * T, i_n * T + T
 
-    if T == 0:
+    if T == 0 and IS_CONTINUOUS_BATCHING:
         return
 
     o_k = i_k * BK + tl.arange(0, BK)
