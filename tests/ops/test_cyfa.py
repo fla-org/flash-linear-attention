@@ -107,6 +107,7 @@ def compare_chunk(inputs, checkpoint_level):
     [
         pytest.param(1, 64, 2, 32, 32, 128, torch.float32, False, id='fp32', marks=pytest.mark.smoke),
         pytest.param(1, 65, 2, 64, 64, 64, torch.float32, False, id='fp32-slots64', marks=pytest.mark.smoke),
+        pytest.param(1, 65, 2, 64, 64, 128, torch.float32, False, id='fp32-slots128-v64', marks=pytest.mark.smoke),
         pytest.param(2, 256, 2, 64, 64, 128, torch.float32, True, id='fp32-state'),
         pytest.param(2, 100, 3, 64, 64, 128, torch.float16, True, id='fp16-ragged'),
         pytest.param(1, 64, 1, 128, 128, 128, torch.bfloat16, False, id='bf16-d128'),

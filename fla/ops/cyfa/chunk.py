@@ -564,9 +564,9 @@ def _scalar_decay_bwd_dqk_dv_single_k(
     dv = torch.empty_like(do)
     dg_force = torch.empty(bsz, seq_len, n_heads, device=q.device, dtype=torch.float32)
     block_k = max(triton.next_power_of_2(d_k), 16)
-    is_hopper_fp32 = IS_NVIDIA_HOPPER and q.dtype == torch.float32
-    # Keep the fused FP32 kernel below the SM90 per-block shared-memory limit.
-    block_v = min(max(triton.next_power_of_2(d_v), 16), 32 if is_hopper_fp32 else 64)
+    limit_fp32_shared_memory = q.dtype == torch.float32 and (IS_NVIDIA_HOPPER or (IS_NVIDIA_SM100 and block_k == 128))
+    # bound FP32 shared memory on SM90 and for 128-wide fused states on SM100.
+    block_v = min(max(triton.next_power_of_2(d_v), 16), 32 if limit_fp32_shared_memory else 64)
 
     _chunk_cyfa_bwd_dqk_dv_kernel[(nt, bsz * n_heads)](
         q,
@@ -591,7 +591,7 @@ def _scalar_decay_bwd_dqk_dv_single_k(
         BK=block_k,
         BV=block_v,
         num_warps=4,
-        num_stages=1 if is_hopper_fp32 else 2,
+        num_stages=1 if limit_fp32_shared_memory else 2,
     )
     return dq, dk, dv, dg_force
 
