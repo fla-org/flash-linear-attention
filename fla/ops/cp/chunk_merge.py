@@ -10,7 +10,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.cp.context import _check_cp_device
-from fla.utils import IS_NPU, autotune_cache_kwargs
+from fla.utils import IS_NPU, IS_NVIDIA_HOPPER, TRITON_ABOVE_3_8_0, autotune_cache_kwargs
 
 CP_DOT_PRECISION = tl.constexpr('ieee' if IS_NPU else 'tf32x3')
 
@@ -70,6 +70,9 @@ def _prune_cp_configs(configs, nargs, **kwargs):
 
 def _prune_cp_summary_configs(configs, nargs, **kwargs):
     args = {**nargs, **kwargs}
+    if IS_NVIDIA_HOPPER and not TRITON_ABOVE_3_8_0 and args['K'] <= 64:
+        # older Hopper lowering can read past shared memory in eight-warp, single-stage BV32 WGMMA tiles
+        return [config for config in configs if (config.num_warps, config.num_stages) != (8, 1)]
     # retain single-stage summaries when multi-stage TF32x3 tiles exceed shared memory
     if args['K'] <= 128:
         return configs

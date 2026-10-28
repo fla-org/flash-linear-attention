@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from fla.ops.cp import chunk_bwd, chunk_fwd, context
+from fla.ops.cp import chunk_bwd, chunk_fwd, chunk_merge, context
 from fla.ops.cp.context import build_cp_context, get_cp_cu_seqlens
 
 
@@ -100,23 +100,33 @@ def test_device_requirement(is_nvidia, is_npu, device_name, capability, supporte
     assert checked_devices == ([1] if is_nvidia else [])
 
 
+@pytest.mark.parametrize(('hopper', 'triton38'), [(False, False), (True, False), (True, True)])
 @pytest.mark.parametrize(
     ('kernel', 'K', 'eight_warps'),
     [
         (chunk_fwd.chunk_cp_fwd_kernel_h, 128, True),
         (chunk_bwd.chunk_cp_bwd_kernel_dh, 128, True),
+        (chunk_fwd.chunk_cp_fwd_kernel_h, 64, True),
+        (chunk_bwd.chunk_cp_bwd_kernel_dh, 64, True),
         (chunk_fwd.chunk_cp_fwd_kernel_h, 192, False),
         (chunk_bwd.chunk_cp_bwd_kernel_dh, 256, False),
     ],
-    ids=['forward', 'backward', 'forward-wide', 'backward-wide'],
+    ids=['forward', 'backward', 'forward-small', 'backward-small', 'forward-wide', 'backward-wide'],
 )
-def test_summary_single_stage_configs(kernel, K, eight_warps):
+def test_summary_single_stage_configs(kernel, K, eight_warps, hopper, triton38, monkeypatch):
+    monkeypatch.setattr(chunk_merge, 'IS_NVIDIA_HOPPER', hopper)
+    monkeypatch.setattr(chunk_merge, 'TRITON_ABOVE_3_8_0', triton38)
     autotuner = kernel.fn
     configs = autotuner.configs
     if autotuner.early_config_prune is not None:
         configs = autotuner.early_config_prune(configs, {'K': K})
     # multi-stage K128 TF32x3 tiles can exceed shared memory and leave only spilling two-warp kernels
     assert any(config.num_stages == 1 and config.num_warps >= 4 for config in configs)
-    assert any(config.num_stages == 1 and config.num_warps == 8 for config in configs) == eight_warps
+    unsafe = K <= 64 and hopper and not triton38
+    assert any(config.num_stages == 1 and config.num_warps == 8 for config in configs) == (eight_warps and not unsafe)
     if not eight_warps:
         assert configs == [config for config in autotuner.configs if config.num_warps in (2, 4)]
+    elif unsafe:
+        assert configs == [config for config in autotuner.configs if (config.num_warps, config.num_stages) != (8, 1)]
+    else:
+        assert configs == autotuner.configs

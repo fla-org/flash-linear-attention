@@ -5,13 +5,14 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""Check backward CP state summaries against per-head controls and FP64 references."""
+"""Check CP state summaries against per-head controls and FP64 references."""
 
 import pytest
 import torch
 import triton
 
 from fla.ops.cp.chunk_bwd import chunk_cp_bwd_dh, chunk_cp_bwd_kernel_dh
+from fla.ops.cp.chunk_fwd import chunk_cp_fwd_h
 from fla.utils import IS_NPU, IS_TF32_SUPPORTED, assert_close, device
 
 pytestmark = pytest.mark.skipif(not (IS_TF32_SUPPORTED or IS_NPU), reason="requires NVIDIA Ampere or newer, or Ascend")
@@ -201,3 +202,38 @@ def test_chunk_bwd_summary(T, H, HV, K, V, gate, use_bg):
     assert torch.isfinite(actual).all()
     assert_close('dh', reference[..., :V].float(), actual[..., :V], 0.006)
     assert_close('dM', reference[..., V:].float(), actual[..., V:], 0.006)
+
+
+def test_chunk_fwd_summary():
+    """Compare a DPLR forward boundary summary with its FP64 affine recurrence."""
+    torch.manual_seed(42)
+    T, BT, H, K, V, bos = 112, 64, 4, 64, 64, 400
+    shape = (1, T + bos, H, K)
+    k, w, bg = [torch.randn(shape, device=device, dtype=torch.bfloat16) * 0.02 for _ in range(3)]
+    u, v = [torch.randn(1, T + bos, H, V, device=device, dtype=torch.bfloat16) * 0.1 for _ in range(2)]
+    gk = torch.zeros(shape, device=device, dtype=torch.float32)
+    gk[:, bos:] = -1e-5 * (torch.arange(T, device=device) % BT + 1)[None, :, None, None]
+    cu_seqlens = torch.tensor([bos, bos + T], device=device, dtype=torch.int32)
+    actual = torch.empty(H, K, V + K, device=device, dtype=torch.float32)
+    chunk_cp_fwd_h(k=k, w=w, u=u, hm=actual, gk=gk, bg=bg, v=v, cu_seqlens=cu_seqlens)
+
+    reference = torch.empty_like(actual, dtype=torch.float64)
+    for head in range(H):
+        state = torch.zeros(K, V, device=device, dtype=torch.float64)
+        matrix = torch.eye(K, device=device, dtype=torch.float64)
+        for start in range(0, T, BT):
+            end = min(start + BT, T)
+            indices = slice(bos + start, bos + end)
+            kc = k[0, indices, head].double()
+            wc = w[0, indices, head].double()
+            bc = bg[0, indices, head].double()
+            vc = v[0, indices, head].double()
+            updated = wc @ state.to(w.dtype).double() + u[0, indices, head].double()
+            decay = torch.exp2(gk[0, bos + end - 1, head]).double()
+            state = decay[:, None] * state + kc.T @ vc + bc.T @ updated.to(u.dtype).double()
+            matrix = (torch.diag(decay) + bc.T @ wc) @ matrix
+        reference[head] = torch.cat((state, matrix), dim=-1)
+
+    assert torch.isfinite(actual).all()
+    assert_close('h', reference[..., :V].float(), actual[..., :V], 0.006)
+    assert_close('M', reference[..., V:].float(), actual[..., V:], 0.006)
