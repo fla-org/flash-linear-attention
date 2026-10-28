@@ -106,6 +106,7 @@ def test_gain(
             ([0, 64, 128, 129], 3, 60),
             ([0, 256, 500, 1000], 4, 128),
             ([0, 15, 100, 300, 1200, 2000], 4, 64),
+            ([0, 0, 1, 65, 65, 130], 2, 64),
         ]
     ],
 )
@@ -208,15 +209,22 @@ def test_gain_many_chunks(varlen: bool):
         assert_close(name, x.grad, y.grad, 1e-5)
 
 
-def test_gain_many_heads():
-    """More than 65535 (batch, head) pairs in one decoding step must launch."""
+@pytest.mark.parametrize(
+    ("B", "T", "H"),
+    [
+        pytest.param(70000, 1, 1, id="batch"),
+        pytest.param(1, 70, 65537, id="heads"),
+    ],
+)
+def test_gain_many_heads(B: int, T: int, H: int):
+    """More than 65535 (batch, head) pairs, or more than 65535 heads alone, must launch."""
     torch.manual_seed(42)
-    B, H, D = 70000, 1, 16
-    k = F.normalize(torch.randn(B, 1, H, D, dtype=torch.float), p=2, dim=-1).to(device)
-    g = F.logsigmoid(torch.randn(B, 1, H, D, dtype=torch.float)).to(device)
-    omega, r = make_noise(B, 1, H).to(device), make_noise(B, 1, H).to(device)
+    D = 16
+    k = F.normalize(torch.randn(B, T, H, D, dtype=torch.float), p=2, dim=-1).to(device)
+    g = F.logsigmoid(torch.randn(B, T, H, D, dtype=torch.float)).to(device)
+    omega, r = make_noise(B, T, H).to(device), make_noise(B, T, H).to(device)
     c0 = make_noise(B, H, lower=0.1).to(device)
-    dbeta = torch.randn(B, 1, H, dtype=torch.float, device=device)
+    dbeta = torch.randn(B, T, H, dtype=torch.float, device=device)
     dct = torch.randn(B, H, dtype=torch.float, device=device)
 
     outs = []
@@ -338,6 +346,7 @@ def test_chunk(
             (4, 4, 60, [0, 15], torch.float16),
             (4, 4, 64, [0, 256, 500, 1000], torch.float16),
             (2, 4, 128, [0, 15, 100, 300, 1200, 2000], torch.bfloat16),
+            (2, 2, 64, [0, 0, 1, 65, 65, 130], torch.bfloat16),
         ]
     ],
 )
@@ -409,6 +418,108 @@ def test_chunk_varlen(H: int, HV: int, D: int, cu_seqlens: list[int], dtype: tor
         (0.008, 0.008, 0.008, 0.02, 0.02, 0.02, 0.008, 0.02),
     ):
         assert_close(name, ref_grad, tri_grad, ratio)
+
+
+@pytest.mark.parametrize(
+    ("K", "V"),
+    [pytest.param(*test, id="K{}-V{}".format(*test)) for test in [(256, 64), (64, 256), (60, 100)]],
+)
+def test_chunk_kv(K: int, V: int):
+    """Keys and values of different widths, up to K=256, against the tokenwise reference on both paths."""
+    torch.manual_seed(42)
+    B, T, H = 2, 100, 2
+    q = torch.randn(B, T, H, K, dtype=torch.bfloat16)
+    k = torch.randn(B, T, H, K, dtype=torch.bfloat16)
+    v = torch.randn(B, T, H, V, dtype=torch.bfloat16)
+    g = F.logsigmoid(torch.randn(B, T, H, K, dtype=torch.float))
+    omega = make_noise(B, T, H)
+    r = make_noise(B, T, H)
+    h0 = torch.randn(B, H, K, V, dtype=torch.float)
+    c0 = make_noise(B, H, lower=0.1)
+    inputs = [x.to(device).requires_grad_(True) for x in (q, k, v, g, omega, r, h0, c0)]
+    q, k, v, g, omega, r, h0, c0 = inputs
+
+    do = torch.randn_like(v)
+    dht = torch.randn_like(h0)
+    dct = torch.randn_like(c0)
+
+    ref, (ref_ht, ref_ct) = naive_recurrent_iso_kdn(
+        q=F.normalize(q, p=2, dim=-1),
+        k=F.normalize(k, p=2, dim=-1),
+        v=v,
+        g=g,
+        omega=omega,
+        r=r,
+        initial_state=(h0, c0),
+        output_final_state=True,
+    )
+    ((ref * do).sum() + (ref_ht * dht).sum() + (ref_ct * dct).sum()).backward()
+    ref_grads = [x.grad for x in inputs]
+    for x in inputs:
+        x.grad = None
+
+    tri, (tri_ht, tri_ct) = chunk_iso_kdn(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        omega=omega,
+        r=r,
+        initial_state=(h0, c0),
+        output_final_state=True,
+        use_qk_l2norm_in_kernel=True,
+    )
+    ((tri * do).sum() + (tri_ht * dht).sum() + (tri_ct * dct).sum()).backward()
+    tri_grads = [x.grad for x in inputs]
+
+    assert_close("o", ref, tri, 0.005)
+    assert_close("ht", ref_ht, tri_ht, 0.005)
+    assert_close("ct", ref_ct, tri_ct, 0.005)
+    for name, ref_grad, tri_grad, ratio in zip(
+        ("dq", "dk", "dv", "dg", "domega", "dr", "dh0", "dc0"),
+        ref_grads,
+        tri_grads,
+        (0.008, 0.008, 0.008, 0.02, 0.02, 0.02, 0.008, 0.02),
+    ):
+        assert_close(name, ref_grad, tri_grad, ratio)
+
+    with torch.no_grad():
+        tri, (tri_ht, tri_ct) = fused_recurrent_iso_kdn(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            omega=omega,
+            r=r,
+            initial_state=(h0, c0),
+            output_final_state=True,
+            use_qk_l2norm_in_kernel=True,
+        )
+    assert_close("o", ref, tri, 0.005)
+    assert_close("ht", ref_ht, tri_ht, 0.005)
+    assert_close("ct", ref_ct, tri_ct, 0.005)
+
+
+@pytest.mark.parametrize("fn", [chunk_iso_kdn, fused_recurrent_iso_kdn], ids=["chunk", "fused_recurrent"])
+@torch.inference_mode()
+def test_unsupported_options(fn):
+    """Options of `chunk_kda` that IsoKDN does not support must raise even when set to a falsy value."""
+    torch.manual_seed(42)
+    B, T, H, D = 1, 16, 2, 64
+    inputs = dict(
+        q=torch.randn(B, T, H, D, dtype=torch.bfloat16, device=device),
+        k=torch.randn(B, T, H, D, dtype=torch.bfloat16, device=device),
+        v=torch.randn(B, T, H, D, dtype=torch.bfloat16, device=device),
+        g=F.logsigmoid(torch.randn(B, T, H, D, dtype=torch.float, device=device)),
+        omega=make_noise(B, T, H).to(device),
+        r=make_noise(B, T, H).to(device),
+        use_qk_l2norm_in_kernel=True,
+    )
+    for option in ({"lower_bound": 0}, {"lower_bound": 0.0}, {"max_num_seqs": 0}, {"safe_gate": True}):
+        with pytest.raises(ValueError, match="not supported by IsoKDN"):
+            fn(**inputs, **option)
+    # the defaults of `chunk_kda` are accepted
+    fn(**inputs, safe_gate=False, lower_bound=None, max_num_seqs=None)
 
 
 @pytest.mark.parametrize(
