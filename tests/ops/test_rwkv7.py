@@ -351,27 +351,30 @@ def test_fused_k_update(
 
 
 @pytest.mark.parametrize(
-    ("B", "T", "H", "D", "dtype"),
+    ("B", "T", "H", "K", "V", "dtype"),
     [
-        pytest.param(4, 4096, 64, 64, torch.bfloat16, id="default"),
-        pytest.param(1, 65537, 8, 64, torch.bfloat16, id="long_ctx"),
+        pytest.param(4, 4096, 64, 64, 64, torch.bfloat16, id="default"),
+        pytest.param(1, 65537, 8, 64, 64, torch.bfloat16, id="long_ctx"),
+        pytest.param(2, 1024, 16, 64, 128, torch.bfloat16, id="expanded_value_bf16"),
+        pytest.param(1, 128, 4, 64, 128, torch.float32, id="expanded_value_fp32"),
     ],
 )
 def test_gate_output_correction(
     B: int,
     T: int,
     H: int,
-    D: int,
+    K: int,
+    V: int,
     dtype: torch.dtype,
 ):
-    value_dim = H * D
+    value_dim = H * V
     torch.manual_seed(0)
 
     o_ref = torch.randn(B, T, value_dim, device=device, dtype=dtype, requires_grad=True)
-    r_ref = torch.randn(B, T, H, D, device=device, dtype=dtype, requires_grad=True)
-    k_ref = torch.randn(B, T, H, D, device=device, dtype=dtype, requires_grad=True)
-    r_k_ref = torch.randn(H, D, device=device, dtype=dtype, requires_grad=True)
-    v_ref = torch.randn(B, T, H, D, device=device, dtype=dtype, requires_grad=True)
+    r_ref = torch.randn(B, T, H, K, device=device, dtype=dtype, requires_grad=True)
+    k_ref = torch.randn(B, T, H, K, device=device, dtype=dtype, requires_grad=True)
+    r_k_ref = torch.randn(H, K, device=device, dtype=dtype, requires_grad=True)
+    v_ref = torch.randn(B, T, H, V, device=device, dtype=dtype, requires_grad=True)
     g_ref = torch.randn(B, T, value_dim, device=device, dtype=dtype, requires_grad=True)
 
     tensors_cus = [t.clone().detach().requires_grad_(True) for t in [o_ref, r_ref, k_ref, r_k_ref, v_ref, g_ref]]
