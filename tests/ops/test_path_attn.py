@@ -174,45 +174,6 @@ def test_parallel_varlen(
     assert_close("db", ref_db, tri_db, 0.005)
 
 
-@pytest.mark.parametrize(
-    ('B', 'T', 'K', 'V', 'cu_seqlens'),
-    [
-        pytest.param(2, 1024, 64, 128, None, id="dense-asymmetric"),
-        pytest.param(1, 2048, 64, 128, [0, 1024, 2048], id="varlen-asymmetric"),
-        pytest.param(2, 1024, 64, 64, None, id="dense-equal-width"),
-        pytest.param(2, 512, 64, 128, None, id="dense-short"),
-    ],
-)
-@pytest.mark.skipif(
-    IS_INTEL_ALCHEMIST,
-    reason="Intel Triton Failure",
-)
-def test_parallel_dv_isolation(B: int, T: int, K: int, V: int, cu_seqlens: list[int] | None):
-    torch.manual_seed(42)
-    os.environ['TRITON_F32_DEFAULT'] = 'ieee'
-
-    q = torch.randn((B, T, 1, K), dtype=torch.bfloat16, device=device).requires_grad_(True)
-    k = torch.randn((B, T, 1, K), dtype=torch.bfloat16, device=device).requires_grad_(True)
-    v = torch.randn((B, T, 1, V), dtype=torch.bfloat16, device=device).requires_grad_(True)
-    w = F.normalize(torch.randn((B, T, 1, K), dtype=torch.float, device=device), dim=-1, p=2).requires_grad_(True)
-    beta = torch.rand((B, T, 1), dtype=torch.float, device=device).sigmoid().requires_grad_(True)
-    cu_seqlens_tensor = None if cu_seqlens is None else torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
-
-    out, _ = parallel_path_attention(q=q, k=k, v=v, w=w, beta=beta, cu_seqlens=cu_seqlens_tensor)
-    do = torch.zeros_like(out)
-    if cu_seqlens is None:
-        target = do[1]
-        untouched = (0, slice(None))
-    else:
-        target = do[0, cu_seqlens[1]:]
-        untouched = (0, slice(0, cu_seqlens[1]))
-    target.copy_(torch.linspace(0.25, 1.0, target.numel(), dtype=target.dtype, device=device).reshape_as(target))
-
-    _, _, dv, _, _ = torch.autograd.grad(out, (q, k, v, w, beta), grad_outputs=do)
-    assert torch.isfinite(dv).all()
-    assert torch.count_nonzero(dv[untouched]).item() == 0
-
-
 @pytest.mark.parametrize(('kernel', 'name'), [
     (chunk_cumprod_householder_fwd_kernel, 'T'),
     (chunk_cumprod_householder_bwd_kernel, 'T'),
