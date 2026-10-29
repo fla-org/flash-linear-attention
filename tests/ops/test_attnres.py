@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from fla.ops.attnres import fused_attnres, naive_attnres
-from fla.utils import IS_NPU, assert_close, device
+from fla.utils import IS_NPU, IS_NVIDIA, assert_close, device
 
 
 @pytest.mark.parametrize(
@@ -108,6 +108,72 @@ def test_attnres(
     assert_close('dv', torch.stack([r.grad for r in residuals_ref]), torch.stack(tri_dvs), 0.005)
     if fuse_output_norm:
         assert_close('dow', output_rms_weight_ref.grad, tri_dow, 0.005)
+
+
+@pytest.mark.skipif(not IS_NVIDIA, reason='Gluon AttnRes requires NVIDIA CUDA')
+@pytest.mark.parametrize(
+    ('weight_mode', 'enabled', 'D', 'dtype', 'fuse_output_norm', 'checkpoint_level', 'expect_gluon'),
+    [
+        pytest.param('tensor', True, 128, torch.float16, False, 0, True, id='weighted'),
+        pytest.param('none', True, 1000, torch.float16, True, 1, True, id='none'),
+        pytest.param('omitted', True, 128, torch.float32, True, 0, True, id='omitted'),
+        pytest.param('none', False, 128, torch.float16, False, 1, False, id='disabled'),
+        pytest.param('none', True, 32, torch.float16, False, 1, False, id='small-D-fallback'),
+    ],
+)
+def test_gluon_backend_routing(
+    monkeypatch,
+    weight_mode: str,
+    enabled: bool,
+    D: int,
+    dtype: torch.dtype,
+    fuse_output_norm: bool,
+    checkpoint_level: int,
+    expect_gluon: bool,
+):
+    from fla import backends
+
+    if torch.cuda.get_device_capability()[0] < 8:
+        pytest.skip('Gluon AttnRes requires SM80+')
+    if backends._DISPATCH_DISABLED:
+        pytest.skip('backend dispatch is disabled in this process')
+    backend = backends._load_operation_registry('attnres')._backends.get('gluon')
+    if backend is None or not backend.is_available():
+        pytest.skip('Gluon is not available')
+    monkeypatch.setenv('FLA_GLUON', '0')
+    monkeypatch.setenv('FLA_ATTNRES_GLUON', '1' if enabled else '0')
+    calls = []
+    original = backend.fused_attnres
+
+    def spy(*args, **kwargs):
+        calls.append('fused_attnres')
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(backend, 'fused_attnres', spy)
+    torch.manual_seed(42)
+    query = torch.randn(D, 1, dtype=dtype, device=device).requires_grad_(True)
+    residuals = [torch.randn(1, 63, D, dtype=dtype, device=device).requires_grad_(True) for _ in range(3)]
+    weight = torch.randn(D, dtype=dtype, device=device).requires_grad_(True) if weight_mode == 'tensor' else None
+    output_weight = torch.randn(D, dtype=dtype, device=device).requires_grad_(True) if fuse_output_norm else None
+    kwargs = dict(query=query, residuals=residuals, output_rms_weight=output_weight, scale=D ** -0.5, return_weights=True)
+    if weight_mode != 'omitted':
+        kwargs['rms_weight'] = weight
+    inputs = [query, *residuals]
+    if weight is not None:
+        inputs.append(weight)
+    if output_weight is not None:
+        inputs.append(output_weight)
+    actual, actual_p = fused_attnres(**kwargs, checkpoint_level=checkpoint_level)
+    do = torch.randn_like(actual)
+    actual_grads = torch.autograd.grad(actual, inputs, do)
+    reference, reference_p = naive_attnres(**kwargs)
+    reference_grads = torch.autograd.grad(reference, inputs, do)
+    assert calls == (['fused_attnres'] if expect_gluon else [])
+    assert_close('o', reference, actual, 0.005)
+    assert_close('p', reference_p, actual_p, 0.005)
+    for expected, grad in zip(reference_grads, actual_grads):
+        assert torch.isfinite(grad).all()
+        assert_close('grad', expected, grad, 0.005)
 
 
 _TRITON_ASCEND_ATTNRES_OPS = ('fused_attnres',)

@@ -121,7 +121,7 @@ def _dv_tile(b_v, b_do, b_qw, b_rstd, b_logit, b_p, b_delta, scale: gl.constexpr
 
 @fla_cache_autotune(
     configs=_FWD_CONFIGS,
-    key=['L', 'D', 'R', 'ES', 'HAS_ONORM', 'SAVE_OPRE'],
+    key=['L', 'D', 'R', 'ES', 'HAS_RMS_WEIGHT', 'HAS_ONORM', 'SAVE_OPRE'],
     prune_configs_by={'early_config_prune': _prune_fwd_smem},
     **autotune_cache_kwargs,
 )
@@ -146,6 +146,7 @@ def attnres_fwd_kernel_gluon(
     NW: gl.constexpr,
     R: gl.constexpr,
     ES: gl.constexpr,
+    HAS_RMS_WEIGHT: gl.constexpr,
     HAS_ONORM: gl.constexpr,
     SAVE_OPRE: gl.constexpr,
 ):
@@ -167,7 +168,9 @@ def attnres_fwd_kernel_gluon(
     o_d = gl.arange(0, BD, layout=sl_d)
     m_d = o_d < D
 
-    b_qw = gl.load(q + o_d, mask=m_d, other=0.).to(gl.float32) * gl.load(w + o_d, mask=m_d, other=0.).to(gl.float32)
+    b_qw = gl.load(q + o_d, mask=m_d, other=0.).to(gl.float32)
+    if HAS_RMS_WEIGHT:
+        b_qw *= gl.load(w + o_d, mask=m_d, other=0.).to(gl.float32)
 
     # [BT, BD] global offsets shared by every source
     o_v = o_tc[:, None] * D + o_d[None, :]
@@ -237,7 +240,7 @@ def attnres_fwd_kernel_gluon(
 
 @fla_cache_autotune(
     configs=_BWD_CONFIGS,
-    key=['L', 'D', 'R', 'ES', 'HAS_ONORM', 'SAVE_OPRE'],
+    key=['L', 'D', 'R', 'ES', 'HAS_RMS_WEIGHT', 'HAS_ONORM', 'SAVE_OPRE'],
     prune_configs_by={'early_config_prune': _prune_bwd_smem},
     **autotune_cache_kwargs,
 )
@@ -266,6 +269,7 @@ def attnres_bwd_kernel_dv_gluon(
     NW: gl.constexpr,
     R: gl.constexpr,
     ES: gl.constexpr,
+    HAS_RMS_WEIGHT: gl.constexpr,
     HAS_ONORM: gl.constexpr,
     SAVE_OPRE: gl.constexpr,
 ):
@@ -285,7 +289,9 @@ def attnres_bwd_kernel_dv_gluon(
 
     o_d = gl.arange(0, BD, layout=sl_d)
     m_d = o_d < D
-    b_qw = gl.load(q + o_d, mask=m_d, other=0.).to(gl.float32) * gl.load(w + o_d, mask=m_d, other=0.).to(gl.float32)
+    b_qw = gl.load(q + o_d, mask=m_d, other=0.).to(gl.float32)
+    if HAS_RMS_WEIGHT:
+        b_qw *= gl.load(w + o_d, mask=m_d, other=0.).to(gl.float32)
     if HAS_ONORM:
         b_ow = gl.load(ow + o_d, mask=m_d, other=0.).to(gl.float32)
 
@@ -446,7 +452,7 @@ def attnres_bwd_kernel_dv_gluon(
         triton.Config({'BN': BN, 'BD': BD, 'NW': num_warps}, num_warps=num_warps)
         for BN, BD, num_warps in [(256, 32, 4), (512, 64, 4), (512, 64, 8), (1024, 128, 8)]
     ],
-    key=['NP', 'D', 'HAS_ONORM'],
+    key=['NP', 'D', 'HAS_RMS_WEIGHT', 'HAS_ONORM'],
     **autotune_cache_kwargs,
 )
 @gluon.jit
@@ -463,6 +469,7 @@ def attnres_bwd_kernel_dqdw_gluon(
     BN: gl.constexpr,
     BD: gl.constexpr,
     NW: gl.constexpr,
+    HAS_RMS_WEIGHT: gl.constexpr,
     HAS_ONORM: gl.constexpr,
 ):
     i_d = gl.program_id(0).to(gl.int64)
@@ -487,10 +494,13 @@ def attnres_bwd_kernel_dqdw_gluon(
         if HAS_ONORM:
             b_dow += gl.sum(gl.load(dow_partial + p, mask=m, other=0.), axis=0)
 
-    b_q = gl.load(q + o_d, mask=m_d, other=0.).to(gl.float32)
-    b_w = gl.load(w + o_d, mask=m_d, other=0.).to(gl.float32)
-    gl.store(dq + o_d, (b_dqw * b_w).to(dq.dtype.element_ty), mask=m_d)
-    gl.store(dw + o_d, (b_dqw * b_q).to(dw.dtype.element_ty), mask=m_d)
+    if HAS_RMS_WEIGHT:
+        b_q = gl.load(q + o_d, mask=m_d, other=0.).to(gl.float32)
+        b_w = gl.load(w + o_d, mask=m_d, other=0.).to(gl.float32)
+        gl.store(dq + o_d, (b_dqw * b_w).to(dq.dtype.element_ty), mask=m_d)
+        gl.store(dw + o_d, (b_dqw * b_q).to(dw.dtype.element_ty), mask=m_d)
+    else:
+        gl.store(dq + o_d, b_dqw.to(dq.dtype.element_ty), mask=m_d)
     if HAS_ONORM:
         gl.store(dow + o_d, b_dow.to(dow.dtype.element_ty), mask=m_d)
 
@@ -516,7 +526,7 @@ def _fused_attnres_fwd(
     q: torch.Tensor,
     residuals: Sequence[torch.Tensor],
     res: tuple[torch.Tensor, ...],
-    w: torch.Tensor,
+    w: torch.Tensor | None,
     ow: torch.Tensor | None,
     eps: float,
     scale: float,
@@ -531,6 +541,7 @@ def _fused_attnres_fwd(
     dtype = residuals[0].dtype
     stats_shape = (L, *output_shape[:-1])
 
+    has_rms_weight = w is not None
     has_onorm = ow is not None
     save_opre = checkpoint_level == 0
     o = torch.empty(output_shape, device=residuals[0].device, dtype=dtype)
@@ -558,6 +569,7 @@ def _fused_attnres_fwd(
         BD=triton.next_power_of_2(D),
         R=_vec_width(dtype, D, triton.next_power_of_2(D)),
         ES=dtype.itemsize,
+        HAS_RMS_WEIGHT=has_rms_weight,
         HAS_ONORM=has_onorm,
         SAVE_OPRE=save_opre,
     )
@@ -570,7 +582,7 @@ def _fused_attnres_bwd(
     q: torch.Tensor,
     residuals: Sequence[torch.Tensor],
     res: tuple[torch.Tensor, ...],
-    w: torch.Tensor,
+    w: torch.Tensor | None,
     ow: torch.Tensor | None,
     o_pre: torch.Tensor | None,
     rstd: torch.Tensor,
@@ -579,11 +591,12 @@ def _fused_attnres_bwd(
     eps: float,
     scale: float,
     checkpoint_level: int,
-) -> tuple[list[torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor | None]:
+) -> tuple[list[torch.Tensor], torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
     L, N, D = len(residuals), do.numel() // do.shape[-1], do.shape[-1]
     NP = triton.cdiv(N, GROUP)
 
     # bwd_dv produces dvs + per-program dqw/dow partials [NP, D]; bwd_dqdw reduces them into dq / dw / dow
+    has_rms_weight = w is not None
     has_onorm = ow is not None
     if has_onorm:
         dow_partial = torch.empty(NP, D, device=do.device, dtype=torch.float32)
@@ -595,7 +608,7 @@ def _fused_attnres_bwd(
     dres = _check_sources(dvs)
     dqw = torch.empty(NP, D, device=do.device, dtype=torch.float32)
     dq = torch.empty_like(q)
-    dw = torch.empty_like(w)
+    dw = torch.empty_like(w) if has_rms_weight else None
 
     attnres_bwd_kernel_dv_gluon[(NP,)](
         q=q,
@@ -619,6 +632,7 @@ def _fused_attnres_bwd(
         BD=triton.next_power_of_2(D),
         R=_vec_width(do.dtype, D, triton.next_power_of_2(D)),
         ES=do.dtype.itemsize,
+        HAS_RMS_WEIGHT=has_rms_weight,
         HAS_ONORM=has_onorm,
         SAVE_OPRE=checkpoint_level == 0,
     )
@@ -634,6 +648,7 @@ def _fused_attnres_bwd(
         dow=dow,
         NP=NP,
         D=D,
+        HAS_RMS_WEIGHT=has_rms_weight,
         HAS_ONORM=has_onorm,
     )
 
@@ -648,7 +663,7 @@ class FusedAttnresGluonFunction(torch.autograd.Function):
     def forward(
         ctx,
         query: torch.Tensor,
-        rms_weight: torch.Tensor,
+        rms_weight: torch.Tensor | None,
         output_rms_weight: torch.Tensor | None,
         rms_eps: float,
         scale: float,
@@ -708,7 +723,7 @@ class FusedAttnresGluonFunction(torch.autograd.Function):
 def _run(
     query: torch.Tensor,
     residuals: Sequence[torch.Tensor],
-    rms_weight: torch.Tensor,
+    rms_weight: torch.Tensor | None = None,
     output_rms_weight: torch.Tensor | None = None,
     rms_eps: float = 1e-6,
     scale: float = 1.0,
@@ -748,7 +763,7 @@ class AttnResGluonBackend(BaseBackend):
         self,
         query: torch.Tensor,
         residuals: Sequence[torch.Tensor],
-        rms_weight: torch.Tensor,
+        rms_weight: torch.Tensor | None = None,
         output_rms_weight: torch.Tensor | None = None,
         rms_eps: float = 1e-6,
         scale: float = 1.0,
