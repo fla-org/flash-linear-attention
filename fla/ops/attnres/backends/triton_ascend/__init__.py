@@ -34,7 +34,7 @@ class TritonAscendAttnResBackend(BaseBackend):
         self,
         query: torch.Tensor,
         residuals: Sequence[torch.Tensor],
-        rms_weight: torch.Tensor,
+        rms_weight: torch.Tensor | None = None,
         output_rms_weight: torch.Tensor | None = None,
         rms_eps: float = 1e-6,
         scale: float = 1.0,

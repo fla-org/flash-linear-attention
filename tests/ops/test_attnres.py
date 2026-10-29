@@ -41,7 +41,6 @@ from fla.utils import IS_NPU, IS_NVIDIA, assert_close, device
         pytest.param(
             3, 1, 63, 1000, 1000 ** -0.5, True, torch.float16, 1, False,
             id="no-rms-weight",
-            marks=pytest.mark.skipif(IS_NPU, reason="optional rms_weight is not supported by the Ascend backend"),
         ),
     ],
 )
@@ -201,23 +200,56 @@ def _spy_on_triton_ascend_attnres_backend():
 
 
 @pytest.mark.skipif(not IS_NPU, reason='Triton-Ascend AttnRes backend routing is only exercised on NPU')
-def test_triton_ascend_backend_routing():
+@pytest.mark.parametrize(
+    ('weight_mode', 'D', 'dtype', 'fuse_output_norm', 'checkpoint_level'),
+    [
+        pytest.param('tensor', 128, torch.float16, False, 1, id='weighted'),
+        pytest.param('none', 128, torch.float16, False, 1, id='none'),
+        pytest.param('none', 1000, torch.float16, True, 0, id='none-onorm'),
+        pytest.param('omitted', 128, torch.float32, True, 1, id='omitted'),
+        pytest.param('none', 8193, torch.float16, False, 0, id='none-D-loop'),
+    ],
+)
+def test_triton_ascend_backend_routing(
+    weight_mode: str,
+    D: int,
+    dtype: torch.dtype,
+    fuse_output_norm: bool,
+    checkpoint_level: int,
+):
     """Verify fused_attnres dispatches to Triton-Ascend on NPU.
 
     Numerical parity can pass through the fallback, so record which implementation actually runs.
     """
     backend, calls = _spy_on_triton_ascend_attnres_backend()
     try:
-        L, B, T, D = 3, 1, 64, 128
-        dtype = torch.float16
+        torch.manual_seed(42)
+        L, B, T = 3, 1, 64
         residuals = [torch.randn(B, T, D, dtype=dtype, device=device).requires_grad_(True) for _ in range(L)]
         query = torch.randn(D, dtype=dtype, device=device).requires_grad_(True)
-        rms_weight = torch.randn(D, dtype=dtype, device=device).requires_grad_(True)
+        rms_weight = torch.randn(D, dtype=dtype, device=device).requires_grad_(True) if weight_mode == 'tensor' else None
+        output_weight = torch.randn(D, dtype=dtype, device=device).requires_grad_(True) if fuse_output_norm else None
+        kwargs = dict(query=query, residuals=residuals, output_rms_weight=output_weight, scale=D ** -0.5, return_weights=True)
+        if weight_mode != 'omitted':
+            kwargs['rms_weight'] = rms_weight
+        inputs = [query, *residuals]
+        if rms_weight is not None:
+            inputs.append(rms_weight)
+        if output_weight is not None:
+            inputs.append(output_weight)
 
         calls.clear()
-        o = fused_attnres(query=query, residuals=residuals, rms_weight=rms_weight, scale=D ** -0.5, checkpoint_level=1)
-        (o * torch.randn_like(o)).sum().backward()
+        o, p = fused_attnres(**kwargs, checkpoint_level=checkpoint_level)
+        do = torch.randn_like(o)
+        grads = torch.autograd.grad(o, inputs, do)
         assert calls == ['fused_attnres'], (f'fused_attnres not routed to the Triton-Ascend backend (dispatched: {calls})')
+        ref, ref_p = naive_attnres(**kwargs)
+        ref_grads = torch.autograd.grad(ref, inputs, do)
+        assert_close('o', ref, o, 0.005)
+        assert_close('p', ref_p, p, 0.005)
+        for expected, grad in zip(ref_grads, grads):
+            assert torch.isfinite(grad).all()
+            assert_close('grad', expected, grad, 0.005)
     finally:
         for name in _TRITON_ASCEND_ATTNRES_OPS:
             delattr(backend, name)
