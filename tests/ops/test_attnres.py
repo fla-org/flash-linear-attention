@@ -13,9 +13,9 @@ from fla.utils import IS_NPU, assert_close, device
 
 
 @pytest.mark.parametrize(
-    ('L', 'B', 'T', 'D', 'scale', 'fuse_output_norm', 'dtype', 'checkpoint_level'),
+    ('L', 'B', 'T', 'D', 'scale', 'fuse_output_norm', 'dtype', 'checkpoint_level', 'use_rms_weight'),
     [
-        pytest.param(*test, id="L{}-B{}-T{}-D{}-scale{}-onorm{}-{}-ckpt{}".format(*test))
+        pytest.param(*test, True, id="L{}-B{}-T{}-D{}-scale{}-onorm{}-{}-ckpt{}".format(*test))
         for test in [
             # single-axis stress (no output norm); checkpoint_level spread across shapes
             (1,  1, 1000, 4096, 1.0,             False, torch.float16, 1),  # L=1
@@ -37,6 +37,12 @@ from fla.utils import IS_NPU, assert_close, device
             (15, 1, 8000, 7186, 1.0,             True,  torch.float16, 1),  # T=8000 + D=7186
             (10, 2, 8000, 4096, 4096 ** -0.5,    True,  torch.float32, 0),
         ]
+    ] + [
+        pytest.param(
+            3, 1, 63, 1000, 1000 ** -0.5, True, torch.float16, 1, False,
+            id="no-rms-weight",
+            marks=pytest.mark.skipif(IS_NPU, reason="optional rms_weight is not supported by the Ascend backend"),
+        ),
     ],
 )
 @pytest.mark.smoke
@@ -49,6 +55,7 @@ def test_attnres(
     fuse_output_norm: bool,
     dtype: torch.dtype,
     checkpoint_level: int,
+    use_rms_weight: bool,
 ):
     torch.manual_seed(42)
     # disable TF32 so the fp32 reference retains its full mantissa in einsum backward.
@@ -58,7 +65,7 @@ def test_attnres(
     # list of L independently allocated `[B, T, D]` tensors — true zero-cat input.
     residuals = [torch.randn(B, T, D, dtype=dtype, device=device).requires_grad_(True) for _ in range(L)]
     query = torch.randn(D, dtype=dtype, device=device).requires_grad_(True)
-    rms_weight = torch.randn(D, dtype=dtype, device=device).requires_grad_(True)
+    rms_weight = torch.randn(D, dtype=dtype, device=device).requires_grad_(True) if use_rms_weight else None
     output_rms_weight = (torch.randn(D, dtype=dtype, device=device).requires_grad_(True) if fuse_output_norm else None)
 
     tri, tri_p = fused_attnres(
@@ -74,12 +81,12 @@ def test_attnres(
     do = torch.randn_like(tri)
     (tri * do).sum().backward()
     tri_dvs = [r.grad for r in residuals]
-    tri_dq, tri_dw = query.grad, rms_weight.grad
+    tri_dq, tri_dw = query.grad, rms_weight.grad if use_rms_weight else None
     tri_dow = output_rms_weight.grad if fuse_output_norm else None
 
     residuals_ref = [r.detach().clone().requires_grad_(True) for r in residuals]
     query_ref = query.detach().clone().requires_grad_(True)
-    rms_weight_ref = rms_weight.detach().clone().requires_grad_(True)
+    rms_weight_ref = rms_weight.detach().clone().requires_grad_(True) if use_rms_weight else None
     output_rms_weight_ref = (output_rms_weight.detach().clone().requires_grad_(True) if fuse_output_norm else None)
 
     ref, ref_p = naive_attnres(
@@ -96,7 +103,8 @@ def test_attnres(
     assert_close(' o', ref, tri, 0.005)
     assert_close(' p', ref_p, tri_p, 0.005)
     assert_close('dq', query_ref.grad, tri_dq, 0.005)
-    assert_close('dw', rms_weight_ref.grad, tri_dw, 0.005)
+    if use_rms_weight:
+        assert_close('dw', rms_weight_ref.grad, tri_dw, 0.005)
     assert_close('dv', torch.stack([r.grad for r in residuals_ref]), torch.stack(tri_dvs), 0.005)
     if fuse_output_norm:
         assert_close('dow', output_rms_weight_ref.grad, tri_dow, 0.005)
