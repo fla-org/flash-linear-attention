@@ -210,8 +210,10 @@ def kda_gate_bwd_kernel_npu(
     else:
         b_A = exp(b_A) if HAS_A else b_A
         b_inner = b_A * b_g
-        b_sig = tl.sigmoid(b_inner)
-        b_dsig = b_sig * (1.0 - b_sig)
+        # avoid cancellation in 1 - sigmoid(z) when the bounded gate saturates
+        b_r = tl.exp(-tl.abs(b_inner))
+        b_inv = 1.0 / (1.0 + b_r)
+        b_dsig = b_r * (b_inv * b_inv)
         b_d_inner_term = b_dyg * (lower_bound * b_dsig)
         b_dg = b_d_inner_term * b_A
         b_dA = tl.sum(tl.sum(b_dg * b_g, 1), 0) if HAS_A else 0.0
