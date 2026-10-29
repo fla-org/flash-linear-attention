@@ -160,6 +160,8 @@ jobs:
             tests/ops/test_gdn_kernels.py \
             tests/ops/test_gdn.py \
             tests/ops/test_gdn2.py \
+            tests/ops/test_gdn2_ascend.py \
+            tests/ops/test_gdn2_ascend_dispatch.py \
             tests/ops/test_kda.py \
             tests/ops/test_gla.py \
             tests/ops/test_oja.py \
@@ -168,37 +170,6 @@ jobs:
             tests/ops/test_delta.py \
             tests/ops/test_precond_gated_delta.py \
             tests/ops/test_wall_attn.py
-
-      - name: Run strict GDN2 tests on Triton-Ascend 3.6.0
-        shell: bash
-        env:
-          FLA_CI_ENV: "0"
-          FLA_NPU_XDIST: "1"
-        run: |
-          source /usr/local/Ascend/ascend-toolkit/set_env.sh
-          python -c "from importlib.metadata import version; assert version('triton-ascend') == '3.6.0'"
-          pytest -s -v --exitfirst -n 8 --dist load \
-            tests/ops/test_gdn2.py \
-            tests/ops/test_gdn2_ascend.py \
-            tests/ops/test_gdn2_ascend_dispatch.py
-
-      - name: Run strict GDN2 tests on Triton-Ascend 3.2.2
-        shell: bash
-        env:
-          FLA_CI_ENV: "0"
-          FLA_NPU_XDIST: "1"
-        run: |
-          source /usr/local/Ascend/ascend-toolkit/set_env.sh
-          legacy_triton_path="$RUNNER_TEMP/gdn2-triton-ascend-3.2.2"
-          python -m pip install --no-deps --target "$legacy_triton_path" triton-ascend==3.2.2 \
-            --extra-index-url=https://triton-ascend.osinfra.cn/pypi/simple
-          export PYTHONPATH="$legacy_triton_path${PYTHONPATH:+:$PYTHONPATH}"
-          export TRITON_CACHE_DIR="$RUNNER_TEMP/gdn2-triton-cache-3.2.2"
-          python -c "from importlib.metadata import version; assert version('triton-ascend') == '3.2.2'"
-          python -m pytest -s -v --exitfirst -n 8 --dist load \
-            tests/ops/test_gdn2.py \
-            tests/ops/test_gdn2_ascend.py \
-            tests/ops/test_gdn2_ascend_dispatch.py
 
       - name: Run NPU graph tests serially
         shell: bash
