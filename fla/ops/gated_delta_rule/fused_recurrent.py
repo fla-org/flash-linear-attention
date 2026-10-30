@@ -13,7 +13,7 @@ import triton.language as tl
 
 from fla.ops.utils.op import exp
 from fla.ops.utils.softplus import softplus
-from fla.utils import input_guard
+from fla.utils import IS_NVIDIA_HOPPER, input_guard
 
 
 @triton.heuristics({
@@ -204,7 +204,14 @@ def fused_recurrent_gated_delta_rule_fwd(
     HV = v.shape[2]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
     BK = triton.next_power_of_2(K)
-    BV = min(8, triton.next_power_of_2(V)) if gv is None else triton.next_power_of_2(V)
+    if gv is not None:
+        BV = triton.next_power_of_2(V)
+    elif IS_NVIDIA_HOPPER and gk is None and not state_v_first:
+        # [K, V] state on H100/H200: BV=16 runs half as many programs per head as BV=8, so less repeated
+        # per-program q/k work; it is faster across measured decode shapes.
+        BV = min(16, triton.next_power_of_2(V))
+    else:
+        BV = min(8, triton.next_power_of_2(V))
     NV = triton.cdiv(V, BV)
 
     o = torch.empty_like(v)

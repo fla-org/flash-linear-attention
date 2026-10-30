@@ -40,8 +40,6 @@ class StickBreakingAttentionConfig(PreTrainedConfig):
         vocab_size: int = 32000,
         **kwargs,
     ):
-        if use_cache:
-            raise ValueError("Stick-breaking attention does not support KV-cache decoding. Use use_cache=False.")
         if fuse_cross_entropy and fuse_linear_cross_entropy:
             raise ValueError("fuse_cross_entropy and fuse_linear_cross_entropy cannot both be True.")
 

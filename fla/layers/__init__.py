@@ -17,6 +17,7 @@ from .forgetting_attn import ForgettingAttention
 from .gated_deltanet import GatedDeltaNet
 from .gated_deltaproduct import GatedDeltaProduct
 from .gdn2 import GatedDeltaNet2
+from .gka import GatedKalmaNet
 from .gla import GatedLinearAttention
 from .gsa import GatedSlotAttention
 from .hgrn import HGRNAttention
@@ -28,6 +29,7 @@ from .log_linear_mamba2 import LogLinearMamba2
 from .mamba import Mamba
 from .mamba2 import Mamba2
 from .mamba3 import Mamba3
+from .memory_attn import MemoryAttention
 from .mesa_net import MesaNet
 from .mla import MultiheadLatentAttention
 from .moba import MoBA
@@ -61,6 +63,7 @@ __all__ = [
     'GatedDeltaNet',
     'GatedDeltaNet2',
     'GatedDeltaProduct',
+    'GatedKalmaNet',
     'GatedLinearAttention',
     'GatedSlotAttention',
     'HGRN2Attention',
@@ -72,6 +75,7 @@ __all__ = [
     'Mamba',
     'Mamba2',
     'Mamba3',
+    'MemoryAttention',
     'MesaNet',
     'MoBA',
     'MomAttention',

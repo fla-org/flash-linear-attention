@@ -15,12 +15,14 @@ def naive_recurrent_gsa(
     v: torch.Tensor,
     s: torch.Tensor,
     g: torch.Tensor | None = None,
-    scale: int | None = None,
-    initial_state: torch.Tensor | None = None,
+    scale: float | None = None,
+    initial_state: tuple[torch.Tensor, torch.Tensor] | None = None,
     output_final_state: bool | None = False,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
     dtype = q.dtype
-    q, k, v, s, g = map(lambda x: x.transpose(1, 2).contiguous().float(), (q, k, v, s, g))
+    q, k, v, s = map(lambda x: x.transpose(1, 2).contiguous().float(), (q, k, v, s))
+    if g is not None:
+        g = g.transpose(1, 2).contiguous().float()
 
     NG = q.shape[1]//k.shape[1]
     # [batch_size, n_heads, seq_len, n_slots]

@@ -79,8 +79,16 @@ def test_generation(
     check_generation(L, B, T, H, D, TransformerConfig, dtype)
 
 
-@pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize('window_size', [8, None])
+@pytest.mark.skipif(device != 'cuda', reason='requires CUDA')
+@pytest.mark.parametrize(
+    ('dtype', 'window_size'),
+    [
+        pytest.param(torch.float16, 8, id='fp16-windowed'),
+        pytest.param(torch.bfloat16, 8, id='bf16-windowed'),
+        pytest.param(torch.float16, None, id='fp16-unbounded'),
+        pytest.param(torch.bfloat16, None, id='bf16-unbounded'),
+    ],
+)
 @torch.no_grad()
 def test_cached_chunk_continuation(dtype, window_size):
     torch.manual_seed(42)

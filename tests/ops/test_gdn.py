@@ -79,6 +79,8 @@ def test_chunk_bwd_dv_local_blackwell_triton_guard():
             (4, 2048, 4, 4, 64, 0.1, 1, torch.float),
             (2, 1024, 4, 4, 128, 1, 0.1, torch.float16),
             (2, 1024, 4, 8, 128, 1, 10, torch.float16),
+            # single-token decode with grouped value heads
+            (16, 1, 4, 12, 128, 1, 1, torch.float16),
         ]
     ],
 )
