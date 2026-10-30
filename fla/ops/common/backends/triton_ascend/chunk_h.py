@@ -28,13 +28,14 @@ _BK = 64
 _BV = 64
 
 
-def _is_ascend_950() -> bool:
+def _use_portable_lowering() -> bool:
+    """Whether the current target requires conservative dot lowering."""
     return IS_NPU and get_device_arch().startswith(("Ascend950", "Ascend910_95"))
 
 
 def _chunk_h_tile_size(K: int, V: int, T: int) -> tuple[int, int]:
-    """Use smaller tiles for large states, with the 950-safe shape on A5."""
-    if _is_ascend_950():
+    """Use smaller tiles for large states and restricted dot-lowering targets."""
+    if _use_portable_lowering():
         if T <= 32:
             return 16, 16
         if K <= 64 and V <= 128:
@@ -77,6 +78,7 @@ def chunk_h_fwd_kernel(
     STORE_FINAL_STATE: tl.constexpr,
     STATE_V_FIRST: tl.constexpr,
     USE_NATIVE_DOT: tl.constexpr,
+    USE_SAFE_DOT: tl.constexpr,
     MANUAL_DOT: tl.constexpr,
     K_OFFSET,
     V_OFFSET,
@@ -178,8 +180,10 @@ def chunk_h_fwd_kernel(
                 b_v_i = tl.load(p_v_i, mask=m_i & (o_v < V), other=0.0)
                 b_decay_i = exp2(b_g_last - b_gamma * (i + 1))
                 b_h += b_k_i.to(tl.float32)[:, None] * (b_v_i * b_decay_i).to(tl.float32)[None, :]
-        else:
+        elif USE_SAFE_DOT:
             b_h = tl.dot(b_k, b_v, b_h, allow_tf32=False)
+        else:
+            b_h = tl.dot(b_k, b_v, b_h)
 
     if STORE_FINAL_STATE:
         ht_base = (i_nh * K * V)
@@ -226,6 +230,7 @@ def chunk_h_bwd_kernel(
     USE_FINAL_STATE_GRADIENT: tl.constexpr,
     STATE_V_FIRST: tl.constexpr,
     USE_NATIVE_DOT: tl.constexpr,
+    USE_SAFE_DOT: tl.constexpr,
     MANUAL_DOT: tl.constexpr,
     K_OFFSET,
     V_OFFSET,
@@ -331,8 +336,10 @@ def chunk_h_bwd_kernel(
                 b_do_i = tl.load(p_do_i, mask=m_i & (o_v < V), other=0.0)
                 b_q_i = b_q_i.to(tl.float32) * scale * exp2(b_gamma * (i + 1))
                 b_dh += b_q_i[:, None] * b_do_i.to(tl.float32)[None, :]
-        else:
+        elif USE_SAFE_DOT:
             b_dh = tl.dot(b_q, b_do, b_dh, allow_tf32=False)
+        else:
+            b_dh = tl.dot(b_q, b_do, b_dh)
 
     if STORE_INITIAL_STATE_GRADIENT:
         dh0_base = (i_nh * K * V)
@@ -416,12 +423,14 @@ def chunk_fwd_h_npu(
     ht = k.new_zeros(N, H, *state_shape, dtype=torch.float) if output_final_state else None
 
     BK, BV = _chunk_h_tile_size(K=K, V=V, T=T)
-    state_compile_kwargs = ascend_compile_kwargs(blacklist_auto_blockify=True) if _is_ascend_950() else {}
+    use_portable_lowering = _use_portable_lowering()
+    state_compile_kwargs = ascend_compile_kwargs(blacklist_auto_blockify=True) if use_portable_lowering else {}
     manual_dot = (
         g_gamma is not None and g is None
-        and k.dtype == torch.float16 and _is_ascend_950() and BK <= 16 and BV <= 16
+        and k.dtype == torch.float16 and use_portable_lowering and BK <= 16 and BV <= 16
     )
-    native_dot = k.dtype == torch.float16 and _is_ascend_950() and not manual_dot
+    native_dot = k.dtype == torch.float16 and use_portable_lowering and not manual_dot
+    safe_dot = use_portable_lowering
     if state_compile_kwargs and manual_dot:
         state_compile_kwargs['compile_mode'] = 'simd'
         state_compile_kwargs['disable_tightly_coupled_buffer_reuse'] = True
@@ -455,6 +464,7 @@ def chunk_fwd_h_npu(
             USE_GV=gv is not None,
             STATE_V_FIRST=state_v_first,
             USE_NATIVE_DOT=native_dot,
+            USE_SAFE_DOT=safe_dot,
             MANUAL_DOT=manual_dot,
             K_OFFSET=0,
             V_OFFSET=0,
@@ -539,12 +549,14 @@ def chunk_bwd_dh_npu(
     dh0 = torch.zeros_like(h0, dtype=torch.float) if h0 is not None else None
 
     BK, BV = _chunk_h_tile_size(K=K, V=V, T=T)
-    state_compile_kwargs = ascend_compile_kwargs(blacklist_auto_blockify=True) if _is_ascend_950() else {}
+    use_portable_lowering = _use_portable_lowering()
+    state_compile_kwargs = ascend_compile_kwargs(blacklist_auto_blockify=True) if use_portable_lowering else {}
     manual_dot = (
         g_gamma is not None and g is None
-        and q.dtype == torch.float16 and _is_ascend_950() and BK <= 16 and BV <= 16
+        and q.dtype == torch.float16 and use_portable_lowering and BK <= 16 and BV <= 16
     )
     native_dot = False
+    safe_dot = use_portable_lowering
     if state_compile_kwargs and manual_dot:
         state_compile_kwargs['compile_mode'] = 'simd'
         state_compile_kwargs['disable_tightly_coupled_buffer_reuse'] = True
@@ -581,6 +593,7 @@ def chunk_bwd_dh_npu(
             USE_GV=gv is not None,
             STATE_V_FIRST=state_v_first,
             USE_NATIVE_DOT=native_dot,
+            USE_SAFE_DOT=safe_dot,
             MANUAL_DOT=manual_dot,
             K_OFFSET=0,
             V_OFFSET=0,
