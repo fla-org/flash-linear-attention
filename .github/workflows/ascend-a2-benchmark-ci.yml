@@ -236,6 +236,7 @@ jobs:
               > chunk_precond_gdn.log 2>&1
             ASCEND_RT_VISIBLE_DEVICES=3 python -m benchmarks.ops.run \
               --op chunk_precond_kda --base '' --json benchmark_chunk_precond_kda.json \
+              --custom-shapes '{"B1_T8192_H96_D128": {"B": 1, "T": 8192, "H": 96, "D": 128}, "B2_T16384_H16_D128": {"B": 2, "T": 16384, "H": 16, "D": 128}, "B4_T2048_H16_D128": {"B": 4, "T": 2048, "H": 16, "D": 128}, "B8_T1024_H8_D64": {"B": 8, "T": 1024, "H": 8, "D": 64}, "B2_T4096_H32_D128": {"B": 2, "T": 4096, "H": 32, "D": 128}, "B2_T2048_H16_D256": {"B": 2, "T": 2048, "H": 16, "D": 256}}' \
               > chunk_precond_kda.log 2>&1
           ) &
           pid_precond_gdn=$!
@@ -294,6 +295,35 @@ jobs:
           for row in results:
               assert row["op"] == "fused_recurrent_gdn2" and row["mode"] == "fwd", row
               assert all(math.isfinite(row[key]) and row[key] > 0 for key in ("median_ms", "p20_ms", "p80_ms")), row
+          PY
+
+      - name: Check chunk_precond_kda benchmark results
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, math
+
+          with open("benchmark_chunk_precond_kda.json") as f:
+              results = json.load(f)["results"]
+          # the same six 32GB-910B-safe shapes pinned via --custom-shapes above
+          shapes = {
+              "B1_T8192_H96_D128":  {"B": 1, "T": 8192,  "H": 96, "D": 128},
+              "B2_T16384_H16_D128": {"B": 2, "T": 16384, "H": 16, "D": 128},
+              "B4_T2048_H16_D128":  {"B": 4, "T": 2048,  "H": 16, "D": 128},
+              "B8_T1024_H8_D64":    {"B": 8, "T": 1024,  "H": 8,  "D": 64},
+              "B2_T4096_H32_D128":  {"B": 2, "T": 4096,  "H": 32, "D": 128},
+              "B2_T2048_H16_D256":  {"B": 2, "T": 2048,  "H": 16, "D": 256},
+          }
+          expected = {
+              (mode, s["B"], s["T"], s["H"], s["D"])
+              for s in shapes.values() for mode in ("fwd", "fwdbwd")
+          }
+          actual = {(r["mode"], r["B"], r["T"], r["H"], r["D"]) for r in results}
+          assert actual == expected and len(results) == len(expected), \
+              f"Incomplete precond_kda benchmark: missing {sorted(expected - actual)}"
+          for row in results:
+              assert all(math.isfinite(row[k]) and row[k] > 0
+                         for k in ("median_ms", "p20_ms", "p80_ms")), row
           PY
 
       - name: Upload benchmark results

@@ -17,7 +17,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils.op import exp2
-from fla.utils import autotune_cache_kwargs
+from fla.utils import ascend_compile_kwargs, autotune_cache_kwargs
 
 
 @triton.heuristics({
@@ -190,5 +190,6 @@ def chunk_precond_kda_fwd_intra_token_parallel(
         K=K,
         BT=BT,
         BC=BC,
+        **ascend_compile_kwargs(),
     )
     return Aqk, Akk

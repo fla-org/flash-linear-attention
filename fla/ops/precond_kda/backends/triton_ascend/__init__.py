@@ -33,15 +33,6 @@ class TritonAscendPrecondKDABackend(BaseBackend):
         from fla.utils import IS_NPU
         return IS_NPU
 
-    def chunk_precond_kda_verifier(self, *args, **kwargs) -> tuple[bool, str | None]:
-        q = args[0] if args else kwargs.get('q')
-        k = args[1] if len(args) > 1 else kwargs.get('k')
-        return _verify_on_npu(q, k)
-
-    def chunk_precond_kda(self, *args, **kwargs):
-        from fla.ops.precond_kda.backends.triton_ascend.chunk import chunk_precond_kda_npu
-        return chunk_precond_kda_npu(*args, **kwargs)
-
     def recompute_w_u_fwd_verifier(self, *args, **kwargs) -> tuple[bool, str | None]:
         k = args[0] if args else kwargs.get('k')
         return _verify_on_npu(k)

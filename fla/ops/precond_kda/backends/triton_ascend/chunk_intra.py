@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 import torch
 import triton
 import triton.language as tl
@@ -21,16 +23,19 @@ import triton.language as tl
 from fla.ops.precond_kda.backends.triton_ascend.chunk_intra_token_parallel import (
     chunk_precond_kda_fwd_intra_token_parallel,
 )
-from fla.ops.precond_kda.wy_fast import recompute_w_u_fwd
+
+# Direct `_npu` import: the dispatched mainline entry would re-enter dispatch
+# only to route straight back into this backend (kda backend precedent).
+from fla.ops.precond_kda.backends.triton_ascend.wy_fast import recompute_w_u_fwd_npu as recompute_w_u_fwd
 from fla.ops.utils import chunk_local_cumsum, prepare_chunk_indices
 from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.op import exp2, gather, unflatten_program_id
-from fla.utils import IS_GATHER_SUPPORTED, IS_NPU, TRITON_ABOVE_3_6_0
+from fla.utils import IS_GATHER_SUPPORTED, ascend_compile_kwargs
 
 # mainline picks tf32x3 on TF32-capable GPUs; triton-ascend accepts ieee/hf32 only
 DEFAULT_SOLVE_TRIL_PRECISION = 'ieee'
-# TF32 rounding makes safe-gate gradient error grow with context length; bf16x3 reduces it and runs faster than TF32.
-SAFE_GATE_DOT_PRECISION = tl.constexpr('bf16x3' if TRITON_ABOVE_3_6_0 and not IS_NPU else 'ieee')
+# triton-ascend accepts 'ieee'/'hf32' only; the safe-gate dots keep full fp32 on Ascend.
+SAFE_GATE_DOT_PRECISION = tl.constexpr('ieee')
 
 
 @triton.heuristics({
@@ -518,8 +523,17 @@ def chunk_precond_kda_fwd_intra_npu(
         Aqk: [B, T, H, BT] - q @ k_precond^T attention matrix
         Akk: [B, T, H, BT] - k @ k_precond^T (asymmetric) for WY
     """
+    # triton-ascend compiles 'ieee'/'hf32' only; tf32/tf32x3 are NVIDIA-only.
+    if solve_tril_precision in ('tf32', 'tf32x3'):
+        warnings.warn(
+            f"solve_tril_precision '{solve_tril_precision}' is NVIDIA-only; "
+            "falling back to 'hf32' on Ascend NPU",
+            stacklevel=2,
+        )
+        solve_tril_precision = 'hf32'
     if solve_tril_precision is None:
         solve_tril_precision = DEFAULT_SOLVE_TRIL_PRECISION
+    scale = float(scale)
 
     B, T, H, K = k.shape
     BT = chunk_size
@@ -559,6 +573,7 @@ def chunk_precond_kda_fwd_intra_npu(
             BK=BK,
             GATE_SHIFT=(-lower_bound if lower_bound is not None else 2.) * RCP_LN2,
             USE_GATHER=IS_GATHER_SUPPORTED,
+            **ascend_compile_kwargs(),
         )
     else:
         Aqk, Akk_diag = chunk_precond_kda_fwd_intra_token_parallel(
@@ -596,6 +611,7 @@ def chunk_precond_kda_fwd_intra_npu(
         BC=BC,
         SOLVE_TRIL_DOT_PRECISION=solve_tril_precision,
         USE_SAFE_GATE=safe_gate,
+        **ascend_compile_kwargs(),
     )
 
     # Step 3: WY representation
@@ -997,6 +1013,7 @@ def chunk_precond_kda_bwd_intra_npu(
         SAFE_GATE=safe_gate,
         GATE_SHIFT=(-lower_bound if lower_bound is not None else 2.) * RCP_LN2,
         USE_GATHER=IS_GATHER_SUPPORTED,
+        **ascend_compile_kwargs(),
     )
 
     dq = dq2

@@ -18,7 +18,7 @@ import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp2
-from fla.utils import autotune_cache_kwargs
+from fla.utils import ascend_compile_kwargs, autotune_cache_kwargs
 
 # mainline selects these via check_shared_mem() (a CUDA probe) and falls back to
 # [16, 32] on NPU; keep the NPU values explicitly.
@@ -123,6 +123,7 @@ def chunk_precond_kda_bwd_dAv_npu(
 
     dA = v.new_empty(B, T, H, BT, dtype=torch.float)
     dv = torch.empty_like(do)
+    scale = None if scale is None else float(scale)
     grid = (NT, B * H)
     chunk_precond_kda_bwd_kernel_dAv[grid](
         q=q,
@@ -142,52 +143,7 @@ def chunk_precond_kda_bwd_dAv_npu(
         BT=BT,
         BK=BK,
         BV=BV,
-    )
-    return dA, dv
-
-
-def chunk_precond_kda_bwd_dAv(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    do: torch.Tensor,
-    A: torch.Tensor | None = None,
-    scale: float = None,
-    cu_seqlens: torch.LongTensor | None = None,
-    chunk_size: int = 64,
-    chunk_indices: torch.LongTensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    B, T, H, K, V = *k.shape, do.shape[-1]
-    BT = chunk_size
-    if chunk_indices is None and cu_seqlens is not None:
-        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
-    # mainline derives this from a CUDA shared-mem probe; NPU always takes the 32 branch
-    CONST_TILING = 32
-    BK = min(max(triton.next_power_of_2(K), 16), CONST_TILING)
-    BV = min(max(triton.next_power_of_2(V), 16), CONST_TILING)
-    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
-
-    dA = v.new_empty(B, T, H, BT, dtype=torch.float)
-    dv = torch.empty_like(do)
-    grid = (NT, B * H)
-    chunk_precond_kda_bwd_kernel_dAv[grid](
-        q=q,
-        k=k,
-        v=v,
-        A=A,
-        do=do,
-        dv=dv,
-        dA=dA,
-        cu_seqlens=cu_seqlens,
-        chunk_indices=chunk_indices,
-        scale=scale,
-        T=T,
-        H=H,
-        K=K,
-        V=V,
-        BT=BT,
-        BK=BK,
-        BV=BV,
+        **ascend_compile_kwargs(),
     )
     return dA, dv
 
@@ -459,6 +415,7 @@ def chunk_precond_kda_bwd_wy_dqkg_npu(
     dq = torch.empty_like(q, dtype=torch.float)
     dk = torch.empty_like(k, dtype=torch.float)
     dkg = torch.empty_like(k_precond, dtype=torch.float)
+    scale = None if scale is None else float(scale)
     dv2 = torch.empty_like(v)
     dg = torch.empty_like(g, dtype=torch.float)
     db = torch.empty_like(beta, dtype=torch.float)
@@ -494,6 +451,7 @@ def chunk_precond_kda_bwd_wy_dqkg_npu(
         V=V,
         BT=BT,
         TRANSPOSE_STATE=transpose_state_layout,
+        **ascend_compile_kwargs(),
     )
     dv = dv2
     return dq, dk, dkg, dv, db, dg, dA
