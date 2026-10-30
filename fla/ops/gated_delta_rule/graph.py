@@ -12,10 +12,8 @@ import math
 import torch
 
 
-def _validate_graph_inputs(q, k, v, g, beta, scale, initial_state, cu_seqlens, options):
-    # only inspect host metadata: offset values belong to the caller's replay contract.
-    if q.device.type != 'npu':
-        raise ValueError("use_graph=True is supported only on NPU")
+def _validate_graph_config(q_shape, v_shape, dtype, options):
+    """Validate the graph execution contract shared by runtime and benchmark callers."""
     allowed = {
         'use_qk_l2norm_in_kernel': False, 'use_beta_sigmoid_in_kernel': False,
         'allow_neg_eigval': False, 'state_v_first': False, 'cu_seqlens_cpu': None,
@@ -26,13 +24,24 @@ def _validate_graph_inputs(q, k, v, g, beta, scale, initial_state, cu_seqlens, o
         expected = allowed.get(name)
         if name not in allowed or type(value) is not type(expected) or value != expected:
             raise ValueError(f"use_graph=True does not support {name}")
-    if q.ndim != 4 or q.shape[0] != 1 or q.shape[1] <= 0 or q.shape[2] <= 0:
+    if len(q_shape) != 4 or q_shape[0] != 1 or q_shape[1] <= 0 or q_shape[2] <= 0:
         raise ValueError("graph q must have shape [1, T_max>0, H>0, D]")
-    if q.shape[-1] not in (64, 128) or k.shape != q.shape or v.shape != q.shape:
+    if q_shape[-1] not in (64, 128) or v_shape != q_shape:
         raise ValueError("graph requires equal q/k/v shapes and K=V in {64, 128}")
+    if dtype not in ('float16', 'bfloat16'):
+        raise ValueError("graph q/k/v must have the same fp16 or bf16 dtype")
+
+
+def _validate_graph_inputs(q, k, v, g, beta, scale, initial_state, cu_seqlens, options):
+    # only inspect host metadata: offset values belong to the caller's replay contract.
+    if q.device.type != 'npu':
+        raise ValueError("use_graph=True is supported only on NPU")
+    _validate_graph_config(q.shape, v.shape, str(q.dtype).removeprefix('torch.'), options)
+    if k.shape != q.shape:
+        raise ValueError("graph requires equal q/k/v shapes")
     if g.shape != q.shape[:3] or beta.shape != q.shape[:3]:
         raise ValueError("graph g and beta must have shape [1, T_max, H]")
-    if q.dtype not in (torch.float16, torch.bfloat16) or k.dtype != q.dtype or v.dtype != q.dtype:
+    if k.dtype != q.dtype or v.dtype != q.dtype:
         raise ValueError("graph q/k/v must have the same fp16 or bf16 dtype")
     if g.dtype != torch.float32 or beta.dtype != q.dtype:
         raise ValueError("graph requires fp32 g and beta with q dtype")
