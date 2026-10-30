@@ -15,6 +15,7 @@ import torch
 import torch.nn.functional as F
 
 from fla.ops.gdn2 import chunk_gdn2, fused_recurrent_gdn2, naive_recurrent_gdn2
+from fla.ops.gdn2.fused_recurrent import fused_recurrent_gdn2_fwd
 from fla.ops.kda.gate import naive_kda_gate, naive_kda_lowerbound_gate
 from fla.utils import IS_AMD, IS_NPU, IS_NVIDIA, assert_close, device, device_platform
 
@@ -280,6 +281,62 @@ def test_fused_recurrent_varlen(cu_seqlens, H, K, V):
         ref_hts.append(ht_i)
     assert_close("o", torch.cat(refs, 1), tri, 0.005)
     assert_close("ht", torch.cat(ref_hts, 0), tri_ht, 0.005)
+
+
+@pytest.mark.parametrize('state_v_first', [False, True], ids=['kv', 'vk'])
+def test_fused_recurrent_empty_varlen_state(state_v_first):
+    N, T, H, K, V = 3, 3, 1, 16, 16
+    q, k, v, g, b, w, _, _ = _rand_inputs(1, T, H, H, K, V, torch.float32)
+    h0 = torch.randn(N, H, K, V, device=device)
+    if state_v_first:
+        h0 = h0.transpose(-1, -2).contiguous()
+    h0_ref = h0.clone()
+    cu_seqlens = torch.tensor([0, 1, 1, T], dtype=torch.long, device=device)
+
+    for initial_state in (None, h0):
+        _, ht = fused_recurrent_gdn2(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            b=b,
+            w=w,
+            initial_state=initial_state,
+            output_final_state=True,
+            state_v_first=state_v_first,
+            cu_seqlens=cu_seqlens,
+        )
+        expected = torch.zeros_like(h0_ref[1]) if initial_state is None else h0_ref[1]
+        torch.testing.assert_close(ht[1], expected, rtol=0, atol=0)
+    assert torch.equal(h0, h0_ref)
+
+
+def test_fused_recurrent_empty_spec_decoding():
+    H, K, V = 1, 16, 16
+    q, k, v, g, b, w, _, _ = _rand_inputs(1, 1, H, H, K, V, torch.float32)
+    state = torch.randn(1, H, K, V, device=device)
+    state_ref = state.clone()
+    invalid_state_guard = 1 << 30
+    state_indices = torch.tensor([invalid_state_guard, 0], dtype=torch.int32, device=device)[1:]
+
+    o, ht = fused_recurrent_gdn2_fwd(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        b=b,
+        w=w,
+        initial_state=state,
+        output_final_state=False,
+        inplace_final_state=True,
+        cu_seqlens=torch.tensor([0, 0], dtype=torch.int32, device=device),
+        ssm_state_indices=state_indices,
+        num_accepted_tokens=torch.zeros(1, dtype=torch.int32, device=device),
+    )
+
+    assert ht is state
+    assert torch.equal(o, torch.zeros_like(o))
+    assert torch.equal(state, state_ref)
 
 
 @pytest.mark.parametrize('chunk_size', [16, 32], ids=['chunk16', 'chunk32'])

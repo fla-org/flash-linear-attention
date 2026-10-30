@@ -7,6 +7,7 @@
 
 import importlib.util
 import inspect
+import logging
 import math
 import os
 
@@ -99,6 +100,9 @@ def test_chunk_invalid_chunk_size():
             (4, 1024, 4, 4, 128, 0.1, 1, False, torch.float),
             (2, 512, 2, 4, 60, 1, 1, False, torch.float),
             (2, 1024, 2, 8, 128, 0.1, 1, True, torch.float),
+            (2, 4, 2, 4, 7, 1, 1, False, torch.float),
+            (2, 4, 2, 4, 8, 1, 1, False, torch.bfloat16),
+            (2, 4, 2, 4, 9, 1, 1, False, torch.float16),
         ]
     ],
 )
@@ -156,6 +160,129 @@ def test_fused_recurrent(
     )
     assert_close("o", ref, tri, 0.005)
     assert_close("ht", ref_ht, tri_ht, 0.005)
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize(
+    ('packed', 'supplied_output'),
+    [
+        pytest.param(False, False, id='dense-allocated'),
+        pytest.param(False, True, id='dense-supplied'),
+        pytest.param(True, False, id='packed-zero-tail'),
+        pytest.param(True, True, id='packed-preserved-tail'),
+    ],
+)
+def test_fused_recurrent_output_buffer(packed, supplied_output):
+    torch.manual_seed(42)
+    H, HV, D = 2, 4, 60
+    lengths = [2, 4] if packed else [3, 3]
+    capacity = 8 if packed else 6
+    q, k = [F.normalize(torch.randn(1, capacity, H, D, device=device), dim=-1).bfloat16() for _ in range(2)]
+    v = torch.randn(1, capacity, HV, D, device=device, dtype=torch.bfloat16)
+    g = F.logsigmoid(torch.randn(1, capacity, HV, D, device=device))
+    beta = torch.rand(1, capacity, HV, device=device, dtype=torch.bfloat16)
+    initial_state = torch.randn(2, HV, D, D, device=device)
+    expected_output = torch.full_like(v, -3 if supplied_output else 0)
+    expected_states = []
+    offset = 0
+    inputs = dict(q=q, k=k, v=v, g=g, beta=beta)
+    for sequence, length in enumerate(lengths):
+        output, state = naive_recurrent_kda(
+            **{name: tensor[:, offset:offset + length] for name, tensor in inputs.items()},
+            initial_state=initial_state[sequence:sequence + 1],
+            output_final_state=True,
+        )
+        expected_output[:, offset:offset + length] = output
+        expected_states.append(state)
+        offset += length
+    if packed:
+        inputs['cu_seqlens'] = torch.tensor([0, lengths[0], sum(lengths)], device=device, dtype=torch.int32)
+    else:
+        inputs = {name: tensor.reshape(2, 3, *tensor.shape[2:]) for name, tensor in inputs.items()}
+    out = torch.full_like(inputs['v'], -3) if supplied_output else None
+    state_pool = initial_state.clone()
+    output, state = fused_recurrent_kda_fwd(
+        **inputs,
+        initial_state=state_pool,
+        output_final_state=True,
+        inplace_final_state=False,
+        out=out,
+    )
+    if supplied_output and output.data_ptr() != out.data_ptr():
+        pytest.fail('The recurrent call replaced the supplied output buffer')
+    output = output.reshape_as(expected_output)
+    if not torch.isfinite(output).all():
+        pytest.fail('The recurrent output contains unwritten or nonfinite values')
+    if packed and not torch.equal(output[:, sum(lengths):], expected_output[:, sum(lengths):]):
+        pytest.fail('Unused packed output capacity changed')
+    if not torch.equal(state_pool, initial_state):
+        pytest.fail('Out-of-place recurrence changed the input state')
+    assert_close('o', expected_output, output, 0.005)
+    assert_close('ht', torch.cat(expected_states), state, 0.005)
+
+
+@pytest.mark.parametrize('state_v_first', [False, True], ids=['kv', 'vk'])
+def test_fused_recurrent_empty_varlen_state(state_v_first):
+    torch.manual_seed(42)
+    N, T, H, D = 3, 3, 1, 16
+    q = torch.rand(1, T, H, D, device=device)
+    k = torch.rand(1, T, H, D, device=device)
+    v = torch.rand(1, T, H, D, device=device)
+    g = F.logsigmoid(torch.randn(1, T, H, D, device=device))
+    beta = torch.rand(1, T, H, device=device)
+    h0 = torch.randn(N, H, D, D, device=device)
+    if state_v_first:
+        h0 = h0.transpose(-1, -2).contiguous()
+    h0_ref = h0.clone()
+    cu_seqlens = torch.tensor([0, 1, 1, T], dtype=torch.long, device=device)
+
+    for initial_state in (None, h0):
+        _, ht = fused_recurrent_kda(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            initial_state=initial_state,
+            output_final_state=True,
+            state_v_first=state_v_first,
+            cu_seqlens=cu_seqlens,
+        )
+        expected = torch.zeros_like(h0_ref[1]) if initial_state is None else h0_ref[1]
+        torch.testing.assert_close(ht[1], expected, rtol=0, atol=0)
+    assert torch.equal(h0, h0_ref)
+
+
+def test_fused_recurrent_empty_spec_decoding():
+    torch.manual_seed(42)
+    H, D = 1, 16
+    q = torch.zeros(1, 1, H, D, device=device)
+    k = torch.zeros_like(q)
+    v = torch.zeros_like(q)
+    g = torch.zeros_like(q)
+    beta = torch.zeros(1, 1, H, device=device)
+    state = torch.randn(1, H, D, D, device=device)
+    state_ref = state.clone()
+    invalid_state_guard = 1 << 30
+    state_indices = torch.tensor([invalid_state_guard, 0], dtype=torch.int32, device=device)[1:]
+
+    o, ht = fused_recurrent_kda_fwd(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        beta=beta,
+        initial_state=state,
+        output_final_state=False,
+        inplace_final_state=True,
+        cu_seqlens=torch.tensor([0, 0], dtype=torch.int32, device=device),
+        ssm_state_indices=state_indices,
+        num_accepted_tokens=torch.zeros(1, dtype=torch.int32, device=device),
+    )
+
+    assert ht is state
+    assert torch.equal(o, torch.zeros_like(o))
+    assert torch.equal(state, state_ref)
 
 
 @pytest.mark.parametrize(
@@ -224,6 +351,7 @@ def test_fused_recurrent_use_beta_sigmoid_in_kernel(
             (2, 512, 3, 60, 1, 1, torch.float),
             (3, 1000, 4, 100, 0.1, 1, torch.float),
             (4, 1024, 4, 128, 0.1, 1, torch.float),
+            (2, 4, 4, 9, 1, 1, torch.bfloat16),
         ]
     ],
 )
@@ -481,6 +609,159 @@ def test_fused_recurrent_vllm_decode(
     mask = torch.ones(max_cache_slots, dtype=torch.bool, device=device)
     mask[state_indices.long()] = False
     assert_close("Untouched ht", ref_state_pool[mask], tri_state_pool[mask], 0.0)
+
+
+@pytest.mark.parametrize(
+    ('state_v_first', 'packed', 'index_stride', 'accepted_tokens'),
+    [
+        pytest.param(False, False, 2, 2, id='dense-strided-accepted'),
+        pytest.param(True, True, 2, 2, id='packed-vfirst-strided-accepted'),
+        pytest.param(False, True, 1, 1, id='packed-contiguous-first'),
+    ],
+)
+@pytest.mark.skipif(not (IS_NVIDIA or IS_NPU), reason='Indexed KDA requires CUDA or NPU')
+def test_fused_recurrent_indexed_state(state_v_first, packed, index_stride, accepted_tokens, monkeypatch):
+    _check_fused_recurrent_indexed_state(
+        state_v_first=state_v_first,
+        packed=packed,
+        index_stride=index_stride,
+        accepted_tokens=accepted_tokens,
+        state_output='inplace',
+        monkeypatch=monkeypatch,
+    )
+
+
+@pytest.mark.parametrize(
+    ('state_v_first', 'packed', 'index_stride', 'accepted_tokens', 'state_output'),
+    [
+        pytest.param(True, False, 1, 1, 'separate', id='dense-vfirst-token-states'),
+        pytest.param(False, True, 2, 2, 'separate', id='packed-strided-token-states'),
+        pytest.param(False, False, 2, 2, 'none', id='dense-strided-no-state'),
+        pytest.param(True, True, 1, 1, 'none', id='packed-vfirst-no-state'),
+    ],
+)
+@pytest.mark.skipif(not (IS_NVIDIA or IS_NPU), reason='Indexed KDA requires CUDA or NPU')
+def test_fused_recurrent_indexed_output(state_v_first, packed, index_stride, accepted_tokens, state_output, monkeypatch):
+    _check_fused_recurrent_indexed_state(
+        state_v_first=state_v_first,
+        packed=packed,
+        index_stride=index_stride,
+        accepted_tokens=accepted_tokens,
+        state_output=state_output,
+        monkeypatch=monkeypatch,
+    )
+
+
+def _check_fused_recurrent_indexed_state(state_v_first, packed, index_stride, accepted_tokens, state_output, monkeypatch):
+    monkeypatch.setattr("fla.utils.testing.FLA_CI_ENV", False)
+    torch.manual_seed(42)
+    H, HV, K, V = 2, 4, 32, 24
+    lengths = [2, 4] if packed else [3, 3]
+    q, k = [F.normalize(torch.randn(1, 6, H, K, device=device), dim=-1) for _ in range(2)]
+    v = torch.randn(1, 6, HV, V, device=device)
+    g = F.logsigmoid(torch.randn(1, 6, HV, K, device=device))
+    beta = torch.rand(1, 6, HV, device=device)
+    original_state = torch.randn(16, HV, K, V, device=device)
+    indices = torch.arange(16, dtype=torch.int32, device=device).reshape(2, 8)[:, ::2]
+    if index_stride == 1:
+        indices = indices.contiguous()
+    accepted = torch.full((2,), accepted_tokens, dtype=torch.int32, device=device)
+    expected_pool = original_state.clone()
+    expected_outputs, expected_states = [], []
+    offset = 0
+    for sequence, length in enumerate(lengths):
+        slot = indices[sequence, accepted_tokens - 1].item()
+        state = original_state[slot:slot + 1].clone()
+        for token in range(length):
+            position = offset + token
+            output, state = naive_recurrent_kda(
+                q=q[:, position:position + 1],
+                k=k[:, position:position + 1],
+                v=v[:, position:position + 1],
+                g=g[:, position:position + 1],
+                beta=beta[:, position:position + 1],
+                initial_state=state,
+                output_final_state=True,
+            )
+            expected_outputs.append(output)
+            expected_states.append(state.clone())
+            expected_pool[indices[sequence, token].item()] = state[0]
+        offset += length
+    expected_output = torch.cat(expected_outputs, dim=1)
+    expected_states = torch.cat(expected_states, dim=0)
+    inputs = dict(q=q, k=k, v=v, g=g, beta=beta)
+    if packed:
+        inputs['cu_seqlens'] = torch.tensor([0, lengths[0], sum(lengths)], dtype=torch.int32, device=device)
+    else:
+        inputs = {name: tensor.reshape(2, 3, *tensor.shape[2:]) for name, tensor in inputs.items()}
+    pool = original_state.transpose(-1, -2).contiguous() if state_v_first else original_state.clone()
+    output, states = fused_recurrent_kda_fwd(
+        **inputs,
+        initial_state=pool,
+        output_final_state=state_output == 'separate',
+        inplace_final_state=state_output == 'inplace',
+        state_v_first=state_v_first,
+        ssm_state_indices=indices,
+        num_accepted_tokens=accepted,
+    )
+    assert_close('indexed output', expected_output, output.reshape_as(expected_output), 0.002)
+    pool_k_first = pool.transpose(-1, -2) if state_v_first else pool
+    if state_output == 'inplace':
+        untouched = torch.ones(16, dtype=torch.bool, device=device)
+        for sequence, length in enumerate(lengths):
+            untouched[indices[sequence, :length].long()] = False
+        if not torch.equal(original_state[untouched], pool_k_first[untouched]):
+            changed = (original_state != pool_k_first).flatten(1).any(1)
+            unexpected_slots = torch.nonzero(untouched & changed).flatten().tolist()
+            pytest.fail(f'Unaddressed state slots changed during indexed updates: {unexpected_slots}')
+        try:
+            assert_close('updated pool', expected_pool, pool_k_first, 0.002)
+        except AssertionError:
+            for sequence, length in enumerate(lengths):
+                for token in range(length):
+                    slot = indices[sequence, token].item()
+                    error = (expected_pool[slot] - pool_k_first[slot]).abs()
+                    head_errors = error.amax(dim=(-2, -1)).tolist()
+                    head, offset = divmod(error.argmax().item(), K * V)
+                    key, value = divmod(offset, V)
+                    logging.getLogger(__name__).error(
+                        f'Indexed state sequence={sequence} token={token} slot={slot} '
+                        f'terminal={token == length - 1} head_max_abs={head_errors} '
+                        f'head={head} key={key} value={value} '
+                        f'expected={expected_pool[slot, head, key, value].item()} '
+                        f'actual={pool_k_first[slot, head, key, value].item()}',
+                    )
+            raise
+        terminal_states = pool_k_first[indices[torch.arange(2, device=device),
+                                               torch.tensor(lengths, device=device) - 1].long()]
+    else:
+        if not torch.equal(original_state, pool_k_first):
+            pytest.fail('The input state pool changed during out-of-place execution')
+        if state_output == 'none':
+            if states is not None:
+                pytest.fail('State output must be None when state storage is disabled')
+            return
+        states = states.transpose(-1, -2) if state_v_first else states
+        if states.shape != expected_states.shape:
+            pytest.fail(f'Expected token states {expected_states.shape}, received {states.shape}')
+        assert_close('token states', expected_states, states, 0.002)
+        terminal_states = states[torch.tensor(lengths, device=device).cumsum(0) - 1]
+    next_inputs = {name: tensor[:, :2].reshape(2, 1, *tensor.shape[2:])
+                   for name, tensor in dict(q=q, k=k, v=v, g=g, beta=beta).items()}
+    reference_terminal = expected_states[torch.tensor(lengths, device=device).cumsum(0) - 1]
+    expected_next, expected_final = naive_recurrent_kda(
+        **next_inputs,
+        initial_state=reference_terminal,
+        output_final_state=True,
+    )
+    next_output, next_state = fused_recurrent_kda_fwd(
+        **next_inputs,
+        initial_state=terminal_states.contiguous(),
+        output_final_state=True,
+        inplace_final_state=False,
+    )
+    assert_close('resumed output', expected_next, next_output, 0.002)
+    assert_close('resumed state', expected_final, next_state, 0.002)
 
 
 @pytest.mark.parametrize(

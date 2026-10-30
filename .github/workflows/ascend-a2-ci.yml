@@ -5,13 +5,6 @@ name: ascend-a2-ci
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-    paths:
-      - "**/*.py"
-      - "pyproject.toml"
-      - ".github/workflows/*.yml"
   pull_request:
     branches:
       - main
@@ -73,7 +66,6 @@ jobs:
     needs: changes
     if: |
       github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'push' ||
       (
         github.event_name == 'pull_request' &&
         (
@@ -170,10 +162,12 @@ jobs:
             tests/ops/test_gdn2.py \
             tests/ops/test_kda.py \
             tests/ops/test_gla.py \
+            tests/ops/test_oja.py \
             tests/ops/test_attnres.py \
             tests/ops/test_solve_tril.py \
             tests/ops/test_delta.py \
-            tests/ops/test_precond_gated_delta.py
+            tests/ops/test_precond_gated_delta.py \
+            tests/ops/test_wall_attn.py
 
       - name: Run NPU graph tests serially
         shell: bash

@@ -29,6 +29,7 @@ from .log_linear_mamba2 import LogLinearMamba2
 from .mamba import Mamba
 from .mamba2 import Mamba2
 from .mamba3 import Mamba3
+from .memory_attn import MemoryAttention
 from .mesa_net import MesaNet
 from .mla import MultiheadLatentAttention
 from .moba import MoBA
@@ -74,6 +75,7 @@ __all__ = [
     'Mamba',
     'Mamba2',
     'Mamba3',
+    'MemoryAttention',
     'MesaNet',
     'MoBA',
     'MomAttention',

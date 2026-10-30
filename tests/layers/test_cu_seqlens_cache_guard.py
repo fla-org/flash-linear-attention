@@ -13,8 +13,9 @@ from fla.layers.bitattn import BitAttention
 from fla.layers.mla import MultiheadLatentAttention
 from fla.layers.moba import MoBA
 from fla.layers.nsa import NativeSparseAttention
+from fla.layers.stickbreaking_attn import StickBreakingAttention
 from fla.models.cache_utils import Cache
-from fla.utils import device
+from fla.utils import IS_AMD, IS_INTEL, IS_NVIDIA, device
 
 try:
     import flash_attn  # noqa: F401
@@ -58,6 +59,13 @@ except ImportError:
             True,
             id="attn",
         ),
+        pytest.param(
+            StickBreakingAttention,
+            dict(hidden_size=128, num_heads=2, layer_idx=0),
+            False,
+            id="stickbreaking_attn",
+            marks=pytest.mark.skipif(not (IS_NVIDIA or IS_AMD or IS_INTEL), reason="Requires a supported GPU"),
+        ),
     ],
 )
 def test_cu_seqlens_rejected_with_non_empty_cache(layer_cls: type, layer_kwargs: dict, requires_flash: bool):
@@ -71,9 +79,9 @@ def test_cu_seqlens_rejected_with_non_empty_cache(layer_cls: type, layer_kwargs:
     cu_seqlens = torch.tensor([0, 7, 16], device=device, dtype=torch.int32)
 
     cache = Cache()
-    layer(hidden_states=packed_states, past_key_values=cache, cu_seqlens=cu_seqlens, use_cache=True)
+    layer(hidden_states=packed_states, attention_mask=None, past_key_values=cache, cu_seqlens=cu_seqlens, use_cache=True)
 
     cache = Cache()
-    layer(hidden_states=prefill_states, past_key_values=cache, use_cache=True)
+    layer(hidden_states=prefill_states, attention_mask=None, past_key_values=cache, use_cache=True)
     with pytest.raises(AssertionError, match="cu_seqlens should not be provided"):
-        layer(hidden_states=packed_states, past_key_values=cache, cu_seqlens=cu_seqlens, use_cache=True)
+        layer(hidden_states=packed_states, attention_mask=None, past_key_values=cache, cu_seqlens=cu_seqlens, use_cache=True)
