@@ -29,8 +29,12 @@ class AttnTileLangBackend(TileLangBackend):
         window_size: int | None = None,
         cu_seqlens: torch.LongTensor | None = None,
         chunk_indices: torch.LongTensor | None = None,
+        output_dtype: torch.dtype | None = None,
     ) -> tuple[bool, str | None]:
-        if q.dtype not in (torch.float16, torch.bfloat16, torch.float32):
+        if q.dtype not in (torch.float16, torch.bfloat16):
+            # float32 fails tilelang layout inference at kernel-build time
+            # (see #1590, tile-ai/tilelang#3669); fall back to Triton until
+            # the upstream limitation is fixed
             return False, f"TileLang backend does not support dtype {q.dtype}; fall back to Triton"
         return True, None
 
@@ -45,9 +49,10 @@ class AttnTileLangBackend(TileLangBackend):
         window_size: int | None = None,
         cu_seqlens: torch.LongTensor | None = None,
         chunk_indices: torch.LongTensor | None = None,
+        output_dtype: torch.dtype | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        from fla.ops.attn.backends.tilelang.parallel import parallel_attn_fwd_tilelang
-        return parallel_attn_fwd_tilelang(
+        from fla.ops.attn.backends.tilelang.parallel import parallel_attn_fwd
+        return parallel_attn_fwd(
             q=q,
             k=k,
             v=v,
@@ -57,6 +62,7 @@ class AttnTileLangBackend(TileLangBackend):
             window_size=window_size,
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
+            output_dtype=output_dtype,
         )
 
     def parallel_attn_bwd_verifier(
@@ -75,7 +81,10 @@ class AttnTileLangBackend(TileLangBackend):
         cu_seqlens: torch.LongTensor | None = None,
         chunk_indices: torch.LongTensor | None = None,
     ) -> tuple[bool, str | None]:
-        if q.dtype not in (torch.float16, torch.bfloat16, torch.float32):
+        if q.dtype not in (torch.float16, torch.bfloat16):
+            # float32 fails tilelang layout inference at kernel-build time
+            # (see #1590, tile-ai/tilelang#3669); fall back to Triton until
+            # the upstream limitation is fixed
             return False, f"TileLang backend does not support dtype {q.dtype}; fall back to Triton"
         return True, None
 
@@ -95,8 +104,8 @@ class AttnTileLangBackend(TileLangBackend):
         cu_seqlens: torch.LongTensor | None = None,
         chunk_indices: torch.LongTensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
-        from fla.ops.attn.backends.tilelang.parallel import parallel_attn_bwd_tilelang
-        return parallel_attn_bwd_tilelang(
+        from fla.ops.attn.backends.tilelang.parallel import parallel_attn_bwd
+        return parallel_attn_bwd(
             q=q,
             k=k,
             v=v,
@@ -107,7 +116,6 @@ class AttnTileLangBackend(TileLangBackend):
             sink_bias=sink_bias,
             scale=scale,
             window_size=window_size,
-            chunk_size=chunk_size,
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
         )

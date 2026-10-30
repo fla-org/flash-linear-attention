@@ -42,7 +42,6 @@ from .utils import (
     modal_omega,
     modal_phase,
     prepare_cu_seqlens,
-    segment_sum,
     validate_cyfa_inputs,
     validate_initial_state,
 )
@@ -1373,7 +1372,14 @@ class ChunkCyFAFunction(torch.autograd.Function):
             chunk_indices=chunk_indices,
             output_dtype=torch.float32,
         )
-        lambdas = cyfa_clock_cumsum(delta, cu_seqlens=cu_seqlens)
+        n_seqs = q.shape[0] if cu_seqlens is None else int(cu_seqlens.numel() - 1)
+        # the clock scan already accumulates the per-segment total, so the final
+        # lambda does not need a second reduction (which would sync on varlen).
+        lambda_total = (
+            torch.empty(n_seqs, q.shape[2], device=q.device, dtype=torch.float32)
+            if output_final_state else None
+        )
+        lambdas = cyfa_clock_cumsum(delta, cu_seqlens=cu_seqlens, clock_total=lambda_total)
         if initial_lambda is not None:
             lambdas = add_segment_initial(lambdas, initial_lambda, cu_seqlens=cu_seqlens)
         write = _point_write(
@@ -1412,9 +1418,7 @@ class ChunkCyFAFunction(torch.autograd.Function):
             chunk_indices=chunk_indices,
         )
         if output_final_state:
-            flt = segment_sum(delta, cu_seqlens=cu_seqlens)
-            if initial_lambda is not None:
-                flt = flt + initial_lambda
+            flt = lambda_total if initial_lambda is None else lambda_total + initial_lambda
         else:
             flt = None
 
@@ -1569,18 +1573,31 @@ class ChunkCyFAFunction(torch.autograd.Function):
                 phase_force[:, -1, :].add_(dlt)
             else:
                 end_indices = cu_seqlens[1:].to(device=phase_force.device, dtype=torch.long) - 1
-                phase_force[0].index_add_(0, end_indices, dlt)
+                nonempty = (cu_seqlens[1:] > cu_seqlens[:-1])[:, None]
+                if phase_force.shape[1] > 0:
+                    phase_force[0].index_add_(
+                        0,
+                        end_indices.clamp(0, phase_force.shape[1] - 1),
+                        dlt.masked_fill(~nonempty, 0),
+                    )
         ddelta = chunk_global_cumsum(
             phase_force,
             reverse=True,
             cu_seqlens=cu_seqlens,
             output_dtype=torch.float32,
         )
-        dlambda0 = (
-            None
-            if initial_lambda is None
-            else segment_sum(phase_force, cu_seqlens=cu_seqlens)
-        )
+        if initial_lambda is None:
+            dlambda0 = None
+        elif cu_seqlens is None:
+            # the reverse scan starts at the full per-segment total
+            dlambda0 = ddelta[:, 0].contiguous()
+        else:
+            starts = cu_seqlens[:-1].to(dtype=torch.long).clamp(max=phase_force.shape[1] - 1)
+            nonempty = cu_seqlens[1:] > cu_seqlens[:-1]
+            dlambda0 = ddelta[0].index_select(0, starts).masked_fill(~nonempty[:, None], 0)
+        if dlt is not None and cu_seqlens is not None and initial_lambda is not None:
+            empty = (cu_seqlens[1:] == cu_seqlens[:-1])[:, None]
+            dlambda0 += dlt.masked_fill(~empty, 0)
         dg_force = dg_force_v.add_(dg_force_k)
         dg = chunk_local_cumsum(
             dg_force,

@@ -57,6 +57,9 @@ def cross_entropy_fwd_kernel(
     logits = logits.to(tl.float32) * logit_scale
     if HAS_SOFTCAPPING:
         logits = logit_softcapping * tanh(logits / logit_softcapping)
+    # Non-positive scale and tanh turn the -inf padding into NaN or a finite value,
+    # which leaks into the online logsumexp on a partial vocab tile.
+    logits = tl.where(col_offsets < n_cols, logits, -float("inf"))
     max_logits = tl.max(logits, 0)
     if HAS_SMOOTHING:
         sum_logits = tl.sum(tl.where(col_offsets < n_cols, logits, 0.0), 0)

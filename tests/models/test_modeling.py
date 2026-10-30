@@ -25,7 +25,7 @@ from fla.models import (
 )
 from fla.utils import device_name, find_spec_cached
 
-from .utils import check_forward, check_generation
+from .utils import check_forward, check_generation, create_model_and_config
 
 pytestmark = pytest.mark.skipif(device_name == 'cpu', reason='Model kernels require an accelerator.')
 
@@ -46,6 +46,24 @@ MODEL_CONFIGS = [
     pytest.param(NSAConfig, marks=REQUIRES_FLASH_ATTN),
     RetNetConfig,
 ]
+
+
+@REQUIRES_FLASH_ATTN
+def test_deltaformer_cache_default():
+    torch.manual_seed(42)
+    model, config = create_model_and_config(DeltaFormerConfig, L=1, H=2, D=64, dtype=torch.bfloat16, vocab_size=128)
+    model.eval()
+    input_ids = torch.randint(0, config.vocab_size, (1, 64), device=device_name)
+
+    assert config.use_cache is False
+    assert model.config.use_cache is False
+    with torch.no_grad():
+        default_outputs = model(input_ids)
+        explicit_outputs = model(input_ids, use_cache=False)
+
+    assert default_outputs.past_key_values is None
+    assert explicit_outputs.past_key_values is None
+    torch.testing.assert_close(default_outputs.logits, explicit_outputs.logits)
 
 
 @pytest.mark.parametrize('config_class', MODEL_CONFIGS, ids=lambda cls: cls.model_type)

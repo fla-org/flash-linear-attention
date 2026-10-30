@@ -19,10 +19,10 @@ from fla.ops.generalized_delta_rule.dplr import chunk_dplr_delta_rule
 from fla.ops.generalized_delta_rule.dplr.backends import DPLRTileLangBackend
 from fla.ops.generalized_delta_rule.dplr.naive import dplr_recurrence
 from fla.ops.rwkv7 import chunk_rwkv7
-from fla.utils import assert_close, device
+from fla.utils import IS_NPU, IS_TF32_SUPPORTED, assert_close, device
 from tests.cp.utils import gather_global, shard_tensor
 
-pytestmark = pytest.mark.skipif(device != "cuda", reason="requires CUDA or ROCm GPUs")
+pytestmark = pytest.mark.skipif(not (IS_TF32_SUPPORTED or IS_NPU), reason="requires NVIDIA Ampere or newer, or Ascend")
 
 
 def _chunk_rwkv7(q, k, v, a, b, gk, scale=None, **kwargs):
@@ -117,9 +117,12 @@ def _run_chunk(
     op=chunk_dplr_delta_rule,
     op_chunk_size: int = 64,
     assert_tilelang: bool = False,
+    layout: str = 'contiguous',
+    disable_recompute: bool = False,
 ):
     T = sum(lengths)
-    assert T % world_size == 0, f"T={T} must be divisible by world_size={world_size}"
+    num_parts = world_size * (2 if layout == 'zigzag' else 1)
+    assert T % num_parts == 0, f"T={T} must be divisible by num_parts={num_parts}"
 
     q_global, k_global, v_global, a_global, b_global, gk_global, do_global = _make_inputs(
         rank=rank,
@@ -146,15 +149,15 @@ def _run_chunk(
 
     dist.barrier()
 
-    context = build_cp_context(cu_seqlens_global, group=dist.group.WORLD)
+    context = build_cp_context(cu_seqlens_global, group=dist.group.WORLD, layout=layout)
 
-    q_local = shard_tensor(q_global, rank=rank, world_size=world_size).clone().detach().requires_grad_(True)
-    k_local = shard_tensor(k_global, rank=rank, world_size=world_size).clone().detach().requires_grad_(True)
-    v_local = shard_tensor(v_global, rank=rank, world_size=world_size).clone().detach().requires_grad_(True)
-    a_local = shard_tensor(a_global, rank=rank, world_size=world_size).clone().detach().requires_grad_(True)
-    b_local = shard_tensor(b_global, rank=rank, world_size=world_size).clone().detach().requires_grad_(True)
-    gk_local = shard_tensor(gk_global, rank=rank, world_size=world_size).clone().detach().requires_grad_(True)
-    do_local = shard_tensor(do_global, rank=rank, world_size=world_size).clone()
+    q_local = shard_tensor(q_global, rank=rank, world_size=world_size, layout=layout).clone().detach().requires_grad_(True)
+    k_local = shard_tensor(k_global, rank=rank, world_size=world_size, layout=layout).clone().detach().requires_grad_(True)
+    v_local = shard_tensor(v_global, rank=rank, world_size=world_size, layout=layout).clone().detach().requires_grad_(True)
+    a_local = shard_tensor(a_global, rank=rank, world_size=world_size, layout=layout).clone().detach().requires_grad_(True)
+    b_local = shard_tensor(b_global, rank=rank, world_size=world_size, layout=layout).clone().detach().requires_grad_(True)
+    gk_local = shard_tensor(gk_global, rank=rank, world_size=world_size, layout=layout).clone().detach().requires_grad_(True)
+    do_local = shard_tensor(do_global, rank=rank, world_size=world_size, layout=layout).clone()
 
     dist.barrier()
 
@@ -179,6 +182,7 @@ def _run_chunk(
             gk=gk_local,
             safe_gate=True,
             chunk_size=op_chunk_size,
+            disable_recompute=disable_recompute,
             cp_context=context,
         )
 
@@ -190,15 +194,17 @@ def _run_chunk(
         if assert_tilelang:
             DPLRTileLangBackend.chunk_dplr_delta_rule = original_chunk
 
-    o_cp_global = gather_global(o_local, world_size=world_size)
-    dq_cp_global = gather_global(q_local.grad, world_size=world_size)
-    dk_cp_global = gather_global(k_local.grad, world_size=world_size)
-    dv_cp_global = gather_global(v_local.grad, world_size=world_size)
-    da_cp_global = gather_global(a_local.grad, world_size=world_size)
-    db_cp_global = gather_global(b_local.grad, world_size=world_size)
-    dgk_cp_global = gather_global(gk_local.grad, world_size=world_size)
+    o_cp_global = gather_global(o_local, world_size=world_size, layout=layout)
+    dq_cp_global = gather_global(q_local.grad, world_size=world_size, layout=layout)
+    dk_cp_global = gather_global(k_local.grad, world_size=world_size, layout=layout)
+    dv_cp_global = gather_global(v_local.grad, world_size=world_size, layout=layout)
+    da_cp_global = gather_global(a_local.grad, world_size=world_size, layout=layout)
+    db_cp_global = gather_global(b_local.grad, world_size=world_size, layout=layout)
+    dgk_cp_global = gather_global(gk_local.grad, world_size=world_size, layout=layout)
 
     if rank == 0:
+        for tensor in (o_cp_global, dq_cp_global, dk_cp_global, dv_cp_global, da_cp_global, db_cp_global, dgk_cp_global):
+            assert torch.isfinite(tensor).all()
         assert_close("Output", ref_out, o_cp_global, ratio=8e-3, warning=False)
         assert_close("dq", ref_dq, dq_cp_global, ratio=8e-3, warning=False)
         assert_close("dk", ref_dk, dk_cp_global, ratio=8e-3, warning=False)
@@ -208,20 +214,37 @@ def _run_chunk(
         assert_close("dgk", ref_dgk, dgk_cp_global, ratio=8e-3, warning=False)
 
 
+@pytest.mark.parametrize('disable_recompute', [False, True], ids=['recompute', 'saved'])
 @pytest.mark.parametrize(
-    ('world_size', 'lengths', 'op'),
+    ('world_size', 'lengths', 'op', 'layout'),
     [
-        pytest.param(2, [400, 624], chunk_dplr_delta_rule, id='cp2-sequence-cut'),
-        pytest.param(2, [512, 512], chunk_dplr_delta_rule, id='cp2-boundary-aligned'),
-        pytest.param(4, [700, 324], chunk_dplr_delta_rule, id='cp4-sequence-cut'),
-        pytest.param(4, [1024], chunk_dplr_delta_rule, id='cp4-single-sequence'),
-        pytest.param(2, [100, 200, 300, 424], chunk_dplr_delta_rule, id='cp2-short-sequences'),
-        pytest.param(2, [400, 624], _chunk_rwkv7, id='cp2-rwkv7-sequence-cut'),
-        pytest.param(4, [1024], _chunk_rwkv7, id='cp4-rwkv7-single-sequence'),
+        pytest.param(2, [400, 624], chunk_dplr_delta_rule, 'contiguous', id='cp2-sequence-cut'),
+        pytest.param(2, [512, 512], chunk_dplr_delta_rule, 'contiguous', id='cp2-boundary-aligned'),
+        pytest.param(4, [700, 324], chunk_dplr_delta_rule, 'contiguous', id='cp4-sequence-cut'),
+        pytest.param(4, [1024], chunk_dplr_delta_rule, 'contiguous', id='cp4-single-sequence'),
+        pytest.param(2, [100, 200, 300, 424], chunk_dplr_delta_rule, 'contiguous', id='cp2-short-sequences'),
+        pytest.param(2, [400, 624], _chunk_rwkv7, 'contiguous', id='cp2-rwkv7-sequence-cut'),
+        pytest.param(4, [1024], _chunk_rwkv7, 'contiguous', id='cp4-rwkv7-single-sequence'),
+        pytest.param(1, [128, 472, 300, 124], chunk_dplr_delta_rule, 'contiguous', id='cp1-packed'),
+        pytest.param(1, [1024], chunk_dplr_delta_rule, 'zigzag', id='cp1-zigzag-single-sequence'),
+        pytest.param(1, [128, 472, 300, 124], chunk_dplr_delta_rule, 'zigzag', id='cp1-zigzag-packed'),
+        pytest.param(2, [128, 472, 300, 124], chunk_dplr_delta_rule, 'zigzag', id='cp2-zigzag-packed'),
+        pytest.param(1, [128, 472, 300, 124], _chunk_rwkv7, 'zigzag', id='cp1-rwkv7-zigzag-packed'),
+        pytest.param(2, [128, 472, 300, 124], _chunk_rwkv7, 'zigzag', id='cp2-rwkv7-zigzag-packed'),
     ],
 )
-def test_chunk(run_distributed, world_size, lengths, op):
-    run_distributed(worker=_run_chunk, world_size=world_size, H=4, D=64, lengths=lengths, dtype=torch.bfloat16, op=op)
+def test_chunk(run_distributed, world_size, lengths, op, layout, disable_recompute):
+    run_distributed(
+        worker=_run_chunk,
+        world_size=world_size,
+        H=4,
+        D=64,
+        lengths=lengths,
+        dtype=torch.bfloat16,
+        op=op,
+        layout=layout,
+        disable_recompute=disable_recompute,
+    )
 
 
 @pytest.mark.skipif(os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") == "1", reason="backend dispatch disabled")

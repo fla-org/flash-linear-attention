@@ -192,9 +192,7 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
         if cu_seqlens is not None:
             chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size, cu_seqlens_cpu=cu_seqlens_cpu)
 
-        # chunk_dplr_fwd returns the possibly CP-merged + compressed initial_state;
-        # for CP this is the [1, HV, K, V] state we must save for backward so the
-        # forward recomputation can rebuild the correct per-rank h.
+        # retain the CP boundary states for backward recomputation
         o, final_state, initial_state, cache = chunk_dplr_fwd(
             q=q,
             k=k,
@@ -286,11 +284,8 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
         scale = ctx.scale
         cp_context = ctx.cp_context
 
-        # When CP compressed the saved initial_state to a single [1, HV, K, V] entry
-        # (for the first local sequence only), expand it back to [N_local, HV, K, V]
-        # BEFORE the forward recomputation. Otherwise chunk_dplr_fwd_h indexes past
-        # the buffer for the non-first sequences on this rank and reads garbage.
-        if cp_context is not None and initial_state is not None and initial_state.shape[0] == 1:
+        # restore each part's boundary state to its original local sequence before recomputation
+        if cp_context is not None:
             initial_state = expand_h0(initial_state, context=cp_context)
 
         if not ctx.disable_recompute:
