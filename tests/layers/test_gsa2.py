@@ -58,6 +58,51 @@ def test_gsa2_layer(num_heads: int, num_v_heads: int, use_short_conv: bool, num_
             assert torch.isfinite(p.grad).all(), f"{name}.grad has non-finite values"
 
 
+@pytest.mark.parametrize(
+    ('B', 'T', 'num_slots', 'level2_axis'),
+    [
+        pytest.param(1, 65, 64, 'head', id='single-partial-chunk'),
+        pytest.param(1, 129, 256, 'slot', id='single-slot-axis'),
+        pytest.param(2, 65, 128, 'head', id='multiple-sequences'),
+    ],
+)
+def test_gsa2_masked_packed_gradients(B: int, T: int, num_slots: int, level2_axis: str):
+    torch.manual_seed(42)
+    layer = GatedSlotAttention2(
+        hidden_size=128,
+        head_dim=64,
+        num_heads=2,
+        num_slots=num_slots,
+        level2_axis=level2_axis,
+        use_short_conv=True,
+        use_w_conv=True,
+        layer_idx=0,
+    ).to(device=device, dtype=torch.bfloat16).train()
+    inputs = torch.randn(B, T, 128, device=device, dtype=torch.bfloat16)
+    mask = torch.arange(T, device=device)[None, :].expand(B, -1) >= 3
+    cu_seqlens_cpu = torch.arange(0, (B + 1) * (T - 3), T - 3, dtype=torch.int32)
+    cu_seqlens = cu_seqlens_cpu.to(device)
+    cotangent = torch.randn_like(inputs)[mask]
+    dense = inputs.detach().clone().requires_grad_(True)
+    packed = inputs.detach().clone().requires_grad_(True)
+    expected = layer(dense, attention_mask=mask, use_cache=False)[0][mask]
+    actual = layer(
+        packed[mask].unsqueeze(0),
+        cu_seqlens=cu_seqlens,
+        cu_seqlens_cpu=cu_seqlens_cpu,
+        use_cache=False,
+    )[0].squeeze(0)
+    assert_close('masked packed output', expected, actual, 0.001)
+    expected_grads = torch.autograd.grad(expected, (dense, *layer.parameters()), cotangent, allow_unused=True)
+    actual_grads = torch.autograd.grad(actual, (packed, *layer.parameters()), cotangent, allow_unused=True)
+    for index, (expected_grad, actual_grad) in enumerate(zip(expected_grads, actual_grads, strict=True)):
+        assert (expected_grad is None) == (actual_grad is None), index
+        if expected_grad is not None:
+            assert torch.isfinite(expected_grad).all() and torch.isfinite(actual_grad).all()
+            assert_close(f'masked packed gradient {index}', expected_grad, actual_grad, 1e-4)
+    assert torch.count_nonzero(actual_grads[0][~mask]) == 0
+
+
 @pytest.mark.parametrize('mode', ['chunk', 'fused_recurrent'])
 @pytest.mark.parametrize(('num_slots', 'requires_grad'), [(64, True), (256, True), (256, False)])
 def test_chunk_fallback(mode: str, num_slots: int, requires_grad: bool):

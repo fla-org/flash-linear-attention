@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn as nn
 from transformers.modeling_layers import GradientCheckpointingLayer
-from transformers.modeling_outputs import CausalLMOutputWithPast
+from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.gsa2 import GatedSlotAttention2
@@ -99,6 +99,7 @@ class GSA2Block(GradientCheckpointingLayer):
         use_cache: bool | None = False,
         output_attentions: bool | None = False,
         attnres_states: list[torch.Tensor] | None = None,
+        _gsa2_dense_cu_seqlens: torch.Tensor | None = None,
         **kwargs: Unpack[dict],
     ) -> tuple[torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None]:
         if self.use_attnres:
@@ -123,13 +124,16 @@ class GSA2Block(GradientCheckpointingLayer):
         else:
             residual = hidden_states
             hidden_states = self.attn_norm(hidden_states)
+        attention_kwargs = kwargs
+        if _gsa2_dense_cu_seqlens is not None and isinstance(self.attn, GatedSlotAttention2):
+            attention_kwargs = {**kwargs, "_gsa2_dense_cu_seqlens": _gsa2_dense_cu_seqlens}
         hidden_states, attentions, past_key_values = self.attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             past_key_values=past_key_values,
             use_cache=use_cache,
             output_attentions=output_attentions,
-            **kwargs,
+            **attention_kwargs,
         )
 
         if self.use_attnres:
@@ -223,6 +227,44 @@ class GSA2Model(GSA2PreTrainedModel, FLAModel):
         self.gradient_checkpointing = False
 
         self.post_init()
+
+    def forward(
+        self,
+        input_ids: torch.LongTensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        inputs_embeds: torch.FloatTensor | None = None,
+        past_key_values: Cache | list[torch.FloatTensor] | None = None,
+        use_cache: bool | None = None,
+        output_attentions: bool | None = None,
+        output_hidden_states: bool | None = None,
+        return_dict: bool | None = None,
+        **kwargs: Unpack[dict],
+    ) -> tuple | BaseModelOutputWithPast:
+        inputs = input_ids if input_ids is not None else inputs_embeds
+        kwargs["_gsa2_dense_cu_seqlens"] = None
+        if (self.training and attention_mask is None and kwargs.get("cu_seqlens") is None
+                and past_key_values is None and not use_cache and inputs is not None
+                and inputs.ndim >= 2 and inputs.shape[0] > 1 and inputs.shape[1] > 0):
+            batch_size, seq_len = inputs.shape[:2]
+            # keep dense layout metadata separate from the public packed-input contract
+            kwargs["_gsa2_dense_cu_seqlens"] = torch.arange(
+                start=0,
+                end=(batch_size + 1) * seq_len,
+                step=seq_len,
+                device=inputs.device,
+                dtype=torch.int32,
+            )
+        return super().forward(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            inputs_embeds=inputs_embeds,
+            past_key_values=past_key_values,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+            **kwargs,
+        )
 
 
 class GSA2ForCausalLM(GSA2PreTrainedModel, FLAForCausalLM, FLAUnsupportedCacheGenerationMixin):

@@ -77,6 +77,15 @@ def chunk_local_cumsum_scalar_kernel(
     'HAS_SCALE': lambda args: args['scale'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
+@fla_cache_autotune(
+    configs=[
+        triton.Config({'BS': BS}, num_warps=num_warps)
+        for BS in BS_LIST
+        for num_warps in [2, 4, 8]
+    ],
+    key=['B', 'H', 'S', 'BT', 'IS_VARLEN', 'REVERSE'],
+    **autotune_cache_kwargs,
+)
 @triton.jit(do_not_specialize=['T'])
 def chunk_local_cumsum_vector_kernel(
     s,
@@ -312,10 +321,8 @@ def chunk_local_cumsum_vector(
     else:
         o = torch.empty_like(g, dtype=output_dtype or g.dtype)
 
-    # the tiling sets the thread layout of tl.cumsum and with it the fp32 summation order, so it depends only on S:
-    # autotuned, dense and varlen calls key differently and could round the same chunk differently
-    BS = min(BS_LIST[-1], triton.next_power_of_2(S))
-    grid = (triton.cdiv(S, BS) * NT, B * H)
+    def grid(meta):
+        return (triton.cdiv(meta['S'], meta['BS']) * NT, B * H)
 
     # keep cumulative normalizer in fp32
     # this kernel is equivalent to the following for full dense chunks without scaling or reversal
@@ -331,10 +338,8 @@ def chunk_local_cumsum_vector(
         H=H,
         S=S,
         BT=BT,
-        BS=BS,
         REVERSE=reverse,
         USE_GRAPH=use_graph,
-        num_warps=4,
     )
     return o
 

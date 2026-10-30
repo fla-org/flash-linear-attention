@@ -14,7 +14,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from fla import models
-from fla.models import GLAConfig, KDAConfig, MomConfig, TransformerConfig
+from fla.models import GLAConfig, KDAConfig, MemoryAttnConfig, MomConfig, TransformerConfig
 from fla.models.cache_utils import Cache
 from fla.utils import assert_close, device_name
 
@@ -44,7 +44,7 @@ def full_precision_matmul():
         torch.set_float32_matmul_precision(precision)
 
 
-@pytest.mark.parametrize('config_class', [GLAConfig, models.GSA2Config, KDAConfig, TransformerConfig])
+@pytest.mark.parametrize('config_class', [GLAConfig, models.GSA2Config, KDAConfig, MemoryAttnConfig, TransformerConfig])
 @pytest.mark.parametrize('num_items', [None, 11, torch.tensor(11)])
 @pytest.mark.parametrize('custom_criterion', [None, 'mean', 'sum'])
 def test_causal_lm_loss(config_class, num_items, custom_criterion, make_model):
@@ -136,7 +136,7 @@ def test_causal_lm_loss_fused(linear, use_l2warp, num_items, make_model):
         assert_close(name, parameter.grad, fused_parameter.grad, 1e-3)
 
 
-@pytest.mark.parametrize('config_class', [GLAConfig, pytest.param(
+@pytest.mark.parametrize('config_class', [GLAConfig, MemoryAttnConfig, pytest.param(
     MomConfig, marks=pytest.mark.skipif(device_name == 'cpu', reason='MoM normalization requires an accelerator.'),
 )])
 @pytest.mark.parametrize('selection', [None, 0, 2, torch.tensor([0, 2, 5])])

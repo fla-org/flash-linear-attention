@@ -19,6 +19,7 @@ from fla.models.forgetting_transformer import (
 )
 from fla.models.gated_deltanet import GatedDeltaNetConfig, GatedDeltaNetForCausalLM, GatedDeltaNetModel
 from fla.models.gated_deltaproduct import GatedDeltaProductConfig, GatedDeltaProductForCausalLM, GatedDeltaProductModel
+from fla.models.gka import GKAConfig, GKAForCausalLM, GKAModel
 from fla.models.gla import GLAConfig, GLAForCausalLM, GLAModel
 from fla.models.gsa import GSAConfig, GSAForCausalLM, GSAModel
 from fla.models.gsa2 import GSA2Config, GSA2ForCausalLM, GSA2Model
@@ -31,6 +32,7 @@ from fla.models.log_linear_mamba2 import LogLinearMamba2Config, LogLinearMamba2F
 from fla.models.mamba import MambaConfig, MambaForCausalLM, MambaModel
 from fla.models.mamba2 import Mamba2Config, Mamba2ForCausalLM, Mamba2Model
 from fla.models.mamba3 import Mamba3Config, Mamba3ForCausalLM, Mamba3Model
+from fla.models.memory_attn import MemoryAttnConfig, MemoryAttnForCausalLM, MemoryAttnModel
 from fla.models.mesa_net import MesaNetConfig, MesaNetForCausalLM, MesaNetModel
 from fla.models.mla import MLAConfig, MLAForCausalLM, MLAModel
 from fla.models.moba import MoBAConfig, MoBAForCausalLM, MoBAModel
@@ -88,6 +90,9 @@ __all__ = [
     'ForgettingTransformerConfig',
     'ForgettingTransformerForCausalLM',
     'ForgettingTransformerModel',
+    'GKAConfig',
+    'GKAForCausalLM',
+    'GKAModel',
     'GLAConfig',
     'GLAForCausalLM',
     'GLAModel',
@@ -133,6 +138,9 @@ __all__ = [
     'MambaConfig',
     'MambaForCausalLM',
     'MambaModel',
+    'MemoryAttnConfig',
+    'MemoryAttnForCausalLM',
+    'MemoryAttnModel',
     'MesaNetConfig',
     'MesaNetForCausalLM',
     'MesaNetModel',

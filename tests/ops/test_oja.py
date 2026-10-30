@@ -547,3 +547,23 @@ def test_chunk_varlen(
     assert_close('db', ref_dbeta, tri_dbeta, 0.015)
     assert_close('dg', ref_dg, tri_dg, 0.015)
     assert_close('dh0', ref_dh0, tri_dh0, 0.007)
+
+
+def test_fused_recurrent_default_beta_gva():
+    """`beta=None` must default to ones over the HV value heads; sizing it from
+    q ([B, T, H]) makes the kernel read out of bounds under GVA (HV > H)."""
+    torch.manual_seed(42)
+    B, T, H, HV, D = 2, 64, 2, 4, 64
+    q = torch.randn(B, T, H, D, dtype=torch.float32, device=device)
+    k = torch.randn(B, T, H, D, dtype=torch.float32, device=device)
+    v = F.normalize(torch.randn(B, T, HV, D, dtype=torch.float32, device=device), p=2, dim=-1)
+    gv = F.logsigmoid(torch.randn(B, T, HV, D, dtype=torch.float32, device=device))
+
+    o_default, ht_default = fused_recurrent_gated_oja_rule(
+        q=q, k=k, v=v, gv=gv, beta=None, output_final_state=True,
+    )
+    o_ones, ht_ones = fused_recurrent_gated_oja_rule(
+        q=q, k=k, v=v, gv=gv, beta=torch.ones(B, T, HV, dtype=torch.float32, device=device), output_final_state=True,
+    )
+    assert torch.equal(o_default, o_ones)
+    assert torch.equal(ht_default, ht_ones)

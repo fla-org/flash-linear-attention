@@ -40,6 +40,7 @@ def logsumexp_fwd_kernel(
     b_x = tl.load(x + i_n * D + o_d, mask=m_d, other=-float('inf'))
     if HAS_SCALE:
         b_x = b_x * scale
+    b_x = tl.where(m_d, b_x, -float('inf'))
     b_m = tl.max(b_x, 0)
     b_z = log(tl.sum(exp(b_x - b_m), 0)) + b_m
     tl.store(z + i_n * tl.cdiv(D, B) + i_d, b_z)

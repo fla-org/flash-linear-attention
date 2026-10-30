@@ -312,7 +312,23 @@ class GatedSlotAttention2(nn.Module):
         last_state = get_layer_cache(self, past_key_values)
 
         cu_seqlens = kwargs.get("cu_seqlens")
+        cu_seqlens_cpu = kwargs.get("cu_seqlens_cpu")
         hidden_states, indices, cu_seqlens = unpad_hidden_states(hidden_states, cu_seqlens, attention_mask, q_len)
+        if (self.training and past_key_values is None and not use_cache
+                and hidden_states.shape[0] == 1 and hidden_states.shape[1] > 0
+                and cu_seqlens is not None and cu_seqlens.numel() == 2):
+            # a single packed sequence has the same token order as a dense sequence
+            cu_seqlens, cu_seqlens_cpu = None, None
+        packed_dense = (
+            self.training and attention_mask is None and cu_seqlens is None
+            and past_key_values is None and not use_cache and batch_size > 1 and q_len > 0
+        )
+        if packed_dense:
+            hidden_states = hidden_states.reshape(1, batch_size * q_len, -1)
+            cu_seqlens = kwargs.get("_gsa2_dense_cu_seqlens")
+            if cu_seqlens is None or cu_seqlens.device != hidden_states.device:
+                cu_seqlens = torch.arange(0, (batch_size + 1) * q_len, q_len,
+                                          device=hidden_states.device, dtype=torch.int32)
 
         conv_state_q, conv_state_k, conv_state_v, conv_state_w = None, None, None, None
         if last_state is not None and last_state["conv_state"] is not None:
@@ -394,7 +410,7 @@ class GatedSlotAttention2(nn.Module):
             use_q_l2norm=self.use_oja_q_l2norm,
             use_k_l2norm=self.use_oja_k_l2norm,
             cu_seqlens=cu_seqlens,
-            cu_seqlens_cpu=kwargs.get("cu_seqlens_cpu"),
+            cu_seqlens_cpu=cu_seqlens_cpu,
         )
 
         # the slot readout becomes the query of the second level, the slot code its key
@@ -425,7 +441,7 @@ class GatedSlotAttention2(nn.Module):
             use_qk_l2norm_in_kernel=self.use_gdn_qk_l2norm_in_kernel,
             use_gate_in_kernel=True,
             cu_seqlens=cu_seqlens,
-            cu_seqlens_cpu=kwargs.get("cu_seqlens_cpu"),
+            cu_seqlens_cpu=cu_seqlens_cpu,
             A_log=self.A2_log,
             dt_bias=self.dt2_bias,
         )
@@ -443,5 +459,7 @@ class GatedSlotAttention2(nn.Module):
         o = rearrange(o, "b t h d -> b t (h d)")
         o = self.o_proj(o)
         o = repad_hidden_states(o, indices, batch_size, q_len)
+        if packed_dense:
+            o = o.reshape(batch_size, q_len, -1)
 
         return o, None, past_key_values
