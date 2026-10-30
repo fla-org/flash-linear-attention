@@ -416,6 +416,7 @@ def chunk_fwd_o_npu(
         STATE_V_FIRST=state_v_first,
         chunk_indices=chunk_indices,
         USE_GRAPH=use_graph,
+        **({'multibuffer': False} if use_graph else {}),
     )
     return o
 
