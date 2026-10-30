@@ -212,7 +212,8 @@ def test_gdn_memory_measurement_covers_selected_engines(monkeypatch, report_memo
     )
     if report_memory:
         assert calls == ['build', 'reset', 'baseline', 'benchmark', 'peak_allocated', 'peak_reserved', 'empty_cache']
-        assert result[0]['memory'] == {'baseline_allocated_bytes': 100, 'peak_allocated_bytes': 250, 'peak_reserved_bytes': 400}
+        assert result[0]['memory'] == {'baseline_allocated_bytes': 100,
+                                       'peak_allocated_bytes': 250, 'peak_reserved_bytes': 400}
     else:
         assert calls == ['build', 'benchmark', 'empty_cache']
         assert 'memory' not in result[0]
