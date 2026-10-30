@@ -14,6 +14,7 @@ import torch.nn.functional as F
 from einops import repeat
 
 from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
+from fla.ops.gated_delta_rule.fused_recurrent import fused_recurrent_gated_delta_rule_fwd
 from fla.ops.gated_delta_rule.gate import fused_gdn_gate, naive_gdn_gate
 from fla.ops.gated_delta_rule.naive import naive_recurrent_gated_delta_rule
 from fla.ops.gated_delta_rule.wy_fast import prepare_wy_repr_bwd, recompute_w_u_fwd
@@ -558,6 +559,49 @@ def test_fused_recurrent_state_v_first(
         fused_recurrent_gated_delta_rule(q=q, k=k, v=v, g=g, beta=beta, transpose_state_layout=True)
     with pytest.raises(ValueError):
         fused_recurrent_gated_delta_rule(q=q, k=k, v=v, g=g, beta=beta, state_v_first=True, transpose_state_layout=True)
+
+
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'HV', 'D', 'cu_seqlens', 'state_v_first', 'dtype'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-HV{}-D{}-cu_seqlens{}-state_v_first{}-{}".format(*test))
+        for test in [
+            (16, 1, 4, 4, 128, None, False, torch.bfloat16),
+            (2, 300, 2, 8, 64, None, False, torch.float),
+            (2, 300, 2, 4, 100, None, True, torch.float),
+            (1, 400, 4, 4, 64, [0, 15, 250, 400], False, torch.bfloat16),
+        ]
+    ],
+)
+def test_fused_recurrent_inplace_final_state(
+    B: int,
+    T: int,
+    H: int,
+    HV: int,
+    D: int,
+    cu_seqlens: list[int] | None,
+    state_v_first: bool,
+    dtype: torch.dtype,
+):
+    torch.manual_seed(42)
+    q = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    k = F.normalize(torch.randn(B, T, H, D, dtype=torch.float32, device=device), p=2, dim=-1).to(dtype)
+    v = torch.randn(B, T, HV, D, dtype=dtype, device=device)
+    beta = torch.rand(B, T, HV, dtype=dtype, device=device).sigmoid()
+    g = F.logsigmoid(torch.rand(B, T, HV, dtype=torch.float32, device=device))
+    if cu_seqlens is not None:
+        cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
+    N = B if cu_seqlens is None else len(cu_seqlens) - 1
+    h0 = torch.randn(N, HV, D, D, dtype=torch.float32, device=device)
+
+    kwargs = dict(q=q, k=k, v=v, g=g, beta=beta, scale=D ** -0.5, state_v_first=state_v_first, cu_seqlens=cu_seqlens)
+    ref, ref_ht = fused_recurrent_gated_delta_rule_fwd(initial_state=h0.clone(), output_final_state=True, **kwargs)
+    state = h0.clone()
+    tri, tri_ht = fused_recurrent_gated_delta_rule_fwd(initial_state=state, inplace_final_state=True, **kwargs)
+
+    assert tri_ht.data_ptr() == state.data_ptr()
+    assert torch.equal(ref, tri)
+    assert torch.equal(ref_ht, state)
 
 
 @pytest.mark.parametrize(
