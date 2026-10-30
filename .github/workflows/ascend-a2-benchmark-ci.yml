@@ -255,6 +255,7 @@ jobs:
 
           ASCEND_RT_VISIBLE_DEVICES=0 python -m benchmarks.ops.run --graph \
             --op chunk_gdn --no-base --modes fwd fwdbwd \
+            --measure-graph-safe --report-memory \
             --warmup 3 --iterations 10 --json benchmark_gdn_graph.json \
             > chunk_gdn_graph.log 2>&1 || status=1
 
