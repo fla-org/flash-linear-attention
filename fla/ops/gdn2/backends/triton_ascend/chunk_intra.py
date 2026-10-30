@@ -16,7 +16,7 @@ import triton.language as tl
 from fla.ops.gdn2.wy_fast import recompute_w_u_fwd_gdn2
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp2
-from fla.utils import TRITON_ABOVE_3_6_0, ascend_compile_kwargs, input_guard
+from fla.utils import ascend_compile_kwargs, input_guard
 from fla.utils.ascend_ub_manager import compute_row_tile_block_size, iter_axis_launch_chunks
 
 _BC = 16
@@ -26,8 +26,7 @@ _SAFETY_MARGIN = 0.80
 _FALLBACK_BK = 16
 _MAX_INTER_BK = 64
 _LAUNCH_BLOCK_BUDGET = 4096
-# triton-ascend 3.6 ignores the AutoBlockify override.
-_INTER_COMPILE_KWARGS = ascend_compile_kwargs(blacklist_auto_blockify=not TRITON_ABOVE_3_6_0)
+_INTER_COMPILE_KWARGS = ascend_compile_kwargs(blacklist_auto_blockify=True)
 
 
 def _get_inter_bk(K: int) -> int:

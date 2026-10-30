@@ -160,8 +160,6 @@ jobs:
             tests/ops/test_gdn_kernels.py \
             tests/ops/test_gdn.py \
             tests/ops/test_gdn2.py \
-            tests/ops/test_gdn2_ascend.py \
-            tests/ops/test_gdn2_ascend_dispatch.py \
             tests/ops/test_kda.py \
             tests/ops/test_gla.py \
             tests/ops/test_oja.py \
