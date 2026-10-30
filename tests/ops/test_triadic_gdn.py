@@ -10,7 +10,7 @@ import torch
 import torch.nn.functional as F
 
 from fla.ops.kda.naive import naive_recurrent_kda
-from fla.ops.triadic_gdn import naive_chunk_triadic_gdn, naive_recurrent_triadic_gdn
+from fla.ops.triadic_gdn import chunk_triadic_gdn, naive_chunk_triadic_gdn, naive_recurrent_triadic_gdn
 from fla.utils import assert_close, device
 
 
@@ -83,3 +83,153 @@ def test_naive(B: int, T: int, H: int, K: int, V: int, E: int, gate_logit_normal
     )
     assert_close('chunk_o', ref, tri, 1e-5)
     assert_close('chunk_ht', ref_ht, tri_ht.flatten(2, 3), 1e-5)
+
+
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'K', 'V', 'E', 'scale', 'gate_logit_normalizer', 'disable_recompute', 'dtype'),
+    [
+        pytest.param(
+            *test,
+            id="B{}-T{}-H{}-K{}-V{}-E{}-scale{}-gate_logit_normalizer{}-disable_recompute{}-{}".format(*test),
+        )
+        for test in [
+            (1, 63, 1, 64, 64, 1, 1, 1, False, torch.float16),
+            (2, 500, 3, 60, 64, 2, 1, 1, True, torch.float16),
+            # strong decay, where factored exponents would overflow
+            (2, 1000, 2, 128, 128, 4, 0.1, 0.1, False, torch.bfloat16),
+            (2, 1024, 2, 128, 128, 8, 1, 1, True, torch.bfloat16),
+            # E, K and V that are not powers of two
+            (1, 777, 2, 100, 96, 12, 1, 10, False, torch.float16),
+            (1, 256, 2, 128, 128, 16, 1, 1, False, torch.bfloat16),
+            # the largest supported key dim
+            (1, 300, 2, 256, 128, 4, 1, 1, False, torch.bfloat16),
+        ]
+    ],
+)
+def test_chunk(
+    B: int,
+    T: int,
+    H: int,
+    K: int,
+    V: int,
+    E: int,
+    scale: float,
+    gate_logit_normalizer: float,
+    disable_recompute: bool,
+    dtype: torch.dtype,
+):
+    torch.manual_seed(42)
+    inputs = _make_inputs(B, T, H, K, V, E, gate_logit_normalizer, dtype)
+    h0 = torch.randn(B, H, E, K, V, dtype=torch.float32, device=device)
+    q, k, v, k2, q2, g, beta, h0 = map(lambda x: x.requires_grad_(True), inputs + [h0])
+    do = torch.randn_like(v)
+    dht = torch.randn_like(h0)
+
+    ref, ref_ht = naive_recurrent_triadic_gdn(
+        q=q,
+        k=k,
+        v=v,
+        k2=k2,
+        q2=q2,
+        g=g,
+        beta=beta,
+        scale=scale,
+        initial_state=h0,
+        output_final_state=True,
+    )
+    ((ref * do).sum() + (ref_ht * dht).sum()).backward()
+    ref_grads = [x.grad for x in (q, k, v, k2, q2, g, beta, h0)]
+    q.grad = k.grad = v.grad = k2.grad = q2.grad = g.grad = beta.grad = h0.grad = None
+
+    tri, tri_ht = chunk_triadic_gdn(
+        q=q,
+        k=k,
+        v=v,
+        k2=k2,
+        q2=q2,
+        g=g,
+        beta=beta,
+        scale=scale,
+        initial_state=h0,
+        output_final_state=True,
+        disable_recompute=disable_recompute,
+    )
+    ((tri * do).sum() + (tri_ht * dht).sum()).backward()
+    tri_grads = [x.grad for x in (q, k, v, k2, q2, g, beta, h0)]
+
+    assert_close('o', ref, tri, 0.005)
+    assert_close('ht', ref_ht, tri_ht, 0.005)
+    for name, ref_grad, tri_grad, ratio in zip(
+        ('dq', 'dk', 'dv', 'dk2', 'dq2', 'dg', 'db', 'dh0'),
+        ref_grads,
+        tri_grads,
+        (0.008, 0.008, 0.008, 0.008, 0.008, 0.02, 0.02, 0.008),
+    ):
+        assert_close(name, ref_grad, tri_grad, ratio)
+
+
+@pytest.mark.parametrize(
+    ('H', 'K', 'V', 'E', 'cu_seqlens', 'dtype'),
+    [
+        pytest.param(*test, id="H{}-K{}-V{}-E{}-cu_seqlens{}-{}".format(*test))
+        for test in [
+            (2, 64, 64, 4, [0, 15], torch.float16),
+            (3, 128, 128, 8, [0, 256, 500, 1000], torch.bfloat16),
+            (2, 128, 128, 4, [0, 15, 100, 300, 1200, 2000], torch.bfloat16),
+        ]
+    ],
+)
+def test_chunk_varlen(H: int, K: int, V: int, E: int, cu_seqlens: list[int], dtype: torch.dtype):
+    torch.manual_seed(42)
+    N, T = len(cu_seqlens) - 1, cu_seqlens[-1]
+    inputs = _make_inputs(1, T, H, K, V, E, 1, dtype)
+    h0 = torch.randn(N, H, E, K, V, dtype=torch.float32, device=device)
+    q, k, v, k2, q2, g, beta, h0 = map(lambda x: x.requires_grad_(True), inputs + [h0])
+    do = torch.randn_like(v)
+    dht = torch.randn_like(h0)
+
+    refs, ref_hts = [], []
+    for i in range(N):
+        bos, eos = cu_seqlens[i], cu_seqlens[i + 1]
+        ref, ref_ht = naive_recurrent_triadic_gdn(
+            q=q[:, bos:eos],
+            k=k[:, bos:eos],
+            v=v[:, bos:eos],
+            k2=k2[:, bos:eos],
+            q2=q2[:, bos:eos],
+            g=g[:, bos:eos],
+            beta=beta[:, bos:eos],
+            initial_state=h0[i:i+1],
+            output_final_state=True,
+        )
+        refs.append(ref)
+        ref_hts.append(ref_ht)
+    ref, ref_ht = torch.cat(refs, 1), torch.cat(ref_hts, 0)
+    ((ref * do).sum() + (ref_ht * dht).sum()).backward()
+    ref_grads = [x.grad for x in (q, k, v, k2, q2, g, beta, h0)]
+    q.grad = k.grad = v.grad = k2.grad = q2.grad = g.grad = beta.grad = h0.grad = None
+
+    tri, tri_ht = chunk_triadic_gdn(
+        q=q,
+        k=k,
+        v=v,
+        k2=k2,
+        q2=q2,
+        g=g,
+        beta=beta,
+        initial_state=h0,
+        output_final_state=True,
+        cu_seqlens=torch.tensor(cu_seqlens, dtype=torch.int32, device=device),
+    )
+    ((tri * do).sum() + (tri_ht * dht).sum()).backward()
+    tri_grads = [x.grad for x in (q, k, v, k2, q2, g, beta, h0)]
+
+    assert_close('o', ref, tri, 0.005)
+    assert_close('ht', ref_ht, tri_ht, 0.005)
+    for name, ref_grad, tri_grad, ratio in zip(
+        ('dq', 'dk', 'dv', 'dk2', 'dq2', 'dg', 'db', 'dh0'),
+        ref_grads,
+        tri_grads,
+        (0.008, 0.008, 0.008, 0.008, 0.008, 0.02, 0.02, 0.008),
+    ):
+        assert_close(name, ref_grad, tri_grad, ratio)
