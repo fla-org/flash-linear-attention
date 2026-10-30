@@ -302,7 +302,8 @@ def test_graph_rejects_unsupported_metadata(case):
         {'B': 2}, {'D': 256}, {'DV': 128}, {'HV': 4}, {'chunk_size': 32}, {'fused_options': True},
         {'disable_recompute': True}, {'safe_gate': True}, {'allow_neg_eigval': True}, {'dtype': 'float32'},
     ],
-    ids=['batch', 'dim', 'value-dim', 'heads', 'chunk-size', 'fused', 'recompute', 'safe-gate', 'negative-eigenvalue', 'dtype'],
+    ids=['batch', 'dim', 'value-dim', 'heads', 'chunk-size', 'fused',
+         'recompute', 'safe-gate', 'negative-eigenvalue', 'dtype'],
 )
 def test_benchmark_rejects_unsupported_graph_config(override):
     from benchmarks.ops.graph_registry import get_graph_op
