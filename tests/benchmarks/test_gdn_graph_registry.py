@@ -6,13 +6,20 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import sys
+from dataclasses import asdict, replace
 from types import SimpleNamespace
 
 import pytest
 
 from benchmarks.ops import graph_benchmark
 from benchmarks.ops.graph_benchmark import benchmark_case
-from benchmarks.ops.graph_registry import GraphBenchmarkCase, _check_gdn_error, get_graph_op, normalize_gdn_shape
+from benchmarks.ops.graph_registry import (
+    GraphBenchmarkCase,
+    GraphBenchmarkMetadata,
+    _check_gdn_error,
+    get_graph_op,
+    normalize_gdn_shape,
+)
 
 
 def test_gdn_registry_forward_backward():
@@ -24,31 +31,54 @@ def test_gdn_registry_forward_backward():
         assert normalized['H'] == normalized['HV']
         assert normalized['D'] == normalized['DV']
         assert normalized['chunk_size'] == 64
+    axes = ('B', 'T', 'H', 'D', 'N')
+    gdn_shapes = {tuple(shape[key] for key in axes) for shape in config.default_shapes.values()}
+    kda_shapes = {tuple(shape[key] for key in axes) for shape in get_graph_op('chunk_kda').default_shapes.values()}
+    assert gdn_shapes == kda_shapes
+    assert {shape['dtype'] for shape in config.default_shapes.values()} == {'float16', 'bfloat16'}
 
 
 @pytest.mark.parametrize(
     'override',
     [
-        {'B': 2}, {'D': 32}, {'DV': 128}, {'HV': 4}, {'chunk_size': 32}, {'fused_options': True},
-        {'disable_recompute': True}, {'dtype': 'float32'}, {'N': 0}, {'T': 0}, {'actual_T': 257},
+        {'N': 0}, {'T': 0}, {'actual_T': 257}, {'sequence_profile': 'unknown'}, {'mode': 'fwd'},
     ],
     ids=[
-        'override-B-2',
-        'override-D-32',
-        'override-DV-128',
-        'override-HV-4',
-        'override-chunk_size-32',
-        'override-fused_options-True',
-        'override-disable_recompute-True',
-        'override-dtype-float32',
         'override-N-0',
         'override-T-0',
         'override-actual_T-257',
+        'override-sequence-profile-unknown',
+        'override-reserved-mode',
     ],
 )
-def test_gdn_registry_rejects_unsupported_shapes(override):
+def test_gdn_registry_rejects_invalid_metadata(override):
     with pytest.raises(ValueError):
         normalize_gdn_shape({'B': 1, 'T': 256, 'H': 2, 'D': 64, **override})
+
+
+def test_gdn_normalization_does_not_define_operator_capabilities():
+    shape = normalize_gdn_shape({'B': 1, 'T': 128, 'H': 2, 'D': 256, 'chunk_size': 128, 'HV': 4})
+    assert shape['D'] == 256 and shape['chunk_size'] == 128 and shape['HV'] == 4
+
+
+@pytest.mark.parametrize(
+    'override',
+    [{'T': True}, {'T': 1.5}, {'dtype': None}, {'fused_options': 1}, {'actual_T': 129}],
+    ids=['bool-dimension', 'float-dimension', 'null-dtype', 'integer-option', 'active-over-capacity'],
+)
+def test_graph_metadata_rejects_invalid_field_types_and_values(override):
+    metadata = GraphBenchmarkMetadata(**normalize_gdn_shape({'B': 1, 'T': 128, 'H': 2, 'D': 64}))
+    with pytest.raises(ValueError):
+        replace(metadata, **override)
+
+
+def test_graph_metadata_has_a_serializable_schema():
+    import json
+
+    metadata = GraphBenchmarkMetadata(**normalize_gdn_shape({'B': 1, 'T': 128, 'H': 2, 'D': 64}))
+    assert json.loads(json.dumps(asdict(metadata))) == asdict(metadata)
+    with pytest.raises(TypeError):
+        GraphBenchmarkMetadata(**{**asdict(metadata), 'op': 'mislabelled'})
 
 
 def test_gdn_registry_preserves_partial_capacity():
@@ -116,7 +146,7 @@ def test_gdn_runner_checks_both_graph_paths_before_reporting(replayed, uncapture
         eager_args=(),
         run_once=run_once,
         assert_close=compare,
-        measure_graph_safe=True,
+        metadata=GraphBenchmarkMetadata(**normalize_gdn_shape({'B': 1, 'T': 64, 'H': 1, 'D': 64})),
     )
     kwargs = dict(
         case=case,
@@ -126,6 +156,7 @@ def test_gdn_runner_checks_both_graph_paths_before_reporting(replayed, uncapture
         iterations=2,
         graph_factory=lambda *_: lambda: replayed,
         synchronize=lambda: None,
+        measure_graph_safe=True,
     )
     if 5.1 in (replayed, uncaptured):
         with pytest.raises(AssertionError, match='GDN dg'):
@@ -139,7 +170,8 @@ def test_gdn_runner_checks_both_graph_paths_before_reporting(replayed, uncapture
         assert len(timings) == 4
 
 
-def test_gdn_memory_measurement_covers_selected_engines(monkeypatch):
+@pytest.mark.parametrize('report_memory', [False, True], ids=['memory-off', 'memory-on'])
+def test_gdn_memory_measurement_covers_selected_engines(monkeypatch, report_memory):
     calls = []
 
     def record(name, result=None):
@@ -159,7 +191,8 @@ def test_gdn_memory_measurement_covers_selected_engines(monkeypatch):
         empty_cache=record('empty_cache'),
     )
     monkeypatch.setitem(sys.modules, 'torch', SimpleNamespace(npu=npu))
-    case = SimpleNamespace(measure_graph_safe=True, metadata={})
+    metadata = GraphBenchmarkMetadata(**normalize_gdn_shape({'B': 1, 'T': 64, 'H': 1, 'D': 64}))
+    case = SimpleNamespace(metadata=metadata)
     monkeypatch.setattr(graph_benchmark, 'get_graph_op', lambda _: SimpleNamespace(
         supported_modes=('fwdbwd',),
         build_case=record('build', case),
@@ -175,9 +208,16 @@ def test_gdn_memory_measurement_covers_selected_engines(monkeypatch):
         0,
         1,
         progress=False,
+        report_memory=report_memory,
     )
-    assert calls == ['build', 'reset', 'baseline', 'benchmark', 'peak_allocated', 'peak_reserved', 'empty_cache']
-    assert result[0]['memory'] == {'baseline_allocated_bytes': 100, 'peak_allocated_bytes': 250, 'peak_reserved_bytes': 400}
+    if report_memory:
+        assert calls == ['build', 'reset', 'baseline', 'benchmark', 'peak_allocated', 'peak_reserved', 'empty_cache']
+        assert result[0]['memory'] == {'baseline_allocated_bytes': 100, 'peak_allocated_bytes': 250, 'peak_reserved_bytes': 400}
+    else:
+        assert calls == ['build', 'benchmark', 'empty_cache']
+        assert 'memory' not in result[0]
+    assert result[0]['mode'] == 'fwdbwd'
+    assert result[0]['T'] == 64
 
 
 def test_graph_safe_measurement_is_opt_in():
@@ -195,7 +235,32 @@ def test_graph_safe_measurement_is_opt_in():
         eager_args=(),
         run_once=run_once,
         assert_close=lambda actual, expected: None,
+        metadata=GraphBenchmarkMetadata(**normalize_gdn_shape({'B': 1, 'T': 64, 'H': 1, 'D': 64})),
     )
     result = benchmark_case(case, 'fwdbwd', ('graph',), 0, 2, graph_factory=lambda step, _: step, synchronize=lambda: None)
     assert 'graph_safe' not in result
     assert calls == [True, True, False, False]
+
+
+@pytest.mark.parametrize('enabled', [False, True], ids=['diagnostics-off', 'diagnostics-on'])
+def test_runner_forwards_diagnostics_to_the_worker(enabled):
+    flags = ['--measure-graph-safe', '--report-memory'] if enabled else []
+    _, args = graph_benchmark._parse_args(['--op', 'chunk_gdn', *flags])
+    for engines in (('eager',), ('eager', 'graph')):
+        command = graph_benchmark._worker_command('run.py', ['chunk_gdn'], {}, ('fwd',), engines, args, 'result.json')
+        assert ('--measure-graph-safe' in command) == (enabled and 'graph' in engines)
+        assert ('--report-memory' in command) == enabled
+
+
+def test_benchmark_case_requires_typed_metadata():
+    with pytest.raises(TypeError, match='GraphBenchmarkMetadata'):
+        GraphBenchmarkCase(
+            eager_step=lambda: None,
+            graph_step=lambda: None,
+            capture_args=(),
+            eager_args=(),
+            graph_args=(),
+            run_once=lambda *_: {},
+            assert_close=lambda *_: None,
+            metadata={},
+        )
