@@ -7,12 +7,46 @@
 
 import pytest
 import torch
+import triton
 
 from fla.ops.cyfa import chunk_cyfa, fused_recurrent_cyfa
+from fla.ops.cyfa.chunk import _prune_table_grad_configs
 from fla.ops.cyfa.naive import naive_recurrent_cyfa
-from fla.utils import IS_NVIDIA, assert_close, device
+from fla.utils import IS_NVIDIA, IS_NVIDIA_HOPPER, IS_NVIDIA_SM100, assert_close, device
 
 pytestmark = pytest.mark.skipif(not IS_NVIDIA, reason='CyFA kernels currently require NVIDIA GPUs')
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize(
+    ('dtype', 'as_kwargs'),
+    [
+        pytest.param(torch.float32, False, id='fp32-nargs'),
+        pytest.param(torch.float32, True, id='fp32-kwargs'),
+        pytest.param(torch.float16, False, id='fp16'),
+        pytest.param(torch.bfloat16, False, id='bf16'),
+        pytest.param(None, False, id='missing-right-a'),
+    ],
+)
+def test_prune_table_grad_configs(dtype, as_kwargs):
+    configs = [
+        triton.Config({'BN': 64, 'BR': 32, 'BC': 64}, num_warps=4),
+        triton.Config({'BN': 64, 'BR': 64, 'BC': 64}, num_warps=4),
+        triton.Config({'BN': 64, 'BR': 64, 'BC': 64}, num_warps=8),
+        triton.Config({'BN': 64, 'BR': 64, 'BC': 64}, num_warps=2),
+        triton.Config({'BN': 64, 'BR': 32, 'BC': 64}, num_warps=8),
+    ]
+    args = {} if dtype is None else {'right_a': torch.empty(1, dtype=dtype, device=device)}
+
+    actual = _prune_table_grad_configs(configs, None, **args) if as_kwargs else _prune_table_grad_configs(configs, args)
+
+    expected = configs
+    if dtype == torch.float32:
+        if IS_NVIDIA_SM100:
+            expected = [configs[0], configs[3], configs[4]]
+        elif IS_NVIDIA_HOPPER:
+            expected = [configs[0], *configs[2:]]
+    assert actual == expected
 
 
 def make_inputs(B, T, H, K, V, M, dtype, initial_state=False, cu_seqlens=None):
@@ -72,6 +106,8 @@ def compare_chunk(inputs, checkpoint_level):
     ('B', 'T', 'H', 'K', 'V', 'M', 'dtype', 'initial_state'),
     [
         pytest.param(1, 64, 2, 32, 32, 128, torch.float32, False, id='fp32', marks=pytest.mark.smoke),
+        pytest.param(1, 65, 2, 64, 64, 64, torch.float32, False, id='fp32-slots64', marks=pytest.mark.smoke),
+        pytest.param(1, 65, 2, 64, 64, 128, torch.float32, False, id='fp32-slots128-v64', marks=pytest.mark.smoke),
         pytest.param(2, 256, 2, 64, 64, 128, torch.float32, True, id='fp32-state'),
         pytest.param(2, 100, 3, 64, 64, 128, torch.float16, True, id='fp16-ragged'),
         pytest.param(1, 64, 1, 128, 128, 128, torch.bfloat16, False, id='bf16-d128'),
