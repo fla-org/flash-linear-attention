@@ -296,6 +296,60 @@ def test_graph_rejects_unsupported_metadata(case):
         _call(inputs, cu, scale=scale)
 
 
+@pytest.mark.parametrize(
+    'override',
+    [
+        {'B': 2}, {'D': 256}, {'DV': 128}, {'HV': 4}, {'chunk_size': 32}, {'fused_options': True},
+        {'disable_recompute': True}, {'safe_gate': True}, {'allow_neg_eigval': True}, {'dtype': 'float32'},
+    ],
+    ids=['batch', 'dim', 'value-dim', 'heads', 'chunk-size', 'fused', 'recompute', 'safe-gate', 'negative-eigenvalue', 'dtype'],
+)
+def test_benchmark_rejects_unsupported_graph_config(override):
+    from benchmarks.ops.graph_registry import get_graph_op
+
+    with pytest.raises(ValueError):
+        get_graph_op('chunk_gdn').build_case({'B': 1, 'T': 128, 'H': 2, 'D': 64, **override}, 'fwd', 'npu:0', 42)
+
+
+def test_runtime_and_benchmark_share_graph_config_validation(monkeypatch):
+    from benchmarks.ops.graph_registry import get_graph_op
+
+    graph = import_module('fla.ops.gated_delta_rule.graph')
+    calls = []
+
+    def reject(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise ValueError('shared graph contract')
+
+    monkeypatch.setattr(graph, '_validate_graph_config', reject)
+    inputs = _inputs()
+    cu = torch.tensor([0, 193, 193, 193, 193], device=device)
+    with pytest.raises(ValueError, match='shared graph contract'):
+        _call(inputs, cu)
+    with pytest.raises(ValueError, match='shared graph contract'):
+        get_graph_op('chunk_gdn').build_case({'B': 1, 'T': 128, 'H': 2, 'D': 64}, 'fwd', 'npu:0', 42)
+    assert len(calls) == 2
+
+
+def test_benchmark_input_geometry_matches_metadata(monkeypatch):
+    from benchmarks.ops.graph_registry import get_graph_op
+
+    graph = import_module('fla.ops.gated_delta_rule.graph')
+    monkeypatch.setattr(graph, '_validate_graph_config', lambda **kwargs: None)
+    case = get_graph_op('chunk_gdn').build_case(
+        shape={'B': 2, 'T': 16, 'H': 2, 'D': 64, 'HV': 4, 'DV': 128, 'N': 4},
+        mode='fwdbwd',
+        device='npu:0',
+        seed=42,
+    )
+    q, k, v, g, beta, h0, cu = case.graph_args
+    assert q.shape == k.shape == (2, 16, 2, 64)
+    assert v.shape == (2, 16, 4, 128)
+    assert g.shape == beta.shape == (2, 16, 4)
+    assert h0.shape == (4, 4, 64, 128)
+    assert cu.shape == (5,)
+
+
 @torch.no_grad()
 def test_persistent_kernels_skip_holes_without_losing_later_tasks(monkeypatch):
     from fla.ops.utils.index import prepare_chunk_indices_static
@@ -573,13 +627,13 @@ def test_training_long_bf16_matches_eager(monkeypatch, tiled):
         output = import_module('fla.ops.common.backends.triton_ascend.chunk_o')
         monkeypatch.setattr(output, '_get_dv_full_tiles', lambda **kwargs: None)
         monkeypatch.setattr(output, '_get_dqkwg_full_tiles', lambda **kwargs: None)
-    values = _inputs(dtype=torch.bfloat16, dim=128, capacity=4096, heads=8)
+    values = _inputs(dtype=torch.bfloat16, dim=128, capacity=1024, heads=8)
     sample = _leaves(values)
-    cu = torch.tensor([0, 1024, 2048, 3072, 4096], device=device)
+    cu = torch.tensor([0, 256, 512, 768, 1024], device=device)
     step = _training_step()
     replay = torch.npu.make_graphed_callables(step, sample + (cu,), allow_unused_input=True)
-    for seed, offsets in enumerate(([0, 1, 65, 129, 4096], [0, 0, 0, 0, 0], [0, 1, 65, 129, 4096]), 1):
-        inputs = _leaves(_inputs(dtype=torch.bfloat16, dim=128, capacity=4096, heads=8, seed=seed))
+    for seed, offsets in enumerate(([0, 1, 65, 129, 1024], [0, 0, 0, 0, 0], [0, 1, 65, 129, 1024]), 1):
+        inputs = _leaves(_inputs(dtype=torch.bfloat16, dim=128, capacity=1024, heads=8, seed=seed))
         live_cu = torch.tensor(offsets, device=device)
         do, dht = _training_upstream(inputs, seed + 30)
         actual = _training_snapshot(replay, inputs, live_cu, do, dht)
