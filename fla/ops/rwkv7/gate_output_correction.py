@@ -21,12 +21,12 @@ def gate_output_correction_ref(
     g: torch.Tensor,
 ):
     """
-    o: [B, T, H*D]
-    r: [B, T, H, D]
-    k: [B, T, H, D]
-    r_k: [H, D]
-    v: [B, T, H, D]
-    g: [B, T, H*D]
+    o: [B, T, H*V]
+    r: [B, T, H, K]
+    k: [B, T, H, K]
+    r_k: [H, K]
+    v: [B, T, H, V]
+    g: [B, T, H*V]
     """
     # Unsqueeze r_k for broadcasting across batch and time
     correction_term = ((r * k * r_k.unsqueeze(0).unsqueeze(0)).sum(-1, keepdim=True) * v).view(o.shape)
@@ -39,7 +39,7 @@ def gate_output_correction_backward_ref(grad_output, o, r, k, r_k, v, g):
     Reference backward pass implementation in pure PyTorch.
     """
     B, T, HD = o.shape
-    H, D = r.shape[-2], r.shape[-1]
+    H, V = v.shape[-2], v.shape[-1]
 
     # Unsqueeze r_k for broadcasting
     r_k_b = r_k.unsqueeze(0).unsqueeze(0)
@@ -50,7 +50,7 @@ def gate_output_correction_backward_ref(grad_output, o, r, k, r_k, v, g):
     grad_gated_input = grad_output * g
     grad_o = grad_gated_input
     grad_correction = grad_gated_input
-    grad_correction_reshaped = grad_correction.view(B, T, H, D)
+    grad_correction_reshaped = grad_correction.view(B, T, H, V)
     grad_v = grad_correction_reshaped * correction_scalar
     grad_correction_scalar = (grad_correction_reshaped * v).sum(-1, keepdim=True)
     grad_r_mul_k_mul_rk = grad_correction_scalar.expand_as(r)
@@ -67,7 +67,7 @@ def gate_output_correction_backward_ref(grad_output, o, r, k, r_k, v, g):
         for num_warps in [2, 4, 8]
         for BT in [2, 4, 8]
     ],
-    key=['num_heads', 'head_dim', 'BLOCK_SIZE_D'],
+    key=['num_heads', 'key_head_dim', 'value_head_dim', 'BLOCK_SIZE_D'],
     **autotune_cache_kwargs,
 )
 @triton.jit
@@ -80,7 +80,8 @@ def gate_output_correction_fwd_kernel(
     T,
     T_OFFSET,
     num_heads: tl.constexpr,
-    head_dim: tl.constexpr,
+    key_head_dim: tl.constexpr,
+    value_head_dim: tl.constexpr,
     BLOCK_SIZE_D: tl.constexpr,
     BT: tl.constexpr,
 ):
@@ -91,25 +92,27 @@ def gate_output_correction_fwd_kernel(
     mask_t = t_local < T
 
     d_idx = tl.arange(0, BLOCK_SIZE_D)[None, :]
-    mask_d = d_idx < head_dim
-    mask = mask_t & mask_d
+    mask_k = d_idx < key_head_dim
+    mask_v = d_idx < value_head_dim
+    mask_tk = mask_t & mask_k
+    mask_tv = mask_t & mask_v
 
     offset_rk_h = pid_h * r_k_h_stride
-    vec_r_k = tl.load(r_k_ptr + offset_rk_h + d_idx, mask=mask_d, other=0.0).to(tl.float32)
+    vec_r_k = tl.load(r_k_ptr + offset_rk_h + d_idx, mask=mask_k, other=0.0).to(tl.float32)
 
     offset_rh = pid_b * r_b_stride + t_idx * r_t_stride + pid_h * r_h_stride
     offset_vh = pid_b * v_b_stride + t_idx * v_t_stride + pid_h * v_h_stride
-    vec_r = tl.load(r_ptr + offset_rh + d_idx, mask=mask, other=0.0).to(tl.float32)
-    vec_k = tl.load(k_ptr + offset_rh + d_idx, mask=mask, other=0.0).to(tl.float32)
-    vec_v = tl.load(v_ptr + offset_vh + d_idx, mask=mask, other=0.0).to(tl.float32)
+    vec_r = tl.load(r_ptr + offset_rh + d_idx, mask=mask_tk, other=0.0).to(tl.float32)
+    vec_k = tl.load(k_ptr + offset_rh + d_idx, mask=mask_tk, other=0.0).to(tl.float32)
+    vec_v = tl.load(v_ptr + offset_vh + d_idx, mask=mask_tv, other=0.0).to(tl.float32)
     correction = tl.sum(vec_r * vec_k * vec_r_k, axis=1)[:, None] * vec_v
 
-    offset_o = pid_b * o_b_stride + t_idx * o_t_stride + pid_h * head_dim
-    vec_o = tl.load(o_ptr + offset_o + d_idx, mask=mask, other=0.0).to(tl.float32)
-    vec_g = tl.load(g_ptr + offset_o + d_idx, mask=mask, other=0.0).to(tl.float32)
+    offset_o = pid_b * o_b_stride + t_idx * o_t_stride + pid_h * value_head_dim
+    vec_o = tl.load(o_ptr + offset_o + d_idx, mask=mask_tv, other=0.0).to(tl.float32)
+    vec_g = tl.load(g_ptr + offset_o + d_idx, mask=mask_tv, other=0.0).to(tl.float32)
     final_output = (vec_o + correction) * vec_g
 
-    tl.store(output_ptr + offset_o + d_idx, final_output.to(output_ptr.dtype.element_ty), mask=mask)
+    tl.store(output_ptr + offset_o + d_idx, final_output.to(output_ptr.dtype.element_ty), mask=mask_tv)
 
 
 @triton.autotune(
@@ -119,18 +122,21 @@ def gate_output_correction_fwd_kernel(
         for num_stages in [1, 2, 4]
         for BT in [2, 4, 8]
     ],
-    key=['num_heads', 'head_dim', 'BLOCK_SIZE_D'],
+    key=['num_heads', 'key_head_dim', 'value_head_dim', 'BLOCK_SIZE_D'],
     **autotune_cache_kwargs,
 )
 @triton.jit
 def gate_output_correction_bwd_kernel(
     grad_output_ptr, o_ptr, r_ptr, k_ptr, r_k_ptr, v_ptr, g_ptr,
     grad_o_ptr, grad_r_ptr, grad_k_ptr, grad_r_k_intermediate_ptr, grad_v_ptr, grad_g_ptr,
-    r_b_stride, r_t_stride, r_h_stride, o_b_stride, o_t_stride, r_k_h_stride,
+    r_b_stride, r_t_stride, r_h_stride,
+    v_b_stride, v_t_stride, v_h_stride,
+    o_b_stride, o_t_stride, r_k_h_stride,
     T,
     T_OFFSET,
     num_heads: tl.constexpr,
-    head_dim: tl.constexpr,
+    key_head_dim: tl.constexpr,
+    value_head_dim: tl.constexpr,
     BLOCK_SIZE_D: tl.constexpr,
     BT: tl.constexpr,
 ):
@@ -142,21 +148,24 @@ def gate_output_correction_bwd_kernel(
     mask_t = t_local < T
 
     d_idx = tl.arange(0, BLOCK_SIZE_D)[None, :]
-    mask_d = d_idx < head_dim
-    mask = mask_t & mask_d
+    mask_k = d_idx < key_head_dim
+    mask_v = d_idx < value_head_dim
+    mask_tk = mask_t & mask_k
+    mask_tv = mask_t & mask_v
 
-    rkv_offset = pid_b * r_b_stride + t_idx * r_t_stride + pid_h * r_h_stride
-    vec_r = tl.load(r_ptr + rkv_offset + d_idx, mask=mask, other=0.0).to(tl.float32)
-    vec_k = tl.load(k_ptr + rkv_offset + d_idx, mask=mask, other=0.0).to(tl.float32)
-    vec_v = tl.load(v_ptr + rkv_offset + d_idx, mask=mask, other=0.0).to(tl.float32)
+    rk_offset = pid_b * r_b_stride + t_idx * r_t_stride + pid_h * r_h_stride
+    v_offset = pid_b * v_b_stride + t_idx * v_t_stride + pid_h * v_h_stride
+    vec_r = tl.load(r_ptr + rk_offset + d_idx, mask=mask_tk, other=0.0).to(tl.float32)
+    vec_k = tl.load(k_ptr + rk_offset + d_idx, mask=mask_tk, other=0.0).to(tl.float32)
+    vec_v = tl.load(v_ptr + v_offset + d_idx, mask=mask_tv, other=0.0).to(tl.float32)
 
-    og_offset = pid_b * o_b_stride + t_idx * o_t_stride + pid_h * head_dim
-    vec_o = tl.load(o_ptr + og_offset + d_idx, mask=mask, other=0.0).to(tl.float32)
-    vec_g = tl.load(g_ptr + og_offset + d_idx, mask=mask, other=0.0).to(tl.float32)
-    vec_grad_output = tl.load(grad_output_ptr + og_offset + d_idx, mask=mask, other=0.0).to(tl.float32)
+    og_offset = pid_b * o_b_stride + t_idx * o_t_stride + pid_h * value_head_dim
+    vec_o = tl.load(o_ptr + og_offset + d_idx, mask=mask_tv, other=0.0).to(tl.float32)
+    vec_g = tl.load(g_ptr + og_offset + d_idx, mask=mask_tv, other=0.0).to(tl.float32)
+    vec_grad_output = tl.load(grad_output_ptr + og_offset + d_idx, mask=mask_tv, other=0.0).to(tl.float32)
 
     offset_rk_h = pid_h * r_k_h_stride
-    vec_r_k = tl.load(r_k_ptr + offset_rk_h + d_idx, mask=mask_d, other=0.0).to(tl.float32)
+    vec_r_k = tl.load(r_k_ptr + offset_rk_h + d_idx, mask=mask_k, other=0.0).to(tl.float32)
 
     prod_r_k_rk = vec_r * vec_k * vec_r_k
     corr_scalar = tl.sum(prod_r_k_rk, axis=1)
@@ -173,18 +182,19 @@ def gate_output_correction_bwd_kernel(
     vec_grad_k = grad_corr_s * vec_r * vec_r_k
     local_grad_rk = grad_corr_s * vec_r * vec_k
 
-    tl.store(grad_o_ptr + og_offset + d_idx, vec_grad_o.to(grad_o_ptr.dtype.element_ty), mask=mask)
-    tl.store(grad_g_ptr + og_offset + d_idx, vec_grad_g.to(grad_g_ptr.dtype.element_ty), mask=mask)
-    tl.store(grad_r_ptr + rkv_offset + d_idx, vec_grad_r.to(grad_r_ptr.dtype.element_ty), mask=mask)
-    tl.store(grad_k_ptr + rkv_offset + d_idx, vec_grad_k.to(grad_k_ptr.dtype.element_ty), mask=mask)
-    tl.store(grad_v_ptr + rkv_offset + d_idx, vec_grad_v.to(grad_v_ptr.dtype.element_ty), mask=mask)
-    tl.store(grad_r_k_intermediate_ptr + rkv_offset + d_idx,
-             local_grad_rk.to(grad_r_k_intermediate_ptr.dtype.element_ty), mask=mask)
+    tl.store(grad_o_ptr + og_offset + d_idx, vec_grad_o.to(grad_o_ptr.dtype.element_ty), mask=mask_tv)
+    tl.store(grad_g_ptr + og_offset + d_idx, vec_grad_g.to(grad_g_ptr.dtype.element_ty), mask=mask_tv)
+    tl.store(grad_r_ptr + rk_offset + d_idx, vec_grad_r.to(grad_r_ptr.dtype.element_ty), mask=mask_tk)
+    tl.store(grad_k_ptr + rk_offset + d_idx, vec_grad_k.to(grad_k_ptr.dtype.element_ty), mask=mask_tk)
+    tl.store(grad_v_ptr + v_offset + d_idx, vec_grad_v.to(grad_v_ptr.dtype.element_ty), mask=mask_tv)
+    tl.store(grad_r_k_intermediate_ptr + rk_offset + d_idx,
+             local_grad_rk.to(grad_r_k_intermediate_ptr.dtype.element_ty), mask=mask_tk)
 
 
 def gate_output_correction_backward_triton(grad_output, o, r, k, r_k, v, g):
     batch_size, seq_len, _ = o.shape
-    num_heads, head_dim = r.shape[-2], r.shape[-1]
+    num_heads, key_head_dim = r.shape[-2], r.shape[-1]
+    value_head_dim = v.shape[-1]
 
     grad_o = torch.empty_like(o)
     grad_r = torch.empty_like(r)
@@ -194,7 +204,7 @@ def gate_output_correction_backward_triton(grad_output, o, r, k, r_k, v, g):
     # Keep intermediate in float32 for precision
     grad_r_k = torch.empty_like(r, dtype=torch.float32)
 
-    BLOCK_SIZE_D = triton.next_power_of_2(head_dim)
+    BLOCK_SIZE_D = triton.next_power_of_2(max(key_head_dim, value_head_dim))
 
     for t_offset in range(0, seq_len, 65536):
         T_SIZE = min(65536, seq_len - t_offset)
@@ -204,10 +214,11 @@ def gate_output_correction_backward_triton(grad_output, o, r, k, r_k, v, g):
             grad_output, o, r, k, r_k, v, g,
             grad_o, grad_r, grad_k, grad_r_k, grad_v, grad_g,
             r.stride(0), r.stride(1), r.stride(2),
+            v.stride(0), v.stride(1), v.stride(2),
             o.stride(0), o.stride(1),
             r_k.stride(0),
             T_SIZE, t_offset,
-            num_heads=num_heads, head_dim=head_dim, BLOCK_SIZE_D=BLOCK_SIZE_D,
+            num_heads=num_heads, key_head_dim=key_head_dim, value_head_dim=value_head_dim, BLOCK_SIZE_D=BLOCK_SIZE_D,
         )
     # Sum over batch and time to get the final gradient for r_k
     grad_r_k = grad_r_k.sum(dim=(0, 1)).type_as(r_k)
@@ -222,7 +233,8 @@ class GateOutputCorrection(torch.autograd.Function):
         assert r_k.dim() == 2 and r_k.shape[0] == r.shape[-2] and r_k.shape[1] == r.shape[-1]
 
         batch_size, seq_len, _ = o.shape
-        num_heads, head_dim = r.shape[-2], r.shape[-1]
+        num_heads, key_head_dim = r.shape[-2], r.shape[-1]
+        value_head_dim = v.shape[-1]
         output = torch.empty_like(o)
         ctx.save_for_backward(o, r, k, r_k, v, g)
         for t in range(0, seq_len, 65536):
@@ -237,7 +249,8 @@ class GateOutputCorrection(torch.autograd.Function):
                 v.stride(0), v.stride(1), v.stride(2),
                 r_k.stride(0),
                 T_SIZE, T_OFFSET,
-                num_heads, head_dim, BLOCK_SIZE_D=triton.next_power_of_2(head_dim),
+                num_heads, key_head_dim, value_head_dim,
+                BLOCK_SIZE_D=triton.next_power_of_2(max(key_head_dim, value_head_dim)),
             )
         return output
 
@@ -265,12 +278,12 @@ def gate_output_correction(
     ``correction = ((r * k * r_k).sum(-1, keepdim=True) * v).view_as(o)``.
 
     Args:
-        o: Output tensor before correction, shape `[B, T, H * D]`.
-        r: Receptance tensor, shape `[B, T, H, D]`.
-        k: Key tensor, shape `[B, T, H, D]`.
-        r_k: Per-head correction weight, shape `[H, D]`.
-        v: Value tensor, shape `[B, T, H, D]`.
-        g: Output gate tensor, shape `[B, T, H * D]`.
+        o: Output tensor before correction, shape `[B, T, H * V]`.
+        r: Receptance tensor, shape `[B, T, H, K]`.
+        k: Key tensor, shape `[B, T, H, K]`.
+        r_k: Per-head correction weight, shape `[H, K]`.
+        v: Value tensor, shape `[B, T, H, V]`.
+        g: Output gate tensor, shape `[B, T, H * V]`.
 
     Returns:
         Corrected and gated output tensor with the same shape as `o`.
