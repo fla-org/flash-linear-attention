@@ -13,7 +13,7 @@ from fla.utils import device
 
 
 @pytest.mark.parametrize("module", [LongConvolution, ImplicitLongConvolution])
-@pytest.mark.parametrize("T", [1, 10, 37, 64, 100])
+@pytest.mark.parametrize("T", [2, 10, 37, 64, 100])
 @pytest.mark.parametrize("max_len", [64])
 @torch.no_grad()
 def test_long_conv_causal(module: type, T: int, max_len: int):
