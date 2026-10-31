@@ -266,7 +266,7 @@ def parallel_attn_bwd_kernel_dq(
     # [BT, BK]
     b_q = tl.load(p_q, mask=m_q[:, None] & (o_d[None, :] < K), other=0.0)
     # [BT, BV]
-    b_do = tl.load(p_do, mask=m_q[:, None] & (o_v[None, :] < V), other=0.0)
+    b_do = tl.load(p_do, mask=m_q[:, None] & (o_v[None, :] < V), other=0.0).to(v.dtype.element_ty)
     # [BT]
     b_lse = tl.load(p_lse, mask=m_q, other=0.0)
     b_delta = tl.load(p_delta, mask=m_q, other=0.0)
@@ -437,7 +437,7 @@ def parallel_attn_bwd_kernel_dkv(
         # [BS, BK]
         b_q = tl.load(p_q, mask=m_q[:, None] & (o_d[None, :] < K), other=0.0)
         # [BS, BV]
-        b_do = tl.load(p_do, mask=m_q[:, None] & (o_v[None, :] < V), other=0.0)
+        b_do = tl.load(p_do, mask=m_q[:, None] & (o_v[None, :] < V), other=0.0).to(v.dtype.element_ty)
         # [BS]
         b_lse = tl.load(p_lse, mask=m_q, other=0.0)
         b_delta = tl.load(p_delta, mask=m_q, other=0.0)
@@ -482,7 +482,7 @@ def parallel_attn_bwd_kernel_dkv(
         # [BS, BK]
         b_q = tl.load(p_q, mask=m_q[:, None] & (o_d[None, :] < K), other=0.0)
         # [BS, BV]
-        b_do = tl.load(p_do, mask=m_q[:, None] & (o_v[None, :] < V), other=0.0)
+        b_do = tl.load(p_do, mask=m_q[:, None] & (o_v[None, :] < V), other=0.0).to(v.dtype.element_ty)
         # [BS]
         b_lse = tl.load(p_lse, mask=m_q, other=0.0)
         b_delta = tl.load(p_delta, mask=m_q, other=0.0)
@@ -515,7 +515,7 @@ def parallel_attn_bwd_kernel_dkv(
         tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), mask=m_k)
 
 
-@dispatch('attn')
+@dispatch
 def parallel_attn_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -526,6 +526,7 @@ def parallel_attn_fwd(
     window_size: int | None = None,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
+    output_dtype: torch.dtype | None = None,
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
     HQ = q.shape[2]
@@ -554,7 +555,7 @@ def parallel_attn_fwd(
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     assert NK == 1, "The key dimension can not be larger than 256"
 
-    o = torch.empty(B, T, HQ, V, dtype=v.dtype, device=q.device)
+    o = torch.empty(B, T, HQ, V, dtype=output_dtype or v.dtype, device=q.device)
     lse = torch.empty(B, T, HQ, dtype=torch.float, device=q.device)
     grid = (NV * NT, B * HQ)
     parallel_attn_fwd_kernel[grid](
@@ -601,7 +602,7 @@ def parallel_attn_bwd_preprocess(
     return delta
 
 
-@dispatch('attn')
+@dispatch
 def parallel_attn_bwd(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -646,7 +647,7 @@ def parallel_attn_bwd(
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     NV = triton.cdiv(V, BV)
 
-    delta = parallel_attn_bwd_preprocess(o, do)
+    delta = parallel_attn_bwd_preprocess(o=o, do=do)
 
     dq = torch.empty(B, T, HQ, K, dtype=k.dtype if H == HQ else torch.float, device=q.device)
     dk = torch.empty(B, T, HQ, K, dtype=k.dtype if H == HQ else torch.float, device=q.device)
@@ -731,9 +732,7 @@ class ParallelAttentionFunction(torch.autograd.Function):
     @staticmethod
     @contiguous
     @autocast_custom_fwd
-    def forward(ctx, q, k, v, g, sink_bias, scale, window_size, cu_seqlens, chunk_indices=None):
-        ctx.dtype = q.dtype
-
+    def forward(ctx, q, k, v, g, sink_bias, scale, window_size, cu_seqlens, chunk_indices=None, output_dtype=None):
         g_cumsum = chunk_global_cumsum(g, cu_seqlens=cu_seqlens, scale=RCP_LN2) if g is not None else None
         sink_bias = sink_bias * RCP_LN2 if sink_bias is not None else None
         o, lse = parallel_attn_fwd(
@@ -746,12 +745,13 @@ class ParallelAttentionFunction(torch.autograd.Function):
             window_size=window_size,
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
+            output_dtype=output_dtype,
         )
         ctx.save_for_backward(q, k, v, o, g_cumsum, lse, sink_bias)
         ctx.scale = scale
         ctx.window_size = window_size
         ctx.cu_seqlens = cu_seqlens
-        return o.to(q.dtype)
+        return o.to(output_dtype or q.dtype)
 
     @staticmethod
     @contiguous
@@ -774,7 +774,7 @@ class ParallelAttentionFunction(torch.autograd.Function):
         if dg is not None:
             dg = chunk_global_cumsum(dg, cu_seqlens=ctx.cu_seqlens, reverse=True)
 
-        return dq.to(q), dk.to(k), dv.to(v), dg, dsink_bias, None, None, None, None
+        return dq.to(q), dk.to(k), dv.to(v), dg, dsink_bias, None, None, None, None, None
 
 
 def parallel_attn(
@@ -788,6 +788,7 @@ def parallel_attn(
     chunk_indices: torch.LongTensor | None = None,
     *,
     sink_bias: torch.Tensor | None = None,
+    output_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     r"""
     Args:
@@ -820,11 +821,17 @@ def parallel_attn(
                 p_i    = exp(s_i)          / (sum_j exp(s_j) + exp(sink_bias[h]))
                 o      = sum_i p_i * v_i   # sink slot contributes no value
             When `None`, standard softmax is used.
+        output_dtype (torch.dtype, Optional):
+            Output dtype, either `q.dtype` or `torch.float32`. Default: `None`, which preserves `q.dtype`.
+            FP32 outputs are saved for the backward delta reduction without rounding to the input dtype.
+            The delta reduction uses the incoming gradient; backward matrix products cast it to the input dtype on load.
 
     Returns:
         o (torch.Tensor):
             Outputs of shape `[B, T, HQ, V]`.
     """
+    if output_dtype not in (None, q.dtype, torch.float32):
+        raise ValueError("output_dtype must be None, q.dtype, or torch.float32")
     if scale is None:
         scale = k.shape[-1] ** -0.5
     HQ, H = q.shape[2], k.shape[2]
@@ -839,6 +846,6 @@ def parallel_attn(
         assert sink_bias.shape == (q.shape[2],), "sink_bias must have shape [HQ]"
 
     o = ParallelAttentionFunction.apply(
-        q, k, v, g, sink_bias, scale, window_size, cu_seqlens, chunk_indices
+        q, k, v, g, sink_bias, scale, window_size, cu_seqlens, chunk_indices, output_dtype
     )
     return o

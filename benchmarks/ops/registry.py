@@ -14,6 +14,7 @@ See ``benchmarks/ops/run.py`` docstring for full usage and how to register new o
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -34,6 +35,10 @@ def shape_BTHD(B, T, H, D, **kw):
 
 def shape_BTH(B, T, H, D, **kw):
     return (B, T, H)
+
+
+def shape_BHDD(B, T, H, D, **kw):
+    return (B, H, D, D)
 
 
 def shape_BTD(B, T, H, D, **kw):
@@ -419,6 +424,30 @@ register_op(OpConfig(
     test_file='tests/ops/test_gdn2.py',
 ))
 
+
+def l2norm_fp32_transform(t):
+    return F.normalize(t, p=2, dim=-1)
+
+
+register_op(OpConfig(
+    name='chunk_oja2',
+    import_path='fla.ops.gated_oja_rule2',
+    inputs={
+        'q': TensorSpec(shape_BTHD),
+        'k': TensorSpec(shape_BTHD),
+        # the slot code has M = D slots and stays in fp32, as the GSA2 layer feeds it
+        'v': TensorSpec(shape_BTHD, dtype='float32', transform=l2norm_fp32_transform),
+        'gv': TensorSpec(shape_BTHD, dtype='float32', transform=logsigmoid),
+        'b': TensorSpec(shape_BTHD, transform=sigmoid_transform),
+        'c': TensorSpec(shape_BTHD, transform=sigmoid_transform),
+    },
+    func_name='chunk_gated_oja_rule2',
+    extra_kwargs={'use_q_l2norm': True, 'use_k_l2norm': True},
+    category='gate_beta',
+    dim_constraints={'D': [64, 128, 256]},
+    test_file='tests/ops/test_gated_oja_rule2.py',
+))
+
 register_op(OpConfig(
     name='chunk_kda',
     import_path='fla.ops.kda',
@@ -430,6 +459,54 @@ register_op(OpConfig(
     extra_kwargs={'use_qk_l2norm_in_kernel': True, 'safe_gate': True, 'lower_bound': -5},
     category='gate_beta',
 ))
+
+
+def _recurrent_kda_post_init(inputs, B, T, H, D, packed=False, **kw):
+    inputs['A_log'].uniform_(1, 16).log_()
+    dt = inputs['dt_bias'].uniform_(math.log(1e-3), math.log(1e-1)).exp_()
+    inputs['dt_bias'] = (dt + torch.log(-torch.expm1(-dt))).reshape(-1)
+    if packed:
+        for name in ('q', 'k', 'v', 'g', 'beta'):
+            tensor = inputs[name]
+            inputs[name] = tensor.reshape(1, B * T, *tensor.shape[2:])
+        offsets = torch.arange(B + 1, dtype=torch.long, device=inputs['q'].device) * T
+        offsets[1:-1] -= torch.arange(1, B, device=offsets.device) % 2 * (T // 2)
+        inputs['cu_seqlens'] = offsets
+
+
+_recurrent_kda_shapes = {
+    'B1_T1_H16_D128': {'B': 1, 'T': 1, 'H': 16, 'D': 128},
+    'B8_T1_H16_D128': {'B': 8, 'T': 1, 'H': 16, 'D': 128},
+    'B32_T1_H32_D128': {'B': 32, 'T': 1, 'H': 32, 'D': 128},
+    'B8_T4_H16_D128': {'B': 8, 'T': 4, 'H': 16, 'D': 128},
+    'B2_T16_H4_D64': {'B': 2, 'T': 16, 'H': 4, 'D': 64},
+}
+
+for _name, _packed in (('fused_recurrent_kda', False), ('fused_recurrent_kda_varlen', True)):
+    register_op(OpConfig(
+        name=_name,
+        import_path='fla.ops.kda',
+        func_name='fused_recurrent_kda',
+        inputs={
+            **{name: TensorSpec(shape_BTHD, requires_grad=False) for name in ('q', 'k', 'v', 'g')},
+            'beta': TensorSpec(shape_BTH, requires_grad=False),
+            'A_log': TensorSpec(shape_H, requires_grad=False, dtype='float32'),
+            'dt_bias': TensorSpec(shape_HD, requires_grad=False, dtype='float32'),
+            'initial_state': TensorSpec(shape_BHDD, requires_grad=False, dtype='float32'),
+        },
+        extra_kwargs={
+            'use_qk_l2norm_in_kernel': True,
+            'use_gate_in_kernel': True,
+            'use_beta_sigmoid_in_kernel': True,
+            'output_final_state': True,
+            'state_v_first': True,
+        },
+        skip_backward=True,
+        post_init=_recurrent_kda_post_init,
+        default_shapes={name: {**shape, 'packed': _packed} for name, shape in _recurrent_kda_shapes.items()},
+        category='gate_beta',
+    ))
+
 
 GDP_NUM_HOUSEHOLDER = 2
 
@@ -470,6 +547,7 @@ for _name, _requires_grad in (('chunk_gated_delta_product', True), ('chunk_gated
         test_file='tests/ops/test_gdp.py',
     ))
 
+
 register_op(OpConfig(
     name='fused_recurrent_gdn2',
     import_path='fla.ops.gdn2',
@@ -482,6 +560,42 @@ register_op(OpConfig(
     extra_kwargs={'use_qk_l2norm_in_kernel': True, 'output_final_state': True},
     skip_backward=True,
     category='gdn2',
+))
+
+register_op(OpConfig(
+    name='fused_recurrent_oja2',
+    import_path='fla.ops.gated_oja_rule2',
+    inputs={
+        'q': TensorSpec(shape_BTHD),
+        'k': TensorSpec(shape_BTHD),
+        'v': TensorSpec(shape_BTHD, dtype='float32', transform=l2norm_fp32_transform),
+        'gv': TensorSpec(shape_BTHD, dtype='float32', transform=logsigmoid),
+        'b': TensorSpec(shape_BTHD, transform=sigmoid_transform),
+        'c': TensorSpec(shape_BTHD, transform=sigmoid_transform),
+    },
+    func_name='fused_recurrent_gated_oja_rule2',
+    extra_kwargs={'use_q_l2norm': True, 'use_k_l2norm': True, 'output_final_state': True},
+    skip_backward=True,
+    category='oja2',
+    dim_constraints={'D': [64, 128]},
+    default_shapes={f'B4_T{T}_H8_D128': {'B': 4, 'T': T, 'H': 8, 'D': 128} for T in (1, 16, 64)},
+    test_file='tests/ops/test_gated_oja_rule2.py',
+))
+
+register_op(OpConfig(
+    name='fused_recurrent_oja',
+    import_path='fla.ops.gated_oja_rule',
+    inputs={
+        **_simple_qkv,
+        'gv': TensorSpec(shape_BTHD, transform=logsigmoid),
+        'beta': TensorSpec(shape_BTH, transform=sigmoid_transform),
+    },
+    func_name='fused_recurrent_gated_oja_rule',
+    extra_kwargs={'output_final_state': True},
+    skip_backward=True,
+    category='gate_beta',
+    dim_constraints={'D': [64, 128]},
+    test_file='tests/ops/test_oja.py',
 ))
 
 register_op(OpConfig(
@@ -527,6 +641,19 @@ register_op(OpConfig(
         'g': TensorSpec(shape_BTH, transform=logsigmoid),
     },
     category='head_gate',
+))
+
+register_op(OpConfig(
+    name='chunk_gka',
+    import_path='fla.ops.gka',
+    inputs={
+        **_simple_qkv,
+        'g': TensorSpec(shape_BTH, transform=logsigmoid),
+        'gk': TensorSpec(shape_BTH, transform=logsigmoid),
+        'alpha': TensorSpec(shape_BTH, transform=sigmoid_transform),
+    },
+    category='head_gate',
+    dim_constraints={'D': [64, 128]},
 ))
 
 # --- RWKV ---
@@ -635,6 +762,38 @@ register_op(OpConfig(
     import_path='fla.ops.stickbreaking_attn',
     inputs={**_simple_qkv},
     category='attn',
+))
+
+# --- Wall attention (per-channel multiplicative-decay attention) ---
+
+
+def wall_log_decay(t):
+    """Small-negative per-channel log-decay gate for Wall attention (``g <= 0``)."""
+    return -t.abs() * 0.05
+
+
+# Wall attention is quadratic in T with per-channel gates, so the global shape
+# matrix (up to T=16384 / H=96 / D=256) is too heavy for the NPU benchmark CI;
+# use a bounded per-op matrix (dense only, fwd + fwdbwd).
+_wall_attn_default_shapes = {
+    'B1_T1024_H8_D64':   {'B': 1, 'T': 1024, 'H': 8,  'D': 64},
+    'B1_T2048_H8_D128':  {'B': 1, 'T': 2048, 'H': 8,  'D': 128},
+    'B2_T1024_H16_D128': {'B': 2, 'T': 1024, 'H': 16, 'D': 128},
+    'B1_T4096_H4_D128':  {'B': 1, 'T': 4096, 'H': 4,  'D': 128},
+}
+
+register_op(OpConfig(
+    name='parallel_wall_attn',
+    import_path='fla.ops.wall_attn',
+    inputs={
+        'q': TensorSpec(shape_BTHD),
+        'k': TensorSpec(shape_BTHD),
+        'v': TensorSpec(shape_BTHD),
+        'g': TensorSpec(shape_BTHD, transform=wall_log_decay),
+    },
+    output_is_tuple=False,
+    category='attn',
+    default_shapes=_wall_attn_default_shapes,
 ))
 
 

@@ -452,9 +452,18 @@ def parallel_moba(
 
     # find topk chunks per (head, token), then AND with the causal mask
     # gate_mask [ N_CHUNK, H, T ], True means the (chunk, head, token) triple participates in MoBA attn
-    _, gate_top_k_idx = torch.topk(gate, k=topk, dim=0, largest=True, sorted=False)
     gate_mask = torch.logical_not(gate.isinf())
-    gate_idx_mask = torch.zeros_like(gate_mask).scatter_(dim=0, index=gate_top_k_idx, value=True)
+    # torch.topk would reduce over dim 0, whose neighbours sit H * T elements apart, and its radix
+    # select rereads the whole gate once per digit pass. Take one chunk at a time instead: argmax
+    # over dim 0 reads the same memory with neighbouring threads, and `topk` here is the number of
+    # blocks a token attends to, which is small by construction.
+    gate_idx_mask = torch.zeros_like(gate_mask)
+    for _ in range(topk):
+        gate_top_1_idx = gate.argmax(dim=0, keepdim=True)
+        gate_idx_mask.scatter_(dim=0, index=gate_top_1_idx, value=True)
+        # retire the chunk just taken so the next pass finds the one below it; the mask above was
+        # read from the untouched gate, and nothing reads gate after this loop
+        gate.scatter_(dim=0, index=gate_top_1_idx, value=-float("inf"))
     gate_mask = torch.logical_and(gate_mask, gate_idx_mask)
 
     # varlen trick: combining all q index that needs moba attn

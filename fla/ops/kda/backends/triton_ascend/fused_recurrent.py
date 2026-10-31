@@ -15,7 +15,7 @@ import triton.language as tl
 
 from fla.ops.utils.op import exp
 from fla.ops.utils.softplus import softplus
-from fla.utils import input_guard
+from fla.utils import ascend_compile_kwargs, input_guard
 from fla.utils.ascend_ub_manager import (
     ASCEND_MAX_GRID_DIM,
     compute_row_tile_block_size,
@@ -23,7 +23,6 @@ from fla.utils.ascend_ub_manager import (
 )
 
 # Peak fp32 live set: b_h[BK,BV] + b_q,b_k,b_g[BK] + b_v,b_o,b_beta[BV].
-# Compiler multi-buffer (~3× analytical peak) is folded into mem_mult.
 _RECUR_MEM_MULT = 3.0
 _SAFETY_MARGIN = 0.80
 _FALLBACK_BV = 32
@@ -232,7 +231,7 @@ def fused_recurrent_kda_fwd_kernel_npu(
                 b_o = tl.sum(b_h * b_q[:, None], 0)
             tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=mask_v)
 
-            if IS_CONTINUOUS_BATCHING:
+            if IS_CONTINUOUS_BATCHING and STORE_FINAL_STATE:
                 if INPLACE_FINAL_STATE:
                     state_base = (
                         tl.load(ssm_state_indices + i_n * stride_indices_seq + i_t).to(tl.int64) * stride_final_state_token
@@ -241,10 +240,10 @@ def fused_recurrent_kda_fwd_kernel_npu(
                 else:
                     p_ht = ht + (bos + i_t) * stride_final_state_token + i_hv * K * V
                 if STATE_V_FIRST:
-                    p_ht = p_ht + o_v[:, None] * K + o_k[None, :]
+                    p_ht = tl.make_block_ptr(p_ht, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
                 else:
-                    p_ht = p_ht + o_k[:, None] * V + o_v[None, :]
-                tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
+                    p_ht = tl.make_block_ptr(p_ht, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
+                tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), boundary_check=(0, 1))
 
             p_q += stride_qk
             p_k += stride_qk
@@ -260,10 +259,10 @@ def fused_recurrent_kda_fwd_kernel_npu(
             if STORE_FINAL_STATE:
                 p_ht = ht + (tl.cast(i_n, tl.int64) * HV + i_hv) * K * V
                 if STATE_V_FIRST:
-                    p_ht = p_ht + o_v[:, None] * K + o_k[None, :]
+                    p_ht = tl.make_block_ptr(p_ht, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
                 else:
-                    p_ht = p_ht + o_k[:, None] * V + o_v[None, :]
-                tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
+                    p_ht = tl.make_block_ptr(p_ht, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
+                tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), boundary_check=(0, 1))
 
 
 @input_guard(no_guard_contiguous={'initial_state', 'out'})
@@ -311,10 +310,11 @@ def fused_recurrent_kda_fwd_npu(
         assert initial_state is not None
         final_state = initial_state
     elif output_final_state:
+        num_states = B * T if ssm_state_indices is not None else N
         if state_v_first:
-            final_state = q.new_empty(N, HV, V, K, dtype=torch.float32)
+            final_state = q.new_empty(num_states, HV, V, K, dtype=torch.float32)
         else:
-            final_state = q.new_empty(N, HV, K, V, dtype=torch.float32)
+            final_state = q.new_empty(num_states, HV, K, V, dtype=torch.float32)
     else:
         final_state = None
 
@@ -364,6 +364,6 @@ def fused_recurrent_kda_fwd_npu(
     for task_off in range(0, task_num, max_tasks):
         task_len = min(max_tasks, task_num - task_off)
         kernel_kwargs["TASK_OFFSET"] = task_off
-        fused_recurrent_kda_fwd_kernel_npu[(task_len,)](**kernel_kwargs)
+        fused_recurrent_kda_fwd_kernel_npu[(task_len,)](**ascend_compile_kwargs(), **kernel_kwargs)
 
     return out, final_state
