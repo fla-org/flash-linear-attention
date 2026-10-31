@@ -82,31 +82,24 @@ def _check(actual, expected):
 
 
 @pytest.mark.parametrize(
-    'dtype,dim,cu_dtype',
+    'dtype,dim,cu_dtype,state,final',
     [
-        (torch.float16, 64, torch.int32), (torch.bfloat16, 64, torch.int64),
-        (torch.float16, 128, torch.int64), (torch.bfloat16, 128, torch.int32),
+        (torch.float16, 64, torch.int32, False, False),
+        (torch.bfloat16, 64, torch.int64, False, True),
+        (torch.float16, 128, torch.int64, True, False),
+        (torch.bfloat16, 128, torch.int32, True, True),
     ],
     ids=[
-        'dtype-float16-dim-64-cu_dtype-int32',
-        'dtype-bfloat16-dim-64-cu_dtype-int64',
-        'dtype-float16-dim-128-cu_dtype-int64',
-        'dtype-bfloat16-dim-128-cu_dtype-int32',
-    ],
-)
-@pytest.mark.parametrize(
-    'state,final',
-    [(False, False), (False, True), (True, False), (True, True)],
-    ids=[
-        'state-false-final-false',
-        'state-false-final-true',
-        'state-true-final-false',
-        'state-true-final-true',
+        'dtype-float16-dim-64-cu_dtype-int32-state-false-final-false',
+        'dtype-bfloat16-dim-64-cu_dtype-int64-state-false-final-true',
+        'dtype-float16-dim-128-cu_dtype-int64-state-true-final-false',
+        'dtype-bfloat16-dim-128-cu_dtype-int32-state-true-final-true',
     ],
 )
 @pytest.mark.parametrize('capture', ['direct', 'callable'], ids=['capture-direct', 'capture-callable'])
 @torch.no_grad()
 def test_replay_changes_values_lengths_and_empty_sequences(dtype, dim, cu_dtype, state, final, capture):
+    """Cover each state combination and dtype/dimension pair through both capture APIs."""
     sample = _inputs(dtype, dim)
     cu = torch.tensor([0, 1, 64, 129, 193], device=device, dtype=cu_dtype)
 

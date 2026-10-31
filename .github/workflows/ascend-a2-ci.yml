@@ -177,12 +177,25 @@ jobs:
             tests/ops/test_precond_gated_delta.py \
             tests/ops/test_wall_attn.py
 
-      - name: Run NPU graph tests serially
+      - name: Run NPU graph suites on separate devices
         shell: bash
         env:
-          ASCEND_RT_VISIBLE_DEVICES: "0"
           FLA_NPU_XDIST: "0"
         run: |
           source /usr/local/Ascend/ascend-toolkit/set_env.sh
-          pytest -s -v --exitfirst tests/ops/test_kda_graph.py
-          FLA_CI_ENV=0 pytest -s -v --exitfirst tests/ops/test_gdn_graph.py
+          ASCEND_RT_VISIBLE_DEVICES=0 pytest -s -v --exitfirst \
+            tests/ops/test_kda_graph.py > >(tee "$RUNNER_TEMP/kda-graph.log") 2>&1 &
+          pid_kda=$!
+          ASCEND_RT_VISIBLE_DEVICES=1 FLA_CI_ENV=0 pytest -s -v --exitfirst \
+            tests/ops/test_gdn_graph.py > >(tee "$RUNNER_TEMP/gdn-graph.log") 2>&1 &
+          pid_gdn=$!
+
+          trap 'kill "$pid_kda" "$pid_gdn" 2>/dev/null || true' EXIT
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+
+          status=0
+          wait "$pid_kda" || status=1
+          wait "$pid_gdn" || status=1
+          trap - EXIT INT TERM
+          exit "$status"
