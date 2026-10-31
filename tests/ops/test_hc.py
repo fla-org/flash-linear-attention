@@ -20,6 +20,8 @@ pytestmark = pytest.mark.skipif(not IS_NVIDIA, reason='NVIDIA CUDA required')
 
 @pytest.fixture(params=['triton', 'gluon', 'tilelang'])
 def backend(request, monkeypatch):
+    # keep the FP32 reference's einsum backward at full precision
+    monkeypatch.setattr(torch.backends.cuda.matmul, 'allow_tf32', False)
     for name in ('GLUON', 'TILELANG'):
         monkeypatch.setenv(f'FLA_{name}', '0')
     name = request.param
