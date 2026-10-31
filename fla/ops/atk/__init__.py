@@ -5,10 +5,15 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+from fla.backends import TritonAscendBackend
+
 # ATK kernels
 # Shared by precond_gated_delta_rule and precond_kda
-
 from fla.ops.atk.chunk_atk_bwd import chunk_atk_bwd
 from fla.ops.atk.chunk_atk_fwd import chunk_atk_fwd, recompute_atk_fwd
 
 __all__ = ['chunk_atk_bwd', 'chunk_atk_fwd', 'recompute_atk_fwd']
+
+
+if TritonAscendBackend.is_available():
+    from fla.ops.atk.backends.triton_ascend import chunk_atk_bwd, chunk_atk_fwd  # noqa: F401

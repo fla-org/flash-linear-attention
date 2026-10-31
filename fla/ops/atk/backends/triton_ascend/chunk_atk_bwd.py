@@ -15,6 +15,9 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.backends import TritonAscendBackend, register
+from fla.ops.atk.backends.triton_ascend.utils import atk_verifier
+from fla.ops.atk.chunk_atk_bwd import chunk_atk_bwd
 from fla.ops.utils import prepare_chunk_indices
 from fla.utils.ascend_ub_manager import ASCEND_LAUNCH_BLOCK_BUDGET
 
@@ -415,6 +418,7 @@ def _launch_varlen_rows(kernel, nt, grid_h, args):
         kernel[(n, grid_h, 1)](*args, chunk_offset=0, t_offset=off)
 
 
+@register(chunk_atk_bwd, backend=TritonAscendBackend, verifier=atk_verifier)
 def chunk_atk_bwd_npu(
     k: torch.Tensor,
     g_raw: torch.Tensor,
