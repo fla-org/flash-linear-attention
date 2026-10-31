@@ -11,10 +11,19 @@ import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 from fla.ops.utils.op import exp, unflatten_program_id
-from fla.utils import check_shared_mem, is_nvidia_hopper
+from fla.utils import IS_NVIDIA_BLACKWELL, autotune_cache_kwargs, check_shared_mem, is_nvidia_hopper
 
 BKV_LIST = [64, 128] if check_shared_mem() else [32, 64]
 NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8, 16]
+
+
+def _prune_bwd_dhu_configs(configs, named_args, **kwargs):
+    args = {**named_args, **kwargs}
+    if args['V'] > 128 and args['vg'].dtype == torch.float32:
+        # four fp32 state tiles exceed shared memory when software-pipelined
+        max_bk = 32 if check_shared_mem('hopper') else 16
+        return [config for config in configs if config.num_stages == 1 and config.kwargs['BK'] <= max_bk]
+    return [config for config in configs if config.num_stages > 1]
 
 
 @triton.heuristics({
@@ -32,6 +41,7 @@ NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8, 16]
         for BK in [32, 64]
     ],
     key=['H', 'K', 'V', 'BT'],
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_oja_fwd_kernel_h_blockdim64(
@@ -56,6 +66,7 @@ def chunk_oja_fwd_kernel_h_blockdim64(
     STORE_FINAL_STATE: tl.constexpr,
     SAVE_NEW_KEY: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    DISABLE_PIPELINING: tl.constexpr = False,
 ):
     # (triton.cdiv(K, meta['BK']) * N * H,)
     i_k, i_nh = unflatten_program_id(tl.cdiv(K, BK))
@@ -110,8 +121,8 @@ def chunk_oja_fwd_kernel_h_blockdim64(
             p_h0_4 = h0 + o_k[:, None] * V + (192 + o_v1)[None, :]
             b_h4 += tl.load(p_h0_4, mask=(o_k[:, None] < K) & ((192 + o_v1)[None, :] < V), other=0.0).to(tl.float32)
 
-    # main recurrence
-    for i_t in range(NT):
+    # disable pipelining for Blackwell's chained tensor-memory dots
+    for i_t in tl.range(NT, num_stages=1 if DISABLE_PIPELINING else None):
         o_t = i_t.to(tl.int64) * BT + tl.arange(0, BT)
         m_t = o_t < T
         m_tk = m_t[:, None] & (o_k[None, :] < K)
@@ -208,7 +219,7 @@ def chunk_oja_fwd_h(
     gv: torch.Tensor | None = None,
     initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
-    chunk_size: int = 64,  # SY: remove this argument and force chunk size 64?
+    chunk_size: int = 64,
     save_new_key: bool = True,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
@@ -244,7 +255,8 @@ def chunk_oja_fwd_h(
         H=H,
         K=K,
         V=V,
-        BT=BT
+        BT=BT,
+        DISABLE_PIPELINING=IS_NVIDIA_BLACKWELL and (v.dtype == torch.float32 or V > 64),
     )
     return h, k_new, final_state
 
@@ -261,8 +273,14 @@ def chunk_oja_fwd_h(
         for num_warps in [2, 4]
         for num_stages in [4, 3, 2]
         for BK in [64, 32]
+    ] + [
+        triton.Config({'BK': BK}, num_warps=num_warps, num_stages=1)
+        for num_warps in [2, 4]
+        for BK in [32, 16]
     ],
     key=['H', 'K', 'V', 'BT', 'BK', 'USE_GV'],
+    prune_configs_by={'early_config_prune': _prune_bwd_dhu_configs},
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_oja_bwd_kernel_dhu_blockdim64(
@@ -481,7 +499,7 @@ def chunk_oja_bwd_dhu(
     scale: float | None = None,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
-    chunk_size: int = 64,  # SY: remove this argument and force chunk size 64?
+    chunk_size: int = 64,
     states_in_fp32: bool = False
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *q.shape, do.shape[-1]
@@ -532,7 +550,8 @@ def chunk_oja_bwd_dhu(
         for num_warps in [2, 4]
         for num_stages in [2, 3, 4]
     ],
-    key=['BT']
+    key=['BT'],
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_gsa_bwd_k_kernel_dqkvg(
@@ -678,6 +697,7 @@ def chunk_gsa_bwd_k_kernel_dqkvg(
         for num_stages in [2, 3, 4]
     ],
     key=['H', 'K', 'V', 'BT', 'BK', 'BV', 'USE_GV'],
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_oja_bwd_kernel_dvwg_h(

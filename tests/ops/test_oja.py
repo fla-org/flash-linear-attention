@@ -315,6 +315,7 @@ def test_chunk_forward(
             (4, 4096, 4, 128, 1, 1, 0, torch.float16),
             (1, 4096, 1, 64, 1, 1, 0, torch.float16),
             (2, 4096, 3, 60, 1, 1, 0, torch.float16),
+            (1, 65, 2, 64, 0.1, 1, 0, torch.float16),
         ]
     ]
 )
