@@ -484,6 +484,32 @@ for _name, _packed in (('fused_recurrent_kda', False), ('fused_recurrent_kda_var
     ))
 
 
+def shape_BTHE(B, T, H, D, E=8, **kw):
+    return (B, T, H, E)
+
+
+def init_triadic_gdn_inputs(inputs, **kwargs):
+    with torch.no_grad():
+        for name in ('q', 'k'):
+            inputs[name].copy_(F.normalize(inputs[name].float(), p=2, dim=-1))
+        for name in ('k2', 'q2'):
+            inputs[name].copy_(F.normalize(F.softplus(inputs[name]), p=2, dim=-1))
+
+
+register_op(OpConfig(
+    name='chunk_triadic_gdn',
+    import_path='fla.ops.triadic_gdn',
+    inputs={
+        **_simple_qkv,
+        'k2': TensorSpec(shape_BTHE, dtype='float32'),
+        'q2': TensorSpec(shape_BTHE, dtype='float32'),
+        'g': TensorSpec(shape_BTHE, dtype='float32', transform=logsigmoid),
+        'beta': TensorSpec(shape_BTH, dtype='float32', transform=sigmoid_transform),
+    },
+    post_init=init_triadic_gdn_inputs,
+    category='gate_beta',
+))
+
 register_op(OpConfig(
     name='fused_recurrent_gdn2',
     import_path='fla.ops.gdn2',
