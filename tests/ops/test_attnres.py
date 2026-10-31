@@ -5,11 +5,27 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+import inspect
+
 import pytest
 import torch
 
+from fla import backends
 from fla.ops.attnres import fused_attnres, naive_attnres
 from fla.utils import IS_NPU, assert_close, device
+
+
+@pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
+def test_attnres_gluon_backend():
+    if not backends.GluonBackend.is_available():
+        pytest.skip('Gluon is unavailable')
+    from fla.ops.attnres.backends.gluon import fused_attnres_gluon
+
+    candidate = backends._function_registries[inspect.unwrap(fused_attnres)]._backends['gluon']
+    assert candidate.implementation is fused_attnres_gluon
+    assert candidate.default_enable is False
+    assert candidate.env_var == 'FLA_ATTNRES_GLUON'
+    assert candidate.priority == 3
 
 
 @pytest.mark.parametrize(

@@ -5,15 +5,33 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+import inspect
 import os
 
 import pytest
 import torch
 
+from fla import backends
 from fla.ops.attn.decoding import attn_decoding_one_step
 from fla.ops.attn.naive import naive_attn_decoding, naive_parallel_attn
-from fla.ops.attn.parallel import parallel_attn
-from fla.utils import assert_close, check_shared_mem, device
+from fla.ops.attn.parallel import parallel_attn, parallel_attn_bwd, parallel_attn_fwd
+from fla.utils import IS_NVIDIA_HOPPER, TRITON_ABOVE_3_4_0, assert_close, check_shared_mem, device
+
+
+@pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
+@pytest.mark.parametrize('entry', [parallel_attn_fwd, parallel_attn_bwd])
+def test_parallel_tilelang_backend(entry):
+    if not backends.TileLangBackend.is_available():
+        pytest.skip('TileLang is unavailable')
+    from fla.ops.attn.backends import tilelang
+
+    candidate = backends._function_registries[inspect.unwrap(entry)]._backends['tilelang']
+    implementation = getattr(tilelang, f'{entry.__name__}_tilelang')
+    assert candidate.implementation is implementation
+    assert candidate.default_enable is (IS_NVIDIA_HOPPER and TRITON_ABOVE_3_4_0)
+    expected = [(p.name, p.kind, p.default) for p in inspect.signature(entry).parameters.values()]
+    actual = [(p.name, p.kind, p.default) for p in inspect.signature(implementation).parameters.values()]
+    assert actual == expected
 
 
 @pytest.mark.parametrize(
