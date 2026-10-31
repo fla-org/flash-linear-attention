@@ -180,7 +180,7 @@ def transform(
         memories_flat = selected_memories.reshape(-1)  # [b*s]
 
         combined = batch_indices * (memories_flat.max() + 1) + memories_flat
-        sorted_indices = combined.argsort()
+        sorted_indices = combined.argsort(stable=True)
 
     x_sorted = x_flat[sorted_indices]  # [b*s, d]
     # (b*s, hidden) -> (b, s, hidd)
