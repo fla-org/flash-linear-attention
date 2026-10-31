@@ -437,6 +437,11 @@ def test_registered_op_dispatch(monkeypatch, module_name, entry_name, backend_ty
     assert type(candidate) is backend_class
     suffix = 'npu' if backend_type == 'triton_ascend' else backend_type
     assert candidate.implementation.__name__ == f'{entry_name}_{suffix}'
+    if backend_type in ('tilelang', 'gluon'):
+        parameters = inspect.signature(entry).parameters.values()
+        arguments = {p.name: object() for p in parameters if p.kind not in (p.VAR_POSITIONAL, p.VAR_KEYWORD)}
+        inspect.signature(candidate.implementation).bind(**arguments)
+        inspect.signature(candidate.implementation).bind(*arguments.values())
     for other in registry._backends.values():
         monkeypatch.setattr(other, 'is_enabled', lambda: False)
     monkeypatch.setattr(candidate, 'is_enabled', lambda: True)

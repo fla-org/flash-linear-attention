@@ -503,6 +503,7 @@ def parallel_attn_bwd_tilelang(
     sink_bias: torch.Tensor | None = None,
     scale: float | None = None,
     window_size: int | None = None,
+    chunk_size: int = 128,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
