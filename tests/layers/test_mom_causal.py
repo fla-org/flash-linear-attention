@@ -34,5 +34,7 @@ def test_causal(T: int, topk: int):
     actual = layer(perturbed)[0]
     torch.testing.assert_close(actual[:, :-1], reference[:, :-1], rtol=0, atol=1e-5)
 
+    # the prefix can take the fused_recurrent path while the full input takes chunk, so allow their rounding;
+    # reordered tokens are off by about 3e-2
     prefix = layer(hidden_states[:, :T // 2])[0]
-    torch.testing.assert_close(prefix, reference[:, :T // 2], rtol=1e-4, atol=1e-5)
+    torch.testing.assert_close(prefix, reference[:, :T // 2], rtol=1e-3, atol=1e-3)
