@@ -5,6 +5,8 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+from fla.backends import TileLangBackend
+
 from .naive import naive_parallel_attn
 from .parallel import parallel_attn
 
@@ -13,8 +15,6 @@ __all__ = [
     'parallel_attn',
 ]
 
-
-from fla.backends import TileLangBackend
 
 if TileLangBackend.is_available():
     from fla.ops.attn.backends import tilelang  # noqa: F401

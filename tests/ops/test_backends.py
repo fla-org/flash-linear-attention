@@ -129,6 +129,7 @@ def test_flash_kda_registered_dispatch(monkeypatch, route):
     assert calls == ['flash_kda' if route == 'accepted' else 'triton']
 
 
+@pytest.mark.skipif(backends._DISPATCH_DISABLED, reason="Backend dispatch was disabled before import")
 def test_attention_and_common_backends_have_separate_implementations():
     import inspect
 

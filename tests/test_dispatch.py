@@ -208,7 +208,7 @@ def test_registered_backend_default_enable(monkeypatch, enable_dispatch, default
     def inherited():
         return 'default'
 
-    @register(overridden, backend=Backend, default_enable=default_enable, env_var='FLA_TEST_POLICY_OVERRIDE')
+    @register(overridden, backend=Backend, env_var='FLA_TEST_POLICY_OVERRIDE', default_enable=default_enable)
     @register(inherited, backend=Backend)
     def implementation():
         return 'backend'
