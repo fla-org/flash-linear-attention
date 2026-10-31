@@ -58,8 +58,8 @@ def naive_hc_post(
         torch.Tensor:
             Updated residual streams of shape `[..., N, D]`, accumulated in FP32 and returned in `x.dtype`.
     """
-    residual = x.float()
+    o = x.float()
     if mixing is not None:
-        residual = einsum(mixing.float(), residual, '... n m, ... m d -> ... n d')
+        o = einsum(mixing.float(), o, '... n m, ... m d -> ... n d')
     update = einsum(post.float(), branch.float(), '... n, ... d -> ... n d')
-    return (residual + update).to(x.dtype)
+    return (o + update).to(x.dtype)
