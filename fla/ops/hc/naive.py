@@ -28,7 +28,6 @@ def naive_hc_pre(x: torch.Tensor, pre: torch.Tensor) -> torch.Tensor:
         torch.Tensor:
             Weighted readout of shape `[..., D]`, accumulated in FP32 and returned in `x.dtype`.
     """
-    # [..., N, D], [..., N] -> [..., D]
     return einsum(x.float(), pre.float(), '... n d, ... n -> ... d').to(x.dtype)
 
 
@@ -59,8 +58,8 @@ def naive_hc_post(
         torch.Tensor:
             Updated residual streams of shape `[..., N, D]`, accumulated in FP32 and returned in `x.dtype`.
     """
-    # [..., N_out, N_in], [..., N_in, D] -> [..., N_out, D]
-    residual = x.float() if mixing is None else einsum(mixing.float(), x.float(), '... n m, ... m d -> ... n d')
-
-    # [..., N], [..., D] -> [..., N, D]
-    return (residual + einsum(post.float(), branch.float(), '... n, ... d -> ... n d')).to(x.dtype)
+    residual = x.float()
+    if mixing is not None:
+        residual = einsum(mixing.float(), residual, '... n m, ... m d -> ... n d')
+    update = einsum(post.float(), branch.float(), '... n, ... d -> ... n d')
+    return (residual + update).to(x.dtype)
