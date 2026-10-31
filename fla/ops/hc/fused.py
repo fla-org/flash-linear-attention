@@ -9,6 +9,7 @@ import torch
 import triton
 import triton.language as tl
 from torch.autograd.function import once_differentiable
+from triton.testing import do_bench_cudagraph
 
 from fla.backends import dispatch
 from fla.ops.utils.cache import fla_cache_autotune
@@ -17,11 +18,11 @@ from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_k
 
 @fla_cache_autotune(
     configs=[
-        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        triton.Config({}, num_warps=num_warps)
         for num_warps in [2, 4, 8]
-        for num_stages in [2, 3]
     ],
     key=['T', 'N', 'D', 'BD', 'IS_POST', 'HAS_MIXING'],
+    do_bench=do_bench_cudagraph,
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -76,11 +77,11 @@ def hc_fwd_kernel(
 
 @fla_cache_autotune(
     configs=[
-        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        triton.Config({}, num_warps=num_warps)
         for num_warps in [2, 4, 8]
-        for num_stages in [2, 3]
     ],
     key=['T', 'N', 'D', 'BD', 'IS_POST', 'HAS_MIXING'],
+    do_bench=do_bench_cudagraph,
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -149,11 +150,11 @@ def hc_bwd_kernel(
 
 @fla_cache_autotune(
     configs=[
-        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        triton.Config({}, num_warps=num_warps)
         for num_warps in [2, 4, 8]
-        for num_stages in [2, 3]
     ],
     key=['T', 'C', 'S'],
+    do_bench=do_bench_cudagraph,
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -332,7 +333,12 @@ def fused_hc_pre(x: torch.Tensor, pre: torch.Tensor) -> torch.Tensor:
     return hc_pre(x=x, pre=pre)
 
 
-def fused_hc_post(x: torch.Tensor, branch: torch.Tensor, post: torch.Tensor, mixing: torch.Tensor | None = None) -> torch.Tensor:
+def fused_hc_post(
+    x: torch.Tensor,
+    branch: torch.Tensor,
+    post: torch.Tensor,
+    mixing: torch.Tensor | None = None,
+) -> torch.Tensor:
     """Update HC, mHC, or iHC residual streams after an attention or MLP branch.
 
     Hyper-connections (HC) mix the incoming residual streams and add a weighted copy of the branch output to each stream:

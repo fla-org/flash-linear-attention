@@ -10,6 +10,7 @@ import triton
 from torch.autograd.function import once_differentiable
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
+from triton.testing import do_bench_cudagraph
 
 from fla.backends import GluonBackend, register
 from fla.ops.hc.fused import hc_post, hc_pre
@@ -17,13 +18,21 @@ from fla.ops.utils.cache import fla_cache_autotune
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, input_guard
 
 
+def _prune_hc_layouts(configs, named_args, **kwargs):
+    N = {**named_args, **kwargs}['N']
+    return [config for config in configs if config.kwargs['WN'] <= triton.next_power_of_2(N)]
+
+
 @fla_cache_autotune(
     configs=[
-        triton.Config({'NW': num_warps}, num_warps=num_warps, num_stages=num_stages)
+        triton.Config({'NW': num_warps, 'WN': WN, 'R': R}, num_warps=num_warps)
         for num_warps in [2, 4, 8]
-        for num_stages in [2, 3]
+        for WN in [1, num_warps]
+        for R in [1, 4]
     ],
     key=['T', 'N', 'D', 'BD', 'IS_POST', 'HAS_MIXING'],
+    prune_configs_by={'early_config_prune': _prune_hc_layouts},
+    do_bench=do_bench_cudagraph,
     **autotune_cache_kwargs,
 )
 @gluon.jit(do_not_specialize=['T'])
@@ -41,13 +50,12 @@ def hc_fwd_kernel_gluon(
     IS_POST: gl.constexpr,
     HAS_MIXING: gl.constexpr,
     NW: gl.constexpr,
+    WN: gl.constexpr,
+    R: gl.constexpr,
 ):
     i_t = gl.program_id(0).to(gl.int64)
     i_c = gl.program_id(1).to(gl.int64)
-    if IS_POST:
-        layout: gl.constexpr = gl.BlockedLayout([1, 4], [1, 32], [NW, 1], [1, 0])
-    else:
-        layout: gl.constexpr = gl.BlockedLayout([1, 2], [1, 32], [1, NW], [1, 0])
+    layout: gl.constexpr = gl.BlockedLayout([1, R], [1, 32], [WN, NW // WN], [1, 0])
     o_n = gl.arange(0, BN, layout=gl.SliceLayout(1, layout)).to(gl.int64)
     o_d = i_c * BD + gl.arange(0, BD, layout=gl.SliceLayout(0, layout)).to(gl.int64)
     m_nd = (o_n[:, None] < N) & (o_d[None, :] < D)
@@ -83,11 +91,14 @@ def hc_fwd_kernel_gluon(
 
 @fla_cache_autotune(
     configs=[
-        triton.Config({'NW': num_warps}, num_warps=num_warps, num_stages=num_stages)
+        triton.Config({'NW': num_warps, 'WN': WN, 'R': R}, num_warps=num_warps)
         for num_warps in [2, 4, 8]
-        for num_stages in [2, 3]
+        for WN in [1, num_warps]
+        for R in [1, 4]
     ],
     key=['T', 'N', 'D', 'BD', 'IS_POST', 'HAS_MIXING'],
+    prune_configs_by={'early_config_prune': _prune_hc_layouts},
+    do_bench=do_bench_cudagraph,
     **autotune_cache_kwargs,
 )
 @gluon.jit(do_not_specialize=['T'])
@@ -110,13 +121,12 @@ def hc_bwd_kernel_gluon(
     IS_POST: gl.constexpr,
     HAS_MIXING: gl.constexpr,
     NW: gl.constexpr,
+    WN: gl.constexpr,
+    R: gl.constexpr,
 ):
     i_t = gl.program_id(0).to(gl.int64)
     i_c = gl.program_id(1).to(gl.int64)
-    if (not IS_POST and N <= 4) or (HAS_MIXING and N > 4):
-        layout: gl.constexpr = gl.BlockedLayout([1, 4], [1, 32], [NW, 1], [1, 0])
-    else:
-        layout: gl.constexpr = gl.BlockedLayout([1, 2], [1, 32], [1, NW], [1, 0])
+    layout: gl.constexpr = gl.BlockedLayout([1, R], [1, 32], [WN, NW // WN], [1, 0])
     o_n = gl.arange(0, BN, layout=gl.SliceLayout(1, layout)).to(gl.int64)
     o_d = i_c * BD + gl.arange(0, BD, layout=gl.SliceLayout(0, layout)).to(gl.int64)
     m_nd = (o_n[:, None] < N) & (o_d[None, :] < D)
@@ -136,7 +146,11 @@ def hc_bwd_kernel_gluon(
             b_dx = gl.full((BN, BD), 0, dtype=gl.float32, layout=layout)
             for i_n in gl.static_range(N):
                 # [BD]
-                b_doj = gl.load(do + (i_t * N + i_n) * D + o_d, mask=o_d < D, other=0).to(gl.float32)
+                if WN == 1:
+                    # all streams reside in each thread's registers
+                    b_doj = gl.sum(gl.where(o_n[:, None] == i_n, b_do, 0), axis=0)
+                else:
+                    b_doj = gl.load(do + (i_t * N + i_n) * D + o_d, mask=o_d < D, other=0).to(gl.float32)
                 # [BN], one output stream's weights across input streams
                 b_mixing = gl.load(mixing + (i_t * N + i_n) * N + o_n, mask=o_n < N, other=0).to(gl.float32)
                 b_dx += b_mixing[:, None] * b_doj[None, :]
@@ -161,11 +175,11 @@ def hc_bwd_kernel_gluon(
 
 @fla_cache_autotune(
     configs=[
-        triton.Config({'NW': num_warps}, num_warps=num_warps, num_stages=num_stages)
+        triton.Config({'NW': num_warps}, num_warps=num_warps)
         for num_warps in [2, 4, 8]
-        for num_stages in [2, 3]
     ],
     key=['T', 'C', 'S'],
+    do_bench=do_bench_cudagraph,
     **autotune_cache_kwargs,
 )
 @gluon.jit(do_not_specialize=['T'])
@@ -234,7 +248,13 @@ def hc_bwd_gluon(
 ):
     N, D = x.shape[-2:]
     T = x.numel() // (N * D)
-    BD = 256 if (not is_post and N <= 4) or (mixing is not None and N > 4) else 1024
+    if mixing is not None:
+        # smaller mixed-post tiles limit live registers for do and dx
+        BD = 256 if N > 4 else 512
+    elif not is_post and N <= 4:
+        BD = 256
+    else:
+        BD = 1024
     BD = min(BD, triton.next_power_of_2(D))
     ND = triton.cdiv(D, BD)
     dx, dw = torch.empty_like(x), torch.empty_like(w)
