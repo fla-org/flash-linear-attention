@@ -197,18 +197,28 @@ def test_chunk_initial_state_grad_count():
     assert q2.grad is not None
 
 
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'K', 'V'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-K{}-V{}".format(*test))
+        for test in [
+            (2, 33, 2, 8, 6),
+            (2, 33, 2, 128, 128),
+            (2, 33, 2, 320, 128),
+        ]
+    ],
+)
 @pytest.mark.skipif(device_platform == 'intel', reason='Intel Triton Failure')
-def test_full_momentum_chunk_recurrent_backward_parity():
+def test_full_momentum_chunk_recurrent_backward_parity(B: int, T: int, H: int, K: int, V: int):
     torch.manual_seed(3)
-    B, T, H, K, V = 2, 33, 2, 8, 6
     dtype = torch.bfloat16
     values = [
         torch.randn(B, T, H, K, dtype=dtype, device=device),
-        torch.randn(B, T, H, K, dtype=dtype, device=device),
+        F.normalize(torch.randn(B, T, H, K, dtype=dtype, device=device), dim=-1),
         torch.randn(B, T, H, V, dtype=dtype, device=device),
-        torch.randn(B, T, H, K, dtype=dtype, device=device),
-        torch.randn(B, T, H, dtype=torch.float32, device=device),
-        torch.randn(B, T, H, dtype=torch.float32, device=device),
+        F.normalize(torch.randn(B, T, H, K, dtype=dtype, device=device), dim=-1),
+        -0.1 * F.softplus(torch.randn(B, T, H, dtype=torch.float32, device=device)),
+        -0.1 * F.softplus(torch.randn(B, T, H, dtype=torch.float32, device=device)),
         torch.rand(B, T, H, dtype=dtype, device=device),
         torch.rand(B, T, H, dtype=dtype, device=device) + 0.5,
         torch.randn(B, H, K, V, dtype=torch.float32, device=device),

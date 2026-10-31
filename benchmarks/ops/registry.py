@@ -576,6 +576,23 @@ register_op(OpConfig(
 ))
 
 register_op(OpConfig(
+    name='chunk_momentum_delta',
+    import_path='fla.ops.momentum_delta_rule',
+    func_name='chunk_momentum_delta_rule',
+    inputs={
+        **_simple_qkv,
+        'p': TensorSpec(shape_BTHD),
+        'log_alpha': TensorSpec(shape_BTH, dtype='float32'),
+        'log_mu': TensorSpec(shape_BTH, dtype='float32'),
+        'beta': TensorSpec(shape_BTH, transform=lambda t: torch.rand_like(t)),
+        'eta': TensorSpec(shape_BTH, transform=lambda t: torch.rand_like(t) + 0.5),
+    },
+    extra_kwargs={'use_qk_l2norm_in_kernel': False, 'use_p_times_alpha': False},
+    category='momentum',
+    test_file='tests/ops/test_momentum_delta.py',
+))
+
+register_op(OpConfig(
     name='chunk_precond_kda',
     import_path='fla.ops.precond_kda',
     inputs={
