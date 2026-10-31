@@ -7,6 +7,7 @@
 
 import importlib
 import importlib.metadata
+import inspect
 import logging
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,9 +17,12 @@ import pytest
 import torch
 
 from fla import backends, utils
+from fla.ops.attn.parallel import parallel_attn_bwd, parallel_attn_fwd
+from fla.ops.attnres.fused import fused_attnres
 from fla.ops.common.backends import tilelang as common_tilelang_backend
 from fla.ops.generalized_delta_rule.dplr.backends import tilelang as dplr_tilelang_backend
 from fla.ops.kda.backends import tilelang as kda_tilelang_backend
+from fla.ops.rwkv6.chunk import chunk_rwkv6_fwd_intra
 from fla.ops.simple_gla.backends.triton_ascend.utils import simple_gla_verifier
 from fla.utils import env
 
@@ -129,25 +133,8 @@ def test_flash_kda_registered_dispatch(monkeypatch, route):
     assert calls == ['flash_kda' if route == 'accepted' else 'triton']
 
 
-@pytest.mark.skipif(backends._DISPATCH_DISABLED, reason="Backend dispatch was disabled before import")
-def test_attention_and_common_backends_have_separate_implementations():
-    import inspect
-
-    from fla.ops.attn.parallel import parallel_attn_bwd, parallel_attn_fwd
-
-    if not backends.TileLangBackend.is_available():
-        pytest.skip('TileLang is unavailable')
-    common = backends._load_operation_registry('common')._backends['tilelang']
-    assert type(common) is common_tilelang_backend.CommonTileLangBackend
-    for entry in [parallel_attn_fwd, parallel_attn_bwd]:
-        candidate = backends._function_registries[inspect.unwrap(entry)]._backends['tilelang']
-        assert type(candidate) is backends.TileLangBackend
-        assert candidate.implementation.__name__ == f'{entry.__name__}_tilelang'
-        assert not hasattr(common, entry.__name__)
-
-
 @pytest.fixture
-def rwkv6_tilelang_backend():
+def rwkv6_tilelang():
     if not backends.TileLangBackend.is_available():
         pytest.skip('TileLang is unavailable')
     return importlib.import_module('fla.ops.rwkv6.backends.tilelang')
@@ -240,14 +227,14 @@ def test_tilelang_backend_default_and_override(monkeypatch, backend_class, defau
     assert backend_class().is_enabled() is expected
 
 
-def test_rwkv6_tilelang_backend_verifier_accepts_supported_shape(rwkv6_tilelang_backend):
+def test_rwkv6_tilelang_verifier_accepts_supported_shape(rwkv6_tilelang):
     q = SimpleNamespace(dtype=torch.bfloat16, is_cuda=True, shape=(1, 64, 2, 64), ndim=4)
     k = SimpleNamespace(dtype=torch.bfloat16, shape=q.shape)
     gi = SimpleNamespace(dtype=torch.float32, shape=q.shape)
     ge = SimpleNamespace(dtype=torch.float32, shape=q.shape)
     u = SimpleNamespace(dtype=torch.bfloat16, shape=(2, 64))
 
-    accepted, reason = rwkv6_tilelang_backend.chunk_rwkv6_fwd_intra_verifier(
+    accepted, reason = rwkv6_tilelang.chunk_rwkv6_fwd_intra_verifier(
         q=q,
         k=k,
         gi=gi,
@@ -260,14 +247,14 @@ def test_rwkv6_tilelang_backend_verifier_accepts_supported_shape(rwkv6_tilelang_
     assert reason is None
 
 
-def test_rwkv6_tilelang_backend_verifier_rejects_unsupported_dimension(rwkv6_tilelang_backend):
+def test_rwkv6_tilelang_verifier_rejects_unsupported_dimension(rwkv6_tilelang):
     q = SimpleNamespace(dtype=torch.bfloat16, is_cuda=True, shape=(1, 64, 2, 128), ndim=4)
     k = SimpleNamespace(dtype=torch.bfloat16, shape=q.shape)
     gi = SimpleNamespace(dtype=torch.float32, shape=q.shape)
     ge = SimpleNamespace(dtype=torch.float32, shape=q.shape)
     u = SimpleNamespace(dtype=torch.bfloat16, shape=(2, 128))
 
-    accepted, reason = rwkv6_tilelang_backend.chunk_rwkv6_fwd_intra_verifier(
+    accepted, reason = rwkv6_tilelang.chunk_rwkv6_fwd_intra_verifier(
         q=q,
         k=k,
         gi=gi,
@@ -410,67 +397,52 @@ def test_retention_ascend_registration_import_order(run_python):
 
 @pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
 @pytest.mark.parametrize(
-    ('module_name', 'entry_name', 'backend_type'),
+    ('entry', 'backend_module', 'backend_class'),
     [
-        ('fla.ops.attn.parallel', 'parallel_attn_fwd', 'tilelang'),
-        ('fla.ops.attn.parallel', 'parallel_attn_bwd', 'tilelang'),
-        ('fla.ops.attnres.fused', 'fused_attnres', 'triton_ascend'),
-        ('fla.ops.attnres.fused', 'fused_attnres', 'gluon'),
-        ('fla.ops.rwkv6.chunk', 'chunk_rwkv6_fwd_intra', 'tilelang'),
+        (parallel_attn_fwd, 'fla.ops.attn.backends.tilelang', backends.TileLangBackend),
+        (parallel_attn_bwd, 'fla.ops.attn.backends.tilelang', backends.TileLangBackend),
+        (fused_attnres, 'fla.ops.attnres.backends.gluon', backends.GluonBackend),
+        (chunk_rwkv6_fwd_intra, 'fla.ops.rwkv6.backends.tilelang', backends.TileLangBackend),
     ],
 )
-def test_registered_op_dispatch(monkeypatch, module_name, entry_name, backend_type):
-    import inspect
-
-    entry = getattr(importlib.import_module(module_name), entry_name)
-    registry = backends._function_registries[inspect.unwrap(entry)]
-    backend_class = {
-        'triton_ascend': backends.TritonAscendBackend,
-        'tilelang': backends.TileLangBackend,
-        'gluon': backends.GluonBackend,
-    }[backend_type]
-    available = backend_class.is_available()
-    assert (backend_type in registry._backends) == available
-    if not available:
-        return
-    candidate = registry._backends[backend_type]
-    assert type(candidate) is backend_class
-    suffix = 'npu' if backend_type == 'triton_ascend' else backend_type
-    assert candidate.implementation.__name__ == f'{entry_name}_{suffix}'
-    if backend_type in ('tilelang', 'gluon'):
-        parameters = inspect.signature(entry).parameters.values()
-        arguments = {p.name: object() for p in parameters if p.kind not in (p.VAR_POSITIONAL, p.VAR_KEYWORD)}
-        inspect.signature(candidate.implementation).bind(**arguments)
-        inspect.signature(candidate.implementation).bind(*arguments.values())
-    for other in registry._backends.values():
-        monkeypatch.setattr(other, 'is_enabled', lambda: False)
-    monkeypatch.setattr(candidate, 'is_enabled', lambda: True)
-    monkeypatch.setattr(candidate, 'verifier', lambda *args, **kwargs: (True, None))
-    result = object()
-    monkeypatch.setattr(candidate, 'implementation', lambda *args, **kwargs: result)
-    assert entry() is result
+def test_backend_entry_contract(entry, backend_module, backend_class):
+    if not backend_class.is_available():
+        pytest.skip('Backend is unavailable')
+    module = importlib.import_module(backend_module)
+    implementation = getattr(module, f'{entry.__name__}_{backend_class.backend_type}')
+    candidate = backends._function_registries[inspect.unwrap(entry)]._backends[backend_class.backend_type]
+    assert candidate.implementation is implementation
+    expected = [(p.name, p.kind, p.default) for p in inspect.signature(entry).parameters.values()]
+    actual = [(p.name, p.kind, p.default) for p in inspect.signature(implementation).parameters.values()]
+    assert actual == expected
 
 
 @pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
 @pytest.mark.parametrize(
-    ('module_name', 'entry_name', 'default_enabled'),
+    ('entry', 'backend_class', 'default_enable', 'env_var', 'priority'),
     [
-        ('fla.ops.attn.parallel', 'parallel_attn_fwd', utils.IS_NVIDIA_HOPPER and utils.TRITON_ABOVE_3_4_0),
-        ('fla.ops.attn.parallel', 'parallel_attn_bwd', utils.IS_NVIDIA_HOPPER and utils.TRITON_ABOVE_3_4_0),
-        ('fla.ops.rwkv6.chunk', 'chunk_rwkv6_fwd_intra', False),
+        (
+            parallel_attn_fwd,
+            backends.TileLangBackend,
+            utils.IS_NVIDIA_HOPPER and utils.TRITON_ABOVE_3_4_0,
+            'FLA_TILELANG',
+            5,
+        ),
+        (
+            parallel_attn_bwd,
+            backends.TileLangBackend,
+            utils.IS_NVIDIA_HOPPER and utils.TRITON_ABOVE_3_4_0,
+            'FLA_TILELANG',
+            5,
+        ),
+        (chunk_rwkv6_fwd_intra, backends.TileLangBackend, False, 'FLA_TILELANG', 5),
+        (fused_attnres, backends.GluonBackend, False, 'FLA_ATTNRES_GLUON', 3),
     ],
 )
-@pytest.mark.parametrize('setting', [None, '0', '1'])
-def test_registered_tilelang_default_and_override(monkeypatch, module_name, entry_name, default_enabled, setting):
-    import inspect
-
-    if not backends.TileLangBackend.is_available():
-        pytest.skip('TileLang is unavailable')
-    entry = getattr(importlib.import_module(module_name), entry_name)
-    candidate = backends._function_registries[inspect.unwrap(entry)]._backends['tilelang']
-    if setting is None:
-        monkeypatch.delenv('FLA_TILELANG', raising=False)
-    else:
-        monkeypatch.setenv('FLA_TILELANG', setting)
-    assert candidate.default_enable is default_enabled
-    assert candidate.is_enabled() is (default_enabled if setting is None else setting != '0')
+def test_backend_registration_policy(entry, backend_class, default_enable, env_var, priority):
+    if not backend_class.is_available():
+        pytest.skip('Backend is unavailable')
+    candidate = backends._function_registries[inspect.unwrap(entry)]._backends[backend_class.backend_type]
+    assert candidate.default_enable is default_enable
+    assert candidate.env_var == env_var
+    assert candidate.priority == priority

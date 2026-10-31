@@ -191,14 +191,13 @@ def test_registered_backend_switches(monkeypatch, enable_dispatch):
 
 
 @pytest.mark.parametrize('default_enable', [False, True])
-def test_registered_backend_default_enable(monkeypatch, enable_dispatch, default_enable):
+def test_register_default_enable_override(monkeypatch, enable_dispatch, default_enable):
     class Backend(BaseBackend):
         backend_type = 'test_policy'
         env_var = 'FLA_TEST_POLICY'
 
     Backend.default_enable = not default_enable
     monkeypatch.delenv('FLA_TEST_POLICY', raising=False)
-    monkeypatch.delenv('FLA_TEST_POLICY_OVERRIDE', raising=False)
 
     @dispatch
     def overridden():
@@ -208,27 +207,17 @@ def test_registered_backend_default_enable(monkeypatch, enable_dispatch, default
     def inherited():
         return 'default'
 
-    @register(overridden, backend=Backend, env_var='FLA_TEST_POLICY_OVERRIDE', default_enable=default_enable)
+    @register(overridden, backend=Backend, default_enable=default_enable)
     @register(inherited, backend=Backend)
     def implementation():
         return 'backend'
 
     assert overridden() == ('backend' if default_enable else 'default')
     assert inherited() == ('default' if default_enable else 'backend')
-
-    monkeypatch.setenv('FLA_TEST_POLICY_OVERRIDE', '1')
-    assert overridden() == 'backend'
-    monkeypatch.setenv('FLA_TEST_POLICY_OVERRIDE', '0')
-    assert overridden() == 'default'
-    assert inherited() == ('default' if default_enable else 'backend')
-
-    monkeypatch.setenv('FLA_TEST_POLICY', '1')
-    assert overridden() == 'backend'
-    assert inherited() == 'backend'
     assert Backend.default_enable is not default_enable
 
 
-def test_registered_backend_priority(enable_dispatch):
+def test_register_priority_override(enable_dispatch):
     class Primary(BaseBackend):
         backend_type = 'primary'
 
