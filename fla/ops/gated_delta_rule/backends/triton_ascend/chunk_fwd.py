@@ -11,12 +11,15 @@ from __future__ import annotations
 
 import torch
 
+from fla.backends import TritonAscendBackend, register
 from fla.ops.common.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
+from fla.ops.gated_delta_rule.chunk_fwd import chunk_gated_delta_rule_fwd_intra
 from fla.ops.gated_delta_rule.wy_fast import recompute_w_u_fwd
 from fla.ops.utils import prepare_chunk_indices, solve_tril
 from fla.utils import input_guard
 
 
+@register(chunk_gated_delta_rule_fwd_intra, backend=TritonAscendBackend)
 @input_guard
 def chunk_gated_delta_rule_fwd_intra_npu(
     k: torch.Tensor,

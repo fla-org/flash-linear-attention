@@ -15,3 +15,10 @@ __all__ = [
     "naive_chunk_gated_delta_rule",
     "naive_recurrent_gated_delta_rule",
 ]
+
+
+from fla.backends import TritonAscendBackend
+from fla.ops.gated_delta_rule.backends.flash_qla import FlashQLABackend  # noqa: F401
+
+if TritonAscendBackend.is_available():
+    from fla.ops.gated_delta_rule.backends.triton_ascend import chunk_fwd, gate, wy_fast  # noqa: F401

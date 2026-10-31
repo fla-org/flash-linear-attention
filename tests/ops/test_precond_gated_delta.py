@@ -21,6 +21,42 @@ from fla.ops.precond_gated_delta_rule.naive import naive_recurrent_precond_gated
 from fla.utils import assert_close, device
 
 
+def test_triton_ascend_registration(run_python):
+    run_python(
+        """
+        import importlib
+        import inspect
+
+        from fla import backends
+
+        backends.TritonAscendBackend.is_available = classmethod(lambda cls: True)
+        # preconditioned GDN reuses the GDN WY stages.
+        for owner in ('gated_delta_rule', 'precond_gated_delta_rule'):
+            importlib.reload(importlib.import_module(f'fla.ops.{owner}'))
+        for operation, names in [
+            ('gated_delta_rule.chunk_fwd', ('chunk_gated_delta_rule_fwd_intra',)),
+            ('gated_delta_rule.gate', ('gdn_gate_fwd', 'gdn_gate_bwd', 'gdn_gate_chunk_cumsum')),
+            ('gated_delta_rule.wy_fast', ('recompute_w_u_fwd', 'prepare_wy_repr_bwd')),
+            ('precond_gated_delta_rule.chunk_precond_kkt_fwd', ('chunk_precond_kkt_fwd',)),
+            ('precond_gated_delta_rule.chunk_precond_wy_bwd', ('prepare_precond_wy_repr_bwd',)),
+            ('precond_gated_delta_rule.fused_recurrent', ('fused_recurrent_precond_gated_delta_rule_fwd',)),
+        ]:
+            owner, file = operation.split('.')
+            module = importlib.import_module(f'fla.ops.{operation}')
+            implementation = importlib.import_module(f'fla.ops.{owner}.backends.triton_ascend.{file}')
+            for name in names:
+                entry = getattr(module, name)
+                candidate = backends._function_registries[inspect.unwrap(entry)]._backends['triton_ascend']
+                target = getattr(implementation, name + '_npu')
+                assert candidate.implementation is target
+                expected = [(p.name, p.kind, p.default) for p in inspect.signature(entry).parameters.values()]
+                actual = [(p.name, p.kind, p.default) for p in inspect.signature(target).parameters.values()]
+                assert actual == expected
+        """,
+        FLA_DISABLE_BACKEND_DISPATCH='0',
+    )
+
+
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'HV', 'D', 'gate_logit_normalizer', 'dtype'),
     [

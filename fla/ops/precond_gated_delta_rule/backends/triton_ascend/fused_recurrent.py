@@ -9,6 +9,9 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.backends import TritonAscendBackend, register
+from fla.ops.precond_gated_delta_rule.backends.triton_ascend.utils import _require_npu_device
+from fla.ops.precond_gated_delta_rule.fused_recurrent import fused_recurrent_precond_gated_delta_rule_fwd
 from fla.ops.utils.op import exp
 from fla.utils import ascend_compile_kwargs, input_guard
 
@@ -206,7 +209,27 @@ def fused_recurrent_precond_gated_delta_rule_fwd_kernel(
             tl.store(p_at, b_a.to(p_at.dtype.element_ty), mask=mask_k)
 
 
-def fused_recurrent_precond_gated_delta_rule_fwd(
+def fused_recurrent_precond_gated_delta_rule_fwd_verifier(
+    q,
+    k,
+    v,
+    g=None,
+    gk=None,
+    gv=None,
+    beta=None,
+    g_atk=None,
+    beta_atk=None,
+    **kwargs,
+) -> tuple[bool, str | None]:
+    return _require_npu_device(q, k, v, g, gk, gv, beta, g_atk, beta_atk)
+
+
+@register(
+    fused_recurrent_precond_gated_delta_rule_fwd,
+    backend=TritonAscendBackend,
+    verifier=fused_recurrent_precond_gated_delta_rule_fwd_verifier,
+)
+def fused_recurrent_precond_gated_delta_rule_fwd_npu(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -310,7 +333,7 @@ class FusedRecurrentPrecondGatedDeltaRuleFunction(torch.autograd.Function):
         eps: float = 1e-6,
         log_atk_scale: torch.Tensor = None,
     ):
-        o, final_state, final_A_state = fused_recurrent_precond_gated_delta_rule_fwd(
+        o, final_state, final_A_state = fused_recurrent_precond_gated_delta_rule_fwd_npu(
             q=q,
             k=k,
             v=v,

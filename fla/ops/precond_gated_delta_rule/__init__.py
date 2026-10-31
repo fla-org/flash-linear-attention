@@ -14,3 +14,13 @@ __all__ = [
     "fused_recurrent_precond_gated_delta_rule",
     "naive_recurrent_precond_gated_delta_rule",
 ]
+
+
+from fla.backends import TritonAscendBackend
+
+if TritonAscendBackend.is_available():
+    from fla.ops.precond_gated_delta_rule.backends.triton_ascend import (  # noqa: F401
+        chunk_precond_kkt_fwd,
+        chunk_precond_wy_bwd,
+        fused_recurrent,
+    )

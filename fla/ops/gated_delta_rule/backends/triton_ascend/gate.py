@@ -13,6 +13,8 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.backends import TritonAscendBackend, register
+from fla.ops.gated_delta_rule.gate import gdn_gate_bwd, gdn_gate_chunk_cumsum, gdn_gate_fwd
 from fla.ops.utils.index import prepare_chunk_indices
 from fla.ops.utils.op import exp
 from fla.ops.utils.softplus import softplus
@@ -305,6 +307,7 @@ def _launch_gate_bwd(
             )
 
 
+@register(gdn_gate_fwd, backend=TritonAscendBackend)
 @input_guard
 def gdn_gate_fwd_npu(
     g: torch.Tensor,
@@ -320,6 +323,7 @@ def gdn_gate_fwd_npu(
     return yg
 
 
+@register(gdn_gate_chunk_cumsum, backend=TritonAscendBackend)
 @input_guard
 def gdn_gate_chunk_cumsum_npu(
     g: torch.Tensor,
@@ -356,6 +360,7 @@ def gdn_gate_chunk_cumsum_npu(
     return o
 
 
+@register(gdn_gate_bwd, backend=TritonAscendBackend)
 def gdn_gate_bwd_npu(
     g: torch.Tensor,
     A_log: torch.Tensor,
