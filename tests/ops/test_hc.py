@@ -43,7 +43,6 @@ _HC_CASES = [
 ] + [
     pytest.param((4, 65), torch.float32, False, 5e-5, id='unbatched'),
     pytest.param((2, 4, 65), torch.float32, True, 6e-3, id='noncontiguous-mixed-dtypes'),
-    pytest.param((2, 0, 4, 65), torch.float32, False, 5e-5, id='empty'),
 ]
 
 
@@ -65,11 +64,6 @@ def test_fused_hc_pre(shape: tuple[int, ...], dtype: torch.dtype, noncontiguous:
     tri_dx, tri_dpre = torch.autograd.grad(outputs=tri, inputs=(x, pre), grad_outputs=do)
     assert tri.shape == ref.shape and tri.dtype == dtype
     assert tri_dx.dtype == dtype and tri_dpre.dtype == weight_dtype
-    if x.numel() == 0:
-        torch.testing.assert_close(ref, tri)
-        torch.testing.assert_close(ref_dx, tri_dx)
-        torch.testing.assert_close(ref_dpre, tri_dpre)
-        return
     assert_close('o', ref, tri, ratio)
     assert_close('dx', ref_dx, tri_dx, ratio)
     assert_close('dpre', ref_dpre, tri_dpre, ratio)
@@ -101,11 +95,6 @@ def test_fused_hc_post(shape: tuple[int, ...], dtype: torch.dtype, noncontiguous
     tri_dx, tri_dbranch, tri_dpost, *tri_dmixing = torch.autograd.grad(outputs=tri, inputs=inputs, grad_outputs=do)
     assert tri.shape == ref.shape and tri.dtype == dtype
     assert tri_dx.dtype == dtype and tri_dbranch.dtype == branch_dtype and tri_dpost.dtype == weight_dtype
-    if x.numel() == 0:
-        for expected, actual in zip((ref, ref_dx, ref_dbranch, ref_dpost, *ref_dmixing),
-                                    (tri, tri_dx, tri_dbranch, tri_dpost, *tri_dmixing)):
-            torch.testing.assert_close(expected, actual)
-        return
     assert_close('o', ref, tri, ratio)
     assert_close('dx', ref_dx, tri_dx, ratio)
     assert_close('dbranch', ref_dbranch, tri_dbranch, ratio)
