@@ -17,6 +17,16 @@ def naive_hc_pre(x: torch.Tensor, pre: torch.Tensor) -> torch.Tensor:
 
     Reduces `[..., N, D]` residual streams with `[..., N]` activated weights to a `[..., D]` branch input.
     Accumulates in FP32 and returns the stream dtype.
+
+    Args:
+        x (torch.Tensor):
+            Residual streams of shape `[..., N, D]`, with N streams and D features per stream.
+        pre (torch.Tensor):
+            Activated readout weights of shape `[..., N]`, with the same leading dimensions as `x`.
+
+    Returns:
+        torch.Tensor:
+            Weighted readout of shape `[..., D]`, accumulated in FP32 and returned in `x.dtype`.
     """
     # [..., N, D], [..., N] -> [..., D]
     return einsum(x.float(), pre.float(), '... n d, ... n -> ... d').to(x.dtype)
@@ -33,6 +43,21 @@ def naive_hc_post(
     HC mixes N residual streams before adding the branch output weighted by `post`.
     mHC uses a caller-supplied doubly stochastic mixing matrix; iHC uses `mixing=None` for the identity transition.
     Accumulates in FP32 and returns `[..., N, D]` in the stream dtype.
+
+    Args:
+        x (torch.Tensor):
+            Residual streams of shape `[..., N, D]`, with N streams and D features per stream.
+        branch (torch.Tensor):
+            Attention or MLP branch output of shape `[..., D]`, with the same leading dimensions as `x`.
+        post (torch.Tensor):
+            Activated write weights of shape `[..., N]`, with the same leading dimensions as `x`.
+        mixing (torch.Tensor, Optional):
+            Residual mixing matrices of shape `[..., N, N]`, indexed by output stream then input stream.
+            Use a doubly stochastic matrix for mHC or `None` for identity mixing in iHC. Default: `None`.
+
+    Returns:
+        torch.Tensor:
+            Updated residual streams of shape `[..., N, D]`, accumulated in FP32 and returned in `x.dtype`.
     """
     # [..., N_out, N_in], [..., N_in, D] -> [..., N_out, D]
     residual = x.float() if mixing is None else einsum(mixing.float(), x.float(), '... n m, ... m d -> ... n d')
