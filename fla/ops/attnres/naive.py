@@ -17,7 +17,7 @@ from einops import einsum
 def naive_attnres(
     query: torch.Tensor,
     residuals: Sequence[torch.Tensor],
-    rms_weight: torch.Tensor,
+    rms_weight: torch.Tensor | None = None,
     output_rms_weight: torch.Tensor | None = None,
     rms_eps: float = 1e-6,
     scale: float = 1.0,
@@ -64,7 +64,9 @@ def naive_attnres(
 
     # all math runs in fp32 end-to-end; the final downcast back to the residual dtype happens once, just before returning.
     v = stacked.float()
-    k = F.rms_norm(v, (D,), rms_weight.flatten().float(), rms_eps)
+    if rms_weight is not None:
+        rms_weight = rms_weight.flatten().float()
+    k = F.rms_norm(v, (D,), rms_weight, rms_eps)
     p = (einsum(k, query.flatten().float() * scale, "l ... d, d -> l ...")).softmax(dim=0)
     o = einsum(p, v, "l ..., l ... d -> ... d")
     o = o.view(output_shape)

@@ -17,7 +17,7 @@ A 2D gather along L compiles to scalar, so ``fwd_p2`` / ``bwd_dv`` use 1D
 ``[BD]`` tiles when ``BN==1``, and contiguous ``[BN, BD]`` tiles along N
 otherwise. ``BN>1`` is only launched when ``SINGLE_D`` (``BD >= D``); the
 host falls back to ``BN==1`` for the D-loop path. ``SINGLE_D`` keeps
-``q*w`` in UB; no-onorm ``SINGLE_D`` fuses ``bwd_prep`` (``FUSE_PREP``).
+``q*w`` (or ``q`` without weights) in UB; no-onorm ``SINGLE_D`` fuses ``bwd_prep`` (``FUSE_PREP``).
 """
 
 from __future__ import annotations
@@ -161,10 +161,11 @@ def attnres_fwd_p1_chunk_kernel(
     BL: tl.constexpr,
     BD: tl.constexpr,
     BN: tl.constexpr,
+    HAS_RMS_WEIGHT: tl.constexpr,
     L_OFFSET,
     N_OFFSET: tl.constexpr,
 ):
-    # BN==1: [BL, BD] along L. BN>1 implies SINGLE_D: [BN, BD] along N, q*w hoisted.
+    # BN==1: [BL, BD] along L. BN>1 implies SINGLE_D: [BN, BD] along N, q or q*w hoisted.
     i_n0 = tl.program_id(0).to(tl.int64) * BN + N_OFFSET
     if BN == 1:
         i_n = i_n0
@@ -178,10 +179,9 @@ def attnres_fwd_p1_chunk_kernel(
             for i_d in range(tl.cdiv(D, BD)):
                 o_d = (i_d * BD + tl.arange(0, BD)).to(tl.int64)
                 m_d = o_d < D
-                b_qw = (
-                    tl.load(q + o_d, mask=m_d, other=0.).to(tl.float32)
-                    * tl.load(w + o_d, mask=m_d, other=0.).to(tl.float32)
-                )
+                b_qw = tl.load(q + o_d, mask=m_d, other=0.).to(tl.float32)
+                if HAS_RMS_WEIGHT:
+                    b_qw *= tl.load(w + o_d, mask=m_d, other=0.).to(tl.float32)
                 b_v = tl.load(
                     res + o_l[:, None] * stride_ln + i_n * D + o_d[None, :],
                     mask=m_l[:, None] & m_d[None, :],
@@ -207,10 +207,9 @@ def attnres_fwd_p1_chunk_kernel(
         o_d = tl.arange(0, BD).to(tl.int64)
         m_d = o_d < D
         m_nd = m_n[:, None] & m_d[None, :]
-        b_qw = (
-            tl.load(q + o_d, mask=m_d, other=0.).to(tl.float32)
-            * tl.load(w + o_d, mask=m_d, other=0.).to(tl.float32)
-        )
+        b_qw = tl.load(q + o_d, mask=m_d, other=0.).to(tl.float32)
+        if HAS_RMS_WEIGHT:
+            b_qw *= tl.load(w + o_d, mask=m_d, other=0.).to(tl.float32)
         for i_l in range(L):
             i_l64 = tl.cast(i_l, tl.int64)
             g_l = L_OFFSET + i_l64
@@ -401,6 +400,7 @@ def attnres_bwd_dv_chunk_kernel(
     scale,
     BD: tl.constexpr,
     BN: tl.constexpr,
+    HAS_RMS_WEIGHT: tl.constexpr,
     SINGLE_D: tl.constexpr,
     LOAD_DQW: tl.constexpr,
     FUSE_PREP: tl.constexpr,
@@ -415,10 +415,9 @@ def attnres_bwd_dv_chunk_kernel(
         if SINGLE_D:
             o_d = tl.arange(0, BD).to(tl.int64)
             m_d = o_d < D
-            b_qw = (
-                tl.load(q + o_d, mask=m_d, other=0.).to(tl.float32)
-                * tl.load(w + o_d, mask=m_d, other=0.).to(tl.float32)
-            )
+            b_qw = tl.load(q + o_d, mask=m_d, other=0.).to(tl.float32)
+            if HAS_RMS_WEIGHT:
+                b_qw *= tl.load(w + o_d, mask=m_d, other=0.).to(tl.float32)
             b_do = tl.load(do_eff + i_n * D + o_d, mask=m_d, other=0.).to(tl.float32)
             if FUSE_PREP:
                 b_dqw = tl.load(o_mix + i_n * D + o_d, mask=m_d, other=0.).to(tl.float32)
@@ -481,10 +480,9 @@ def attnres_bwd_dv_chunk_kernel(
                 for i_d in range(tl.cdiv(D, BD)):
                     o_d = (i_d * BD + tl.arange(0, BD)).to(tl.int64)
                     m_d = o_d < D
-                    b_qw = (
-                        tl.load(q + o_d, mask=m_d, other=0.).to(tl.float32)
-                        * tl.load(w + o_d, mask=m_d, other=0.).to(tl.float32)
-                    )
+                    b_qw = tl.load(q + o_d, mask=m_d, other=0.).to(tl.float32)
+                    if HAS_RMS_WEIGHT:
+                        b_qw *= tl.load(w + o_d, mask=m_d, other=0.).to(tl.float32)
                     b_do = tl.load(do_eff + i_n * D + o_d, mask=m_d, other=0.).to(tl.float32)
                     b_v = tl.load(
                         res + i_l64 * stride_ln + i_n * D + o_d,
@@ -508,10 +506,9 @@ def attnres_bwd_dv_chunk_kernel(
         o_d = tl.arange(0, BD).to(tl.int64)
         m_d = o_d < D
         m_nd = m_n[:, None] & m_d[None, :]
-        b_qw = (
-            tl.load(q + o_d, mask=m_d, other=0.).to(tl.float32)
-            * tl.load(w + o_d, mask=m_d, other=0.).to(tl.float32)
-        )
+        b_qw = tl.load(q + o_d, mask=m_d, other=0.).to(tl.float32)
+        if HAS_RMS_WEIGHT:
+            b_qw *= tl.load(w + o_d, mask=m_d, other=0.).to(tl.float32)
         b_do = tl.load(
             do_eff + o_n[:, None] * D + o_d[None, :],
             mask=m_nd,
@@ -626,7 +623,7 @@ def _dres_chunk(
 def fused_attnres_fwd_npu(
     q: torch.Tensor,
     sources: Sequence[torch.Tensor],
-    w: torch.Tensor,
+    w: torch.Tensor | None,
     ow: torch.Tensor | None,
     eps: float,
     scale: float,
@@ -634,6 +631,7 @@ def fused_attnres_fwd_npu(
 ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
     L, N, D = len(sources), *sources[0].shape
     dtype = sources[0].dtype
+    has_rms_weight = w is not None
     save_opre = checkpoint_level == 0
 
     o = torch.empty((N, D), device=sources[0].device, dtype=dtype)
@@ -674,6 +672,7 @@ def fused_attnres_fwd_npu(
             scale=scale,
             BL=bl,
             BD=bd,
+            HAS_RMS_WEIGHT=has_rms_weight,
             L_OFFSET=l0,
         )
         m, acc = _merge_online_softmax(m, acc, chunk_m, chunk_acc)
@@ -714,7 +713,7 @@ def fused_attnres_bwd_npu(
     do: torch.Tensor,
     q: torch.Tensor,
     sources: Sequence[torch.Tensor],
-    w: torch.Tensor,
+    w: torch.Tensor | None,
     ow: torch.Tensor | None,
     o_pre: torch.Tensor | None,
     rstd: torch.Tensor,
@@ -723,13 +722,15 @@ def fused_attnres_bwd_npu(
     eps: float,
     scale: float,
     stacked: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, list[torch.Tensor]]:
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None, list[torch.Tensor]]:
+    has_rms_weight = w is not None
     has_onorm = ow is not None
     N, D = do.shape
     flat_dvs: list[torch.Tensor | None] = [None] * len(sources)
 
     dqw = torch.zeros_like(do, dtype=torch.float32)
-    dq, dw = torch.empty_like(q), torch.empty_like(w)
+    dq = torch.empty_like(q)
+    dw = torch.empty_like(w) if has_rms_weight else None
     dow = torch.empty_like(ow) if has_onorm else None
     dow_partial = torch.empty_like(do, dtype=torch.float32) if has_onorm else None
 
@@ -755,7 +756,7 @@ def fused_attnres_bwd_npu(
         _launch_n(
             attnres_bwd_prep_kernel,
             N,
-            ow=ow if ow is not None else w,
+            ow=ow if ow is not None else (w if has_rms_weight else q),
             o_mix=o_mix,
             do=do,
             do_eff=do_eff,
@@ -796,6 +797,7 @@ def fused_attnres_bwd_npu(
             stride_ln=stride_ln,
             scale=scale,
             BD=bd,
+            HAS_RMS_WEIGHT=has_rms_weight,
             SINGLE_D=single_d,
             LOAD_DQW=load_dqw,
             FUSE_PREP=1 if fuse_prep else 0,
@@ -805,8 +807,11 @@ def fused_attnres_bwd_npu(
         del chunk
 
     dqw_sum = dqw.sum(dim=0)
-    dq.copy_((dqw_sum * w.float()).to(dq.dtype))
-    dw.copy_((dqw_sum * q.float()).to(dw.dtype))
+    if has_rms_weight:
+        dq.copy_((dqw_sum * w.float()).to(dq.dtype))
+        dw.copy_((dqw_sum * q.float()).to(dw.dtype))
+    else:
+        dq.copy_(dqw_sum.to(dq.dtype).view_as(dq))
     if has_onorm:
         dow.copy_(dow_partial.sum(dim=0).to(dow.dtype))
     assert all(t is not None for t in flat_dvs)
@@ -821,7 +826,7 @@ class FusedAttnresNpuFunction(torch.autograd.Function):
     def forward(
         ctx,
         query: torch.Tensor,
-        rms_weight: torch.Tensor,
+        rms_weight: torch.Tensor | None,
         output_rms_weight: torch.Tensor | None,
         rms_eps: float,
         scale: float,
@@ -871,7 +876,7 @@ class FusedAttnresNpuFunction(torch.autograd.Function):
 def fused_attnres_npu(
     query: torch.Tensor,
     residuals: Sequence[torch.Tensor],
-    rms_weight: torch.Tensor,
+    rms_weight: torch.Tensor | None = None,
     output_rms_weight: torch.Tensor | None = None,
     rms_eps: float = 1e-6,
     scale: float = 1.0,
