@@ -484,6 +484,7 @@ def chunk_kda_bwd(
     cp_context: FLACPContext | None = None,
     use_graph: bool = False,
     chunk_offsets: torch.LongTensor | None = None,
+    use_tilelang_helpers: bool = False,
     **kwargs,
 ):
     H, HV = q.shape[2], v.shape[2]
@@ -494,21 +495,21 @@ def chunk_kda_bwd(
             g = kda_gate_chunk_cumsum(
                 g=g_org,
                 A_log=A_log,
-                dt_bias=dt_bias,
-                scale=RCP_LN2,
                 chunk_size=chunk_size,
+                scale=RCP_LN2,
+                dt_bias=dt_bias,
                 cu_seqlens=cu_seqlens,
                 chunk_indices=chunk_indices,
                 lower_bound=lower_bound,
                 use_graph=use_graph,
             )
         w, u, qg, kg = recompute_w_u_fwd(
-            q=q,
             k=k,
             v=v,
             beta=beta,
             A=Akk,
             gk=g,
+            q=q,
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
             use_graph=use_graph,
@@ -524,11 +525,11 @@ def chunk_kda_bwd(
             gk=g,
             initial_state=initial_state,
             output_final_state=False,
+            chunk_size=chunk_size,
+            state_v_first=state_v_first,
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
             chunk_offsets=chunk_offsets,
-            chunk_size=chunk_size,
-            state_v_first=state_v_first,
         )
     else:
         w, u, qg, kg, v_new, h = kwargs["w"], kwargs["u"], kwargs["qg"], kwargs["kg"], kwargs["v_new"], kwargs["h"]
@@ -537,9 +538,20 @@ def chunk_kda_bwd(
             # Only the first sequence's state is non-zero as it's the only one that could be cross-rank.
             initial_state = expand_h0(initial_state, context=cp_context)
 
+    bwd_dav = chunk_kda_bwd_dAv
+    bwd_dqkg = chunk_kda_bwd_wy_dqkg_fused
+    bwd_intra = chunk_kda_bwd_intra
+    if use_tilelang_helpers:
+        from fla.ops.kda.backends.tilelang.chunk_bwd_dav import chunk_kda_bwd_dAv_tilelang
+        from fla.ops.kda.backends.tilelang.chunk_bwd_dqkg import chunk_kda_bwd_wy_dqkg_fused_tilelang
+        from fla.ops.kda.backends.tilelang.chunk_bwd_intra import chunk_kda_bwd_intra_tilelang
+        bwd_dav = chunk_kda_bwd_dAv_tilelang
+        bwd_dqkg = chunk_kda_bwd_wy_dqkg_fused_tilelang
+        bwd_intra = chunk_kda_bwd_intra_tilelang
+
     # dAqk = do @ v.T
     # dv = A @ do
-    dAqk, dv = chunk_kda_bwd_dAv(
+    dAqk, dv = bwd_dav(
         q=q,
         k=k,
         v=v_new,
@@ -563,12 +575,12 @@ def chunk_kda_bwd(
             dv=dv,
             gk=g,
             scale=scale,
+            state_v_first=state_v_first,
             cu_seqlens=cu_seqlens,
             dht=dht,
             initial_state=initial_state,
             context=cp_context,
             chunk_size=chunk_size,
-            state_v_first=state_v_first,
             use_graph=use_graph,
         )
 
@@ -576,20 +588,20 @@ def chunk_kda_bwd(
         q=qg,
         k=kg,
         w=w,
+        do=do,
+        dv=dv,
         gk=g,
         h0=initial_state,
         dht=dht,
-        do=do,
-        dv=dv,
         scale=scale,
+        state_v_first=state_v_first,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
         chunk_offsets=chunk_offsets,
-        state_v_first=state_v_first,
     )
 
-    dq, dk, dv, db, dg, dAkk = chunk_kda_bwd_wy_dqkg_fused(
+    dq, dk, dv, db, dg, dAkk = bwd_dqkg(
         q=q,
         k=k,
         v=v,
@@ -602,15 +614,15 @@ def chunk_kda_bwd(
         dh=dh,
         dv=dv,
         scale=scale,
+        state_v_first=state_v_first,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
         chunk_offsets=chunk_offsets,
-        state_v_first=state_v_first,
         use_graph=use_graph,
     )
 
-    dq, dk, db, dg = chunk_kda_bwd_intra(
+    dq, dk, db, dg = bwd_intra(
         q=q,
         k=k,
         g=g,
