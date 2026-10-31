@@ -29,6 +29,7 @@
 
 ## News
 
+- [2026-10] 🧱 Add [iHC and mHC](fla/ops/hc) residual kernels with Triton, Gluon, and TileLang backends ([#1519](https://github.com/fla-org/flash-linear-attention/pull/1519)).
 - [2026-10] 🧠 Add Gated Slot Attention 2 (GSA2) implementation to `fla` ([paper](https://arxiv.org/abs/2610.02816)).
 - [2026-10] 🛰️ Add Gated KalmaNet (GKA) implementation to `fla` ([paper](https://arxiv.org/abs/2511.21016)) - a fading-memory layer that solves a test-time ridge regression at every token.
 - [2026-10] 🌊 Add [CyFA](https://arxiv.org/abs/2609.36259) (Cyclic Flow Attention) implementation to `fla` - a Linear RNN that partitions memory by relative time through learned cyclic transport.
@@ -257,7 +258,7 @@ GLAForCausalLM(
 
 ### Fused Modules
 
-We offer a collection of fused modules in `fla.modules` to facilitate faster training:
+We offer a collection of fused modules and operators in `fla.modules` and `fla.ops` to facilitate faster training:
 
 * [`Rotary Embedding`](fla/modules/rotary): rotary positional embeddings as adopted by the Llama architecture, a.k.a., Transformer++.
 * [`Norm Layers`](fla/modules/norm/layernorm.py):
@@ -267,6 +268,7 @@ We offer a collection of fused modules in `fla.modules` to facilitate faster tra
 * [`Cross Entropy`](fla/modules/fused_cross_entropy): faster Triton implementation of cross entropy loss.
 * [`Linear Cross Entropy`](fla/modules/fused_linear_cross_entropy): fused linear layer and cross entropy loss to avoid the materialization of large logits tensors. Also refer to implementations by [mgmalek](https://github.com/mgmalek/efficient_cross_entropy) and [Liger-Kernel](https://github.com/linkedin/Liger-Kernel/blob/main/src/liger_kernel/ops/fused_linear_cross_entropy.py).
 * [`Linear KL Divergence`](fla/modules/fused_kl_div): fused linear layer and KL divergence loss in a similar vein as CE loss.
+* [`HC`](fla/ops/hc): residual stream readout and updates for iHC/mHC, with [Sinkhorn normalization](fla/ops/utils/sinkhorn) for mHC mixing. CUDA kernels support Triton, Gluon, and TileLang. See [HC, mHC, and iHC](fla/ops/hc/README.md) for the formulations.
 
 > [!IMPORTANT]
 > You can set `fuse_linear_cross_entropy` in the model configuration to enable or disable the fused linear cross entropy loss.
