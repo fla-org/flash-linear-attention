@@ -20,37 +20,6 @@ from fla.ops.rwkv6.fused_recurrent import fused_recurrent_rwkv6
 from fla.utils import assert_close, device, device_platform
 
 
-@pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
-def test_chunk_tilelang_backend():
-    if not backends.TileLangBackend.is_available():
-        pytest.skip('TileLang is unavailable')
-    from fla.ops.rwkv6.backends.tilelang import chunk_rwkv6_fwd_intra_tilelang
-
-    candidate = backends._function_registries[inspect.unwrap(chunk_rwkv6_fwd_intra)]._backends['tilelang']
-    assert candidate.implementation is chunk_rwkv6_fwd_intra_tilelang
-    assert candidate.default_enable is False
-
-
-@pytest.mark.parametrize(
-    ('D', 'accepted', 'reason'),
-    [
-        (64, True, None),
-        (128, False, 'TileLang RWKV6 intra backend currently supports the D=64 benchmark bucket only, got K=128'),
-    ],
-)
-def test_chunk_tilelang_verifier(D, accepted, reason):
-    if not backends.TileLangBackend.is_available():
-        pytest.skip('TileLang is unavailable')
-    from fla.ops.rwkv6.backends.tilelang import chunk_rwkv6_fwd_intra_verifier
-
-    q = SimpleNamespace(dtype=torch.bfloat16, is_cuda=True, shape=(1, 64, 2, D), ndim=4)
-    k = SimpleNamespace(dtype=torch.bfloat16, shape=q.shape)
-    gi = SimpleNamespace(dtype=torch.float32, shape=q.shape)
-    ge = SimpleNamespace(dtype=torch.float32, shape=q.shape)
-    u = SimpleNamespace(dtype=torch.bfloat16, shape=(2, D))
-    assert chunk_rwkv6_fwd_intra_verifier(q=q, k=k, gi=gi, ge=ge, u=u, scale=1.0) == (accepted, reason)
-
-
 @pytest.mark.skipif(
     device_platform == 'intel',
     reason="Intel Triton Failure",
@@ -287,3 +256,34 @@ def test_chunk_varlen(
     assert_close('dw', ref_dw, tri_dw, 0.005)
     assert_close('du', ref_du, tri_du, 0.005)
     assert_close('dh0', ref_dh0, tri_dh0, 0.005)
+
+
+@pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
+def test_chunk_tilelang_backend():
+    if not backends.TileLangBackend.is_available():
+        pytest.skip('TileLang is unavailable')
+    from fla.ops.rwkv6.backends.tilelang import chunk_rwkv6_fwd_intra_tilelang
+
+    candidate = backends._function_registries[inspect.unwrap(chunk_rwkv6_fwd_intra)]._backends['tilelang']
+    assert candidate.implementation is chunk_rwkv6_fwd_intra_tilelang
+    assert candidate.default_enable is False
+
+
+@pytest.mark.parametrize(
+    ('D', 'accepted', 'reason'),
+    [
+        (64, True, None),
+        (128, False, 'TileLang RWKV6 intra backend currently supports the D=64 benchmark bucket only, got K=128'),
+    ],
+)
+def test_chunk_tilelang_verifier(D, accepted, reason):
+    if not backends.TileLangBackend.is_available():
+        pytest.skip('TileLang is unavailable')
+    from fla.ops.rwkv6.backends.tilelang import chunk_rwkv6_fwd_intra_verifier
+
+    q = SimpleNamespace(dtype=torch.bfloat16, is_cuda=True, shape=(1, 64, 2, D), ndim=4)
+    k = SimpleNamespace(dtype=torch.bfloat16, shape=q.shape)
+    gi = SimpleNamespace(dtype=torch.float32, shape=q.shape)
+    ge = SimpleNamespace(dtype=torch.float32, shape=q.shape)
+    u = SimpleNamespace(dtype=torch.bfloat16, shape=(2, D))
+    assert chunk_rwkv6_fwd_intra_verifier(q=q, k=k, gi=gi, ge=ge, u=u, scale=1.0) == (accepted, reason)

@@ -190,64 +190,6 @@ def test_registered_backend_switches(monkeypatch, enable_dispatch):
     assert global_entry() == 'default'
 
 
-@pytest.mark.parametrize('default_enable', [False, True])
-def test_register_default_enable_override(monkeypatch, enable_dispatch, default_enable):
-    class Backend(BaseBackend):
-        backend_type = 'test_policy'
-        env_var = 'FLA_TEST_POLICY'
-
-    Backend.default_enable = not default_enable
-    monkeypatch.delenv('FLA_TEST_POLICY', raising=False)
-
-    @dispatch
-    def overridden():
-        return 'default'
-
-    @dispatch
-    def inherited():
-        return 'default'
-
-    @register(overridden, backend=Backend, default_enable=default_enable)
-    @register(inherited, backend=Backend)
-    def implementation():
-        return 'backend'
-
-    assert overridden() == ('backend' if default_enable else 'default')
-    assert inherited() == ('default' if default_enable else 'backend')
-    assert Backend.default_enable is not default_enable
-
-
-def test_register_priority_override(enable_dispatch):
-    class Primary(BaseBackend):
-        backend_type = 'primary'
-
-    class Secondary(BaseBackend):
-        backend_type = 'secondary'
-        priority = 3
-
-    @dispatch
-    def overridden():
-        return 'default'
-
-    @dispatch
-    def inherited():
-        return 'default'
-
-    @register(overridden, backend=Primary, priority=0)
-    @register(inherited, backend=Primary)
-    def primary():
-        return 'primary'
-
-    @register(overridden, backend=Secondary)
-    @register(inherited, backend=Secondary)
-    def secondary():
-        return 'secondary'
-
-    assert overridden() == 'primary'
-    assert inherited() == 'secondary'
-    assert Primary.priority == 5
-
-
 def test_ascend_available(monkeypatch):
     monkeypatch.setattr(utils, 'IS_NPU', True)
     assert TritonAscendBackend.is_available() is True
@@ -716,3 +658,61 @@ def test_dispatch_gluon(monkeypatch, direction, env_var):
     kwargs = {'weight': x, 'bias': None, 'residual': None} if direction == 'fwd' else {'dy': x, 'dht': None}
     inspect.signature(entry).bind(x=x, **kwargs)
     assert entry(x=x, **kwargs) is result
+
+
+@pytest.mark.parametrize('default_enable', [False, True])
+def test_register_default_enable_override(monkeypatch, enable_dispatch, default_enable):
+    class Backend(BaseBackend):
+        backend_type = 'test_policy'
+        env_var = 'FLA_TEST_POLICY'
+
+    Backend.default_enable = not default_enable
+    monkeypatch.delenv('FLA_TEST_POLICY', raising=False)
+
+    @dispatch
+    def overridden():
+        return 'default'
+
+    @dispatch
+    def inherited():
+        return 'default'
+
+    @register(overridden, backend=Backend, default_enable=default_enable)
+    @register(inherited, backend=Backend)
+    def implementation():
+        return 'backend'
+
+    assert overridden() == ('backend' if default_enable else 'default')
+    assert inherited() == ('default' if default_enable else 'backend')
+    assert Backend.default_enable is not default_enable
+
+
+def test_register_priority_override(enable_dispatch):
+    class Primary(BaseBackend):
+        backend_type = 'primary'
+
+    class Secondary(BaseBackend):
+        backend_type = 'secondary'
+        priority = 3
+
+    @dispatch
+    def overridden():
+        return 'default'
+
+    @dispatch
+    def inherited():
+        return 'default'
+
+    @register(overridden, backend=Primary, priority=0)
+    @register(inherited, backend=Primary)
+    def primary():
+        return 'primary'
+
+    @register(overridden, backend=Secondary)
+    @register(inherited, backend=Secondary)
+    def secondary():
+        return 'secondary'
+
+    assert overridden() == 'primary'
+    assert inherited() == 'secondary'
+    assert Primary.priority == 5
