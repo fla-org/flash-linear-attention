@@ -14,7 +14,10 @@ import triton
 import triton.language as tl
 from triton.runtime import driver
 
-from fla.ops.kda.backends.triton_ascend.wy_fast import recompute_w_u_fwd_kda_npu as _recompute_w_u_fwd_npu
+from fla.backends import TritonAscendBackend, register
+from fla.ops.kda.backends.triton_ascend.utils import _verify_intra_chunk_size
+from fla.ops.kda.backends.triton_ascend.wy_fast import recompute_w_u_fwd_npu
+from fla.ops.kda.chunk_intra import chunk_kda_bwd_intra, chunk_kda_fwd_intra
 from fla.ops.kda.chunk_intra_token_parallel import chunk_kda_fwd_intra_token_parallel
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.graph import get_static_buffer
@@ -55,10 +58,6 @@ def _get_inter_bk(K: int) -> int:
         min_block=16,
         max_block=min(_MAX_INTER_BK, triton.next_power_of_2(K)),
     )
-
-
-def _recompute_w_u_fwd(*args, **kwargs):
-    return _recompute_w_u_fwd_npu(*args, **kwargs)
 
 
 def _launch_sub_chunk_kernel(
@@ -533,6 +532,11 @@ def chunk_kda_fwd_kernel_inter_solve_fused_npu(
         tl.store(p_Akk3 + 3 * BC + o_i[None, :], b_Ai33_c.to(Akk.dtype.element_ty), mask=m_tc3[:, None])
 
 
+def chunk_kda_fwd_intra_verifier(*args, **kwargs):
+    return _verify_intra_chunk_size(args, kwargs)
+
+
+@register(chunk_kda_fwd_intra, backend=TritonAscendBackend, verifier=chunk_kda_fwd_intra_verifier)
 @input_guard
 def chunk_kda_fwd_intra_npu(
     q: torch.Tensor,
@@ -668,7 +672,7 @@ def chunk_kda_fwd_intra_npu(
             BH_OFFSET=0,
         ),
     )
-    w, u, qg, kg = _recompute_w_u_fwd(
+    w, u, qg, kg = recompute_w_u_fwd_npu(
         k=k,
         v=v,
         beta=beta,
@@ -925,6 +929,25 @@ def chunk_kda_bwd_kernel_intra_npu(
                 tl.store(p_dg2 + i_ti * (HV * K) + o_i[:, None] * (HV * K) + o_k[None, :], b_dg2, mask=m_ik)
 
 
+def _verify_bwd_intra_k(args, kwargs):
+    # beyond the single-block UB envelope dispatch falls back to the mainline kernel
+    k = args[1] if len(args) > 1 else kwargs['k']
+    K = int(k.shape[-1])
+    safe_gate = kwargs.get('safe_gate', False)
+    limit = 512 if safe_gate else 256
+    if triton.next_power_of_2(K) > limit:
+        return False, f'KDA Ascend bwd_intra only supports K <= {limit} with safe_gate={safe_gate}, got K={K}'
+    return True, None
+
+
+def chunk_kda_bwd_intra_verifier(*args, **kwargs):
+    ok, reason = _verify_intra_chunk_size(args, kwargs)
+    if not ok:
+        return ok, reason
+    return _verify_bwd_intra_k(args, kwargs)
+
+
+@register(chunk_kda_bwd_intra, backend=TritonAscendBackend, verifier=chunk_kda_bwd_intra_verifier)
 @input_guard
 def chunk_kda_bwd_intra_npu(
     q: torch.Tensor,

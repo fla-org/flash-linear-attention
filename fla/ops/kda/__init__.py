@@ -14,4 +14,18 @@ __all__ = [
 ]
 
 
-from fla.ops.kda.backends import flash_kda  # noqa: F401
+from fla.backends import TileLangBackend, TritonAscendBackend
+from fla.ops.kda.backends.flash_kda import FlashKDABackend  # noqa: F401
+
+if TileLangBackend.is_available():
+    from fla.ops.kda.backends import tilelang  # noqa: F401
+
+if TritonAscendBackend.is_available():
+    from fla.ops.kda.backends.triton_ascend import (  # noqa: F401
+        chunk_bwd,
+        chunk_intra,
+        chunk_intra_token_parallel,
+        fused_recurrent,
+        gate,
+        wy_fast,
+    )
