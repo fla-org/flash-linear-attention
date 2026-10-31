@@ -317,6 +317,60 @@ def test_chunk(
 
 
 @pytest.mark.parametrize(
+    ('B', 'T', 'H', 'D', 'dtype'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-{}".format(*test))
+        for test in [
+            (1, 63, 4, 64, torch.float),
+            (2, 100, 4, 64, torch.float),
+            (2, 500, 4, 60, torch.float),
+            (2, 1000, 4, 128, torch.float16),
+        ]
+    ],
+)
+@pytest.mark.parametrize('impl', [chunk_simple_gla, fused_chunk_simple_gla], ids=['chunk', 'fused_chunk'])
+def test_chunk_g_gamma(
+    B: int,
+    T: int,
+    H: int,
+    D: int,
+    dtype: torch.dtype,
+    impl,
+):
+    torch.manual_seed(42)
+    os.environ['TRITON_F32_DEFAULT'] = 'ieee'
+    q = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_(True)
+    k = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_(True)
+    v = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_(True)
+    # per-head decays as strong as lightning attention's, where the last partial chunk used to overflow
+    g_gamma = -(8 / H) * torch.arange(H, dtype=torch.float32, device=device)
+    h0 = torch.rand((B, H, D, D), dtype=torch.float32, device=device).requires_grad_(True)
+    dht = torch.randn_like(h0)
+    do = torch.randn_like(v)
+
+    ref, ref_ht = fused_recurrent_simple_gla(q=q, k=k, v=v, g_gamma=g_gamma, initial_state=h0, output_final_state=True)
+    ((ref * do).sum() + (dht * ref_ht).sum()).backward()
+    ref_dq, q.grad = q.grad.clone(), None
+    ref_dk, k.grad = k.grad.clone(), None
+    ref_dv, v.grad = v.grad.clone(), None
+    ref_dh0, h0.grad = h0.grad.clone(), None
+
+    tri, tri_ht = impl(q=q, k=k, v=v, g_gamma=g_gamma, initial_state=h0, output_final_state=True)
+    ((tri * do).sum() + (dht * tri_ht).sum()).backward()
+    tri_dq, q.grad = q.grad.clone(), None
+    tri_dk, k.grad = k.grad.clone(), None
+    tri_dv, v.grad = v.grad.clone(), None
+    tri_dh0, h0.grad = h0.grad.clone(), None
+
+    assert_close('o', ref, tri, 0.004)
+    assert_close('ht', ref_ht, tri_ht, 0.005)
+    assert_close('dq', ref_dq, tri_dq, 0.005)
+    assert_close('dk', ref_dk, tri_dk, 0.005)
+    assert_close('dv', ref_dv, tri_dv, 0.005)
+    assert_close('dh0', ref_dh0, tri_dh0, 0.005)
+
+
+@pytest.mark.parametrize(
     ('B', 'T', 'H', 'D', 'scale', 'gate_logit_normalizer', 'dtype', 'chunk_size'),
     [
         pytest.param(*test, id="B{}-T{}-H{}-D{}-scale{}-gate{}-{}-chunk{}".format(*test))

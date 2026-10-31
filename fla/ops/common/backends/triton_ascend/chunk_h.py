@@ -128,7 +128,8 @@ def chunk_h_fwd_kernel(
         if USE_G_GAMMA:
             b_g_last = b_gamma * min(BT, T - i_t * BT)
             b_h *= exp2(b_g_last)
-            b_v = b_v * exp2(b_g_last - b_g)[:, None]
+            # past the end of a partial chunk b_g_last - b_g is positive and exp2 can overflow, 0 * inf = nan
+            b_v = b_v * tl.where(m_t, exp2(b_g_last - b_g), 0)[:, None]
 
         if USE_GK:
             p_gk = gk + kv_base + o_k[:, None] + o_t[None, :] * (H * K)
