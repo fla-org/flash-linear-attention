@@ -180,7 +180,6 @@ def hc_fwd_gluon(
         HAS_Y=y is not None,
         HAS_M=m is not None,
         num_warps=4,
-        enable_fp_fusion=False,
     )
     return o, hc_bwd_gluon
 
@@ -222,7 +221,6 @@ def hc_bwd_gluon(
         HAS_Y=y is not None,
         HAS_M=m is not None,
         num_warps=4,
-        enable_fp_fusion=False,
     )
     for partial, grad, size in ((dw_partial, dw, N), (dm_partial, dm, N * N)):
         if grad is not None:
@@ -235,6 +233,5 @@ def hc_bwd_gluon(
                 BC=triton.next_power_of_2(ND),
                 BS=triton.next_power_of_2(size),
                 num_warps=4,
-                enable_fp_fusion=False,
             )
     return dx, dw, dy, dm
