@@ -86,23 +86,26 @@ def test_naive(B: int, T: int, H: int, K: int, V: int, E: int, gate_logit_normal
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'K', 'V', 'E', 'scale', 'gate_logit_normalizer', 'disable_recompute', 'dtype'),
+    ('B', 'T', 'H', 'K', 'V', 'E', 'scale', 'gate_logit_normalizer', 'use_state', 'disable_recompute', 'dtype'),
     [
         pytest.param(
             *test,
-            id="B{}-T{}-H{}-K{}-V{}-E{}-scale{}-gate_logit_normalizer{}-disable_recompute{}-{}".format(*test),
+            id="B{}-T{}-H{}-K{}-V{}-E{}-scale{}-gate_logit_normalizer{}-use_state{}-disable_recompute{}-{}".format(*test),
         )
         for test in [
-            (1, 63, 1, 64, 64, 1, 1, 1, False, torch.float16),
-            (2, 500, 3, 60, 64, 2, 1, 1, True, torch.float16),
+            (1, 63, 1, 64, 64, 1, 1, 1, True, False, torch.float16),
+            (1, 200, 2, 64, 64, 4, 1, 1, True, False, torch.float),
+            (2, 500, 3, 60, 64, 2, 1, 1, True, True, torch.float16),
             # strong decay, where factored exponents would overflow
-            (2, 1000, 2, 128, 128, 4, 0.1, 0.1, False, torch.bfloat16),
-            (2, 1024, 2, 128, 128, 8, 1, 1, True, torch.bfloat16),
+            (2, 1000, 2, 128, 128, 4, 0.1, 0.1, False, False, torch.bfloat16),
+            (2, 1024, 2, 128, 128, 8, 1, 1, False, True, torch.bfloat16),
             # E, K and V that are not powers of two
-            (1, 777, 2, 100, 96, 12, 1, 10, False, torch.float16),
-            (1, 256, 2, 128, 128, 16, 1, 1, False, torch.bfloat16),
+            (1, 777, 2, 100, 96, 12, 1, 10, True, False, torch.float16),
+            (1, 256, 2, 128, 128, 16, 1, 1, True, False, torch.bfloat16),
+            # head dims below the 16-wide tl.dot tiles
+            (2, 100, 2, 8, 12, 2, 1, 1, True, False, torch.float16),
             # the largest supported key dim
-            (1, 300, 2, 256, 128, 4, 1, 1, False, torch.bfloat16),
+            (1, 300, 2, 256, 128, 4, 1, 1, True, False, torch.bfloat16),
         ]
     ],
 )
@@ -115,15 +118,18 @@ def test_chunk(
     E: int,
     scale: float,
     gate_logit_normalizer: float,
+    use_state: bool,
     disable_recompute: bool,
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
-    inputs = _make_inputs(B, T, H, K, V, E, gate_logit_normalizer, dtype)
-    h0 = torch.randn(B, H, E, K, V, dtype=torch.float32, device=device)
-    q, k, v, k2, q2, g, beta, h0 = map(lambda x: x.requires_grad_(True), inputs + [h0])
+    h0 = torch.randn(B, H, E, K, V, dtype=torch.float32, device=device) if use_state else None
+    inputs = [x.requires_grad_(True) for x in _make_inputs(B, T, H, K, V, E, gate_logit_normalizer, dtype)]
+    if use_state:
+        inputs.append(h0.requires_grad_(True))
+    q, k, v, k2, q2, g, beta = inputs[:7]
     do = torch.randn_like(v)
-    dht = torch.randn_like(h0)
+    dht = torch.randn_like(h0) if use_state else None
 
     ref, ref_ht = naive_recurrent_triadic_gdn(
         q=q,
@@ -135,11 +141,12 @@ def test_chunk(
         beta=beta,
         scale=scale,
         initial_state=h0,
-        output_final_state=True,
+        output_final_state=use_state,
     )
-    ((ref * do).sum() + (ref_ht * dht).sum()).backward()
-    ref_grads = [x.grad for x in (q, k, v, k2, q2, g, beta, h0)]
-    q.grad = k.grad = v.grad = k2.grad = q2.grad = g.grad = beta.grad = h0.grad = None
+    ((ref * do).sum() + ((ref_ht * dht).sum() if use_state else 0)).backward()
+    ref_grads = [x.grad for x in inputs]
+    for x in inputs:
+        x.grad = None
 
     tri, tri_ht = chunk_triadic_gdn(
         q=q,
@@ -151,14 +158,15 @@ def test_chunk(
         beta=beta,
         scale=scale,
         initial_state=h0,
-        output_final_state=True,
+        output_final_state=use_state,
         disable_recompute=disable_recompute,
     )
-    ((tri * do).sum() + (tri_ht * dht).sum()).backward()
-    tri_grads = [x.grad for x in (q, k, v, k2, q2, g, beta, h0)]
+    ((tri * do).sum() + ((tri_ht * dht).sum() if use_state else 0)).backward()
+    tri_grads = [x.grad for x in inputs]
 
     assert_close('o', ref, tri, 0.005)
-    assert_close('ht', ref_ht, tri_ht, 0.005)
+    if use_state:
+        assert_close('ht', ref_ht, tri_ht, 0.005)
     for name, ref_grad, tri_grad, ratio in zip(
         ('dq', 'dk', 'dv', 'dk2', 'dq2', 'dg', 'db', 'dh0'),
         ref_grads,

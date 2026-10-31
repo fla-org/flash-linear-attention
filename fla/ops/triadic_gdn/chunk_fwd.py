@@ -318,7 +318,8 @@ def chunk_triadic_gdn_fwd_intra(
         E=E,
         BT=BT,
         BC=16,
-        BK=min(64, triton.next_power_of_2(K)),
+        # tl.dot needs every tile dim to be at least 16
+        BK=max(16, min(64, triton.next_power_of_2(K))),
         BE=max(16, triton.next_power_of_2(E)),
         num_warps=8,
         num_stages=1,
@@ -392,7 +393,7 @@ def chunk_triadic_gdn_fwd_h(
         V=V,
         E=E,
         BT=BT,
-        BK=triton.next_power_of_2(K),
+        BK=max(16, triton.next_power_of_2(K)),
         BV=BV,
         num_warps=num_warps,
         num_stages=2,

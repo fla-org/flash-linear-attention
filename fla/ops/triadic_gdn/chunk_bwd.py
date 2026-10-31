@@ -531,13 +531,14 @@ def chunk_triadic_gdn_bwd(
         V=V,
         E=E,
         BT=BT,
-        BK=triton.next_power_of_2(K),
+        BK=max(16, triton.next_power_of_2(K)),
         BV=BV,
         num_warps=num_warps,
         num_stages=2,
     )
 
-    BK = min(64, triton.next_power_of_2(K))
+    # tl.dot needs every tile dim to be at least 16
+    BK = max(16, min(64, triton.next_power_of_2(K)))
     NK = triton.cdiv(K, BK)
     dq = torch.empty_like(q, dtype=torch.float32)
     dk = torch.empty_like(k, dtype=torch.float32)
@@ -576,7 +577,7 @@ def chunk_triadic_gdn_bwd(
         E=E,
         BT=BT,
         BK=BK,
-        BV=triton.next_power_of_2(V),
+        BV=max(16, triton.next_power_of_2(V)),
         num_warps=8,
     )
 
@@ -615,7 +616,7 @@ def chunk_triadic_gdn_bwd(
         BT=BT,
         BC=16,
         BK=BK,
-        BV=min(64, triton.next_power_of_2(V)),
+        BV=max(16, min(64, triton.next_power_of_2(V))),
         BE=max(16, triton.next_power_of_2(E)),
         num_warps=8,
         num_stages=1,
