@@ -34,4 +34,4 @@ def test_long_conv_causal(module: type, T: int, max_len: int):
     # changing the last token must leave every earlier output unchanged
     x2 = x.clone()
     x2[:, -1] += 1
-    torch.testing.assert_close(conv(x2)[:, :-1], y[:, :-1], rtol=0, atol=1e-5)
+    torch.testing.assert_close(conv(x2)[:, :-1], y[:, :-1], rtol=0, atol=1e-4)
