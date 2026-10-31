@@ -229,6 +229,7 @@ def chunk_gsa_fwd_k(
         cu_seqlens=cu_seqlens,
         chunk_size=BT,
         states_in_fp32=False,
+        chunk_indices=chunk_indices,
     )
     o = v.new_empty(B, T, H, V)
     A = q.new_empty(B, T, H, BT)
