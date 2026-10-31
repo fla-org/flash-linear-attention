@@ -503,7 +503,7 @@ class FusedAttnresFunction(torch.autograd.Function):
         return (dq, dw, dow, None, None, None, None, *dvs)
 
 
-@dispatch('attnres')
+@dispatch
 def fused_attnres(
     query: torch.Tensor,
     residuals: Sequence[torch.Tensor],

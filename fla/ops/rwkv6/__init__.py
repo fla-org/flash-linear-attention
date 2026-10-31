@@ -12,3 +12,9 @@ __all__ = [
     'chunk_rwkv6',
     'fused_recurrent_rwkv6',
 ]
+
+
+from fla.backends import TileLangBackend
+
+if TileLangBackend.is_available():
+    from fla.ops.rwkv6.backends import tilelang  # noqa: F401

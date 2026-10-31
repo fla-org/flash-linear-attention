@@ -12,3 +12,9 @@ __all__ = [
     'naive_parallel_attn',
     'parallel_attn',
 ]
+
+
+from fla.backends import TileLangBackend
+
+if TileLangBackend.is_available():
+    from fla.ops.attn.backends import tilelang  # noqa: F401

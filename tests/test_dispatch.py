@@ -516,8 +516,8 @@ def test_dispatch_disabled(run_python, disabled):
             return x + 1
 
         for operation in [
-            'attn', 'attnres', 'common', 'gated_delta_rule', 'gdn2', 'generalized_delta_rule.dplr',
-            'gla', 'kda', 'rwkv6', 'wall_attn',
+            'common', 'gated_delta_rule', 'gdn2', 'generalized_delta_rule.dplr',
+            'gla', 'kda', 'wall_attn',
         ]:
             with warnings.catch_warnings():
                 warnings.simplefilter('error', DeprecationWarning)
@@ -612,6 +612,7 @@ def test_register_import_order(run_python):
                 'fla.modules.norm.triton_ascend.fused_norm_gate',
                 ['layer_norm_gated_fwd', 'layer_norm_gated_bwd'],
             ),
+            'fla.ops.attnres.fused': ('fla.ops.attnres.backends.triton_ascend', ['fused_attnres']),
             'fla.ops.utils.cumsum': (
                 'fla.ops.utils.triton_ascend.cumsum',
                 ['chunk_global_cumsum', 'chunk_local_cumsum'],

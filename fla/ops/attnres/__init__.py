@@ -12,3 +12,12 @@ __all__ = [
     'fused_attnres',
     'naive_attnres',
 ]
+
+
+from fla.backends import GluonBackend, TritonAscendBackend
+
+if GluonBackend.is_available():
+    from fla.ops.attnres.backends import gluon  # noqa: F401
+
+if TritonAscendBackend.is_available():
+    from fla.ops.attnres.backends import triton_ascend  # noqa: F401
