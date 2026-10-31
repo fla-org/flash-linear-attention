@@ -18,11 +18,8 @@ def naive_hc_pre(x: torch.Tensor, pre: torch.Tensor) -> torch.Tensor:
     Reduces `[..., N, D]` residual streams with `[..., N]` activated weights to a `[..., D]` branch input.
     Accumulates in FP32 and returns the stream dtype.
     """
-    dtype = x.dtype
-    x, pre = x.float(), pre.float()
     # [..., N, D], [..., N] -> [..., D]
-    o = einsum(x, pre, '... n d, ... n -> ... d')
-    return o.to(dtype)
+    return einsum(x.float(), pre.float(), '... n d, ... n -> ... d').to(x.dtype)
 
 
 def naive_hc_post(
@@ -37,15 +34,8 @@ def naive_hc_post(
     mHC uses a caller-supplied doubly stochastic mixing matrix; iHC uses `mixing=None` for the identity transition.
     Accumulates in FP32 and returns `[..., N, D]` in the stream dtype.
     """
-    dtype = x.dtype
-    x, branch, post = x.float(), branch.float(), post.float()
-
-    residual = x
-    if mixing is not None:
-        mixing = mixing.float()
-        # [..., N_out, N_in], [..., N_in, D] -> [..., N_out, D]
-        residual = einsum(mixing, x, '... n m, ... m d -> ... n d')
+    # [..., N_out, N_in], [..., N_in, D] -> [..., N_out, D]
+    residual = x.float() if mixing is None else einsum(mixing.float(), x.float(), '... n m, ... m d -> ... n d')
 
     # [..., N], [..., D] -> [..., N, D]
-    update = einsum(post, branch, '... n, ... d -> ... n d')
-    return (residual + update).to(dtype)
+    return (residual + einsum(post.float(), branch.float(), '... n, ... d -> ... n d')).to(x.dtype)
