@@ -329,5 +329,10 @@ def hc_pre_tilelang(x: torch.Tensor, pre: torch.Tensor) -> torch.Tensor:
 
 
 @register(hc_post, backend=HCTileLangBackend)
-def hc_post_tilelang(x: torch.Tensor, branch: torch.Tensor, post: torch.Tensor, mixing: torch.Tensor | None = None) -> torch.Tensor:
+def hc_post_tilelang(
+    x: torch.Tensor,
+    branch: torch.Tensor,
+    post: torch.Tensor,
+    mixing: torch.Tensor | None = None,
+) -> torch.Tensor:
     return FusedHCPostTileLangFunction.apply(x, branch, post, mixing)

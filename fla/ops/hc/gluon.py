@@ -169,7 +169,16 @@ def hc_bwd_kernel_gluon(
     **autotune_cache_kwargs,
 )
 @gluon.jit(do_not_specialize=['T'])
-def hc_bwd_kernel_reduce_gluon(partial, grad, T, C: gl.constexpr, S: gl.constexpr, BC: gl.constexpr, BS: gl.constexpr, NW: gl.constexpr):
+def hc_bwd_kernel_reduce_gluon(
+    partial,
+    grad,
+    T,
+    C: gl.constexpr,
+    S: gl.constexpr,
+    BC: gl.constexpr,
+    BS: gl.constexpr,
+    NW: gl.constexpr,
+):
     i_t = gl.program_id(0).to(gl.int64)
     layout: gl.constexpr = gl.BlockedLayout([1, 4], [4, 8], [NW, 1], [1, 0])
     o_c = gl.arange(0, BC, layout=gl.SliceLayout(1, layout)).to(gl.int64)
@@ -313,5 +322,10 @@ def hc_pre_gluon(x: torch.Tensor, pre: torch.Tensor) -> torch.Tensor:
 
 
 @register(hc_post, backend=GluonBackend)
-def hc_post_gluon(x: torch.Tensor, branch: torch.Tensor, post: torch.Tensor, mixing: torch.Tensor | None = None) -> torch.Tensor:
+def hc_post_gluon(
+    x: torch.Tensor,
+    branch: torch.Tensor,
+    post: torch.Tensor,
+    mixing: torch.Tensor | None = None,
+) -> torch.Tensor:
     return FusedHCPostGluonFunction.apply(x, branch, post, mixing)
