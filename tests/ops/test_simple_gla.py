@@ -328,12 +328,14 @@ def test_chunk(
         ]
     ],
 )
+@pytest.mark.parametrize('impl', [chunk_simple_gla, fused_chunk_simple_gla], ids=['chunk', 'fused_chunk'])
 def test_chunk_g_gamma(
     B: int,
     T: int,
     H: int,
     D: int,
     dtype: torch.dtype,
+    impl,
 ):
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
@@ -353,7 +355,7 @@ def test_chunk_g_gamma(
     ref_dv, v.grad = v.grad.clone(), None
     ref_dh0, h0.grad = h0.grad.clone(), None
 
-    tri, tri_ht = chunk_simple_gla(q=q, k=k, v=v, g_gamma=g_gamma, initial_state=h0, output_final_state=True)
+    tri, tri_ht = impl(q=q, k=k, v=v, g_gamma=g_gamma, initial_state=h0, output_final_state=True)
     ((tri * do).sum() + (dht * tri_ht).sum()).backward()
     tri_dq, q.grad = q.grad.clone(), None
     tri_dk, k.grad = k.grad.clone(), None
