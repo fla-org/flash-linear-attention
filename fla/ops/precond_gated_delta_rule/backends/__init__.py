@@ -7,6 +7,12 @@
 
 """GDR backends."""
 
-from fla.ops.precond_gated_delta_rule.backends.triton_ascend import TritonAscendPrecondGDNBackend
 
-__all__ = ['TritonAscendPrecondGDNBackend']
+from fla.backends import TritonAscendBackend
+
+if TritonAscendBackend.is_available():
+    from fla.ops.precond_gated_delta_rule.backends.triton_ascend import (  # noqa: F401
+        chunk_precond_kkt_fwd,
+        chunk_precond_wy_bwd,
+        fused_recurrent,
+    )

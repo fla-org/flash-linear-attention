@@ -7,6 +7,7 @@
 
 """Check intra-card CP routing, cache reuse, and grouped-head outputs and final states."""
 
+import inspect
 import os
 
 import pytest
@@ -16,6 +17,7 @@ import torch.nn.functional as F
 from fla import backends
 from fla.ops.common import intracard_cp
 from fla.ops.common.backends.intracard import IntraCardCPBackend
+from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_fwd_h
 from fla.ops.common.intracard_cp import _intracard_cache
 from fla.ops.gated_delta_rule import chunk_gated_delta_rule
 from fla.ops.kda import chunk_kda
@@ -156,7 +158,7 @@ def test_chunk_gdn_grouped_heads(monkeypatch):
 
     assert split_calls == 1, "the grouped-head case must execute intra-card splitting"
 
-    common_registry = backends._load_operation_registry('common')
+    common_registry = backends._function_registries[inspect.unwrap(chunk_gated_delta_rule_fwd_h)]
     with monkeypatch.context() as patch:
         patch.setattr(common_registry, '_backends', {})
         with torch.inference_mode():

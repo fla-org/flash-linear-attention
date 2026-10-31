@@ -13,6 +13,8 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.backends import TritonAscendBackend, register
+from fla.ops.kda.fused_recurrent import fused_recurrent_kda_fwd
 from fla.ops.utils.op import exp
 from fla.ops.utils.softplus import softplus
 from fla.utils import ascend_compile_kwargs, input_guard
@@ -265,6 +267,7 @@ def fused_recurrent_kda_fwd_kernel_npu(
                 tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), boundary_check=(0, 1))
 
 
+@register(fused_recurrent_kda_fwd, backend=TritonAscendBackend)
 @input_guard(no_guard_contiguous={'initial_state', 'out'})
 def fused_recurrent_kda_fwd_npu(
     q: torch.Tensor,

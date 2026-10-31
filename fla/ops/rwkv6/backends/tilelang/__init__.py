@@ -12,9 +12,10 @@ from __future__ import annotations
 import torch
 
 from fla.backends import TileLangBackend, register
+from fla.ops.rwkv6.chunk import chunk_rwkv6_fwd_intra
 
 
-@register('rwkv6')
+@register(chunk_rwkv6_fwd_intra)
 class RWKV6TileLangBackend(TileLangBackend):
 
     default_enable = False

@@ -14,7 +14,9 @@ import tilelang
 import tilelang.language as T
 import torch
 
-from fla.ops.attn.parallel import parallel_attn_bwd_preprocess
+from fla.backends import register
+from fla.ops.attn.backends.tilelang import AttnTileLangBackend
+from fla.ops.attn.parallel import parallel_attn_bwd, parallel_attn_bwd_preprocess, parallel_attn_fwd
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.constant import RCP_LN2
 
@@ -363,7 +365,28 @@ def parallel_attn_bwd_kernel(
     return main
 
 
-def parallel_attn_fwd(
+def parallel_attn_fwd_verifier(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g_cumsum: torch.Tensor | None,
+    sink_bias: torch.Tensor | None,
+    scale: float,
+    window_size: int | None = None,
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
+    output_dtype: torch.dtype | None = None,
+) -> tuple[bool, str | None]:
+    if q.dtype not in (torch.float16, torch.bfloat16):
+        # float32 fails tilelang layout inference at kernel-build time
+        # (see #1590, tile-ai/tilelang#3669); fall back to Triton until
+        # the upstream limitation is fixed
+        return False, f"TileLang backend does not support dtype {q.dtype}; fall back to Triton"
+    return True, None
+
+
+@register(parallel_attn_fwd, backend=AttnTileLangBackend, verifier=parallel_attn_fwd_verifier)
+def parallel_attn_fwd_tilelang(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -433,7 +456,31 @@ def parallel_attn_fwd(
     return o, lse
 
 
-def parallel_attn_bwd(
+def parallel_attn_bwd_verifier(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    o: torch.Tensor,
+    g_cumsum: torch.Tensor | None,
+    lse: torch.Tensor,
+    do: torch.Tensor,
+    sink_bias: torch.Tensor | None = None,
+    scale: float | None = None,
+    window_size: int | None = None,
+    chunk_size: int = 128,
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
+) -> tuple[bool, str | None]:
+    if q.dtype not in (torch.float16, torch.bfloat16):
+        # float32 fails tilelang layout inference at kernel-build time
+        # (see #1590, tile-ai/tilelang#3669); fall back to Triton until
+        # the upstream limitation is fixed
+        return False, f"TileLang backend does not support dtype {q.dtype}; fall back to Triton"
+    return True, None
+
+
+@register(parallel_attn_bwd, backend=AttnTileLangBackend, verifier=parallel_attn_bwd_verifier)
+def parallel_attn_bwd_tilelang(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,

@@ -12,3 +12,6 @@ __all__ = [
     'fused_attnres',
     'naive_attnres',
 ]
+
+
+from fla.ops.attnres import backends  # noqa: F401

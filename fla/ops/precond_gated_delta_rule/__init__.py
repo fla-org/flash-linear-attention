@@ -14,3 +14,6 @@ __all__ = [
     "fused_recurrent_precond_gated_delta_rule",
     "naive_recurrent_precond_gated_delta_rule",
 ]
+
+
+from fla.ops.precond_gated_delta_rule import backends  # noqa: F401

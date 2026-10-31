@@ -14,4 +14,4 @@ __all__ = [
 ]
 
 
-from fla.ops.kda.backends import flash_kda  # noqa: F401
+from fla.ops.kda import backends  # noqa: F401

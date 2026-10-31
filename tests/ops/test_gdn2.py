@@ -596,8 +596,8 @@ def test_chunk_varlen(cu_seqlens, H, K, V, use_gate_in_kernel, dtype, state_v_fi
 )
 def test_chunk_npu_verifier(name, case, dtype, lower_bound, reason):
     """Check dispatch metadata and the forward entry signature without requiring an NPU."""
-    from fla.ops.gdn2.backends.triton_ascend import TritonAscendGDN2Backend
-    from fla.ops.gdn2.backends.triton_ascend.chunk_intra import chunk_gdn2_fwd_intra_npu
+    from fla.ops.gdn2.backends.triton_ascend.chunk_bwd import chunk_gdn2_bwd_wy_dqkg_fused_verifier
+    from fla.ops.gdn2.backends.triton_ascend.chunk_intra import chunk_gdn2_fwd_intra_npu, chunk_gdn2_fwd_intra_verifier
 
     shape = (1, 1, 1, 257) if case == 'oversized_k' else (1, 22, 2, 64) if case == 'lower_bound' else (1,)
     tensor = Mock(spec=torch.Tensor, shape=shape, dtype=dtype)
@@ -621,7 +621,9 @@ def test_chunk_npu_verifier(name, case, dtype, lower_bound, reason):
         kwargs['q'].device.type = 'npu'
     elif case in ('cu_seqlens', 'chunk_indices'):
         kwargs[case] = torch.tensor([0, 1], dtype=torch.int64)
-    accepted, actual_reason = TritonAscendGDN2Backend().verify(name, **kwargs)
+    verifier = (chunk_gdn2_fwd_intra_verifier if name == 'chunk_gdn2_fwd_intra'
+                else chunk_gdn2_bwd_wy_dqkg_fused_verifier)
+    accepted, actual_reason = verifier(**kwargs)
     assert accepted == (reason is None)
     if reason is None:
         assert actual_reason is None
@@ -646,7 +648,7 @@ def test_chunk_npu_verifier(name, case, dtype, lower_bound, reason):
 )
 def test_fused_recurrent_npu_verifier(case, dtype, reason):
     """Check recurrent dispatch metadata without requiring an NPU."""
-    from fla.ops.gdn2.backends.triton_ascend import TritonAscendGDN2Backend
+    from fla.ops.gdn2.backends.triton_ascend.fused_recurrent import fused_recurrent_gdn2_fwd_verifier
 
     tensor = Mock(spec=torch.Tensor, shape=(1, 1, 1, 32), dtype=dtype)
     tensor.device.type = 'npu'
@@ -656,7 +658,7 @@ def test_fused_recurrent_npu_verifier(case, dtype, reason):
     elif case == 'unsupported_optional_dtype':
         kwargs['A_log'] = Mock(spec=torch.Tensor, shape=(1,), dtype=torch.int32)
         kwargs['A_log'].device.type = 'npu'
-    accepted, actual_reason = TritonAscendGDN2Backend().verify('fused_recurrent_gdn2_fwd', **kwargs)
+    accepted, actual_reason = fused_recurrent_gdn2_fwd_verifier(**kwargs)
     assert accepted == (reason is None)
     if reason is None:
         assert actual_reason is None

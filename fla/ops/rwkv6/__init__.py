@@ -12,3 +12,6 @@ __all__ = [
     'chunk_rwkv6',
     'fused_recurrent_rwkv6',
 ]
+
+
+from fla.ops.rwkv6 import backends  # noqa: F401

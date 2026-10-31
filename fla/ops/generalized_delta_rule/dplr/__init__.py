@@ -12,3 +12,6 @@ __all__ = [
     'chunk_dplr_delta_rule',
     'fused_recurrent_dplr_delta_rule',
 ]
+
+
+from fla.ops.generalized_delta_rule.dplr import backends  # noqa: F401

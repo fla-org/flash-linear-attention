@@ -7,6 +7,8 @@
 
 """GDN-2 backends."""
 
-from fla.ops.gdn2.backends.triton_ascend import TritonAscendGDN2Backend
 
-__all__ = ['TritonAscendGDN2Backend']
+from fla.backends import TritonAscendBackend
+
+if TritonAscendBackend.is_available():
+    from fla.ops.gdn2.backends.triton_ascend import chunk_bwd, chunk_intra, fused_recurrent  # noqa: F401
