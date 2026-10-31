@@ -120,10 +120,9 @@ def test_fused_recurrent(B, T, H, HV, K, V, scale, use_qk_l2norm_in_kernel, dtyp
 @pytest.mark.skipif(not IS_NPU, reason='Triton-Ascend fused recurrent routing is only exercised on NPU')
 def test_fused_recurrent_npu_backend_routing(monkeypatch):
     """The public fused-recurrent call must enter the Triton-Ascend backend."""
-    from fla.ops.gdn2.backends.triton_ascend import fused_recurrent as npu_impl
-
-    spy = Mock(wraps=npu_impl.fused_recurrent_gdn2_fwd_npu)
-    monkeypatch.setattr(npu_impl, 'fused_recurrent_gdn2_fwd_npu', spy)
+    candidate = backends._function_registries[inspect.unwrap(fused_recurrent_gdn2_fwd)]._backends['triton_ascend']
+    spy = Mock(wraps=candidate.implementation)
+    monkeypatch.setattr(candidate, 'implementation', spy)
     q, k, v, g, b, w, _, _ = _rand_inputs(1, 2, 1, 1, 32, 32, torch.float16)
     fused_recurrent_gdn2(
         q=q,
@@ -598,8 +597,8 @@ def test_chunk_varlen(cu_seqlens, H, K, V, use_gate_in_kernel, dtype, state_v_fi
 )
 def test_chunk_npu_verifier(name, case, dtype, lower_bound, reason):
     """Check dispatch metadata and the forward entry signature without requiring an NPU."""
-    from fla.ops.gdn2.backends.triton_ascend import TritonAscendGDN2Backend
-    from fla.ops.gdn2.backends.triton_ascend.chunk_intra import chunk_gdn2_fwd_intra_npu
+    from fla.ops.gdn2.backends.triton_ascend.chunk_bwd import chunk_gdn2_bwd_wy_dqkg_fused_verifier
+    from fla.ops.gdn2.backends.triton_ascend.chunk_intra import chunk_gdn2_fwd_intra_npu, chunk_gdn2_fwd_intra_verifier
 
     shape = (1, 1, 1, 257) if case == 'oversized_k' else (1, 22, 2, 64) if case == 'lower_bound' else (1,)
     tensor = Mock(spec=torch.Tensor, shape=shape, dtype=dtype)
@@ -623,7 +622,9 @@ def test_chunk_npu_verifier(name, case, dtype, lower_bound, reason):
         kwargs['q'].device.type = 'npu'
     elif case in ('cu_seqlens', 'chunk_indices'):
         kwargs[case] = torch.tensor([0, 1], dtype=torch.int64)
-    accepted, actual_reason = TritonAscendGDN2Backend().verify(name, **kwargs)
+    verifier = (chunk_gdn2_fwd_intra_verifier if name == 'chunk_gdn2_fwd_intra'
+                else chunk_gdn2_bwd_wy_dqkg_fused_verifier)
+    accepted, actual_reason = verifier(**kwargs)
     assert accepted == (reason is None)
     if reason is None:
         assert actual_reason is None
@@ -648,7 +649,7 @@ def test_chunk_npu_verifier(name, case, dtype, lower_bound, reason):
 )
 def test_fused_recurrent_npu_verifier(case, dtype, reason):
     """Check recurrent dispatch metadata without requiring an NPU."""
-    from fla.ops.gdn2.backends.triton_ascend import TritonAscendGDN2Backend
+    from fla.ops.gdn2.backends.triton_ascend.fused_recurrent import fused_recurrent_gdn2_fwd_verifier
 
     tensor = Mock(spec=torch.Tensor, shape=(1, 1, 1, 32), dtype=dtype)
     tensor.device.type = 'npu'
@@ -658,7 +659,7 @@ def test_fused_recurrent_npu_verifier(case, dtype, reason):
     elif case == 'unsupported_optional_dtype':
         kwargs['A_log'] = Mock(spec=torch.Tensor, shape=(1,), dtype=torch.int32)
         kwargs['A_log'].device.type = 'npu'
-    accepted, actual_reason = TritonAscendGDN2Backend().verify('fused_recurrent_gdn2_fwd', **kwargs)
+    accepted, actual_reason = fused_recurrent_gdn2_fwd_verifier(**kwargs)
     assert accepted == (reason is None)
     if reason is None:
         assert actual_reason is None
@@ -1023,22 +1024,24 @@ def test_chunk_intra_default_shift(use_gate_in_kernel, monkeypatch):
     ],
     ids=['forward', 'backward', 'fused-recurrent-forward'],
 )
-def test_gdn2_dispatch_uses_local_registry(monkeypatch, module_name, func_name):
-    from fla.ops.gdn2.backends.triton_ascend import TritonAscendGDN2Backend
-
-    entry = getattr(importlib.import_module(f'fla.ops.gdn2.{module_name}'), func_name)
+def test_npu_backend_dispatch(monkeypatch, module_name, func_name):
     if backends._DISPATCH_DISABLED:
         pytest.skip('Backend dispatch was disabled before import')
-    assert hasattr(entry, '__wrapped__')
-    monkeypatch.setattr(TritonAscendGDN2Backend, 'is_available', classmethod(lambda cls: True))
-    monkeypatch.setattr(TritonAscendGDN2Backend, 'is_enabled', lambda self: True)
-    monkeypatch.setattr(TritonAscendGDN2Backend, f'{func_name}_verifier', lambda self, q: (True, None))
+    monkeypatch.setattr(backends.TritonAscendBackend, 'is_available', classmethod(lambda cls: True))
+    importlib.reload(importlib.import_module('fla.ops.gdn2'))
+    entry = getattr(importlib.import_module(f'fla.ops.gdn2.{module_name}'), func_name)
+    registry = backends._function_registries[inspect.unwrap(entry)]
+    candidate = registry._backends['triton_ascend']
+    backend_module = importlib.import_module(f'fla.ops.gdn2.backends.triton_ascend.{module_name}')
+    assert candidate.implementation is getattr(backend_module, func_name + '_npu')
+    assert 'gdn2' not in backends._operation_registries
+    monkeypatch.setattr(candidate, 'verifier', lambda q: (True, None))
     result = object()
 
-    def implementation(self, q):
+    def implementation(q):
         assert torch.is_grad_enabled()
         assert q.requires_grad
         return result
 
-    monkeypatch.setattr(TritonAscendGDN2Backend, func_name, implementation)
+    monkeypatch.setattr(candidate, 'implementation', implementation)
     assert entry(q=torch.tensor([1.0, 2.0], requires_grad=True)) is result

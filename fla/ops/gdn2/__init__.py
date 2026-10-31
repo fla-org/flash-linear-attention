@@ -15,3 +15,9 @@ __all__ = [
     "naive_chunk_gdn2",
     "naive_recurrent_gdn2",
 ]
+
+
+from fla.backends import TritonAscendBackend
+
+if TritonAscendBackend.is_available():
+    from fla.ops.gdn2.backends.triton_ascend import chunk_bwd, chunk_intra, fused_recurrent  # noqa: F401
