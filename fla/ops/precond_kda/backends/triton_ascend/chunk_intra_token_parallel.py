@@ -5,32 +5,56 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-# Migrated from fla/ops/precond_kda/chunk_intra_token_parallel.py for triton-ascend: kernel bodies are
-# verbatim copies; the @triton.autotune spaces keep only the tile axes because
-# num_warps/num_stages are unsupported on this backend (each pruned candidate was
-# one full aarch64 compile, ~9x the necessary cold-compile cost).
+# Migrated from fla/ops/precond_kda/chunk_intra_token_parallel.py for triton-ascend.
+# Mirrors the KDA token-parallel backend (fla/ops/kda/backends/triton_ascend/
+# chunk_intra_token_parallel.py): the host slabs the launch per axis so the
+# per-launch block product — and the workspace, which scales with the logical
+# block count — stays bounded on very long sequences. AutoBlockify already
+# maps oversized logical grids onto physical cores on triton-ascend 3.6.0, but
+# a blacklisted kernel submits the full grid against CANN's legacy 65535-block
+# limit; slabbing is immune to that.
 
 """Precond-KDA token-parallel intra kernel adapted for triton-ascend on Ascend NPU."""
+
+from __future__ import annotations
 
 import torch
 import triton
 import triton.language as tl
 
 from fla.ops.utils.op import exp2
-from fla.utils import ascend_compile_kwargs, autotune_cache_kwargs
+from fla.utils import ascend_compile_kwargs, input_guard
+from fla.utils.ascend_ub_manager import (
+    ASCEND_MAX_GRID_DIM,
+    max_grid_axis_chunks,
+)
+
+_BH = 4
+
+
+def _launch_token_parallel_kernel(
+    kernel,
+    *,
+    tg_total: int,
+    h_total: int,
+    kernel_kwargs: dict,
+) -> None:
+    hg_total = triton.cdiv(h_total, _BH)
+    compile_kwargs = ascend_compile_kwargs()
+    max_tg = max_grid_axis_chunks(tg_total, hg_total, max_grid=ASCEND_MAX_GRID_DIM)
+    for tg_off in range(0, tg_total, max_tg):
+        tg_len = min(max_tg, tg_total - tg_off)
+        kernel_kwargs['TG_OFFSET'] = tg_off
+        max_hg = max_grid_axis_chunks(hg_total, tg_len, max_grid=ASCEND_MAX_GRID_DIM)
+        for hg_off in range(0, hg_total, max_hg):
+            hg_len = min(max_hg, hg_total - hg_off)
+            kernel_kwargs['HG_OFFSET'] = hg_off
+            kernel[(tg_len, hg_len)](**kernel_kwargs, **compile_kwargs)
 
 
 @triton.heuristics({
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
-@triton.autotune(
-    configs=[
-        triton.Config({'BH': BH})
-        for BH in [1, 2, 4, 8]
-    ],
-    key=["K", "H"],
-    **autotune_cache_kwargs,
-)
 @triton.jit(do_not_specialize=['T', 'N'])
 def chunk_precond_kda_fwd_kernel_intra_token_parallel(
     q,
@@ -50,13 +74,16 @@ def chunk_precond_kda_fwd_kernel_intra_token_parallel(
     BC: tl.constexpr,
     BH: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    TG_OFFSET: tl.constexpr,
+    HG_OFFSET: tl.constexpr,
 ):
     """
     Asymmetric version for precond_kda:
     - Aqk = q @ k_precond^T (column uses k_precond)
     - Akk = k @ k_precond^T (row uses original k, column uses k_precond)
     """
-    i_tg, i_hg = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
+    i_tg = tl.program_id(0).to(tl.int64) + TG_OFFSET
+    i_hg = tl.program_id(1).to(tl.int64) + HG_OFFSET
 
     if IS_VARLEN:
         i_n = 0
@@ -137,6 +164,7 @@ def chunk_precond_kda_fwd_kernel_intra_token_parallel(
         tl.store(Akk + i_t * H*BC + (i_hg * BH + o_h) * BC + j - i_ts, b_Akk.to(Akk.dtype.element_ty), mask=m_h)
 
 
+@input_guard
 def chunk_precond_kda_fwd_intra_token_parallel(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -173,23 +201,29 @@ def chunk_precond_kda_fwd_intra_token_parallel(
     BT = chunk_size
     BC = sub_chunk_size
 
-    def grid(meta): return (B * T, triton.cdiv(H, meta['BH']))
-    chunk_precond_kda_fwd_kernel_intra_token_parallel[grid](
-        q=q,
-        k=k,
-        k_precond=k_precond,
-        g=gk,
-        beta=beta,
-        Aqk=Aqk,
-        Akk=Akk,
-        scale=scale,
-        cu_seqlens=cu_seqlens,
-        N=N,
-        T=T,
-        H=H,
-        K=K,
-        BT=BT,
-        BC=BC,
-        **ascend_compile_kwargs(),
+    _launch_token_parallel_kernel(
+        chunk_precond_kda_fwd_kernel_intra_token_parallel,
+        tg_total=B * T,
+        h_total=H,
+        kernel_kwargs=dict(
+            q=q,
+            k=k,
+            k_precond=k_precond,
+            g=gk,
+            beta=beta,
+            Aqk=Aqk,
+            Akk=Akk,
+            scale=scale,
+            cu_seqlens=cu_seqlens,
+            N=N,
+            T=T,
+            H=H,
+            K=K,
+            BT=BT,
+            BC=BC,
+            BH=_BH,
+            TG_OFFSET=0,
+            HG_OFFSET=0,
+        ),
     )
     return Aqk, Akk
