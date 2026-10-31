@@ -273,6 +273,8 @@ jobs:
           cat conv1d.log
           echo "========== chunk_precond_gdn =========="
           cat chunk_precond_gdn.log
+          echo "========== parallel_wall_attn =========="
+          cat parallel_wall_attn.log
           exit "$status"
 
       - name: Check fused-recurrent GDN2 benchmark results
