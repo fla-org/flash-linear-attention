@@ -26,9 +26,9 @@ _FALLBACK_TILE = 16
 _MAX_TILE = 128
 
 
-def _get_tile(size: int) -> int:
+def _get_tile(size: int, block_rows: int) -> int:
     return compute_row_tile_block_size(
-        _BC,
+        block_rows,
         size,
         _BWD_MEM_MULT,
         tiling_row=False,
@@ -364,6 +364,7 @@ def chunk_gdn2_bwd_wy_dqkg_fused_npu(
     BT = chunk_size
     if BT % _BC != 0:
         raise ValueError(f'GDN-2 Ascend bwd requires chunk_size % {_BC} == 0, got {BT}')
+    BC = min(32, BT)
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
@@ -377,8 +378,8 @@ def chunk_gdn2_bwd_wy_dqkg_fused_npu(
     dA = torch.empty_like(A, dtype=torch.float)
     dA_acc = torch.zeros(B, T, H, BT, dtype=torch.float, device=A.device)
 
-    BK = _get_tile(K)
-    BV = _get_tile(V)
+    BK = _get_tile(size=K, block_rows=BC)
+    BV = _get_tile(size=V, block_rows=BC)
     NK = triton.cdiv(K, BK)
     is_varlen = cu_seqlens is not None
     chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT) if is_varlen else g.new_zeros(1, dtype=torch.int64)
@@ -437,7 +438,7 @@ def chunk_gdn2_bwd_wy_dqkg_fused_npu(
         K=K,
         V=V,
         BT=BT,
-        BC=32 if BT >= 32 else _BC,
+        BC=BC,
         BK=BK,
         BV=BV,
         STATE_V_FIRST=state_v_first,
