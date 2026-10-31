@@ -13,6 +13,9 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.backends import TritonAscendBackend, register
+from fla.ops.kda.backends.triton_ascend.utils import _verify_intra_chunk_size
+from fla.ops.kda.chunk_intra_token_parallel import chunk_kda_fwd_intra_token_parallel
 from fla.ops.utils.op import exp2
 from fla.utils import input_guard
 from fla.utils.ascend_ub_manager import (
@@ -143,6 +146,15 @@ def chunk_kda_fwd_kernel_intra_token_parallel_npu(
         tl.store(Akk + i_t * HV * BC + o_hv * BC + j - i_ts, b_Akk.to(Akk.dtype.element_ty), mask=m_hv)
 
 
+def chunk_kda_fwd_intra_token_parallel_verifier(*args, **kwargs):
+    return _verify_intra_chunk_size(args, kwargs)
+
+
+@register(
+    chunk_kda_fwd_intra_token_parallel,
+    backend=TritonAscendBackend,
+    verifier=chunk_kda_fwd_intra_token_parallel_verifier,
+)
 @input_guard
 def chunk_kda_fwd_intra_token_parallel_npu(
     q: torch.Tensor,

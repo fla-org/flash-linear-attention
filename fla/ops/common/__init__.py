@@ -5,7 +5,4 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from fla.backends import TritonAscendBackend
-
-if TritonAscendBackend.is_available():
-    from fla.ops.common.backends.triton_ascend import chunk_o  # noqa: F401
+from fla.ops.common import backends  # noqa: F401

@@ -13,6 +13,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.backends import TritonAscendBackend, register
 from fla.ops.gated_delta_rule.backends.triton_ascend.wy_fast import (
     _MAX_TILE_BWD,
     _MAX_TILE_BWD_KV,
@@ -30,6 +31,8 @@ from fla.ops.gated_delta_rule.backends.triton_ascend.wy_fast import (
     prepare_wy_repr_bwd_da_mask_dot1_npu,
     prepare_wy_repr_bwd_kv_npu,
 )
+from fla.ops.precond_gated_delta_rule.backends.triton_ascend.utils import _require_npu_device
+from fla.ops.precond_gated_delta_rule.chunk_precond_wy_bwd import prepare_precond_wy_repr_bwd
 from fla.ops.utils import prepare_chunk_indices
 from fla.utils import ascend_compile_kwargs, input_guard
 
@@ -177,6 +180,11 @@ def prepare_precond_wy_repr_bwd_finalize_a2_dg_npu(
         tl.store(dg + (bos * HV + i_h) + o_t * HV, b_dg.to(dg.dtype.element_ty), mask=m_t)
 
 
+def prepare_precond_wy_repr_bwd_verifier(k, k_precond, v, *args, **kwargs):
+    return _require_npu_device(k, k_precond, v)
+
+
+@register(prepare_precond_wy_repr_bwd, backend=TritonAscendBackend, verifier=prepare_precond_wy_repr_bwd_verifier)
 @input_guard
 def prepare_precond_wy_repr_bwd_npu(
     k: torch.Tensor,

@@ -13,6 +13,15 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.backends import TritonAscendBackend, register
+from fla.ops.gla.chunk import (
+    chunk_gla_bwd_dA,
+    chunk_gla_bwd_dqk_intra,
+    chunk_gla_bwd_dqkg,
+    chunk_gla_bwd_dv,
+    chunk_gla_fwd_intra_gk,
+    chunk_gla_fwd_o_gk,
+)
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp2
 from fla.utils import ascend_compile_kwargs, input_guard
@@ -22,6 +31,9 @@ from fla.utils.ascend_ub_manager import (
     launch_grid_chunked,
 )
 
+_MAX_KV = 512
+
+
 _BC = 16
 _SAFETY_MARGIN = 0.80
 _FALLBACK = 16
@@ -29,6 +41,14 @@ _MAX_TILE = 64
 
 # disable auto-multi-buffer on inter and K>256 intra-A split/merge launches
 _GLA_COMPILE_KWARGS = ascend_compile_kwargs()
+
+
+def _verify_kv(K: int, V: int | None = None) -> tuple[bool, str | None]:
+    if K > _MAX_KV:
+        return False, f'NPU GLA supports K<={_MAX_KV}, got K={K}'
+    if V is not None and V > _MAX_KV:
+        return False, f'NPU GLA supports V<={_MAX_KV}, got V={V}'
+    return True, None
 
 
 def _get_bk(K: int) -> int:
@@ -263,6 +283,11 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra_merge_npu(
     tl.store(p_A2, b_A.to(A2.dtype.element_ty), mask=m_A2)
 
 
+def chunk_gla_fwd_intra_gk_verifier(q, k, *args, **kwargs):
+    return _verify_kv(k.shape[-1])
+
+
+@register(chunk_gla_fwd_intra_gk, backend=TritonAscendBackend, verifier=chunk_gla_fwd_intra_gk_verifier)
 @input_guard
 def chunk_gla_fwd_intra_gk_npu(
     q: torch.Tensor,
@@ -425,6 +450,11 @@ def chunk_gla_fwd_kernel_o_npu(
             tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
 
 
+def chunk_gla_fwd_o_gk_verifier(q, v, *args, **kwargs):
+    return _verify_kv(q.shape[-1], v.shape[-1])
+
+
+@register(chunk_gla_fwd_o_gk, backend=TritonAscendBackend, verifier=chunk_gla_fwd_o_gk_verifier)
 @input_guard
 def chunk_gla_fwd_o_gk_npu(
     q: torch.Tensor,
@@ -544,6 +574,11 @@ def chunk_gla_bwd_kernel_dA_npu(
     tl.store(p_dA, b_dA.to(p_dA.dtype.element_ty), mask=m_A)
 
 
+def chunk_gla_bwd_dA_verifier(v, do, *args, **kwargs):
+    return _verify_kv(v.shape[-1])
+
+
+@register(chunk_gla_bwd_dA, backend=TritonAscendBackend, verifier=chunk_gla_bwd_dA_verifier)
 @input_guard
 def chunk_gla_bwd_dA_npu(
     v: torch.Tensor,
@@ -655,6 +690,11 @@ def chunk_gla_bwd_kernel_dv_npu(
     )
 
 
+def chunk_gla_bwd_dv_verifier(k, g, A, do, dh, *args, **kwargs):
+    return _verify_kv(k.shape[-1], do.shape[-1])
+
+
+@register(chunk_gla_bwd_dv, backend=TritonAscendBackend, verifier=chunk_gla_bwd_dv_verifier)
 @input_guard
 def chunk_gla_bwd_dv_npu(
     k: torch.Tensor,
@@ -817,6 +857,11 @@ def chunk_gla_bwd_kernel_intra_npu(
     )
 
 
+def chunk_gla_bwd_dqk_intra_verifier(q, k, *args, **kwargs):
+    return _verify_kv(k.shape[-1])
+
+
+@register(chunk_gla_bwd_dqk_intra, backend=TritonAscendBackend, verifier=chunk_gla_bwd_dqk_intra_verifier)
 @input_guard
 def chunk_gla_bwd_dqk_intra_npu(
     q: torch.Tensor,
@@ -939,6 +984,11 @@ def chunk_gla_bwd_kernel_inter_npu(
     tl.store(dg_base + o_t[:, None] * (H * K) + o_k[None, :], b_dg.to(dg.dtype.element_ty), mask=m_tk)
 
 
+def chunk_gla_bwd_dqkg_verifier(q, k, v, *args, **kwargs):
+    return _verify_kv(k.shape[-1], v.shape[-1])
+
+
+@register(chunk_gla_bwd_dqkg, backend=TritonAscendBackend, verifier=chunk_gla_bwd_dqkg_verifier)
 @input_guard
 def chunk_gla_bwd_dqkg_npu(
     q: torch.Tensor,

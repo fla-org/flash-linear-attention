@@ -14,6 +14,8 @@ import triton
 import triton.language as tl
 import triton.runtime.driver as driver
 
+from fla.backends import TritonAscendBackend, register
+from fla.ops.kda.wy_fast import recompute_w_u_fwd
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp2
 from fla.utils import input_guard
@@ -242,6 +244,7 @@ def recompute_w_u_fwd_kda_kernel_npu(
                 tl.store(p_w, b_w.to(p_w.dtype.element_ty), boundary_check=(0, 1))
 
 
+@register(recompute_w_u_fwd, backend=TritonAscendBackend)
 @input_guard
 def recompute_w_u_fwd_kda_npu(
     k: torch.Tensor,

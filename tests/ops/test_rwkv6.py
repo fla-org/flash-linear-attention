@@ -28,6 +28,7 @@ from fla.utils import assert_close, device, device_platform
             (1, 15, 2, 60, 1.0, torch.float16),
             (3, 60, 3, 64, 0.1, torch.float16),
             (3, 64, 2, 64, 1, torch.float16),
+            (3, 64, 2, 64, 1, torch.bfloat16),
             (4, 500, 3, 256, 1, torch.float16),
             (4, 1000, 4, 64, 10, torch.float16),
             (4, 2048, 4, 64, 1, torch.float16),
