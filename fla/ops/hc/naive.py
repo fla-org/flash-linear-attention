@@ -6,6 +6,7 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
+from einops import einsum
 
 # pre/post precision follows the DeepSeek reference:
 # https://github.com/deepseek-ai/TileKernels/blob/c1cf914a82e6/tile_kernels/torch/mhc.py
@@ -19,8 +20,8 @@ def naive_hc_pre(x: torch.Tensor, pre: torch.Tensor) -> torch.Tensor:
     """
     dtype = x.dtype
     x, pre = x.float(), pre.float()
-    # [..., N, D] * [..., N, 1] -> [..., D]
-    o = (x * pre.unsqueeze(-1)).sum(-2)
+    # [..., N, D], [..., N] -> [..., D]
+    o = einsum(x, pre, '... n d, ... n -> ... d')
     return o.to(dtype)
 
 
@@ -42,9 +43,9 @@ def naive_hc_post(
     residual = x
     if mixing is not None:
         mixing = mixing.float()
-        # [..., N, N, 1] * [..., 1, N, D] -> [..., N, D], reducing over input streams
-        residual = (mixing.unsqueeze(-1) * x.unsqueeze(-3)).sum(-2)
+        # [..., N_out, N_in], [..., N_in, D] -> [..., N_out, D]
+        residual = einsum(mixing, x, '... n m, ... m d -> ... n d')
 
-    # [..., N, 1] * [..., 1, D] -> [..., N, D]
-    update = post.unsqueeze(-1) * branch.unsqueeze(-2)
+    # [..., N], [..., D] -> [..., N, D]
+    update = einsum(post, branch, '... n, ... d -> ... n d')
     return (residual + update).to(dtype)
