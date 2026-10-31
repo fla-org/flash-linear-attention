@@ -7,55 +7,68 @@
 
 import torch
 import triton
+from torch.autograd.function import once_differentiable
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
 
 from fla.backends import GluonBackend, register
-from fla.ops.hc.fused import hc_fwd
+from fla.ops.hc.fused import hc_post, hc_pre
+from fla.ops.utils.cache import fla_cache_autotune
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, input_guard
 
 
+@fla_cache_autotune(
+    configs=[
+        triton.Config({'NW': num_warps}, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in [2, 4, 8]
+        for num_stages in [2, 3]
+    ],
+    key=['T', 'N', 'D', 'BD', 'IS_POST', 'HAS_MIXING'],
+    **autotune_cache_kwargs,
+)
 @gluon.jit(do_not_specialize=['T'])
-def hc_fwd_kernel(
+def hc_fwd_kernel_gluon(
     x,
     w,
-    y,
-    m,
+    branch,
+    mixing,
     o,
     T,
     N: gl.constexpr,
     D: gl.constexpr,
     BN: gl.constexpr,
     BD: gl.constexpr,
-    HAS_Y: gl.constexpr,
-    HAS_M: gl.constexpr,
+    IS_POST: gl.constexpr,
+    HAS_MIXING: gl.constexpr,
+    NW: gl.constexpr,
 ):
     i_t = gl.program_id(0).to(gl.int64)
     i_c = gl.program_id(1).to(gl.int64)
-    if HAS_Y:
-        layout: gl.constexpr = gl.BlockedLayout([1, 4], [1, 32], [4, 1], [1, 0])
+    if IS_POST:
+        layout: gl.constexpr = gl.BlockedLayout([1, 4], [1, 32], [NW, 1], [1, 0])
     else:
-        layout: gl.constexpr = gl.BlockedLayout([1, 2], [1, 32], [1, 4], [1, 0])
+        layout: gl.constexpr = gl.BlockedLayout([1, 2], [1, 32], [1, NW], [1, 0])
     o_n = gl.arange(0, BN, layout=gl.SliceLayout(1, layout)).to(gl.int64)
     o_d = i_c * BD + gl.arange(0, BD, layout=gl.SliceLayout(0, layout)).to(gl.int64)
     m_nd = (o_n[:, None] < N) & (o_d[None, :] < D)
     # [BN]
     b_w = gl.load(w + i_t * N + o_n, mask=o_n < N, other=0).to(gl.float32)
-    if HAS_Y:
+    if IS_POST:
         # [BD]
-        b_y = gl.load(y + i_t * D + o_d, mask=o_d < D, other=0).to(gl.float32)
-        if HAS_M:
+        b_branch = gl.load(branch + i_t * D + o_d, mask=o_d < D, other=0).to(gl.float32)
+        if HAS_MIXING:
             b_o = gl.full((BN, BD), 0, dtype=gl.float32, layout=layout)
             for i_n in gl.static_range(N):
                 # [BD]
                 b_x = gl.load(x + (i_t * N + i_n) * D + o_d, mask=o_d < D, other=0).to(gl.float32)
                 # [BN], one input stream's weights across output streams
-                b_m = gl.load(m + (i_t * N + o_n) * N + i_n, mask=o_n < N, other=0).to(gl.float32)
+                b_mixing = gl.load(mixing + (i_t * N + o_n) * N + i_n, mask=o_n < N, other=0).to(gl.float32)
                 # [BN, 1] * [1, BD] -> [BN, BD]
-                b_o += b_m[:, None] * b_x[None, :]
+                b_o += b_mixing[:, None] * b_x[None, :]
         else:
             # [BN, BD]
             b_o = gl.load(x + (i_t * N + o_n[:, None]) * D + o_d[None, :], mask=m_nd, other=0).to(gl.float32)
-        b_o += b_w[:, None] * b_y[None, :]
+        b_o += b_w[:, None] * b_branch[None, :]
         gl.store(o + (i_t * N + o_n[:, None]) * D + o_d[None, :], b_o, mask=m_nd)
     else:
         # keep the stream reduction in registers to avoid a shared-memory layout conversion
@@ -68,60 +81,70 @@ def hc_fwd_kernel(
         gl.store(o + i_t * D + o_d, b_o, mask=o_d < D)
 
 
+@fla_cache_autotune(
+    configs=[
+        triton.Config({'NW': num_warps}, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in [2, 4, 8]
+        for num_stages in [2, 3]
+    ],
+    key=['T', 'N', 'D', 'BD', 'IS_POST', 'HAS_MIXING'],
+    **autotune_cache_kwargs,
+)
 @gluon.jit(do_not_specialize=['T'])
-def hc_bwd_kernel(
+def hc_bwd_kernel_gluon(
     x,
     w,
-    y,
-    m,
+    branch,
+    mixing,
     do,
     dx,
-    dy,
+    dbranch,
     dw_partial,
-    dm_partial,
+    dmixing_partial,
     T,
     N: gl.constexpr,
     D: gl.constexpr,
     BN: gl.constexpr,
     BD: gl.constexpr,
     ND: gl.constexpr,
-    HAS_Y: gl.constexpr,
-    HAS_M: gl.constexpr,
+    IS_POST: gl.constexpr,
+    HAS_MIXING: gl.constexpr,
+    NW: gl.constexpr,
 ):
     i_t = gl.program_id(0).to(gl.int64)
     i_c = gl.program_id(1).to(gl.int64)
-    if (not HAS_Y and N <= 4) or (HAS_M and N > 4):
-        layout: gl.constexpr = gl.BlockedLayout([1, 4], [1, 32], [4, 1], [1, 0])
+    if (not IS_POST and N <= 4) or (HAS_MIXING and N > 4):
+        layout: gl.constexpr = gl.BlockedLayout([1, 4], [1, 32], [NW, 1], [1, 0])
     else:
-        layout: gl.constexpr = gl.BlockedLayout([1, 2], [1, 32], [1, 4], [1, 0])
+        layout: gl.constexpr = gl.BlockedLayout([1, 2], [1, 32], [1, NW], [1, 0])
     o_n = gl.arange(0, BN, layout=gl.SliceLayout(1, layout)).to(gl.int64)
     o_d = i_c * BD + gl.arange(0, BD, layout=gl.SliceLayout(0, layout)).to(gl.int64)
     m_nd = (o_n[:, None] < N) & (o_d[None, :] < D)
     # [BN]
     b_w = gl.load(w + i_t * N + o_n, mask=o_n < N, other=0).to(gl.float32)
-    if HAS_Y:
+    if IS_POST:
         # [BN, BD]
         b_do = gl.load(do + (i_t * N + o_n[:, None]) * D + o_d[None, :], mask=m_nd, other=0).to(gl.float32)
         # [BD]
-        b_y = gl.load(y + i_t * D + o_d, mask=o_d < D, other=0).to(gl.float32)
+        b_branch = gl.load(branch + i_t * D + o_d, mask=o_d < D, other=0).to(gl.float32)
         # [BN, BD] -> [BN]
-        b_dw = gl.sum(b_do * b_y[None, :], axis=1)
+        b_dw = gl.sum(b_do * b_branch[None, :], axis=1)
         # [BN, BD] -> [BD]
-        b_dy = gl.sum(b_do * b_w[:, None], axis=0)
-        gl.store(dy + i_t * D + o_d, b_dy, mask=o_d < D)
-        if HAS_M:
+        b_dbranch = gl.sum(b_do * b_w[:, None], axis=0)
+        gl.store(dbranch + i_t * D + o_d, b_dbranch, mask=o_d < D)
+        if HAS_MIXING:
             b_dx = gl.full((BN, BD), 0, dtype=gl.float32, layout=layout)
             for i_n in gl.static_range(N):
                 # [BD]
                 b_doj = gl.load(do + (i_t * N + i_n) * D + o_d, mask=o_d < D, other=0).to(gl.float32)
                 # [BN], one output stream's weights across input streams
-                b_m = gl.load(m + (i_t * N + i_n) * N + o_n, mask=o_n < N, other=0).to(gl.float32)
-                b_dx += b_m[:, None] * b_doj[None, :]
+                b_mixing = gl.load(mixing + (i_t * N + i_n) * N + o_n, mask=o_n < N, other=0).to(gl.float32)
+                b_dx += b_mixing[:, None] * b_doj[None, :]
                 # [BD]
                 b_xj = gl.load(x + (i_t * N + i_n) * D + o_d, mask=o_d < D, other=0).to(gl.float32)
                 # [BN], one column of the mixing gradient for this feature tile
-                b_dm = gl.sum(b_do * b_xj[None, :], axis=1)
-                gl.store(dm_partial + ((i_t * ND + i_c) * N + o_n) * N + i_n, b_dm, mask=o_n < N)
+                b_dmixing = gl.sum(b_do * b_xj[None, :], axis=1)
+                gl.store(dmixing_partial + ((i_t * ND + i_c) * N + o_n) * N + i_n, b_dmixing, mask=o_n < N)
         else:
             b_dx = b_do
     else:
@@ -136,10 +159,19 @@ def hc_bwd_kernel(
     gl.store(dw_partial + (i_t * ND + i_c) * N + o_n, b_dw, mask=o_n < N)
 
 
+@fla_cache_autotune(
+    configs=[
+        triton.Config({'NW': num_warps}, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in [2, 4, 8]
+        for num_stages in [2, 3]
+    ],
+    key=['T', 'C', 'S'],
+    **autotune_cache_kwargs,
+)
 @gluon.jit(do_not_specialize=['T'])
-def hc_bwd_kernel_reduce(partial, grad, T, C: gl.constexpr, S: gl.constexpr, BC: gl.constexpr, BS: gl.constexpr):
+def hc_bwd_kernel_reduce_gluon(partial, grad, T, C: gl.constexpr, S: gl.constexpr, BC: gl.constexpr, BS: gl.constexpr, NW: gl.constexpr):
     i_t = gl.program_id(0).to(gl.int64)
-    layout: gl.constexpr = gl.BlockedLayout([1, 4], [4, 8], [4, 1], [1, 0])
+    layout: gl.constexpr = gl.BlockedLayout([1, 4], [4, 8], [NW, 1], [1, 0])
     o_c = gl.arange(0, BC, layout=gl.SliceLayout(1, layout)).to(gl.int64)
     o_s = gl.arange(0, BS, layout=gl.SliceLayout(0, layout)).to(gl.int64)
     # [BC, BS], feature tiles by routing-weight entries
@@ -152,79 +184,78 @@ def hc_bwd_kernel_reduce(partial, grad, T, C: gl.constexpr, S: gl.constexpr, BC:
     gl.store(grad + i_t * S + o_s, gl.sum(b_partial, axis=0), mask=o_s < S)
 
 
-@register(hc_fwd, backend=GluonBackend)
 def hc_fwd_gluon(
     x: torch.Tensor,
     w: torch.Tensor,
-    y: torch.Tensor | None = None,
-    m: torch.Tensor | None = None,
+    branch: torch.Tensor | None,
+    mixing: torch.Tensor | None,
+    is_post: bool,
 ):
     N, D = x.shape[-2:]
     # flatten all leading batch/sequence dimensions into T tokens
     T = x.numel() // (N * D)
-    BD = min(256 if y is not None else 1024, triton.next_power_of_2(D))
+    BD = min(256 if is_post else 1024, triton.next_power_of_2(D))
     ND = triton.cdiv(D, BD)
     # [..., N, D] for post; [..., D] for pre
-    o = torch.empty_like(x) if y is not None else x.new_empty((*x.shape[:-2], D))
-    hc_fwd_kernel[(T, ND)](
+    o = torch.empty_like(x) if is_post else x.new_empty((*x.shape[:-2], D))
+    hc_fwd_kernel_gluon[(T, ND)](
         x=x,
         w=w,
-        y=y,
-        m=m,
+        branch=branch,
+        mixing=mixing,
         o=o,
         T=T,
         N=N,
         D=D,
         BN=triton.next_power_of_2(N),
         BD=BD,
-        HAS_Y=y is not None,
-        HAS_M=m is not None,
-        num_warps=4,
+        IS_POST=is_post,
+        HAS_MIXING=mixing is not None,
     )
-    return o, hc_bwd_gluon
+    return o
 
 
 def hc_bwd_gluon(
     x: torch.Tensor,
     w: torch.Tensor,
-    y: torch.Tensor | None,
-    m: torch.Tensor | None,
+    branch: torch.Tensor | None,
+    mixing: torch.Tensor | None,
     do: torch.Tensor,
+    is_post: bool,
 ):
     N, D = x.shape[-2:]
     T = x.numel() // (N * D)
-    BD = 256 if (y is None and N <= 4) or (m is not None and N > 4) else 1024
+    BD = 256 if (not is_post and N <= 4) or (mixing is not None and N > 4) else 1024
     BD = min(BD, triton.next_power_of_2(D))
     ND = triton.cdiv(D, BD)
     dx, dw = torch.empty_like(x), torch.empty_like(w)
-    dy = torch.empty_like(y) if y is not None else None
-    dm = torch.empty_like(m) if m is not None else None
+    dbranch = torch.empty_like(branch) if is_post else None
+    dmixing = torch.empty_like(mixing) if mixing is not None else None
     # [T, ND, N] and [T, ND, N * N], partial gradients along feature tiles
     dw_partial = torch.empty((T, ND, N), device=x.device, dtype=torch.float32)
-    dm_partial = torch.empty((T, ND, N * N), device=x.device, dtype=torch.float32) if m is not None else None
-    hc_bwd_kernel[(T, ND)](
+    dmixing_partial = torch.empty((T, ND, N * N), device=x.device, dtype=torch.float32) if mixing is not None else None
+    hc_bwd_kernel_gluon[(T, ND)](
         x=x,
         w=w,
-        y=y,
-        m=m,
+        branch=branch,
+        mixing=mixing,
         do=do,
         dx=dx,
-        dy=dy,
+        dbranch=dbranch,
         dw_partial=dw_partial,
-        dm_partial=dm_partial,
+        dmixing_partial=dmixing_partial,
         T=T,
         N=N,
         D=D,
         BN=triton.next_power_of_2(N),
         BD=BD,
         ND=ND,
-        HAS_Y=y is not None,
-        HAS_M=m is not None,
-        num_warps=4,
+        IS_POST=is_post,
+        HAS_MIXING=mixing is not None,
     )
-    for partial, grad, size in ((dw_partial, dw, N), (dm_partial, dm, N * N)):
+    for partial, grad, size in ((dw_partial, dw, N), (dmixing_partial, dmixing, N * N)):
         if grad is not None:
-            hc_bwd_kernel_reduce[(T,)](
+            hc_bwd_kernel_reduce_gluon[(T,)](
                 partial=partial,
                 grad=grad,
                 T=T,
@@ -232,6 +263,55 @@ def hc_bwd_gluon(
                 S=size,
                 BC=triton.next_power_of_2(ND),
                 BS=triton.next_power_of_2(size),
-                num_warps=4,
             )
-    return dx, dw, dy, dm
+    return dx, dw, dbranch, dmixing
+
+
+class FusedHCPreGluonFunction(torch.autograd.Function):
+
+    @staticmethod
+    @input_guard
+    @autocast_custom_fwd
+    def forward(ctx, x, pre):
+        o = hc_fwd_gluon(x=x, w=pre, branch=None, mixing=None, is_post=False)
+        ctx.save_for_backward(x, pre)
+        return o
+
+    @staticmethod
+    @input_guard
+    @autocast_custom_bwd
+    @once_differentiable
+    def backward(ctx, do):
+        x, pre = ctx.saved_tensors
+        dx, dpre, _, _ = hc_bwd_gluon(x=x, w=pre, branch=None, mixing=None, do=do, is_post=False)
+        return dx, dpre
+
+
+class FusedHCPostGluonFunction(torch.autograd.Function):
+
+    @staticmethod
+    @input_guard
+    @autocast_custom_fwd
+    def forward(ctx, x, branch, post, mixing):
+        o = hc_fwd_gluon(x=x, w=post, branch=branch, mixing=mixing, is_post=True)
+        ctx.save_for_backward(x, branch, post, mixing)
+        return o
+
+    @staticmethod
+    @input_guard
+    @autocast_custom_bwd
+    @once_differentiable
+    def backward(ctx, do):
+        x, branch, post, mixing = ctx.saved_tensors
+        dx, dpost, dbranch, dmixing = hc_bwd_gluon(x=x, w=post, branch=branch, mixing=mixing, do=do, is_post=True)
+        return dx, dbranch, dpost, dmixing
+
+
+@register(hc_pre, backend=GluonBackend)
+def hc_pre_gluon(x: torch.Tensor, pre: torch.Tensor) -> torch.Tensor:
+    return FusedHCPreGluonFunction.apply(x, pre)
+
+
+@register(hc_post, backend=GluonBackend)
+def hc_post_gluon(x: torch.Tensor, branch: torch.Tensor, post: torch.Tensor, mixing: torch.Tensor | None = None) -> torch.Tensor:
+    return FusedHCPostGluonFunction.apply(x, branch, post, mixing)

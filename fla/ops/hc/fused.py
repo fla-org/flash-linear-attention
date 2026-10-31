@@ -11,23 +11,33 @@ import triton.language as tl
 from torch.autograd.function import once_differentiable
 
 from fla.backends import dispatch
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
+from fla.ops.utils.cache import fla_cache_autotune
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, input_guard
 
 
+@fla_cache_autotune(
+    configs=[
+        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in [2, 4, 8]
+        for num_stages in [2, 3]
+    ],
+    key=['T', 'N', 'D', 'BD', 'IS_POST', 'HAS_MIXING'],
+    **autotune_cache_kwargs,
+)
 @triton.jit(do_not_specialize=['T'])
 def hc_fwd_kernel(
     x,
     w,
-    y,
-    m,
+    branch,
+    mixing,
     o,
     T,
     N: tl.constexpr,
     D: tl.constexpr,
     BN: tl.constexpr,
     BD: tl.constexpr,
-    HAS_Y: tl.constexpr,
-    HAS_M: tl.constexpr,
+    IS_POST: tl.constexpr,
+    HAS_MIXING: tl.constexpr,
 ):
     i_t = tl.program_id(0).to(tl.int64)
     i_c = tl.program_id(1).to(tl.int64)
@@ -36,22 +46,22 @@ def hc_fwd_kernel(
     m_nd = (o_n[:, None] < N) & (o_d[None, :] < D)
     # [BN]
     b_w = tl.load(w + i_t * N + o_n, mask=o_n < N, other=0).to(tl.float32)
-    if HAS_Y:
+    if IS_POST:
         # [BD]
-        b_y = tl.load(y + i_t * D + o_d, mask=o_d < D, other=0).to(tl.float32)
-        if HAS_M:
+        b_branch = tl.load(branch + i_t * D + o_d, mask=o_d < D, other=0).to(tl.float32)
+        if HAS_MIXING:
             b_o = tl.full((BN, BD), 0, dtype=tl.float32)
             for i_n in tl.static_range(N):
                 # [BD]
                 b_x = tl.load(x + (i_t * N + i_n) * D + o_d, mask=o_d < D, other=0).to(tl.float32)
                 # [BN], one input stream's weights across output streams
-                b_m = tl.load(m + (i_t * N + o_n) * N + i_n, mask=o_n < N, other=0).to(tl.float32)
+                b_mixing = tl.load(mixing + (i_t * N + o_n) * N + i_n, mask=o_n < N, other=0).to(tl.float32)
                 # [BN, 1] * [1, BD] -> [BN, BD]
-                b_o += b_m[:, None] * b_x[None, :]
+                b_o += b_mixing[:, None] * b_x[None, :]
         else:
             # [BN, BD]
             b_o = tl.load(x + (i_t * N + o_n[:, None]) * D + o_d[None, :], mask=m_nd, other=0).to(tl.float32)
-        b_o += b_w[:, None] * b_y[None, :]
+        b_o += b_w[:, None] * b_branch[None, :]
         tl.store(o + (i_t * N + o_n[:, None]) * D + o_d[None, :], b_o, mask=m_nd)
     else:
         # keep the stream reduction in registers to avoid a shared-memory layout conversion
@@ -64,25 +74,34 @@ def hc_fwd_kernel(
         tl.store(o + i_t * D + o_d, b_o, mask=o_d < D)
 
 
+@fla_cache_autotune(
+    configs=[
+        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in [2, 4, 8]
+        for num_stages in [2, 3]
+    ],
+    key=['T', 'N', 'D', 'BD', 'IS_POST', 'HAS_MIXING'],
+    **autotune_cache_kwargs,
+)
 @triton.jit(do_not_specialize=['T'])
 def hc_bwd_kernel(
     x,
     w,
-    y,
-    m,
+    branch,
+    mixing,
     do,
     dx,
-    dy,
+    dbranch,
     dw_partial,
-    dm_partial,
+    dmixing_partial,
     T,
     N: tl.constexpr,
     D: tl.constexpr,
     BN: tl.constexpr,
     BD: tl.constexpr,
     ND: tl.constexpr,
-    HAS_Y: tl.constexpr,
-    HAS_M: tl.constexpr,
+    IS_POST: tl.constexpr,
+    HAS_MIXING: tl.constexpr,
 ):
     i_t = tl.program_id(0).to(tl.int64)
     i_c = tl.program_id(1).to(tl.int64)
@@ -91,29 +110,29 @@ def hc_bwd_kernel(
     m_nd = (o_n[:, None] < N) & (o_d[None, :] < D)
     # [BN]
     b_w = tl.load(w + i_t * N + o_n, mask=o_n < N, other=0).to(tl.float32)
-    if HAS_Y:
+    if IS_POST:
         # [BN, BD]
         b_do = tl.load(do + (i_t * N + o_n[:, None]) * D + o_d[None, :], mask=m_nd, other=0).to(tl.float32)
         # [BD]
-        b_y = tl.load(y + i_t * D + o_d, mask=o_d < D, other=0).to(tl.float32)
+        b_branch = tl.load(branch + i_t * D + o_d, mask=o_d < D, other=0).to(tl.float32)
         # [BN, BD] -> [BN]
-        b_dw = tl.sum(b_do * b_y[None, :], axis=1)
+        b_dw = tl.sum(b_do * b_branch[None, :], axis=1)
         # [BN, BD] -> [BD]
-        b_dy = tl.sum(b_do * b_w[:, None], axis=0)
-        tl.store(dy + i_t * D + o_d, b_dy, mask=o_d < D)
-        if HAS_M:
+        b_dbranch = tl.sum(b_do * b_w[:, None], axis=0)
+        tl.store(dbranch + i_t * D + o_d, b_dbranch, mask=o_d < D)
+        if HAS_MIXING:
             b_dx = tl.full((BN, BD), 0, dtype=tl.float32)
             for i_n in tl.static_range(N):
                 # [BD]
                 b_doj = tl.load(do + (i_t * N + i_n) * D + o_d, mask=o_d < D, other=0).to(tl.float32)
                 # [BN], one output stream's weights across input streams
-                b_m = tl.load(m + (i_t * N + i_n) * N + o_n, mask=o_n < N, other=0).to(tl.float32)
-                b_dx += b_m[:, None] * b_doj[None, :]
+                b_mixing = tl.load(mixing + (i_t * N + i_n) * N + o_n, mask=o_n < N, other=0).to(tl.float32)
+                b_dx += b_mixing[:, None] * b_doj[None, :]
                 # [BD]
                 b_xj = tl.load(x + (i_t * N + i_n) * D + o_d, mask=o_d < D, other=0).to(tl.float32)
                 # [BN], one column of the mixing gradient for this feature tile
-                b_dm = tl.sum(b_do * b_xj[None, :], axis=1)
-                tl.store(dm_partial + ((i_t * ND + i_c) * N + o_n) * N + i_n, b_dm, mask=o_n < N)
+                b_dmixing = tl.sum(b_do * b_xj[None, :], axis=1)
+                tl.store(dmixing_partial + ((i_t * ND + i_c) * N + o_n) * N + i_n, b_dmixing, mask=o_n < N)
         else:
             b_dx = b_do
     else:
@@ -128,6 +147,15 @@ def hc_bwd_kernel(
     tl.store(dw_partial + (i_t * ND + i_c) * N + o_n, b_dw, mask=o_n < N)
 
 
+@fla_cache_autotune(
+    configs=[
+        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in [2, 4, 8]
+        for num_stages in [2, 3]
+    ],
+    key=['T', 'C', 'S'],
+    **autotune_cache_kwargs,
+)
 @triton.jit(do_not_specialize=['T'])
 def hc_bwd_kernel_reduce(partial, grad, T, C: tl.constexpr, S: tl.constexpr, BC: tl.constexpr, BS: tl.constexpr):
     i_t = tl.program_id(0).to(tl.int64)
@@ -143,71 +171,75 @@ def hc_bwd_kernel_reduce(partial, grad, T, C: tl.constexpr, S: tl.constexpr, BC:
     tl.store(grad + i_t * S + o_s, tl.sum(b_partial, axis=0), mask=o_s < S)
 
 
-@dispatch
-def hc_fwd(x: torch.Tensor, w: torch.Tensor, y: torch.Tensor | None = None, m: torch.Tensor | None = None):
+def hc_fwd(
+    x: torch.Tensor,
+    w: torch.Tensor,
+    branch: torch.Tensor | None,
+    mixing: torch.Tensor | None,
+    is_post: bool,
+):
     N, D = x.shape[-2:]
     # flatten all leading batch/sequence dimensions into T tokens
     T = x.numel() // (N * D)
     BD = min(256, triton.next_power_of_2(D))
     ND = triton.cdiv(D, BD)
     # [..., N, D] for post; [..., D] for pre
-    o = torch.empty_like(x) if y is not None else x.new_empty((*x.shape[:-2], D))
+    o = torch.empty_like(x) if is_post else x.new_empty((*x.shape[:-2], D))
     hc_fwd_kernel[(T, ND)](
         x=x,
         w=w,
-        y=y,
-        m=m,
+        branch=branch,
+        mixing=mixing,
         o=o,
         T=T,
         N=N,
         D=D,
         BN=triton.next_power_of_2(N),
         BD=BD,
-        HAS_Y=y is not None,
-        HAS_M=m is not None,
-        num_warps=4,
+        IS_POST=is_post,
+        HAS_MIXING=mixing is not None,
     )
-    return o, hc_bwd
+    return o
 
 
 def hc_bwd(
     x: torch.Tensor,
     w: torch.Tensor,
-    y: torch.Tensor | None,
-    m: torch.Tensor | None,
+    branch: torch.Tensor | None,
+    mixing: torch.Tensor | None,
     do: torch.Tensor,
+    is_post: bool,
 ):
     N, D = x.shape[-2:]
     T = x.numel() // (N * D)
     BD = min(256, triton.next_power_of_2(D))
     ND = triton.cdiv(D, BD)
     dx, dw = torch.empty_like(x), torch.empty_like(w)
-    dy = torch.empty_like(y) if y is not None else None
-    dm = torch.empty_like(m) if m is not None else None
+    dbranch = torch.empty_like(branch) if is_post else None
+    dmixing = torch.empty_like(mixing) if mixing is not None else None
     # [T, ND, N] and [T, ND, N * N], partial gradients along feature tiles
     dw_partial = torch.empty((T, ND, N), device=x.device, dtype=torch.float32)
-    dm_partial = torch.empty((T, ND, N * N), device=x.device, dtype=torch.float32) if m is not None else None
+    dmixing_partial = torch.empty((T, ND, N * N), device=x.device, dtype=torch.float32) if mixing is not None else None
     hc_bwd_kernel[(T, ND)](
         x=x,
         w=w,
-        y=y,
-        m=m,
+        branch=branch,
+        mixing=mixing,
         do=do,
         dx=dx,
-        dy=dy,
+        dbranch=dbranch,
         dw_partial=dw_partial,
-        dm_partial=dm_partial,
+        dmixing_partial=dmixing_partial,
         T=T,
         N=N,
         D=D,
         BN=triton.next_power_of_2(N),
         BD=BD,
         ND=ND,
-        HAS_Y=y is not None,
-        HAS_M=m is not None,
-        num_warps=4,
+        IS_POST=is_post,
+        HAS_MIXING=mixing is not None,
     )
-    for partial, grad, size in ((dw_partial, dw, N), (dm_partial, dm, N * N)):
+    for partial, grad, size in ((dw_partial, dw, N), (dmixing_partial, dmixing, N * N)):
         if grad is not None:
             hc_bwd_kernel_reduce[(T,)](
                 partial=partial,
@@ -217,19 +249,18 @@ def hc_bwd(
                 S=size,
                 BC=triton.next_power_of_2(ND),
                 BS=triton.next_power_of_2(size),
-                num_warps=4,
             )
-    return dx, dw, dy, dm
+    return dx, dw, dbranch, dmixing
 
 
-class FusedHCFunction(torch.autograd.Function):
+class FusedHCPreFunction(torch.autograd.Function):
 
     @staticmethod
     @input_guard
     @autocast_custom_fwd
-    def forward(ctx, x, w, y, m):
-        o, ctx.bwd = hc_fwd(x=x, w=w, y=y, m=m)
-        ctx.save_for_backward(x, w, y, m)
+    def forward(ctx, x, pre):
+        o = hc_fwd(x=x, w=pre, branch=None, mixing=None, is_post=False)
+        ctx.save_for_backward(x, pre)
         return o
 
     @staticmethod
@@ -237,8 +268,39 @@ class FusedHCFunction(torch.autograd.Function):
     @autocast_custom_bwd
     @once_differentiable
     def backward(ctx, do):
-        x, w, y, m = ctx.saved_tensors
-        return ctx.bwd(x=x, w=w, y=y, m=m, do=do)
+        x, pre = ctx.saved_tensors
+        dx, dpre, _, _ = hc_bwd(x=x, w=pre, branch=None, mixing=None, do=do, is_post=False)
+        return dx, dpre
+
+
+class FusedHCPostFunction(torch.autograd.Function):
+
+    @staticmethod
+    @input_guard
+    @autocast_custom_fwd
+    def forward(ctx, x, branch, post, mixing):
+        o = hc_fwd(x=x, w=post, branch=branch, mixing=mixing, is_post=True)
+        ctx.save_for_backward(x, branch, post, mixing)
+        return o
+
+    @staticmethod
+    @input_guard
+    @autocast_custom_bwd
+    @once_differentiable
+    def backward(ctx, do):
+        x, branch, post, mixing = ctx.saved_tensors
+        dx, dpost, dbranch, dmixing = hc_bwd(x=x, w=post, branch=branch, mixing=mixing, do=do, is_post=True)
+        return dx, dbranch, dpost, dmixing
+
+
+@dispatch
+def hc_pre(x: torch.Tensor, pre: torch.Tensor) -> torch.Tensor:
+    return FusedHCPreFunction.apply(x, pre)
+
+
+@dispatch
+def hc_post(x: torch.Tensor, branch: torch.Tensor, post: torch.Tensor, mixing: torch.Tensor | None = None) -> torch.Tensor:
+    return FusedHCPostFunction.apply(x, branch, post, mixing)
 
 
 def fused_hc_pre(x: torch.Tensor, pre: torch.Tensor) -> torch.Tensor:
@@ -267,7 +329,7 @@ def fused_hc_pre(x: torch.Tensor, pre: torch.Tensor) -> torch.Tensor:
         raise ValueError('Expected [..., N, D] with 1 <= N <= 8 and D >= 1')
     if pre.shape != x.shape[:-1]:
         raise ValueError('pre must have shape [..., N] matching x')
-    return FusedHCFunction.apply(x, pre, None, None)
+    return hc_pre(x=x, pre=pre)
 
 
 def fused_hc_post(x: torch.Tensor, branch: torch.Tensor, post: torch.Tensor, mixing: torch.Tensor | None = None) -> torch.Tensor:
@@ -303,4 +365,4 @@ def fused_hc_post(x: torch.Tensor, branch: torch.Tensor, post: torch.Tensor, mix
         raise ValueError('branch and post must have shapes [..., D] and [..., N] matching x')
     if mixing is not None and mixing.shape != (*x.shape[:-1], x.shape[-2]):
         raise ValueError('mixing must have shape [..., N, N] matching x')
-    return FusedHCFunction.apply(x, post, branch, mixing)
+    return hc_post(x=x, branch=branch, post=post, mixing=mixing)

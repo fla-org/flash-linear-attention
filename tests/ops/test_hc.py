@@ -176,7 +176,7 @@ def test_fused_hc_backward_backend(backend, monkeypatch, op, identity):
         mixing = None if identity else torch.randn(3, 4, 4, device=device, requires_grad=True)
         out = op(x=x, branch=x[:, 0], post=weight, mixing=mixing)
     for name in ('GLUON', 'TILELANG'):
-        monkeypatch.setenv(f'FLA_{name}', '0')
+        monkeypatch.setenv(f'FLA_{name}', str(int(name == 'GLUON' and backend != 'gluon')))
     out.backward(torch.randn_like(out))
     backward.assert_called_once()
 
