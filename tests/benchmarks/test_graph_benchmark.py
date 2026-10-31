@@ -13,6 +13,7 @@ import torch
 from benchmarks.ops.graph_benchmark import benchmark_case, print_results
 from benchmarks.ops.graph_registry import (
     GraphBenchmarkCase,
+    GraphBenchmarkMetadata,
     get_graph_op,
     list_graph_ops,
     make_cu_seqlens,
@@ -94,6 +95,7 @@ def test_benchmark_case_captures_once_validates_and_times_both_engines(mode):
         graph_args=("live",),
         run_once=run_once,
         assert_close=lambda actual, reference: comparisons.append((actual, reference)),
+        metadata=GraphBenchmarkMetadata(**normalize_kda_shape({'B': 1, 'T': 128, 'H': 2, 'D': 64})),
     )
 
     captures = []
@@ -175,6 +177,7 @@ def test_benchmark_case_rejects_reusing_capture_tensor_as_live_input():
         graph_args=(tensor,),
         run_once=lambda *_: {},
         assert_close=lambda *_: None,
+        metadata=GraphBenchmarkMetadata(**normalize_kda_shape({'B': 1, 'T': 128, 'H': 2, 'D': 64})),
     )
     with pytest.raises(ValueError, match="reuses its capture address"):
         benchmark_case(
@@ -186,6 +189,45 @@ def test_benchmark_case_rejects_reusing_capture_tensor_as_live_input():
             graph_factory=lambda *_: None,
             synchronize=lambda: None,
         )
+
+
+@pytest.mark.parametrize('requires_grad', [False, True], ids=['inference', 'training'])
+def test_graph_safe_measurement_uses_independent_leaf_storage(requires_grad):
+    live = torch.ones(2, requires_grad=requires_grad)
+    seen = []
+
+    def graph_step(value):
+        seen.append(value)
+        return value
+
+    def run_once(step, args, collect):
+        value = step(*args)
+        return {'o': value.detach().clone()} if collect else {}
+
+    case = GraphBenchmarkCase(
+        eager_step=lambda value: value,
+        graph_step=graph_step,
+        capture_args=(torch.zeros_like(live),),
+        eager_args=(live.detach().clone(),),
+        graph_args=(live,),
+        run_once=run_once,
+        assert_close=lambda actual, expected: torch.testing.assert_close(actual['o'], expected['o']),
+        metadata=GraphBenchmarkMetadata(**normalize_kda_shape({'B': 1, 'T': 128, 'H': 2, 'D': 64})),
+    )
+    benchmark_case(
+        case=case,
+        mode='fwdbwd',
+        engines=('graph',),
+        warmup=0,
+        iterations=2,
+        graph_factory=lambda *_: lambda value: value,
+        synchronize=lambda: None,
+        measure_graph_safe=True,
+    )
+    assert len(seen) == 3
+    assert all(value.data_ptr() != live.data_ptr() for value in seen)
+    assert all(value.is_leaf and value.requires_grad == requires_grad for value in seen)
+    assert all(value is seen[0] for value in seen)
 
 
 def test_result_table_reports_base_and_graph_speedups(capsys):

@@ -49,7 +49,12 @@ jobs:
             // here: a change to it affects the NPU backend too, so it should
             // trigger this CI.
             const npuPattern = /^fla\/(.+\/)?backends\/triton_ascend\/|^\.github\/workflows\/ascend-|^pyproject\.toml$|^fla\/backends\.py$|^fla\/utils\/|^fla\/modules\/|^tests\/conftest\.py$|^benchmarks\//;
-            const related = files.filter(f => npuPattern.test(f.filename)).map(f => f.filename);
+            const graphPaths = new Set([
+              'fla/ops/gated_delta_rule/chunk.py',
+              'fla/ops/gated_delta_rule/graph.py',
+              'fla/ops/utils/triton_ascend/solve_tril.py',
+            ]);
+            const related = files.filter(f => npuPattern.test(f.filename) || graphPaths.has(f.filename)).map(f => f.filename);
             if (related.length > 0) {
               core.info('NPU-related files changed: ' + related.join(', '));
             }
@@ -95,7 +100,7 @@ jobs:
         HF_ENDPOINT: https://hf-mirror.com
 
     env:
-      FLA_CI_ENV: 1
+      FLA_CI_ENV: 0
       ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3"
       # Triton perf_report always calls plt.savefig when save_path is set.
       MPLBACKEND: Agg
@@ -248,6 +253,12 @@ jobs:
             --warmup 3 --iterations 10 --json benchmark_kda_graph.json \
             > chunk_kda_graph.log 2>&1 || status=1
 
+          ASCEND_RT_VISIBLE_DEVICES=0 python -m benchmarks.ops.run --graph \
+            --op chunk_gdn --no-base --modes fwd fwdbwd \
+            --measure-graph-safe --report-memory \
+            --warmup 3 --iterations 10 --json benchmark_gdn_graph.json \
+            > chunk_gdn_graph.log 2>&1 || status=1
+
           echo "========== chunk_gdn =========="
           cat chunk_gdn.log
           echo "========== fused_recurrent_gdn2 =========="
@@ -262,6 +273,7 @@ jobs:
           cat fused_attnres.log
           echo "========== chunk_kda graph =========="
           cat chunk_kda_graph.log
+          cat chunk_gdn_graph.log
           echo "========== conv1d =========="
           cat conv1d.log
           echo "========== chunk_precond_gdn =========="
@@ -307,6 +319,7 @@ jobs:
             benchmark_chunk_precond_gdn.json
             benchmark_kda_graph.json
             benchmark_parallel_wall_attn.json
+            benchmark_gdn_graph.json
             conv_benchmark/
           if-no-files-found: ignore
           retention-days: 10

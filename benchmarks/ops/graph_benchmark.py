@@ -37,6 +37,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from dataclasses import asdict
 from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -85,6 +86,7 @@ def benchmark_case(
     graph_factory,
     synchronize,
     clock_ns=time.perf_counter_ns,
+    measure_graph_safe: bool = False,
 ) -> dict[str, Any]:
     """Benchmark one materialized case; dependencies are injectable for unit tests."""
 
@@ -135,6 +137,26 @@ def benchmark_case(
             actual = case.run_once(graphed_step, case.graph_args, True)
         synchronize()
         case.assert_close(actual, reference)
+        if measure_graph_safe:
+            # live leaf gradients may alias captured backward buffers after replay.
+            graph_safe_args = case.graph_args
+            if graph_safe_args:
+                import torch
+
+                graph_safe_args = tuple(
+                    arg.detach().clone().requires_grad_(arg.requires_grad) if isinstance(arg, torch.Tensor) else arg
+                    for arg in graph_safe_args
+                )
+            with inference_context():
+                graph_safe = case.run_once(case.graph_step, graph_safe_args, True)
+            synchronize()
+            case.assert_close(graph_safe, reference)
+
+            def graph_safe_invocation():
+                with inference_context():
+                    case.run_once(case.graph_step, graph_safe_args, False)
+
+            result["graph_safe"] = _measure(graph_safe_invocation, synchronize, warmup, iterations, clock_ns)
         result["validation"] = "passed"
 
         def graph_invocation():
@@ -195,6 +217,8 @@ def benchmark_graph_op(
     iterations: int,
     seed: int = 2026,
     progress: bool = True,
+    measure_graph_safe: bool = False,
+    report_memory: bool = False,
 ) -> list[dict[str, Any]]:
     import torch
 
@@ -220,6 +244,9 @@ def benchmark_graph_op(
             if progress:
                 print(f"  [{op_name}] {shape_name} {mode}: building case", flush=True)
             case = config.build_case(shape, mode, device, seed + shape_index * 10)
+            if report_memory:
+                torch.npu.reset_peak_memory_stats(device)
+                baseline_allocated = torch.npu.memory_allocated(device)
             measured = benchmark_case(
                 case=case,
                 mode=mode,
@@ -228,13 +255,19 @@ def benchmark_graph_op(
                 iterations=iterations,
                 graph_factory=graph_factory,
                 synchronize=torch.npu.synchronize,
+                measure_graph_safe=measure_graph_safe,
             )
+            if report_memory:
+                measured["memory"] = {
+                    "baseline_allocated_bytes": baseline_allocated,
+                    "peak_allocated_bytes": torch.npu.max_memory_allocated(device),
+                    "peak_reserved_bytes": torch.npu.max_memory_reserved(device),
+                }
             results.append({
                 "op": op_name,
                 "shape": shape_name,
                 "mode": mode,
-                **shape,
-                **case.metadata,
+                **asdict(case.metadata),
                 **measured,
             })
             del case
@@ -276,6 +309,8 @@ def _worker_command(
         str(args.seed),
         "--json",
         output,
+        *(["--measure-graph-safe"] if args.measure_graph_safe and "graph" in engines else []),
+        *(["--report-memory"] if args.report_memory else []),
     ]
 
 
@@ -349,7 +384,7 @@ def _format_config(row: dict[str, Any]) -> str:
 
     excluded = {
         "op", "shape", "mode", "B", "T", "H", "D", "N",
-        "eager", "graph", "capture_ms", "validation",
+        "eager", "graph", "graph_safe", "memory", "capture_ms", "validation",
     }
     preferred = ("dtype", "chunk_size", "actual_T", "HV", "DV")
     for name, column in (("actual_T", "T"), ("HV", "H"), ("DV", "D")):
@@ -399,6 +434,12 @@ def print_results(current, current_info, baseline=None, baseline_info=None) -> N
                 f"{eager_speedup:>9} {graph_speedup:>9}    "
                 f"{_format_config(row)}"
             )
+        if row.get("graph_safe"):
+            print(f"  Uncaptured graph-safe: p50={row['graph_safe']['p50_ms']:.3f} ms, "
+                  f"p95={row['graph_safe']['p95_ms']:.3f} ms (same capacity as replay)")
+        if row.get("memory"):
+            print(f"  Whole-case allocator peak: allocated={row['memory']['peak_allocated_bytes'] / 2**20:.1f} MiB, "
+                  f"reserved={row['memory']['peak_reserved_bytes'] / 2**20:.1f} MiB")
 
 
 def _parse_args(argv=None):
@@ -409,6 +450,8 @@ def _parse_args(argv=None):
     parser.add_argument("--custom-shapes", help="JSON object keyed by shape name; B/T/H/D are required")
     parser.add_argument("--modes", nargs="+", choices=("fwd", "fwdbwd"), default=["fwdbwd"])
     parser.add_argument("--engines", nargs="+", choices=("eager", "graph"), default=["eager", "graph"])
+    parser.add_argument("--measure-graph-safe", action="store_true", help="Also time the uncaptured graph-compatible step")
+    parser.add_argument("--report-memory", action="store_true", help="Report whole-case NPU allocator peaks")
     parser.add_argument("--dtype", choices=("float16", "bfloat16"), default="float16")
     parser.add_argument("--device", default="npu:0")
     parser.add_argument("--warmup", type=int, default=10)
@@ -462,6 +505,8 @@ def run_graph_benchmark(argv=None):
                 warmup=args.warmup,
                 iterations=args.iterations,
                 seed=args.seed,
+                measure_graph_safe=args.measure_graph_safe,
+                report_memory=args.report_memory,
             ))
         payload = {"machine_info": info, "results": results}
         if args.json_file:

@@ -68,6 +68,8 @@ class FlashQLABackend(BaseBackend):
         cp_context: FLACPContext | None = None,
         **kwargs,
     ) -> tuple[bool, str | None]:
+        if kwargs.get('use_graph', False):
+            return False, "FlashQLA does not support use_graph=True"
         if not (IS_NVIDIA_HOPPER or IS_NVIDIA_SM100 or IS_NVIDIA_SM120):
             return False, "FlashQLA requires NVIDIA SM90, SM100/SM103 or SM120"
         if IS_NVIDIA_SM120 and _needs_backward(q, k, v, g, beta, initial_state):

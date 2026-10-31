@@ -167,12 +167,15 @@ def merge_16x16_to_64x64_inverse_kernel_npu(
     IS_VARLEN: tl.constexpr,
     NT_OFFSET,
     BH_OFFSET,
+    USE_GRAPH: tl.constexpr = False,
 ):
     i_t = tl.program_id(0) + NT_OFFSET
     i_bh = tl.program_id(1) + BH_OFFSET
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        if USE_GRAPH and i_n < 0:
+            return
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = (eos - bos).to(tl.int32)
     else:
@@ -189,10 +192,34 @@ def merge_16x16_to_64x64_inverse_kernel_npu(
     p_A_22 = tl.make_block_ptr(A, (T, BT), (H * BT, 1), (i_t * BT + 16, 16), (16, 16), (1, 0))
     p_A_33 = tl.make_block_ptr(A, (T, BT), (H * BT, 1), (i_t * BT + 32, 32), (16, 16), (1, 0))
     p_A_44 = tl.make_block_ptr(A, (T, BT), (H * BT, 1), (i_t * BT + 48, 48), (16, 16), (1, 0))
-    b_Ai_11 = tl.load(p_A_11, boundary_check=(0, 1)).to(tl.float32)
-    b_Ai_22 = tl.load(p_A_22, boundary_check=(0, 1)).to(tl.float32)
-    b_Ai_33 = tl.load(p_A_33, boundary_check=(0, 1)).to(tl.float32)
-    b_Ai_44 = tl.load(p_A_44, boundary_check=(0, 1)).to(tl.float32)
+    if USE_GRAPH:
+        b_Ai_11 = tl.load(p_A_11, padding_option='zero', boundary_check=(0, 1)).to(tl.float32)
+        m_rows = i_t * BT + o_i < T
+        m_cols = i_t * BT + o_i < T
+        b_Ai_11 = tl.where(m_rows[:, None] & m_cols[None, :], b_Ai_11, 0)
+    else:
+        b_Ai_11 = tl.load(p_A_11, boundary_check=(0, 1)).to(tl.float32)
+    if USE_GRAPH:
+        b_Ai_22 = tl.load(p_A_22, padding_option='zero', boundary_check=(0, 1)).to(tl.float32)
+        m_rows = i_t * BT + 16 + o_i < T
+        m_cols = i_t * BT + 16 + o_i < T
+        b_Ai_22 = tl.where(m_rows[:, None] & m_cols[None, :], b_Ai_22, 0)
+    else:
+        b_Ai_22 = tl.load(p_A_22, boundary_check=(0, 1)).to(tl.float32)
+    if USE_GRAPH:
+        b_Ai_33 = tl.load(p_A_33, padding_option='zero', boundary_check=(0, 1)).to(tl.float32)
+        m_rows = i_t * BT + 32 + o_i < T
+        m_cols = i_t * BT + 32 + o_i < T
+        b_Ai_33 = tl.where(m_rows[:, None] & m_cols[None, :], b_Ai_33, 0)
+    else:
+        b_Ai_33 = tl.load(p_A_33, boundary_check=(0, 1)).to(tl.float32)
+    if USE_GRAPH:
+        b_Ai_44 = tl.load(p_A_44, padding_option='zero', boundary_check=(0, 1)).to(tl.float32)
+        m_rows = i_t * BT + 48 + o_i < T
+        m_cols = i_t * BT + 48 + o_i < T
+        b_Ai_44 = tl.where(m_rows[:, None] & m_cols[None, :], b_Ai_44, 0)
+    else:
+        b_Ai_44 = tl.load(p_A_44, boundary_check=(0, 1)).to(tl.float32)
 
     b_Ai_11 = -tl.where(m_A, b_Ai_11, 0)
     b_Ai_22 = -tl.where(m_A, b_Ai_22, 0)
@@ -230,12 +257,48 @@ def merge_16x16_to_64x64_inverse_kernel_npu(
     p_A_41 = tl.make_block_ptr(A, (T, BT), (H * BT, 1), (i_t * BT + 48, 0), (16, 16), (1, 0))
     p_A_42 = tl.make_block_ptr(A, (T, BT), (H * BT, 1), (i_t * BT + 48, 16), (16, 16), (1, 0))
     p_A_43 = tl.make_block_ptr(A, (T, BT), (H * BT, 1), (i_t * BT + 48, 32), (16, 16), (1, 0))
-    b_A_21 = tl.load(p_A_21, boundary_check=(0, 1)).to(tl.float32)
-    b_A_31 = tl.load(p_A_31, boundary_check=(0, 1)).to(tl.float32)
-    b_A_32 = tl.load(p_A_32, boundary_check=(0, 1)).to(tl.float32)
-    b_A_41 = tl.load(p_A_41, boundary_check=(0, 1)).to(tl.float32)
-    b_A_42 = tl.load(p_A_42, boundary_check=(0, 1)).to(tl.float32)
-    b_A_43 = tl.load(p_A_43, boundary_check=(0, 1)).to(tl.float32)
+    if USE_GRAPH:
+        b_A_21 = tl.load(p_A_21, padding_option='zero', boundary_check=(0, 1)).to(tl.float32)
+        m_rows = i_t * BT + 16 + o_i < T
+        m_cols = i_t * BT + o_i < T
+        b_A_21 = tl.where(m_rows[:, None] & m_cols[None, :], b_A_21, 0)
+    else:
+        b_A_21 = tl.load(p_A_21, boundary_check=(0, 1)).to(tl.float32)
+    if USE_GRAPH:
+        b_A_31 = tl.load(p_A_31, padding_option='zero', boundary_check=(0, 1)).to(tl.float32)
+        m_rows = i_t * BT + 32 + o_i < T
+        m_cols = i_t * BT + o_i < T
+        b_A_31 = tl.where(m_rows[:, None] & m_cols[None, :], b_A_31, 0)
+    else:
+        b_A_31 = tl.load(p_A_31, boundary_check=(0, 1)).to(tl.float32)
+    if USE_GRAPH:
+        b_A_32 = tl.load(p_A_32, padding_option='zero', boundary_check=(0, 1)).to(tl.float32)
+        m_rows = i_t * BT + 32 + o_i < T
+        m_cols = i_t * BT + 16 + o_i < T
+        b_A_32 = tl.where(m_rows[:, None] & m_cols[None, :], b_A_32, 0)
+    else:
+        b_A_32 = tl.load(p_A_32, boundary_check=(0, 1)).to(tl.float32)
+    if USE_GRAPH:
+        b_A_41 = tl.load(p_A_41, padding_option='zero', boundary_check=(0, 1)).to(tl.float32)
+        m_rows = i_t * BT + 48 + o_i < T
+        m_cols = i_t * BT + o_i < T
+        b_A_41 = tl.where(m_rows[:, None] & m_cols[None, :], b_A_41, 0)
+    else:
+        b_A_41 = tl.load(p_A_41, boundary_check=(0, 1)).to(tl.float32)
+    if USE_GRAPH:
+        b_A_42 = tl.load(p_A_42, padding_option='zero', boundary_check=(0, 1)).to(tl.float32)
+        m_rows = i_t * BT + 48 + o_i < T
+        m_cols = i_t * BT + 16 + o_i < T
+        b_A_42 = tl.where(m_rows[:, None] & m_cols[None, :], b_A_42, 0)
+    else:
+        b_A_42 = tl.load(p_A_42, boundary_check=(0, 1)).to(tl.float32)
+    if USE_GRAPH:
+        b_A_43 = tl.load(p_A_43, padding_option='zero', boundary_check=(0, 1)).to(tl.float32)
+        m_rows = i_t * BT + 48 + o_i < T
+        m_cols = i_t * BT + 32 + o_i < T
+        b_A_43 = tl.where(m_rows[:, None] & m_cols[None, :], b_A_43, 0)
+    else:
+        b_A_43 = tl.load(p_A_43, boundary_check=(0, 1)).to(tl.float32)
 
     b_Ai_22_c = b_Ai_22 + 0.0
     b_Ai_33_c = b_Ai_33 + 0.0
@@ -303,14 +366,16 @@ def merge_16x16_to_64x64_inverse_kernel_npu(
     tl.store(p_Ai_43, b_Ai_43.to(p_Ai_43.dtype.element_ty, fp_downcast_rounding='rtne'), boundary_check=(0, 1))
 
 
-@register(solve_tril, backend=TritonAscendBackend)
 @input_guard
-def solve_tril_npu(
+def _solve_tril_npu(
     A: torch.Tensor,
     cu_seqlens: torch.Tensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
     output_dtype: torch.dtype | None = torch.float,
+    use_graph: bool = False,
 ) -> torch.Tensor:
+    if use_graph and A.shape[-1] != 64:
+        raise ValueError("NPU graph solve_tril supports only 64x64 chunks")
     assert A.shape[-1] in [16, 32, 64]
     output_dtype = A.dtype if output_dtype is None else output_dtype
 
@@ -339,9 +404,26 @@ def solve_tril_npu(
             'T': T,
             'H': H,
             'BT': BT,
+            **({'USE_GRAPH': True} if use_graph else {}),
             'IS_VARLEN': cu_seqlens is not None,
             'NT_OFFSET': 0,
             'BH_OFFSET': 0,
         },
     )
     return Ai
+
+
+@register(solve_tril, backend=TritonAscendBackend)
+def solve_tril_npu(
+    A: torch.Tensor,
+    cu_seqlens: torch.Tensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
+    output_dtype: torch.dtype | None = torch.float,
+) -> torch.Tensor:
+    return _solve_tril_npu(
+        A=A,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        output_dtype=output_dtype,
+        use_graph=False,
+    )
