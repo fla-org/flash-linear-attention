@@ -20,7 +20,7 @@ class HCTileLangBackend(TileLangBackend):
     default_enable = False
 
 
-@tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_DEVICE_COMPILE_FLAGS: ['--fmad=false']})
+@tilelang.jit
 def hc_pre_fwd_kernel(NT, N, D, x_dtype, pre_dtype, BD):
     BN = triton.next_power_of_2(N)
 
@@ -53,7 +53,7 @@ def hc_pre_fwd_kernel(NT, N, D, x_dtype, pre_dtype, BD):
     return kernel
 
 
-@tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_DEVICE_COMPILE_FLAGS: ['--fmad=false']})
+@tilelang.jit
 def hc_post_fwd_kernel(NT, N, D, x_dtype, branch_dtype, post_dtype, mixing_dtype, BD, HAS_MIXING):
     BN = triton.next_power_of_2(N)
 
@@ -72,7 +72,7 @@ def hc_post_fwd_kernel(NT, N, D, x_dtype, branch_dtype, post_dtype, mixing_dtype
             # keep broadcast loads in the 2D loop so layout inference can distribute both axes
             if HAS_MIXING:
                 T.clear(b_o)
-                for k in T.serial(N):
+                for k in T.unroll(N):
                     for i, d in T.Parallel(BN, BD):
                         b_o[i, d] += T.if_then_else(
                             i < N and i_d + d < D,
@@ -91,7 +91,7 @@ def hc_post_fwd_kernel(NT, N, D, x_dtype, branch_dtype, post_dtype, mixing_dtype
     return kernel
 
 
-@tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_DEVICE_COMPILE_FLAGS: ['--fmad=false']})
+@tilelang.jit
 def hc_pre_bwd_kernel(NT, N, D, x_dtype, pre_dtype, BD):
     BN = triton.next_power_of_2(N)
     ND = tilelang.cdiv(D, BD)
@@ -125,9 +125,19 @@ def hc_pre_bwd_kernel(NT, N, D, x_dtype, pre_dtype, BD):
     return kernel
 
 
-@tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_DEVICE_COMPILE_FLAGS: ['--fmad=false']})
+@tilelang.jit
 def hc_post_bwd_kernel(NT, N, D, x_dtype, branch_dtype, post_dtype, mixing_dtype, BD, HAS_MIXING):
     BN = triton.next_power_of_2(N)
+    # keep feature reductions within a warp and limit live do/dx values per thread
+    WN = triton.cdiv(BN, 4)
+    R = min(4, BD) if D % 4 == 0 else 1
+    TD = min(BD // R, 32)
+    layout = T.Fragment(
+        shape=(BN, BD),
+        replicate=32 // TD,
+        forward_thread_fn=lambda i, d, rep=0: (i % WN) * TD + (d // R) % TD + rep * WN * TD,
+        forward_index_fn=lambda i, d: (i // WN) * triton.cdiv(BD, TD) + (d // (R * TD)) * R + d % R,
+    )
     ND = tilelang.cdiv(D, BD)
 
     @T.prim_func
@@ -142,7 +152,7 @@ def hc_post_bwd_kernel(NT, N, D, x_dtype, branch_dtype, post_dtype, mixing_dtype
         dpost: T.Tensor((NT, ND, N), 'float32'),
         dmixing: T.Tensor((NT, ND, N, N), 'float32'),
     ):
-        with T.Kernel(NT, ND, threads=128) as (token, block):
+        with T.Kernel(NT, ND, threads=32 * WN if HAS_MIXING else 128) as (token, block):
             i_t = T.cast(token, 'int64')
             i_c = T.cast(block, 'int64')
             i_d = i_c * BD
@@ -151,6 +161,8 @@ def hc_post_bwd_kernel(NT, N, D, x_dtype, branch_dtype, post_dtype, mixing_dtype
             b_dx = T.alloc_fragment((BN, BD), 'float32')
             b_dpost = T.alloc_fragment((BN,), 'float32')
             b_dbranch = T.alloc_fragment((BD,), 'float32')
+            if HAS_MIXING and N > 4:
+                T.annotate_layout({b_do: layout, b_tmp: layout, b_dx: layout})
             for i, d in T.Parallel(BN, BD):
                 b_do[i, d] = T.if_then_else(i < N and i_d + d < D, do[i_t, i, i_d + d], 0)
                 b_tmp[i, d] = b_do[i, d] * T.if_then_else(
@@ -165,7 +177,7 @@ def hc_post_bwd_kernel(NT, N, D, x_dtype, branch_dtype, post_dtype, mixing_dtype
                 b_dmixing = T.alloc_fragment((BN,), 'float32')
                 T.clear(b_dx)
                 # transpose the mixing axes to propagate gradients to input streams
-                for k in T.serial(N):
+                for k in T.unroll(N):
                     for i, d in T.Parallel(BN, BD):
                         b_dx[i, d] += T.if_then_else(
                             i < N and i_d + d < D,
@@ -211,7 +223,10 @@ def hc_fwd_tilelang(
 ):
     N, D = x.shape[-2:]
     NT = x.numel() // (N * D)
-    BD = 256 if NT < 128 or is_post or N > 4 else 1024
+    BD = 256 if NT < 128 or (not is_post and N > 4) else 1024
+    if mixing is not None and NT < 128:
+        # expose more feature tiles when there are too few tokens to fill the GPU
+        BD = 128
     BD = max(128, min(BD, triton.next_power_of_2(D)))
     if is_post:
         o = torch.empty_like(x)
