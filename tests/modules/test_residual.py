@@ -13,6 +13,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from fla.modules.residuals import AttentionResidual, ManifoldHyperConnection, StandardDeferredResidual, StandardResidual
+from fla.modules.residuals.mhc import MHCState
 from fla.ops.attnres import naive_attnres
 from fla.ops.hc import naive_hc_post, naive_hc_pre
 from fla.ops.utils.sinkhorn import naive_sinkhorn
@@ -212,12 +213,17 @@ def test_mhc(num_streams, dtype, ratio, monkeypatch):
                 module.pre_bias.add_(0.1 * i)
                 module.res_bias.normal_(std=0.3)
     reference = copy.deepcopy(modules)
-    x = torch.randn(2, 7, 128, device=device, dtype=dtype, requires_grad=True)
+    x = torch.randn(2, 7, num_streams, 128, device=device, dtype=dtype, requires_grad=True)
     ref_x = x.detach().clone().requires_grad_()
     branches = [torch.randn(2, 7, 128, device=device, dtype=dtype, requires_grad=True) for _ in range(4)]
     ref_branches = [branch.detach().clone().requires_grad_() for branch in branches]
-    state = modules[-1].initialize(x)
-    ref_state = ref_x.unsqueeze(-2).expand(2, 7, num_streams, 128)
+    initial = modules[-1].initialize(x[:, :, 0])
+    expected_streams = x[:, :, :1].expand_as(x)
+    torch.testing.assert_close(initial.streams, expected_streams, rtol=0, atol=0)
+    for actual, expected in zip(initial[1:], naive_mhc_coefficients(reference[-1], expected_streams)):
+        assert_close('initial_coefficients', expected, actual, ratio)
+    state = MHCState(x, *modules[-1].prepare_coefficients(x))
+    ref_state = ref_x
     ref_coefficients = naive_mhc_coefficients(reference[-1], ref_state)
     assert state.streams.dtype == dtype
     loss, ref_loss = 0, 0
