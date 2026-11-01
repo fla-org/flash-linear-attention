@@ -1286,3 +1286,17 @@ def test_chunk_fwd_intra_grouped_npu(K, dtype, varlen):
     assert torch.isfinite(Akk).all()
     assert_close('Aqk', ref_qk[diagonal_rows].to(dtype), actual_qk[diagonal_rows], 0.005)
     assert_close('Akk', ref_kk, Akk.cpu(), 0.005)
+
+
+@pytest.mark.skipif(not IS_NPU, reason="Ascend WY tile planning")
+def test_recompute_w_u_fwd_gdn2_ub_budget(monkeypatch):
+    """A smaller UB budget must not reuse a larger cached WY plan."""
+    from fla.ops.gdn2.backends.triton_ascend.wy_fast import _get_fwd_tiles
+    from fla.utils import ascend_ub_manager
+
+    plans = []
+    for capacity in (192 * 1024 * 8, 64 * 1024 * 8, 192 * 1024 * 8):
+        monkeypatch.setattr(ascend_ub_manager, '_ub_manager', ascend_ub_manager.UBManager(capacity))
+        plans.append(_get_fwd_tiles(64, 256, 512, store_qg=True, ub_capacity_bits=capacity))
+    assert plans[0] == plans[2]
+    assert all(small < large for small, large in zip(plans[1], plans[0]))

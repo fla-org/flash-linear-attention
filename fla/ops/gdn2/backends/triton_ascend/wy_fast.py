@@ -9,20 +9,22 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
+
 import torch
 import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp2
-from fla.utils import ascend_compile_kwargs, input_guard
-from fla.utils.ascend_ub_manager import compute_row_tile_block_size, get_npu_properties
+from fla.utils import ascend_compile_kwargs, get_multiprocessor_count, input_guard
+from fla.utils.ascend_ub_manager import compute_row_tile_block_size, get_ub_manager
 
 # share A between both stages, while the channel-wise gates keep the V and K
 # slabs independent. The multipliers conservatively include the extra gate tile.
 _RECOMPUTE_FWD_U_MEM_MULT = 4.5
-_RECOMPUTE_FWD_W_MEM_MULT = 5.5
-_RECOMPUTE_FWD_W_MEM_MULT_QG = 7.5
+_RECOMPUTE_FWD_W_MEM_MULT = 4.5
+_RECOMPUTE_FWD_W_MEM_MULT_QG = 4.5
 _SAFETY_MARGIN = 0.75
 _FALLBACK_TILE = 16
 _MAX_TILE_FWD = 128
@@ -30,8 +32,8 @@ _PREFERRED_TILE = 64
 _MAX_K = 256
 
 
-def _launch_wy_core_grid(kernel, *, task_num: int, kernel_kwargs: dict) -> None:
-    num_core = get_npu_properties()["num_aicore"]
+def _launch_wy_core_grid(kernel, *, task_num: int, device_index: int, kernel_kwargs: dict) -> None:
+    num_core = get_multiprocessor_count(device_index, use_aicore=True)
     kernel[(num_core,)](
         task_num=task_num,
         num_core=num_core,
@@ -46,8 +48,9 @@ def _candidate_tiles(dim: int) -> list[int]:
     return tiles or [_FALLBACK_TILE]
 
 
-def _get_fwd_tiles(BT: int, K: int, V: int, *, store_qg: bool) -> tuple[int, int]:
-    """Choose independent K/V slabs within their respective peak UB budgets."""
+@lru_cache(maxsize=128)
+def _get_fwd_tiles(BT: int, K: int, V: int, *, store_qg: bool, ub_capacity_bits: int) -> tuple[int, int]:
+    """Choose K/V slabs, caching plans separately for each detected UB capacity."""
     w_mult = _RECOMPUTE_FWD_W_MEM_MULT_QG if store_qg else _RECOMPUTE_FWD_W_MEM_MULT
 
     def _max_tile(dim: int, mem_mult: float) -> int:
@@ -86,6 +89,7 @@ def _get_fwd_tiles(BT: int, K: int, V: int, *, store_qg: bool) -> tuple[int, int
 @triton.heuristics({
     'STORE_QG': lambda args: args['qg'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
+    'IS_ALIGNED': lambda args: args['cu_seqlens'] is None and args['T'] % args['BT'] == 0,
 })
 @triton.jit(do_not_specialize=['T', 'B', 'task_num', 'num_core'])
 def recompute_w_u_fwd_gdn2_kernel_npu(
@@ -114,6 +118,7 @@ def recompute_w_u_fwd_gdn2_kernel_npu(
     BV: tl.constexpr,
     STORE_QG: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    IS_ALIGNED: tl.constexpr,
 ):
     T_seq = T
     BH = B * H
@@ -142,7 +147,7 @@ def recompute_w_u_fwd_gdn2_kernel_npu(
         o_t64 = tl.cast(o_t, tl.int64)
         o_A64 = tl.cast(tl.arange(0, BT), tl.int64)
         local_t64 = i_t64 * BT + o_t64
-        m_t = local_t64 < T_cur
+        m_t = tl.full((BT,), True, tl.int1) if IS_ALIGNED else local_t64 < T_cur
 
         head_A = (bos * H + i_h64) * BT
         p_A = A + head_A + local_t64[:, None] * (H * BT) + o_A64[None, :]
@@ -182,7 +187,7 @@ def recompute_w_u_fwd_gdn2_kernel_npu(
                 b_q = tl.load(p_q, mask=m_k, other=0.0)
                 tl.store(p_qg, (b_q * b_gk_exp).to(p_qg.dtype.element_ty), mask=m_k)
 
-            last_idx64 = min(i_t64 * BT + BT, T_cur) - 1
+            last_idx64 = (i_t64 + 1) * BT - 1 if IS_ALIGNED else min(i_t64 * BT + BT, T_cur) - 1
             m_last_k = o_k64 < K
             p_gn = gk + ((bos + last_idx64) * H + i_h64) * K + o_k64
             b_gn = tl.load(p_gn, mask=m_last_k, other=0.0).to(tl.float32)
@@ -221,7 +226,7 @@ def recompute_w_u_fwd_gdn2_npu(
         raise ValueError('GDN-2 Ascend WY requires gk')
     if cu_seqlens is not None and B != 1:
         raise ValueError('GDN-2 Ascend WY requires batch size 1 for packed sequences')
-    BK, BV = _get_fwd_tiles(BT, K, V, store_qg=q is not None)
+    BK, BV = _get_fwd_tiles(BT, K, V, store_qg=q is not None, ub_capacity_bits=get_ub_manager().ub_capacity_bits)
 
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
@@ -234,6 +239,7 @@ def recompute_w_u_fwd_gdn2_npu(
     _launch_wy_core_grid(
         recompute_w_u_fwd_gdn2_kernel_npu,
         task_num=NT * B * H,
+        device_index=k.device.index,
         kernel_kwargs=dict(
             q=q,
             k=k,
