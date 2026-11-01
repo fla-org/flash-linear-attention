@@ -328,7 +328,7 @@ def chunk_gated_delta_rule_fwd_kkt_solve_kernel(
     tl.store(p_A33, b_Ai33.to(A.dtype.element_ty), mask=m_A33)
 
 
-@dispatch('gated_delta_rule')
+@dispatch
 def chunk_gated_delta_rule_fwd_intra(
     k: torch.Tensor,
     v: torch.Tensor,

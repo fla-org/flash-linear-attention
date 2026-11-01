@@ -11,6 +11,9 @@ import tilelang
 import tilelang.language as T
 import torch
 
+from fla.backends import TileLangBackend, register
+from fla.ops.rwkv6.chunk import chunk_rwkv6_fwd_intra
+
 
 @tilelang.jit(pass_configs={
     tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
@@ -120,6 +123,51 @@ def _build_rwkv6_fwd_intra_kernel(
     return kernel
 
 
+def chunk_rwkv6_fwd_intra_verifier(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    gi: torch.Tensor,
+    ge: torch.Tensor,
+    u: torch.Tensor,
+    scale: float,
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_size: int = 64,
+    chunk_indices: torch.LongTensor | None = None,
+) -> tuple[bool, str | None]:
+    if cu_seqlens is not None or chunk_indices is not None:
+        return False, "TileLang RWKV6 intra backend supports dense inputs only"
+    if chunk_size != 64:
+        return False, f"TileLang RWKV6 intra backend requires chunk_size=64, got {chunk_size}"
+    if q.dtype != torch.bfloat16:
+        return False, f"TileLang RWKV6 intra backend supports benchmark dtype bfloat16 only, got {q.dtype}"
+    if k.dtype != q.dtype or u.dtype != q.dtype:
+        return False, f"TileLang RWKV6 intra backend requires q/k/u dtype match, got {q.dtype}/{k.dtype}/{u.dtype}"
+    if gi.dtype != torch.float32 or ge.dtype != torch.float32:
+        return False, f"TileLang RWKV6 intra backend requires fp32 gi/ge, got {gi.dtype}/{ge.dtype}"
+    if not q.is_cuda:
+        return False, "TileLang RWKV6 intra backend requires CUDA tensors"
+    if q.shape != k.shape or q.shape != gi.shape or q.shape != ge.shape:
+        return False, "TileLang RWKV6 intra backend requires q, k, gi, and ge to have identical shapes"
+    if q.ndim != 4:
+        return False, f"TileLang RWKV6 intra backend expects q with rank 4, got {q.ndim}"
+    B, T, H, K = q.shape
+    if u.shape != (H, K):
+        return False, f"TileLang RWKV6 intra backend requires u shape {(H, K)}, got {tuple(u.shape)}"
+    if T % chunk_size != 0:
+        return False, f"TileLang RWKV6 intra backend requires T divisible by {chunk_size}, got T={T}"
+    if K != 64:
+        return False, f"TileLang RWKV6 intra backend currently supports the D=64 benchmark bucket only, got K={K}"
+    if B <= 0 or H <= 0:
+        return False, f"TileLang RWKV6 intra backend requires positive B/H, got B={B}, H={H}"
+    return True, None
+
+
+@register(
+    chunk_rwkv6_fwd_intra,
+    backend=TileLangBackend,
+    verifier=chunk_rwkv6_fwd_intra_verifier,
+    default_enable=False,
+)
 def chunk_rwkv6_fwd_intra_tilelang(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -127,7 +175,9 @@ def chunk_rwkv6_fwd_intra_tilelang(
     ge: torch.Tensor,
     u: torch.Tensor,
     scale: float,
+    cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
+    chunk_indices: torch.LongTensor | None = None,
 ) -> torch.Tensor:
     B, T_seq, H, K = q.shape
     BT = chunk_size

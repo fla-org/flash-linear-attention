@@ -14,7 +14,7 @@ import triton
 import triton.language as tl
 
 from fla.backends import TritonAscendBackend, register
-from fla.ops.common.chunk_o import chunk_bwd_dv
+from fla.ops.common.chunk_o import chunk_bwd_dqkwg, chunk_bwd_dv, chunk_bwd_dv_local, chunk_fwd_o
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.op import exp2
@@ -306,6 +306,7 @@ def chunk_o_fwd_kernel(
         tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
 
 
+@register(chunk_fwd_o, backend=TritonAscendBackend)
 @input_guard
 def chunk_fwd_o_npu(
     q: torch.Tensor,
@@ -1231,6 +1232,7 @@ def chunk_dg_bwd_kernel(
         tl.store(p_dg_r, b_dg_r.to(p_dg_r.dtype.element_ty), boundary_check=(0,))
 
 
+@register(chunk_bwd_dv_local, backend=TritonAscendBackend)
 @input_guard
 def chunk_bwd_dv_local_npu(
     q: torch.Tensor,
@@ -1312,6 +1314,7 @@ def chunk_bwd_dv_local_npu(
     return dv
 
 
+@register(chunk_bwd_dqkwg, backend=TritonAscendBackend)
 @input_guard
 def chunk_bwd_dqkwg_npu(
     q: torch.Tensor,
