@@ -545,7 +545,6 @@ def chunk_gla_bwd_kernel_dv_npu(
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
-        NT = tl.cdiv(T, BT)
     else:
         NT = tl.cdiv(T, BT)
         i_tg = tl.cast(i_b, tl.int64) * NT + i_t
@@ -612,7 +611,6 @@ def chunk_gla_bwd_kernel_inter_npu(
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
-        NT = tl.cdiv(T, BT)
     else:
         NT = tl.cdiv(T, BT)
         i_tg = tl.cast(i_b, tl.int64) * NT + i_t
@@ -813,7 +811,8 @@ def chunk_gla_fwd_o_gk_npu(
     chunk_indices: torch.LongTensor | None = None,
     use_graph: bool = False,
 ):
-    B, T, H, K, HV, V = *q.shape, v.shape[2], v.shape[-1]
+    B, T, H, K = q.shape
+    HV, V = v.shape[2], v.shape[-1]
     BT = chunk_size
 
     if chunk_indices is None and cu_seqlens is not None:
@@ -916,7 +915,8 @@ def chunk_gla_bwd_dv_npu(
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
 ):
-    B, T, H, K, V = *k.shape, do.shape[-1]
+    B, T, H, K = k.shape
+    V = do.shape[-1]
     BT = chunk_size
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens=cu_seqlens, chunk_size=chunk_size)
@@ -1028,7 +1028,8 @@ def chunk_gla_bwd_dqkg_npu(
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
 ):
-    B, T, H, K, V = *k.shape, v.shape[-1]
+    B, T, H, K = k.shape
+    V = v.shape[-1]
     BT = chunk_size
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens=cu_seqlens, chunk_size=chunk_size)
