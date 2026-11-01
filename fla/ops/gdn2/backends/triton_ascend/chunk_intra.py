@@ -30,7 +30,6 @@ SAFETY_MARGIN = 0.80
 FALLBACK_BK = 16
 MAX_INTER_BK = 64
 LAUNCH_BLOCK_BUDGET = 4096
-# Disable auto-multi-buffer and AutoBlockify on the inter kernels for CANN 9.1.
 INTER_COMPILE_KWARGS = ascend_compile_kwargs(blacklist_auto_blockify=True)
 
 
@@ -168,6 +167,10 @@ def chunk_gdn2_fwd_kernel_intra_grouped_npu(
     b_g = tl.load(p_g, mask=m_rk, other=0.0).to(tl.float32)
     b_b = tl.load(p_b, mask=m_rk, other=0.0).to(tl.float32)
     b_k *= b_b
+    o_j = tl.arange(0, BC)
+    row_in_subchunk = ROW_GROUP * BR + o_r
+    b_Aqk_rows = tl.zeros((BR, BC), dtype=tl.float32)
+    b_Akk_rows = tl.zeros((BR, BC), dtype=tl.float32)
 
     for j in range(0, (ROW_GROUP + 1) * BR):
         i_j = i_ts + j
@@ -179,17 +182,28 @@ def chunk_gdn2_fwd_kernel_intra_grouped_npu(
         b_kgj = tl.where(m_k[None, :], b_kj[None, :] * exp2(b_g - b_gj[None, :]), 0.0)
         b_Aqk = tl.sum(b_q * b_kgj, axis=1) * scale
         b_Akk = tl.sum(b_k * b_kgj, axis=1)
-        row_in_subchunk = ROW_GROUP * BR + o_r
-        tl.store(
-            Aqk + o_c * (H * BT) + i_i * BC + j,
-            b_Aqk.to(Aqk.dtype.element_ty),
-            mask=m_r & m_j & (j <= row_in_subchunk),
+        b_Aqk_rows = tl.where(
+            (o_j[None, :] == j) & (j <= row_in_subchunk[:, None]) & m_j,
+            b_Aqk[:, None],
+            b_Aqk_rows,
         )
-        tl.store(
-            Akk + o_c * (H * BC) + j,
-            b_Akk.to(Akk.dtype.element_ty),
-            mask=m_r & m_j & (j < row_in_subchunk),
+        b_Akk_rows = tl.where(
+            (o_j[None, :] == j) & (j < row_in_subchunk[:, None]) & m_j,
+            b_Akk[:, None],
+            b_Akk_rows,
         )
+
+    # complete contiguous rows avoid the cross-block locks needed by column-wise stores.
+    tl.store(
+        Aqk + o_c[:, None] * (H * BT) + i_i * BC + o_j[None, :],
+        b_Aqk_rows.to(Aqk.dtype.element_ty),
+        mask=m_r[:, None],
+    )
+    tl.store(
+        Akk + o_c[:, None] * (H * BC) + o_j[None, :],
+        b_Akk_rows.to(Akk.dtype.element_ty),
+        mask=m_r[:, None],
+    )
 
 
 @triton.jit(do_not_specialize=['T', 'NT_OFFSET', 'NC_OFFSET', 'BH_OFFSET'])

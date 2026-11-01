@@ -31,7 +31,9 @@ def test_long_conv_causal(module: type, T: int, max_len: int):
     y = conv(x)
 
     k = conv.filter if module is LongConvolution else conv.filter(T)[0]
-    windows = F.pad(x.transpose(1, 2), (k.shape[-1] - 1, 0)).unfold(-1, k.shape[-1], 1)
+    # slice-based windows keep the singleton reference differentiable on NPU.
+    padded = F.pad(x.transpose(1, 2), (k.shape[-1] - 1, 0))
+    windows = torch.stack([padded[..., t:t + k.shape[-1]] for t in range(T)], dim=-2)
     ref = x + (windows * k.flip(-1)[None, :, None, :]).sum(-1).transpose(1, 2)
     torch.testing.assert_close(y, ref, rtol=1e-4, atol=1e-4)
 
