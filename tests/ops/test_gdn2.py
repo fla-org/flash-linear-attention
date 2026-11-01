@@ -5,6 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+import importlib
 import inspect
 import math
 from functools import partial
@@ -14,7 +15,9 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from fla import backends
 from fla.ops.gdn2 import chunk_gdn2, fused_recurrent_gdn2, naive_recurrent_gdn2
+from fla.ops.gdn2.fused_recurrent import fused_recurrent_gdn2_fwd
 from fla.ops.kda.gate import naive_kda_gate, naive_kda_lowerbound_gate
 from fla.utils import IS_AMD, IS_NPU, IS_NVIDIA, assert_close, device, device_platform
 
@@ -282,6 +285,62 @@ def test_fused_recurrent_varlen(cu_seqlens, H, K, V):
     assert_close("ht", torch.cat(ref_hts, 0), tri_ht, 0.005)
 
 
+@pytest.mark.parametrize('state_v_first', [False, True], ids=['kv', 'vk'])
+def test_fused_recurrent_empty_varlen_state(state_v_first):
+    N, T, H, K, V = 3, 3, 1, 16, 16
+    q, k, v, g, b, w, _, _ = _rand_inputs(1, T, H, H, K, V, torch.float32)
+    h0 = torch.randn(N, H, K, V, device=device)
+    if state_v_first:
+        h0 = h0.transpose(-1, -2).contiguous()
+    h0_ref = h0.clone()
+    cu_seqlens = torch.tensor([0, 1, 1, T], dtype=torch.long, device=device)
+
+    for initial_state in (None, h0):
+        _, ht = fused_recurrent_gdn2(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            b=b,
+            w=w,
+            initial_state=initial_state,
+            output_final_state=True,
+            state_v_first=state_v_first,
+            cu_seqlens=cu_seqlens,
+        )
+        expected = torch.zeros_like(h0_ref[1]) if initial_state is None else h0_ref[1]
+        torch.testing.assert_close(ht[1], expected, rtol=0, atol=0)
+    assert torch.equal(h0, h0_ref)
+
+
+def test_fused_recurrent_empty_spec_decoding():
+    H, K, V = 1, 16, 16
+    q, k, v, g, b, w, _, _ = _rand_inputs(1, 1, H, H, K, V, torch.float32)
+    state = torch.randn(1, H, K, V, device=device)
+    state_ref = state.clone()
+    invalid_state_guard = 1 << 30
+    state_indices = torch.tensor([invalid_state_guard, 0], dtype=torch.int32, device=device)[1:]
+
+    o, ht = fused_recurrent_gdn2_fwd(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        b=b,
+        w=w,
+        initial_state=state,
+        output_final_state=False,
+        inplace_final_state=True,
+        cu_seqlens=torch.tensor([0, 0], dtype=torch.int32, device=device),
+        ssm_state_indices=state_indices,
+        num_accepted_tokens=torch.zeros(1, dtype=torch.int32, device=device),
+    )
+
+    assert ht is state
+    assert torch.equal(o, torch.zeros_like(o))
+    assert torch.equal(state, state_ref)
+
+
 @pytest.mark.parametrize('chunk_size', [16, 32], ids=['chunk16', 'chunk32'])
 def test_chunk_invalid_chunk_size(chunk_size):
     tensor = torch.zeros(1, 64, 2, 64, dtype=torch.float32, device='cpu')
@@ -539,8 +598,8 @@ def test_chunk_varlen(cu_seqlens, H, K, V, use_gate_in_kernel, dtype, state_v_fi
 )
 def test_chunk_npu_verifier(name, case, dtype, lower_bound, reason):
     """Check dispatch metadata and the forward entry signature without requiring an NPU."""
-    from fla.ops.gdn2.backends.triton_ascend.chunk_bwd import chunk_gdn2_bwd_wy_dqkg_fused_verifier
-    from fla.ops.gdn2.backends.triton_ascend.chunk_intra import chunk_gdn2_fwd_intra_npu, chunk_gdn2_fwd_intra_verifier
+    from fla.ops.gdn2.backends.triton_ascend import TritonAscendGDN2Backend
+    from fla.ops.gdn2.backends.triton_ascend.chunk_intra import chunk_gdn2_fwd_intra_npu
 
     shape = (1, 1, 1, 257) if case == 'oversized_k' else (1, 22, 2, 64) if case == 'lower_bound' else (1,)
     tensor = Mock(spec=torch.Tensor, shape=shape, dtype=dtype)
@@ -564,9 +623,7 @@ def test_chunk_npu_verifier(name, case, dtype, lower_bound, reason):
         kwargs['q'].device.type = 'npu'
     elif case in ('cu_seqlens', 'chunk_indices'):
         kwargs[case] = torch.tensor([0, 1], dtype=torch.int64)
-    verifier = (chunk_gdn2_fwd_intra_verifier if name == 'chunk_gdn2_fwd_intra'
-                else chunk_gdn2_bwd_wy_dqkg_fused_verifier)
-    accepted, actual_reason = verifier(**kwargs)
+    accepted, actual_reason = TritonAscendGDN2Backend().verify(name, **kwargs)
     assert accepted == (reason is None)
     if reason is None:
         assert actual_reason is None
@@ -591,7 +648,7 @@ def test_chunk_npu_verifier(name, case, dtype, lower_bound, reason):
 )
 def test_fused_recurrent_npu_verifier(case, dtype, reason):
     """Check recurrent dispatch metadata without requiring an NPU."""
-    from fla.ops.gdn2.backends.triton_ascend.fused_recurrent import fused_recurrent_gdn2_fwd_verifier
+    from fla.ops.gdn2.backends.triton_ascend import TritonAscendGDN2Backend
 
     tensor = Mock(spec=torch.Tensor, shape=(1, 1, 1, 32), dtype=dtype)
     tensor.device.type = 'npu'
@@ -601,7 +658,7 @@ def test_fused_recurrent_npu_verifier(case, dtype, reason):
     elif case == 'unsupported_optional_dtype':
         kwargs['A_log'] = Mock(spec=torch.Tensor, shape=(1,), dtype=torch.int32)
         kwargs['A_log'].device.type = 'npu'
-    accepted, actual_reason = fused_recurrent_gdn2_fwd_verifier(**kwargs)
+    accepted, actual_reason = TritonAscendGDN2Backend().verify('fused_recurrent_gdn2_fwd', **kwargs)
     assert accepted == (reason is None)
     if reason is None:
         assert actual_reason is None
@@ -955,3 +1012,33 @@ def test_chunk_intra_default_shift(use_gate_in_kernel, monkeypatch):
     for ref, tri in zip((default,) + default_grads, (explicit,) + explicit_grads):
         assert torch.isfinite(ref).all() and torch.isfinite(tri).all()
         assert torch.equal(ref, tri)
+
+
+@pytest.mark.parametrize(
+    ('module_name', 'func_name'),
+    [
+        ('chunk_intra', 'chunk_gdn2_fwd_intra'),
+        ('chunk_bwd', 'chunk_gdn2_bwd_wy_dqkg_fused'),
+        ('fused_recurrent', 'fused_recurrent_gdn2_fwd'),
+    ],
+    ids=['forward', 'backward', 'fused-recurrent-forward'],
+)
+def test_gdn2_dispatch_uses_local_registry(monkeypatch, module_name, func_name):
+    from fla.ops.gdn2.backends.triton_ascend import TritonAscendGDN2Backend
+
+    entry = getattr(importlib.import_module(f'fla.ops.gdn2.{module_name}'), func_name)
+    if backends._DISPATCH_DISABLED:
+        pytest.skip('Backend dispatch was disabled before import')
+    assert hasattr(entry, '__wrapped__')
+    monkeypatch.setattr(TritonAscendGDN2Backend, 'is_available', classmethod(lambda cls: True))
+    monkeypatch.setattr(TritonAscendGDN2Backend, 'is_enabled', lambda self: True)
+    monkeypatch.setattr(TritonAscendGDN2Backend, f'{func_name}_verifier', lambda self, q: (True, None))
+    result = object()
+
+    def implementation(self, q):
+        assert torch.is_grad_enabled()
+        assert q.requires_grad
+        return result
+
+    monkeypatch.setattr(TritonAscendGDN2Backend, func_name, implementation)
+    assert entry(q=torch.tensor([1.0, 2.0], requires_grad=True)) is result

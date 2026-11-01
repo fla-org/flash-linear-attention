@@ -5,9 +5,10 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from .chunk import chunk_gated_delta_rule, chunk_gdn
-from .fused_recurrent import fused_recurrent_gated_delta_rule, fused_recurrent_gdn
-from .naive import naive_chunk_gated_delta_rule, naive_recurrent_gated_delta_rule
+from fla.backends import TritonAscendBackend
+from fla.ops.gated_delta_rule.chunk import chunk_gated_delta_rule, chunk_gdn
+from fla.ops.gated_delta_rule.fused_recurrent import fused_recurrent_gated_delta_rule, fused_recurrent_gdn
+from fla.ops.gated_delta_rule.naive import naive_chunk_gated_delta_rule, naive_recurrent_gated_delta_rule
 
 __all__ = [
     "chunk_gated_delta_rule", "chunk_gdn",
@@ -17,4 +18,7 @@ __all__ = [
 ]
 
 
-from fla.ops.gated_delta_rule import backends  # noqa: F401
+from fla.ops.gated_delta_rule.backends import flash_qla  # noqa: F401
+
+if TritonAscendBackend.is_available():
+    from fla.ops.gated_delta_rule.backends import triton_ascend  # noqa: F401

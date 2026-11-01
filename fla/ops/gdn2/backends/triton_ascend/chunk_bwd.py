@@ -13,12 +13,10 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.backends import TritonAscendBackend, register
-from fla.ops.gdn2.chunk_bwd import chunk_gdn2_bwd_wy_dqkg_fused
 from fla.ops.kda.backends.triton_ascend.chunk_bwd import chunk_kda_bwd_kernel_wy_k_part_npu
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 from fla.ops.utils.op import exp2
-from fla.utils import input_guard
+from fla.utils import ascend_compile_kwargs, input_guard
 from fla.utils.ascend_ub_manager import compute_row_tile_block_size, get_npu_properties
 
 _BC = 16
@@ -342,39 +340,6 @@ def chunk_gdn2_bwd_kernel_wy_dA_finalize_npu(
             tl.store(p_dA, b_fin.to(p_dA.dtype.element_ty), boundary_check=(0, 1))
 
 
-def chunk_gdn2_bwd_wy_dqkg_fused_verifier(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    v_new: torch.Tensor,
-    g: torch.Tensor,
-    b: torch.Tensor,
-    w_gate: torch.Tensor,
-    A: torch.Tensor,
-    h: torch.Tensor,
-    do: torch.Tensor,
-    dh: torch.Tensor,
-    dv: torch.Tensor,
-    scale: float | None = None,
-    cu_seqlens: torch.LongTensor | None = None,
-    chunk_size: int = 64,
-    chunk_indices: torch.LongTensor | None = None,
-    state_v_first: bool = False,
-) -> tuple[bool, str | None]:
-    del scale, state_v_first
-    if chunk_size != 64:
-        return False, f"GDN-2 Ascend backward requires chunk_size=64, got {chunk_size}"
-    float_tensors = (q, k, v, v_new, g, b, w_gate, A, h, do, dh, dv)
-    tensors = (*float_tensors, *(t for t in (cu_seqlens, chunk_indices) if t is not None))
-    if any(t.device.type != "npu" for t in tensors):
-        return False, "GDN-2 Ascend backward requires NPU tensors"
-    supported = (torch.float16, torch.bfloat16, torch.float32)
-    if any(t.dtype not in supported for t in float_tensors):
-        return False, "GDN-2 Ascend backward received an unsupported dtype"
-    return True, None
-
-
-@register(chunk_gdn2_bwd_wy_dqkg_fused, backend=TritonAscendBackend, verifier=chunk_gdn2_bwd_wy_dqkg_fused_verifier)
 @input_guard
 def chunk_gdn2_bwd_wy_dqkg_fused_npu(
     q: torch.Tensor,
@@ -445,6 +410,7 @@ def chunk_gdn2_bwd_wy_dqkg_fused_npu(
         BV=BV,
         IS_VARLEN=is_varlen,
         T_CONTIG=t_contig,
+        **ascend_compile_kwargs(),
     )
 
     k_part_kwargs = dict(
@@ -479,7 +445,7 @@ def chunk_gdn2_bwd_wy_dqkg_fused_npu(
     )
     for k_off in range(NK):
         k_part_kwargs['K_OFFSET'] = k_off
-        chunk_kda_bwd_kernel_wy_k_part_npu[(num_core,)](**k_part_kwargs)
+        chunk_kda_bwd_kernel_wy_k_part_npu[(num_core,)](**k_part_kwargs, **ascend_compile_kwargs())
 
     k_arg, k_t_contig = _t_contig_arg(k, H)
     g_arg, g_t_contig = _t_contig_arg(g, H)
@@ -515,7 +481,7 @@ def chunk_gdn2_bwd_wy_dqkg_fused_npu(
     )
     for k_off in range(NK):
         gate_kwargs['K_OFFSET'] = k_off
-        chunk_gdn2_bwd_kernel_wy_gate_part_npu[(num_core,)](**gate_kwargs)
+        chunk_gdn2_bwd_kernel_wy_gate_part_npu[(num_core,)](**gate_kwargs, **ascend_compile_kwargs())
 
     finalize_kwargs = dict(
         A=A_arg,
@@ -530,6 +496,7 @@ def chunk_gdn2_bwd_wy_dqkg_fused_npu(
         BT=BT,
         IS_VARLEN=is_varlen,
         A_T_CONTIG=t_contig,
+        **ascend_compile_kwargs(),
     )
     if is_varlen:
         finalize_kwargs['task_num'] = NT * bh_total

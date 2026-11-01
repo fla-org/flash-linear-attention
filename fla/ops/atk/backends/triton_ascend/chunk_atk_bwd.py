@@ -16,7 +16,7 @@ import triton
 import triton.language as tl
 
 from fla.backends import TritonAscendBackend, register
-from fla.ops.atk.backends.triton_ascend.utils import chunk_atk_fwd_verifier
+from fla.ops.atk.backends.triton_ascend.chunk_atk_fwd import atk_verifier
 from fla.ops.atk.chunk_atk_bwd import chunk_atk_bwd
 from fla.ops.utils import prepare_chunk_indices
 from fla.utils.ascend_ub_manager import ASCEND_LAUNCH_BLOCK_BUDGET
@@ -418,7 +418,7 @@ def _launch_varlen_rows(kernel, nt, grid_h, args):
         kernel[(n, grid_h, 1)](*args, chunk_offset=0, t_offset=off)
 
 
-@register(chunk_atk_bwd, backend=TritonAscendBackend, verifier=chunk_atk_fwd_verifier)
+@register(chunk_atk_bwd, backend=TritonAscendBackend, verifier=atk_verifier)
 def chunk_atk_bwd_npu(
     k: torch.Tensor,
     g_raw: torch.Tensor,
@@ -467,7 +467,9 @@ def chunk_atk_bwd_npu(
     gg = torch.zeros_like(g_raw, dtype=torch.float32)
     gbeta = torch.zeros_like(beta, dtype=torch.float32)
     gac_prev = torch.zeros_like(ac, dtype=torch.float32)
+    dh0 = torch.zeros(N, H, K, device=k.device, dtype=torch.float32) if initial_A_state is not None else None
     if dat is not None:
+        # non-empty final-state gradients enter the reverse scan at the last chunk
         if cu_seqlens is None:
             gac_prev[:, NT - 1] += dat
         else:
@@ -476,7 +478,8 @@ def chunk_atk_bwd_npu(
             valid = seqlens > 0
             idx = torch.arange(N, device=k.device)
             gac_prev[idx[valid], last_chunk[valid]] += dat[valid]
-    dh0 = torch.zeros(N, H, K, device=k.device, dtype=torch.float32) if initial_A_state is not None else None
+            if dh0 is not None:
+                dh0 += dat.masked_fill(valid[:, None, None], 0)
     ga = torch.zeros_like(a, dtype=torch.float32)
     gsa = torch.zeros_like(sa, dtype=torch.float32)
 

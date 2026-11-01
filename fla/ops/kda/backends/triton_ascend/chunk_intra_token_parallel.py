@@ -14,7 +14,6 @@ import triton
 import triton.language as tl
 
 from fla.backends import TritonAscendBackend, register
-from fla.ops.kda.backends.triton_ascend.utils import _verify_intra_chunk_size
 from fla.ops.kda.chunk_intra_token_parallel import chunk_kda_fwd_intra_token_parallel
 from fla.ops.utils.op import exp2
 from fla.utils import input_guard
@@ -23,18 +22,18 @@ from fla.utils.ascend_ub_manager import (
     max_grid_axis_chunks,
 )
 
-_BH = 4
-_NUM_WARPS = 2
+HEAD_BLOCK_SIZE = 4
+NUM_WARPS = 2
 
 
-def _launch_token_parallel_kernel(
+def launch_token_parallel_kernel(
     kernel,
     *,
     tg_total: int,
     hv_total: int,
     kernel_kwargs: dict,
 ) -> None:
-    hg_total = triton.cdiv(hv_total, _BH)
+    hg_total = triton.cdiv(hv_total, HEAD_BLOCK_SIZE)
     max_tg = max_grid_axis_chunks(tg_total, hg_total, max_grid=ASCEND_MAX_GRID_DIM)
     for tg_off in range(0, tg_total, max_tg):
         tg_len = min(max_tg, tg_total - tg_off)
@@ -43,7 +42,7 @@ def _launch_token_parallel_kernel(
         for hg_off in range(0, hg_total, max_hg):
             hg_len = min(max_hg, hg_total - hg_off)
             kernel_kwargs['HG_OFFSET'] = hg_off
-            kernel[(tg_len, hg_len)](num_warps=_NUM_WARPS, **kernel_kwargs)
+            kernel[(tg_len, hg_len)](num_warps=NUM_WARPS, **kernel_kwargs)
 
 
 @triton.heuristics({
@@ -146,8 +145,23 @@ def chunk_kda_fwd_kernel_intra_token_parallel_npu(
         tl.store(Akk + i_t * HV * BC + o_hv * BC + j - i_ts, b_Akk.to(Akk.dtype.element_ty), mask=m_hv)
 
 
-def chunk_kda_fwd_intra_token_parallel_verifier(*args, **kwargs):
-    return _verify_intra_chunk_size(args, kwargs)
+def chunk_kda_fwd_intra_token_parallel_verifier(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    gk: torch.Tensor,
+    beta: torch.Tensor,
+    Aqk: torch.Tensor,
+    Akk: torch.Tensor,
+    scale: float,
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_size: int = 64,
+    sub_chunk_size: int = 16,
+    use_graph: bool = False,
+) -> tuple[bool, str | None]:
+    chunk_size = 64 if chunk_size is None else int(chunk_size)
+    if chunk_size not in (32, 64):
+        return False, f'KDA Ascend intra only supports chunk_size in (32, 64), got {chunk_size}'
+    return True, None
 
 
 @register(
@@ -181,7 +195,7 @@ def chunk_kda_fwd_intra_token_parallel_npu(
     BT = chunk_size
     BC = sub_chunk_size
 
-    _launch_token_parallel_kernel(
+    launch_token_parallel_kernel(
         chunk_kda_fwd_kernel_intra_token_parallel_npu,
         tg_total=B * T,
         hv_total=HV,
@@ -201,7 +215,7 @@ def chunk_kda_fwd_intra_token_parallel_npu(
             K=K,
             BT=BT,
             BC=BC,
-            BH=_BH,
+            BH=HEAD_BLOCK_SIZE,
             TG_OFFSET=0,
             HG_OFFSET=0,
         ),

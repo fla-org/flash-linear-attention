@@ -16,7 +16,7 @@ import triton.language as tl
 from fla.backends import dispatch
 from fla.ops.utils.op import exp
 from fla.ops.utils.softplus import softplus
-from fla.utils import input_guard
+from fla.utils import IS_NVIDIA_HOPPER, input_guard
 
 
 @triton.heuristics(
@@ -96,8 +96,7 @@ def fused_recurrent_kda_fwd_kernel(
     else:
         bos, eos = i_n * T, i_n * T + T
 
-    if T == 0:
-        # no tokens to process for this sequence
+    if T == 0 and IS_CONTINUOUS_BATCHING:
         return
 
     o_k = i_k * BK + tl.arange(0, BK)
@@ -133,7 +132,7 @@ def fused_recurrent_kda_fwd_kernel(
                 i_t = 0
             p_h0 = (
                 h0
-                + tl.load(ssm_state_indices + i_n * stride_indices_seq + i_t).to(
+                + tl.load(ssm_state_indices + i_n * stride_indices_seq + i_t * stride_indices_tok).to(
                     tl.int64
                 )
                 * stride_init_state_token
@@ -200,11 +199,11 @@ def fused_recurrent_kda_fwd_kernel(
             b_o = tl.sum(b_h * b_q[:, None], 0)
         tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=mask_v, eviction_policy='evict_first')
 
-        if IS_CONTINUOUS_BATCHING:
+        if IS_CONTINUOUS_BATCHING and STORE_FINAL_STATE:
             if INPLACE_FINAL_STATE:
                 p_ht = (
                     ht
-                    + tl.load(ssm_state_indices + i_n * stride_indices_seq + i_t).to(
+                    + tl.load(ssm_state_indices + i_n * stride_indices_seq + i_t * stride_indices_tok).to(
                         tl.int64
                     )
                     * stride_final_state_token
@@ -265,20 +264,26 @@ def fused_recurrent_kda_fwd(
     HV = v.shape[2]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
     BK = triton.next_power_of_2(K)
-    BV = 32
+    if IS_NVIDIA_HOPPER and not state_v_first:
+        # [K, V] state on H100/H200: BV=16 runs half as many programs per head as BV=8, so less repeated
+        # per-program q/k/gate work; it is faster across measured decode shapes.
+        BV = min(16, triton.next_power_of_2(V))
+    else:
+        BV = 8
 
     if out is None:
-        out = torch.zeros_like(v)
+        out = torch.empty_like(v) if cu_seqlens is None else torch.zeros_like(v)
     else:
         assert out.shape == v.shape
     if inplace_final_state:
         assert initial_state is not None
         final_state = initial_state
     elif output_final_state:
+        num_states = B * T if ssm_state_indices is not None else N
         if state_v_first:
-            final_state = q.new_empty(N, HV, V, K, dtype=torch.float32)
+            final_state = q.new_empty(num_states, HV, V, K, dtype=torch.float32)
         else:
-            final_state = q.new_empty(N, HV, K, V, dtype=torch.float32)
+            final_state = q.new_empty(num_states, HV, K, V, dtype=torch.float32)
     else:
         final_state = None
 
@@ -328,8 +333,8 @@ def fused_recurrent_kda_fwd(
         APPLY_BETA_SIGMOID=use_beta_sigmoid_in_kernel,
         ALLOW_NEG_EIGVAL=allow_neg_eigval,
         STATE_V_FIRST=state_v_first,
-        num_warps=4,
-        num_stages=2,
+        num_warps=1,
+        num_stages=3,
     )
 
     return out, final_state

@@ -5,6 +5,8 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+from fla.backends import TileLangBackend
+
 from .chunk import chunk_rwkv6
 from .fused_recurrent import fused_recurrent_rwkv6
 
@@ -14,4 +16,5 @@ __all__ = [
 ]
 
 
-from fla.ops.rwkv6 import backends  # noqa: F401
+if TileLangBackend.is_available():
+    from fla.ops.rwkv6.backends import tilelang  # noqa: F401

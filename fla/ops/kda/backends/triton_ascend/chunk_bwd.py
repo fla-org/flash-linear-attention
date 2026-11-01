@@ -12,10 +12,8 @@ from __future__ import annotations
 import torch
 import triton
 import triton.language as tl
-from triton.runtime import driver
 
 from fla.backends import TritonAscendBackend, register
-from fla.ops.kda.backends.triton_ascend.utils import _SUB_CHUNK, _chunk_size_from
 from fla.ops.kda.chunk_bwd import chunk_kda_bwd_dAv, chunk_kda_bwd_wy_dqkg_fused
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 from fla.ops.utils.graph import get_static_buffer
@@ -24,28 +22,37 @@ from fla.utils import ascend_compile_kwargs, input_guard
 from fla.utils.ascend_ub_manager import (
     ASCEND_MAX_GRID_DIM,
     compute_row_tile_block_size,
+    get_npu_properties,
     max_grid_axis_chunks,
 )
 
-_DAV_NUM_WARPS = 2
-_DAV_MEM_MULT = 8.0
-_DAV_SAFETY_MARGIN = 0.75
-_DAV_FALLBACK_TILE = 8
-_DAV_MAX_TILE = 64
+DAV_NUM_WARPS = 2
+DAV_MEM_MULT = 8.0
+DAV_SAFETY_MARGIN = 0.75
+DAV_FALLBACK_TILE = 8
+DAV_MAX_TILE = 64
+
+SUB_CHUNK_SIZE = 16
+BWD_MEM_MULT = 10.0
+SAFETY_MARGIN = 0.80
+FALLBACK_TILE = 16
+MAX_TILE = 128
 
 
-def _get_dAv_bv(BT: int, V: int) -> int:
+def get_dav_bv(BT: int, V: int) -> int:
     return compute_row_tile_block_size(
-        BT, V, _DAV_MEM_MULT,
+        row_dim=BT,
+        fixed_dim=V,
+        memory_multiplier=DAV_MEM_MULT,
         tiling_row=False,
-        safety_margin=_DAV_SAFETY_MARGIN,
-        fallback=_DAV_FALLBACK_TILE,
+        safety_margin=DAV_SAFETY_MARGIN,
+        fallback=DAV_FALLBACK_TILE,
         min_block=8,
-        max_block=min(_DAV_MAX_TILE, triton.next_power_of_2(V)),
+        max_block=min(DAV_MAX_TILE, triton.next_power_of_2(V)),
     )
 
 
-def _launch_dAv_2d_kernel(kernel, *, nt: int, bh_total: int, kernel_kwargs: dict) -> None:
+def launch_dav_kernel(kernel, *, nt: int, bh_total: int, kernel_kwargs: dict) -> None:
     max_nt = max_grid_axis_chunks(nt, bh_total, max_grid=ASCEND_MAX_GRID_DIM)
     for nt_off in range(0, nt, max_nt):
         nt_len = min(max_nt, nt - nt_off)
@@ -54,7 +61,83 @@ def _launch_dAv_2d_kernel(kernel, *, nt: int, bh_total: int, kernel_kwargs: dict
         for bh_off in range(0, bh_total, max_bh):
             bh_len = min(max_bh, bh_total - bh_off)
             kernel_kwargs['BH_OFFSET'] = bh_off
-            kernel[(nt_len, bh_len)](num_warps=_DAV_NUM_WARPS, **kernel_kwargs)
+            kernel[(nt_len, bh_len)](num_warps=DAV_NUM_WARPS, **kernel_kwargs)
+
+
+def get_bwd_bk(K: int) -> int:
+    return compute_row_tile_block_size(
+        row_dim=SUB_CHUNK_SIZE,
+        fixed_dim=K,
+        memory_multiplier=BWD_MEM_MULT,
+        tiling_row=False,
+        safety_margin=SAFETY_MARGIN,
+        fallback=FALLBACK_TILE,
+        min_block=16,
+        max_block=min(MAX_TILE, triton.next_power_of_2(K)),
+    )
+
+
+def prepare_k_major_state(state: torch.Tensor, name: str, use_graph: bool) -> torch.Tensor:
+    """Return ``state`` as ``[..., K, V]``. The input is ``[..., V, K]``."""
+    transposed = state.transpose(-1, -2)
+    if not use_graph:
+        return transposed.contiguous()
+    buf = get_static_buffer(name, tuple(transposed.shape), state.dtype, state.device)
+    return buf.copy_(transposed)
+
+
+def get_bwd_bv(V: int) -> int:
+    return compute_row_tile_block_size(
+        row_dim=SUB_CHUNK_SIZE,
+        fixed_dim=V,
+        memory_multiplier=BWD_MEM_MULT,
+        tiling_row=False,
+        safety_margin=SAFETY_MARGIN,
+        fallback=FALLBACK_TILE,
+        min_block=16,
+        max_block=min(MAX_TILE, triton.next_power_of_2(V)),
+    )
+
+
+def prepare_time_contiguous_input(x: torch.Tensor, head_dim: int) -> tuple[torch.Tensor, bool]:
+    """Transpose [B, T, H*, ...] → [B, H*, T, ...] so T-loads are stride-1."""
+    if head_dim == 1:
+        return x, False
+    return x.transpose(1, 2).contiguous(), True
+
+
+def launch_wy_da_finalize(
+    kernel,
+    *,
+    nt: int,
+    bh_total: int,
+    T: int,
+    BT: int,
+    is_varlen: bool,
+    num_core: int,
+    kernel_kwargs: dict,
+) -> None:
+    """Host-split aligned bulk vs tail so TAIL_MODE is constexpr per launch."""
+    kwargs = dict(kernel_kwargs)
+    kwargs['num_core'] = num_core
+    kwargs.update(ascend_compile_kwargs())
+    if is_varlen:
+        kwargs['TAIL_MODE'] = 1
+        kwargs['NT_OFFSET'] = 0
+        kwargs['task_num'] = nt * bh_total
+        kernel[(num_core,)](**kwargs)
+        return
+    n_bulk = nt if T % BT == 0 else max(nt - 1, 0)
+    if n_bulk > 0:
+        kwargs['TAIL_MODE'] = 0
+        kwargs['NT_OFFSET'] = 0
+        kwargs['task_num'] = n_bulk * bh_total
+        kernel[(num_core,)](**kwargs)
+    if T % BT != 0 and nt > 0:
+        kwargs['TAIL_MODE'] = 1
+        kwargs['NT_OFFSET'] = n_bulk
+        kwargs['task_num'] = bh_total
+        kernel[(num_core,)](**kwargs)
 
 
 @triton.jit(do_not_specialize=['T'])
@@ -118,150 +201,6 @@ def chunk_kda_bwd_kernel_dAv_npu(
     p_dA = tl.make_block_ptr(dA, (T, BT), (HV * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
     b_dA = tl.where(o_t[:, None] >= o_t, b_dA * scale, 0.)
     tl.store(p_dA, b_dA.to(p_dA.dtype.element_ty), boundary_check=(0, 1))
-
-
-@register(chunk_kda_bwd_dAv, backend=TritonAscendBackend)
-@input_guard
-def chunk_kda_bwd_dAv_npu(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    do: torch.Tensor,
-    A: torch.Tensor | None = None,
-    scale: float = None,
-    cu_seqlens: torch.LongTensor | None = None,
-    chunk_size: int = 64,
-    chunk_indices: torch.LongTensor | None = None,
-    use_graph: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    B, T, HV, V = k.shape[0], k.shape[1], do.shape[2], do.shape[-1]
-    BT = chunk_size
-    if chunk_indices is None and cu_seqlens is not None:
-        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
-    BV = _get_dAv_bv(BT, V)
-    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
-
-    if use_graph:
-        dA = get_static_buffer("dAv_dA", (B, T, HV, BT), torch.float, v.device, zero=True)
-        dv = get_static_buffer("dAv_dv", tuple(do.shape), do.dtype, do.device, zero=True)
-    else:
-        dA = v.new_empty(B, T, HV, BT, dtype=torch.float)
-        # dv stays zero-initialized on Ascend eager as well: boundary_check stores
-        # can read-modify-write destination lanes of NaN-poisoned empty buffers.
-        dv = torch.zeros_like(do)
-
-    _launch_dAv_2d_kernel(
-        chunk_kda_bwd_kernel_dAv_npu,
-        nt=NT,
-        bh_total=B * HV,
-        kernel_kwargs=dict(
-            v=v,
-            A=A,
-            do=do,
-            dv=dv,
-            dA=dA,
-            cu_seqlens=cu_seqlens,
-            chunk_indices=chunk_indices,
-            scale=scale,
-            T=T,
-            HV=HV,
-            V=V,
-            BT=BT,
-            BV=BV,
-            IS_VARLEN=cu_seqlens is not None,
-            USE_GRAPH=use_graph,
-            NT_OFFSET=0,
-            BH_OFFSET=0,
-        ),
-    )
-    return dA, dv
-
-
-_BC = 16
-_BWD_MEM_MULT = 10.0
-_SAFETY_MARGIN = 0.80
-_FALLBACK_TILE = 16
-_MAX_TILE = 128
-
-
-def _get_bk(K: int) -> int:
-    return compute_row_tile_block_size(
-        _BC,
-        K,
-        _BWD_MEM_MULT,
-        tiling_row=False,
-        safety_margin=_SAFETY_MARGIN,
-        fallback=_FALLBACK_TILE,
-        min_block=16,
-        max_block=min(_MAX_TILE, triton.next_power_of_2(K)),
-    )
-
-
-def _k_major_state(state: torch.Tensor, name: str, use_graph: bool) -> torch.Tensor:
-    """Return ``state`` as ``[..., K, V]``. The input is ``[..., V, K]``."""
-    transposed = state.transpose(-1, -2)
-    if not use_graph:
-        return transposed.contiguous()
-    buf = get_static_buffer(name, tuple(transposed.shape), state.dtype, state.device)
-    return buf.copy_(transposed)
-
-
-def _get_bv(V: int) -> int:
-    return compute_row_tile_block_size(
-        _BC,
-        V,
-        _BWD_MEM_MULT,
-        tiling_row=False,
-        safety_margin=_SAFETY_MARGIN,
-        fallback=_FALLBACK_TILE,
-        min_block=16,
-        max_block=min(_MAX_TILE, triton.next_power_of_2(V)),
-    )
-
-
-def _t_contig_arg(x: torch.Tensor, head_dim: int) -> tuple[torch.Tensor, bool]:
-    """Transpose [B, T, H*, ...] → [B, H*, T, ...] so T-loads are stride-1."""
-    if head_dim == 1:
-        return x, False
-    return x.transpose(1, 2).contiguous(), True
-
-
-def get_npu_properties():
-    device = torch.npu.current_device()
-    return driver.active.utils.get_device_properties(device)
-
-
-def _launch_wy_dA_finalize(
-    kernel,
-    *,
-    nt: int,
-    bh_total: int,
-    T: int,
-    BT: int,
-    is_varlen: bool,
-    num_core: int,
-    kernel_kwargs: dict,
-) -> None:
-    """Host-split aligned bulk vs tail so TAIL_MODE is constexpr per launch."""
-    kwargs = dict(kernel_kwargs)
-    kwargs['num_core'] = num_core
-    if is_varlen:
-        kwargs['TAIL_MODE'] = 1
-        kwargs['NT_OFFSET'] = 0
-        kwargs['task_num'] = nt * bh_total
-        kernel[(num_core,)](**kwargs)
-        return
-    n_bulk = nt if T % BT == 0 else max(nt - 1, 0)
-    if n_bulk > 0:
-        kwargs['TAIL_MODE'] = 0
-        kwargs['NT_OFFSET'] = 0
-        kwargs['task_num'] = n_bulk * bh_total
-        kernel[(num_core,)](**kwargs)
-    if T % BT != 0 and nt > 0:
-        kwargs['TAIL_MODE'] = 1
-        kwargs['NT_OFFSET'] = n_bulk
-        kwargs['task_num'] = bh_total
-        kernel[(num_core,)](**kwargs)
 
 
 @triton.jit(do_not_specialize=['T', 'task_num', 'num_core', 'BH'])
@@ -771,15 +710,87 @@ def chunk_kda_bwd_kernel_wy_dA_finalize_npu(
                 tl.store(p_db, tl.load(p_db_acc, boundary_check=(0,)).to(p_db.dtype.element_ty), boundary_check=(0,))
 
 
-def _verify_subchunk_aligned(args, kwargs):
-    chunk_size = _chunk_size_from(args, kwargs)
-    if chunk_size % _SUB_CHUNK != 0:
-        return False, f'KDA Ascend bwd requires chunk_size % {_SUB_CHUNK} == 0, got {chunk_size}'
+@register(chunk_kda_bwd_dAv, backend=TritonAscendBackend)
+@input_guard
+def chunk_kda_bwd_dAv_npu(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    do: torch.Tensor,
+    A: torch.Tensor | None = None,
+    scale: float = None,
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_size: int = 64,
+    chunk_indices: torch.LongTensor | None = None,
+    use_graph: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    B, T, HV, V = k.shape[0], k.shape[1], do.shape[2], do.shape[-1]
+    BT = chunk_size
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
+    BV = get_dav_bv(BT, V)
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
+
+    if use_graph:
+        dA = get_static_buffer("dAv_dA", (B, T, HV, BT), torch.float, v.device, zero=True)
+        dv = get_static_buffer("dAv_dv", tuple(do.shape), do.dtype, do.device, zero=True)
+    else:
+        dA = v.new_empty(B, T, HV, BT, dtype=torch.float)
+        # dv stays zero-initialized on Ascend eager as well: boundary_check stores
+        # can read-modify-write destination lanes of NaN-poisoned empty buffers.
+        dv = torch.zeros_like(do)
+
+    launch_dav_kernel(
+        chunk_kda_bwd_kernel_dAv_npu,
+        nt=NT,
+        bh_total=B * HV,
+        kernel_kwargs=dict(
+            v=v,
+            A=A,
+            do=do,
+            dv=dv,
+            dA=dA,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+            scale=scale,
+            T=T,
+            HV=HV,
+            V=V,
+            BT=BT,
+            BV=BV,
+            IS_VARLEN=cu_seqlens is not None,
+            USE_GRAPH=use_graph,
+            NT_OFFSET=0,
+            BH_OFFSET=0,
+        ),
+    )
+    return dA, dv
+
+
+def chunk_kda_bwd_wy_dqkg_fused_verifier(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    v_new: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    A: torch.Tensor,
+    h: torch.Tensor,
+    do: torch.Tensor,
+    dh: torch.Tensor,
+    dv: torch.Tensor,
+    scale: float | None = None,
+    state_v_first: bool = False,
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_size: int = 64,
+    chunk_indices: torch.LongTensor | None = None,
+    chunk_offsets: torch.LongTensor | None = None,
+    use_graph: bool = False,
+) -> tuple[bool, str | None]:
+    chunk_size = 64 if chunk_size is None else int(chunk_size)
+    if chunk_size % SUB_CHUNK_SIZE != 0:
+        return False, f'KDA Ascend bwd requires chunk_size % {SUB_CHUNK_SIZE} == 0, got {chunk_size}'
     return True, None
-
-
-def chunk_kda_bwd_wy_dqkg_fused_verifier(*args, **kwargs):
-    return _verify_subchunk_aligned(args, kwargs)
 
 
 @register(chunk_kda_bwd_wy_dqkg_fused, backend=TritonAscendBackend, verifier=chunk_kda_bwd_wy_dqkg_fused_verifier)
@@ -806,8 +817,8 @@ def chunk_kda_bwd_wy_dqkg_fused_npu(
 ):
     B, T, H, K, HV, V = *k.shape, v.shape[2], v.shape[-1]
     BT = chunk_size
-    if BT % _BC != 0:
-        raise ValueError(f'KDA Ascend bwd requires chunk_size % {_BC} == 0, got {BT}')
+    if BT % SUB_CHUNK_SIZE != 0:
+        raise ValueError(f'KDA Ascend bwd requires chunk_size % {SUB_CHUNK_SIZE} == 0, got {BT}')
 
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
@@ -830,23 +841,23 @@ def chunk_kda_bwd_wy_dqkg_fused_npu(
     dA_acc = torch.zeros(B, T, HV, BT, dtype=torch.float, device=A.device)
     db_acc = torch.zeros(B, T, HV, dtype=torch.float, device=beta.device)
 
-    BK = _get_bk(K)
-    BV = _get_bv(V)
+    BK = get_bwd_bk(K)
+    BV = get_bwd_bv(V)
     # v-first [V, K] leaves the dot reduction axis strided, and that layout
     # conversion does not fit the 192KB UB. h and dh are read-only here.
     if state_v_first:
-        h = _k_major_state(h, "wy_h_kmajor", use_graph)
-        dh = _k_major_state(dh, "wy_dh_kmajor", use_graph)
+        h = prepare_k_major_state(h, "wy_h_kmajor", use_graph)
+        dh = prepare_k_major_state(dh, "wy_dh_kmajor", use_graph)
         state_v_first = False
     NK = triton.cdiv(K, BK)
     is_varlen = cu_seqlens is not None
     if chunk_offsets is None:
         chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT) if is_varlen else g.new_zeros(1, dtype=torch.int64)
 
-    v_arg, g_t_contig = _t_contig_arg(v, HV)
-    beta_arg = _t_contig_arg(beta, HV)[0]
-    A_arg = _t_contig_arg(A, HV)[0]
-    dv_arg = _t_contig_arg(dv, HV)[0]
+    v_arg, g_t_contig = prepare_time_contiguous_input(v, HV)
+    beta_arg = prepare_time_contiguous_input(beta, HV)[0]
+    A_arg = prepare_time_contiguous_input(A, HV)[0]
+    dv_arg = prepare_time_contiguous_input(dv, HV)[0]
 
     bh_total = B * HV
     num_core = get_npu_properties()['num_vectorcore']
@@ -900,8 +911,8 @@ def chunk_kda_bwd_wy_dqkg_fused_npu(
         K=K,
         V=V,
         BT=BT,
-        # BC=32 exceeds the UB budget sized for _BC and fails to compile.
-        BC=_BC,
+        # BC=32 exceeds the UB budget sized for SUB_CHUNK_SIZE and fails to compile.
+        BC=SUB_CHUNK_SIZE,
         BK=BK,
         BV=BV,
         STATE_V_FIRST=state_v_first,
@@ -910,10 +921,10 @@ def chunk_kda_bwd_wy_dqkg_fused_npu(
     )
     for k_off in range(NK):
         k_part_kwargs['K_OFFSET'] = k_off
-        chunk_kda_bwd_kernel_wy_k_part_npu[(num_core,)](**k_part_kwargs)
+        chunk_kda_bwd_kernel_wy_k_part_npu[(num_core,)](**k_part_kwargs, **ascend_compile_kwargs())
 
-    k_arg, k_t_contig = _t_contig_arg(k, H)
-    g_arg, g_t_contig = _t_contig_arg(g, HV)
+    k_arg, k_t_contig = prepare_time_contiguous_input(k, H)
+    g_arg, g_t_contig = prepare_time_contiguous_input(g, HV)
     dw_kwargs = dict(
         k=k_arg,
         g=g_arg,
@@ -947,9 +958,9 @@ def chunk_kda_bwd_wy_dqkg_fused_npu(
     )
     for k_off in range(NK):
         dw_kwargs['K_OFFSET'] = k_off
-        chunk_kda_bwd_kernel_wy_dw_part_npu[(num_core,)](**dw_kwargs)
+        chunk_kda_bwd_kernel_wy_dw_part_npu[(num_core,)](**dw_kwargs, **ascend_compile_kwargs())
 
-    _launch_wy_dA_finalize(
+    launch_wy_da_finalize(
         chunk_kda_bwd_kernel_wy_dA_finalize_npu,
         nt=NT,
         bh_total=bh_total,

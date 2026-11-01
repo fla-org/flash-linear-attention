@@ -497,10 +497,9 @@ def chunk_atk_bwd(
     gg = torch.zeros_like(g_raw, dtype=torch.float32)
     gbeta = torch.zeros_like(beta, dtype=torch.float32)
     gac_prev = torch.zeros_like(ac, dtype=torch.float32)
+    dh0 = torch.zeros(N, H, K, device=k.device, dtype=torch.float32) if initial_A_state is not None else None
     if dat is not None:
-        # The final ATK state `at` equals `ac[:, last_chunk]`, so its incoming
-        # gradient enters the reverse scan as the carry at the final chunk;
-        # `gac_prev[:, last_chunk]` is never written by the local-backward kernel.
+        # non-empty final-state gradients enter the reverse scan at the last chunk
         if cu_seqlens is None:
             gac_prev[:, NT - 1] += dat
         else:
@@ -509,7 +508,8 @@ def chunk_atk_bwd(
             valid = seqlens > 0
             idx = torch.arange(N, device=k.device)
             gac_prev[idx[valid], last_chunk[valid]] += dat[valid]
-    dh0 = torch.zeros(N, H, K, device=k.device, dtype=torch.float32) if initial_A_state is not None else None
+            if dh0 is not None:
+                dh0 += dat.masked_fill(valid[:, None, None], 0)
     ga = torch.empty_like(a, dtype=torch.float32)
     gsa = torch.empty_like(sa, dtype=torch.float32)
 

@@ -5,8 +5,8 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from .chunk import chunk_dplr_delta_rule
-from .fused_recurrent import fused_recurrent_dplr_delta_rule
+from fla.ops.generalized_delta_rule.dplr.chunk import chunk_dplr_delta_rule
+from fla.ops.generalized_delta_rule.dplr.fused_recurrent import fused_recurrent_dplr_delta_rule
 
 __all__ = [
     'chunk_dplr_delta_rule',
@@ -14,4 +14,4 @@ __all__ = [
 ]
 
 
-from fla.ops.generalized_delta_rule.dplr import backends  # noqa: F401
+from fla.ops.generalized_delta_rule.dplr.backends import tilelang  # noqa: F401

@@ -255,7 +255,7 @@ def chunk_gdn2_bwd_kernel_wy_dqkg_fused(
     tl.store(p_dA, b_dA.to(p_dA.dtype.element_ty), mask=m_dA)
 
 
-@dispatch
+@dispatch('gdn2')
 def chunk_gdn2_bwd_wy_dqkg_fused(
     q: torch.Tensor,
     k: torch.Tensor,

@@ -12,11 +12,9 @@ from __future__ import annotations
 import torch
 import triton
 import triton.language as tl
-from triton.runtime import driver
 
 from fla.backends import TritonAscendBackend, register
-from fla.ops.kda.backends.triton_ascend.utils import _verify_intra_chunk_size
-from fla.ops.kda.backends.triton_ascend.wy_fast import recompute_w_u_fwd_kda_npu as _recompute_w_u_fwd_npu
+from fla.ops.kda.backends.triton_ascend import wy_fast
 from fla.ops.kda.chunk_intra import chunk_kda_bwd_intra, chunk_kda_fwd_intra
 from fla.ops.kda.chunk_intra_token_parallel import chunk_kda_fwd_intra_token_parallel
 from fla.ops.utils import prepare_chunk_indices
@@ -26,45 +24,42 @@ from fla.utils import ascend_compile_kwargs, input_guard
 from fla.utils.ascend_ub_manager import (
     ASCEND_MAX_GRID_DIM,
     compute_row_tile_block_size,
+    get_npu_properties,
     max_grid_axis_chunks,
 )
 
-_BC = 32
-_NUM_WARPS_SUB = 2
-_NUM_WARPS_INTER = 2
+SUB_CHUNK_SIZE = 32
+NUM_WARPS_SUB = 2
+NUM_WARPS_INTER = 2
 # live-tile count scales with NC: BC=32/NC=2 holds half the tiles of the stock
 # BC=16/NC=4 layout (one rhs pair + q/k/g rows instead of three pairs), so the
 # stock 14.0 budget halves to 7.0 while keeping BK at 128.
-_INTER_MEM_MULT = 7.0
-_SAFETY_MARGIN = 0.80
-_FALLBACK_BK = 16
-_MAX_INTER_BK = 128
+INTER_MEM_MULT = 7.0
+SAFETY_MARGIN = 0.80
+FALLBACK_BK = 16
+MAX_INTER_BK = 128
 # limit programs per launch to stay within Ascend AICore task time.
-_KDA_LAUNCH_BLOCK_BUDGET = 4096
+KDA_LAUNCH_BLOCK_BUDGET = 4096
 
 
 # disable auto-multi-buffer and AutoBlockify on the fused inter launch
-_INTER_COMPILE_KWARGS = ascend_compile_kwargs(blacklist_auto_blockify=True)
+INTER_COMPILE_KWARGS = ascend_compile_kwargs(blacklist_auto_blockify=True)
 
 
-def _get_inter_bk(K: int) -> int:
+def get_inter_bk(K: int) -> int:
     return compute_row_tile_block_size(
-        _BC,
-        K,
-        _INTER_MEM_MULT,
+        row_dim=SUB_CHUNK_SIZE,
+        fixed_dim=K,
+        memory_multiplier=INTER_MEM_MULT,
         tiling_row=False,
-        safety_margin=_SAFETY_MARGIN,
-        fallback=_FALLBACK_BK,
+        safety_margin=SAFETY_MARGIN,
+        fallback=FALLBACK_BK,
         min_block=16,
-        max_block=min(_MAX_INTER_BK, triton.next_power_of_2(K)),
+        max_block=min(MAX_INTER_BK, triton.next_power_of_2(K)),
     )
 
 
-def _recompute_w_u_fwd(*args, **kwargs):
-    return _recompute_w_u_fwd_npu(*args, **kwargs)
-
-
-def _launch_sub_chunk_kernel(
+def launch_sub_chunk_kernel(
     kernel,
     *,
     nt: int,
@@ -72,7 +67,7 @@ def _launch_sub_chunk_kernel(
     bh_total: int,
     kernel_kwargs: dict,
 ) -> None:
-    budget = _KDA_LAUNCH_BLOCK_BUDGET
+    budget = KDA_LAUNCH_BLOCK_BUDGET
     chunk_indices = kernel_kwargs.get('chunk_indices')
     cu_seqlens = kernel_kwargs.get('cu_seqlens')
     nt_step = nt if nt * nc * bh_total <= budget else max(1, budget // max(nc * bh_total, 1))
@@ -99,17 +94,17 @@ def _launch_sub_chunk_kernel(
             for bh_off in range(0, bh_total, max_bh):
                 bh_len = min(max_bh, bh_total - bh_off)
                 kernel_kwargs['BH_OFFSET'] = bh_off
-                kernel[(nt_len, nc_len, bh_len)](num_warps=_NUM_WARPS_SUB, **kernel_kwargs)
+                kernel[(nt_len, nc_len, bh_len)](num_warps=NUM_WARPS_SUB, **kernel_kwargs)
 
 
-def _launch_inter_kernel(
+def launch_inter_kernel(
     kernel,
     *,
     nt: int,
     bh_total: int,
     kernel_kwargs: dict,
 ) -> None:
-    budget = _KDA_LAUNCH_BLOCK_BUDGET
+    budget = KDA_LAUNCH_BLOCK_BUDGET
     chunk_indices = kernel_kwargs.get('chunk_indices')
     cu_seqlens = kernel_kwargs.get('cu_seqlens')
     nt_step = nt if nt * bh_total <= budget else max(1, min(nt, budget // max(bh_total, 1)))
@@ -129,9 +124,9 @@ def _launch_inter_kernel(
             bh_len = min(max_bh, bh_total - bh_off)
             kernel_kwargs['BH_OFFSET'] = bh_off
             kernel[(nt_len, bh_len)](
-                num_warps=_NUM_WARPS_INTER,
+                num_warps=NUM_WARPS_INTER,
                 **kernel_kwargs,
-                **_INTER_COMPILE_KWARGS,
+                **INTER_COMPILE_KWARGS,
             )
 
 
@@ -536,165 +531,6 @@ def chunk_kda_fwd_kernel_inter_solve_fused_npu(
         tl.store(p_Akk3 + 3 * BC + o_i[None, :], b_Ai33_c.to(Akk.dtype.element_ty), mask=m_tc3[:, None])
 
 
-def chunk_kda_fwd_intra_verifier(*args, **kwargs):
-    return _verify_intra_chunk_size(args, kwargs)
-
-
-@register(chunk_kda_fwd_intra, backend=TritonAscendBackend, verifier=chunk_kda_fwd_intra_verifier)
-@input_guard
-def chunk_kda_fwd_intra_npu(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    gk: torch.Tensor | None = None,
-    beta: torch.Tensor | None = None,
-    scale: float | None = None,
-    cu_seqlens: torch.LongTensor | None = None,
-    chunk_size: int = 64,
-    chunk_indices: torch.LongTensor | None = None,
-    safe_gate: bool = False,
-    lower_bound: float | None = None,
-    disable_recompute: bool = False,
-    use_graph: bool = False,
-):
-    B, T, H, K, HV = *k.shape, gk.shape[2]
-    BT = chunk_size
-    if BT not in (32, 64):
-        raise ValueError(f"KDA intra chunk kernel only supports chunk_size 32 or 64, got {BT}.")
-    # BC=32 tiles need NC>=2 (chunk_size 32 keeps BC=16).
-    # BC=32 tile envelope: sub BK is next_pow2(K), and [32, 512] sub tiles exceed the
-    # UB budget (compile failure) - keep stock BC=16 for K > 256.
-    BC = _BC if (BT >= 64 and K <= 256) else 16
-    if chunk_indices is None and cu_seqlens is not None:
-        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
-    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
-    NC = triton.cdiv(BT, BC)
-    is_varlen = cu_seqlens is not None
-
-    Aqk = torch.zeros(B, T, HV, BT, device=k.device, dtype=k.dtype)
-    Akk = torch.zeros(B, T, HV, BT, device=k.device, dtype=k.dtype)
-    Akkd = torch.zeros(B, T, HV, BC, device=k.device, dtype=torch.float32)
-
-    if safe_gate:
-        # the UB model for sub tiles is never binding for K<=128 (returns next_pow2(K)
-        # unchanged); for K>128 it would shrink BK to 128 and change the Akkd accumulation
-        # path (fp16 varlen tolerance) - so pin the stock next_pow2 for all K.
-        sub_bk = triton.next_power_of_2(K)
-        _launch_sub_chunk_kernel(
-            chunk_kda_fwd_kernel_intra_sub_chunk_npu,
-            nt=NT,
-            nc=NC,
-            bh_total=B * HV,
-            kernel_kwargs=dict(
-                q=q,
-                k=k,
-                g=gk,
-                beta=beta,
-                Aqk=Aqk,
-                Akk=Akkd,
-                scale=scale,
-                cu_seqlens=cu_seqlens,
-                chunk_indices=chunk_indices,
-                T=T,
-                H=H,
-                HV=HV,
-                K=K,
-                BT=BT,
-                BC=BC,
-                BK=sub_bk,
-                IS_VARLEN=is_varlen,
-                USE_GRAPH=use_graph,
-                NT_OFFSET=0,
-                NC_OFFSET=0,
-                BH_OFFSET=0,
-            ),
-        )
-    else:
-        Aqk, Akkd = chunk_kda_fwd_intra_token_parallel(
-            q=q,
-            k=k,
-            gk=gk,
-            beta=beta,
-            Aqk=Aqk,
-            Akk=Akkd,
-            scale=scale,
-            cu_seqlens=cu_seqlens,
-            chunk_size=BT,
-            sub_chunk_size=BC,
-            use_graph=use_graph,
-        )
-
-    # Invert diagonal Akkd blocks first; inter then only merges off-diagonals.
-    _launch_sub_chunk_kernel(
-        chunk_kda_fwd_kernel_diag_solve_npu,
-        nt=NT,
-        nc=NC,
-        bh_total=B * HV,
-        kernel_kwargs=dict(
-            Akkd=Akkd,
-            cu_seqlens=cu_seqlens,
-            chunk_indices=chunk_indices,
-            T=T,
-            HV=HV,
-            BT=BT,
-            BC=BC,
-            IS_VARLEN=is_varlen,
-            USE_GRAPH=use_graph,
-            NT_OFFSET=0,
-            NC_OFFSET=0,
-            BH_OFFSET=0,
-        ),
-    )
-
-    inter_bk = _get_inter_bk(K)
-    _launch_inter_kernel(
-        chunk_kda_fwd_kernel_inter_solve_fused_npu,
-        nt=NT,
-        bh_total=B * HV,
-        kernel_kwargs=dict(
-            q=q,
-            k=k,
-            g=gk,
-            beta=beta,
-            Aqk=Aqk,
-            Akkd=Akkd,
-            Akk=Akk,
-            scale=scale,
-            cu_seqlens=cu_seqlens,
-            chunk_indices=chunk_indices,
-            T=T,
-            H=H,
-            HV=HV,
-            K=K,
-            BT=BT,
-            BC=BC,
-            NC=NC,
-            BK=inter_bk,
-            IS_VARLEN=is_varlen,
-            USE_GRAPH=use_graph,
-            NT_OFFSET=0,
-            BH_OFFSET=0,
-        ),
-    )
-    w, u, qg, kg = _recompute_w_u_fwd(
-        k=k,
-        v=v,
-        beta=beta,
-        A=Akk,
-        q=q if disable_recompute else None,
-        gk=gk,
-        cu_seqlens=cu_seqlens,
-        chunk_indices=chunk_indices,
-        use_graph=use_graph,
-    )
-    return w, u, qg, kg, Aqk, Akk
-
-
-def get_npu_properties():
-    device = torch.npu.current_device()
-    return driver.active.utils.get_device_properties(device)
-
-
 @triton.jit(do_not_specialize=['B', 'T', 'NT_TOTAL'])
 def chunk_kda_bwd_kernel_intra_npu(
     q,
@@ -933,22 +769,204 @@ def chunk_kda_bwd_kernel_intra_npu(
                 tl.store(p_dg2 + i_ti * (HV * K) + o_i[:, None] * (HV * K) + o_k[None, :], b_dg2, mask=m_ik)
 
 
-def _verify_bwd_intra_k(args, kwargs):
+def chunk_kda_fwd_intra_verifier(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    gk: torch.Tensor | None = None,
+    beta: torch.Tensor | None = None,
+    scale: float | None = None,
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_size: int = 64,
+    chunk_indices: torch.LongTensor | None = None,
+    safe_gate: bool = False,
+    lower_bound: float | None = None,
+    disable_recompute: bool = False,
+    use_graph: bool = False,
+) -> tuple[bool, str | None]:
+    chunk_size = 64 if chunk_size is None else int(chunk_size)
+    if chunk_size not in (32, 64):
+        return False, f'KDA Ascend intra only supports chunk_size in (32, 64), got {chunk_size}'
+    return True, None
+
+
+@register(chunk_kda_fwd_intra, backend=TritonAscendBackend, verifier=chunk_kda_fwd_intra_verifier)
+@input_guard
+def chunk_kda_fwd_intra_npu(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    gk: torch.Tensor | None = None,
+    beta: torch.Tensor | None = None,
+    scale: float | None = None,
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_size: int = 64,
+    chunk_indices: torch.LongTensor | None = None,
+    safe_gate: bool = False,
+    lower_bound: float | None = None,
+    disable_recompute: bool = False,
+    use_graph: bool = False,
+):
+    B, T, H, K, HV = *k.shape, gk.shape[2]
+    BT = chunk_size
+    if BT not in (32, 64):
+        raise ValueError(f"KDA intra chunk kernel only supports chunk_size 32 or 64, got {BT}.")
+    # BC=32 tiles need NC>=2 (chunk_size 32 keeps BC=16).
+    # BC=32 tile envelope: sub BK is next_pow2(K), and [32, 512] sub tiles exceed the
+    # UB budget (compile failure) - keep stock BC=16 for K > 256.
+    BC = SUB_CHUNK_SIZE if (BT >= 64 and K <= 256) else 16
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
+    NC = triton.cdiv(BT, BC)
+    is_varlen = cu_seqlens is not None
+
+    Aqk = torch.zeros(B, T, HV, BT, device=k.device, dtype=k.dtype)
+    Akk = torch.zeros(B, T, HV, BT, device=k.device, dtype=k.dtype)
+    Akkd = torch.zeros(B, T, HV, BC, device=k.device, dtype=torch.float32)
+
+    if safe_gate:
+        # the UB model for sub tiles is never binding for K<=128 (returns next_pow2(K)
+        # unchanged); for K>128 it would shrink BK to 128 and change the Akkd accumulation
+        # path (fp16 varlen tolerance) - so pin the stock next_pow2 for all K.
+        sub_bk = triton.next_power_of_2(K)
+        launch_sub_chunk_kernel(
+            chunk_kda_fwd_kernel_intra_sub_chunk_npu,
+            nt=NT,
+            nc=NC,
+            bh_total=B * HV,
+            kernel_kwargs=dict(
+                q=q,
+                k=k,
+                g=gk,
+                beta=beta,
+                Aqk=Aqk,
+                Akk=Akkd,
+                scale=scale,
+                cu_seqlens=cu_seqlens,
+                chunk_indices=chunk_indices,
+                T=T,
+                H=H,
+                HV=HV,
+                K=K,
+                BT=BT,
+                BC=BC,
+                BK=sub_bk,
+                IS_VARLEN=is_varlen,
+                USE_GRAPH=use_graph,
+                NT_OFFSET=0,
+                NC_OFFSET=0,
+                BH_OFFSET=0,
+            ),
+        )
+    else:
+        Aqk, Akkd = chunk_kda_fwd_intra_token_parallel(
+            q=q,
+            k=k,
+            gk=gk,
+            beta=beta,
+            Aqk=Aqk,
+            Akk=Akkd,
+            scale=scale,
+            cu_seqlens=cu_seqlens,
+            chunk_size=BT,
+            sub_chunk_size=BC,
+            use_graph=use_graph,
+        )
+
+    # Invert diagonal Akkd blocks first; inter then only merges off-diagonals.
+    launch_sub_chunk_kernel(
+        chunk_kda_fwd_kernel_diag_solve_npu,
+        nt=NT,
+        nc=NC,
+        bh_total=B * HV,
+        kernel_kwargs=dict(
+            Akkd=Akkd,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+            T=T,
+            HV=HV,
+            BT=BT,
+            BC=BC,
+            IS_VARLEN=is_varlen,
+            USE_GRAPH=use_graph,
+            NT_OFFSET=0,
+            NC_OFFSET=0,
+            BH_OFFSET=0,
+        ),
+    )
+
+    inter_bk = get_inter_bk(K)
+    launch_inter_kernel(
+        chunk_kda_fwd_kernel_inter_solve_fused_npu,
+        nt=NT,
+        bh_total=B * HV,
+        kernel_kwargs=dict(
+            q=q,
+            k=k,
+            g=gk,
+            beta=beta,
+            Aqk=Aqk,
+            Akkd=Akkd,
+            Akk=Akk,
+            scale=scale,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+            T=T,
+            H=H,
+            HV=HV,
+            K=K,
+            BT=BT,
+            BC=BC,
+            NC=NC,
+            BK=inter_bk,
+            IS_VARLEN=is_varlen,
+            USE_GRAPH=use_graph,
+            NT_OFFSET=0,
+            BH_OFFSET=0,
+        ),
+    )
+    w, u, qg, kg = wy_fast.recompute_w_u_fwd_npu(
+        k=k,
+        v=v,
+        beta=beta,
+        A=Akk,
+        q=q if disable_recompute else None,
+        gk=gk,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        use_graph=use_graph,
+    )
+    return w, u, qg, kg, Aqk, Akk
+
+
+def chunk_kda_bwd_intra_verifier(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    dAqk: torch.Tensor,
+    dAkk: torch.Tensor,
+    dq: torch.Tensor,
+    dk: torch.Tensor,
+    db: torch.Tensor,
+    dg: torch.Tensor,
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
+    chunk_size: int = 64,
+    safe_gate: bool = False,
+    lower_bound: float | None = None,
+    use_graph: bool = False,
+) -> tuple[bool, str | None]:
+    chunk_size = 64 if chunk_size is None else int(chunk_size)
+    if chunk_size not in (32, 64):
+        return False, f'KDA Ascend intra only supports chunk_size in (32, 64), got {chunk_size}'
     # beyond the single-block UB envelope dispatch falls back to the mainline kernel
-    k = args[1] if len(args) > 1 else kwargs['k']
     K = int(k.shape[-1])
-    safe_gate = kwargs.get('safe_gate', False)
     limit = 512 if safe_gate else 256
     if triton.next_power_of_2(K) > limit:
         return False, f'KDA Ascend bwd_intra only supports K <= {limit} with safe_gate={safe_gate}, got K={K}'
     return True, None
-
-
-def chunk_kda_bwd_intra_verifier(*args, **kwargs):
-    ok, reason = _verify_intra_chunk_size(args, kwargs)
-    if not ok:
-        return ok, reason
-    return _verify_bwd_intra_k(args, kwargs)
 
 
 @register(chunk_kda_bwd_intra, backend=TritonAscendBackend, verifier=chunk_kda_bwd_intra_verifier)

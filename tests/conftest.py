@@ -184,9 +184,10 @@ def _guarded_new_empty(self, *args, **kwargs):
 
 @pytest.fixture(scope="function", autouse=True)
 def poison_torch_memory(request):
-    # Only apply the guard to ops and modules tests
+    # guard operator/module tests and the CP tests moved from them
     path = str(request.node.fspath)
-    if 'tests/ops/' not in path and 'tests/modules/' not in path:
+    cp_poisoned = any(path.endswith(f'tests/cp/{name}') for name in ('test_intracard.py', 'test_graph.py'))
+    if 'tests/ops/' not in path and 'tests/modules/' not in path and not cp_poisoned:
         yield
         return
 

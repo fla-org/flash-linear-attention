@@ -104,6 +104,7 @@ def grpo_bwd_kernel(
     completion_mask_ptr,
     lse_ptr,
     beta,
+    save_kl: tl.constexpr,
     B,
     N,
     L,
@@ -137,6 +138,9 @@ def grpo_bwd_kernel(
         logp = x - lse
 
         dlogp = (beta * (-1.0 * exp(ref_logp - logp) + 1) - advantage) * dloss
+        if save_kl:
+            dkl = tl.load(dloss_ptr + tl.cast(B, tl.int64) * L).to(tl.float32)
+            dlogp += (-1.0 * exp(ref_logp - logp) + 1) * dkl
 
         for start_n in tl.range(0, N, BLOCK_SIZE):
             cols = start_n + base_cols
@@ -231,6 +235,7 @@ class GrpoLossNPU(torch.autograd.Function):
                 completion_mask_ptr=completion_mask,
                 lse_ptr=lse,
                 beta=ctx.beta,
+                save_kl=dloss.shape[0] == 2 * B,
                 B=B,
                 N=N,
                 L=L,

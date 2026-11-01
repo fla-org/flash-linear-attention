@@ -5,6 +5,8 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+from fla.backends import TritonAscendBackend
+
 from .chunk import chunk_gla
 from .fused_chunk import fused_chunk_gla
 from .fused_recurrent import fused_recurrent_gla
@@ -16,4 +18,5 @@ __all__ = [
 ]
 
 
-from fla.ops.gla import backends  # noqa: F401
+if TritonAscendBackend.is_available():
+    from fla.ops.gla.backends import triton_ascend  # noqa: F401

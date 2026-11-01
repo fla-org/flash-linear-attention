@@ -120,6 +120,37 @@ def test_generation(
     check_generation(L, B, T, H, D, Mamba2Config, dtype, model=model, config=config)
 
 
+@pytest.mark.skipif(device != 'cuda', reason='Mamba2 fast path requires CUDA')
+def test_mamba2_triton_conv_prefill_and_cached_decode(monkeypatch):
+    pytest.importorskip("mamba_ssm")
+    from fla.layers import mamba2
+    from fla.models.cache_utils import Cache
+
+    monkeypatch.delenv('FLA_CONV_BACKEND', raising=False)
+    torch.manual_seed(42)
+    layer = mamba2.Mamba2(
+        hidden_size=32,
+        num_heads=1,
+        head_dim=64,
+        state_size=16,
+        layer_idx=0,
+        backend='triton',
+    ).to(device=device, dtype=torch.float32).eval()
+    hidden_states = torch.randn(2, 4, 32, device=device)
+
+    results = []
+    for fast_path in (False, True):
+        monkeypatch.setattr(mamba2, 'is_fast_path_available', fast_path)
+        cache = Cache()
+        with torch.no_grad():
+            prefill, _, cache = layer(hidden_states[:, :3], past_key_values=cache, use_cache=True)
+            decode, _, cache = layer(hidden_states[:, 3:], past_key_values=cache, use_cache=True)
+        results.append((prefill, decode, cache[0]['conv_state'], cache[0]['recurrent_state']))
+
+    for actual, reference in zip(results[1], results[0]):
+        torch.testing.assert_close(actual, reference, rtol=1e-4, atol=1e-4)
+
+
 def _copy_params(src, dst):
     """Copy parameters with matching names and shapes from src to dst."""
     dst_dict = dict(dst.named_parameters())

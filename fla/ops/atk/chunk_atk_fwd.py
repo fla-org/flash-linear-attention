@@ -413,7 +413,11 @@ def _atk_fwd_stages(
         if is_varlen:
             seq_lens = [cu_seqlens[i + 1] - cu_seqlens[i] for i in range(N)]
             last_chunk_indices = [triton.cdiv(s.item(), CHUNK_LEN) - 1 for s in seq_lens]
-            at = torch.stack([ac[i, last_chunk_indices[i], :, :] for i in range(N)], dim=0).to(k.dtype)
+            at = torch.stack([
+                ac[i, last_chunk_indices[i]] if last_chunk_indices[i] >= 0 else
+                (initial_A_state[i] if initial_A_state is not None else k.new_zeros(H, D))
+                for i in range(N)
+            ], dim=0).to(k.dtype)
         else:
             at = ac[:, -1, :, :].contiguous().to(k.dtype)
 

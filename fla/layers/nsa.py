@@ -100,7 +100,7 @@ class NativeSparseAttention(nn.Module):
             seqlen_offset = past_key_values.get_seq_length(self.layer_idx)
             max_seqlen = q.shape[1] + seqlen_offset
 
-            if attention_mask is not None:
+            if cu_seqlens is None and attention_mask is not None:
                 # to eliminate the offsets of padding tokens
                 seqlen_offset = seqlen_offset + prepare_lens_from_mask(attention_mask) - attention_mask.shape[-1]
                 max_seqlen = q.shape[1] + max(seqlen_offset)
@@ -123,7 +123,7 @@ class NativeSparseAttention(nn.Module):
                 k = rearrange(k, '... (h d) -> ... h d', d=self.head_dim)
                 v = rearrange(v, '... (h d) -> ... h d', d=self.head_dim)
 
-        if attention_mask is not None:
+        if cu_seqlens is None and attention_mask is not None:
             (q, g), (k, v), indices_q, cu_seqlens, max_seq_lens = unpad_input(
                 (q, g), (k, v), attention_mask, q_len, keepdim=True)
             g_cmp, g_slc, g_swa = g.sigmoid().unbind(-1)

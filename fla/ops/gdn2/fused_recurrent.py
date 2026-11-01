@@ -121,7 +121,7 @@ def fused_recurrent_gdn2_fwd_kernel(
     else:
         bos, eos = i_n * T, i_n * T + T
 
-    if T == 0:
+    if T == 0 and IS_CONTINUOUS_BATCHING:
         return
 
     o_k = i_k * BK + tl.arange(0, BK)
@@ -251,7 +251,7 @@ def fused_recurrent_gdn2_fwd_kernel(
             tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
 
 
-@dispatch
+@dispatch('gdn2')
 def fused_recurrent_gdn2_fwd(
     q: torch.Tensor,
     k: torch.Tensor,

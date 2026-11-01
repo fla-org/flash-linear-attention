@@ -82,6 +82,7 @@ def test_checkpoint(config_class, make_model, tmp_path):
     models.GatedDeltaProductConfig,
     models.GLAConfig,
     models.GSAConfig,
+    models.GSA2Config,
     models.HGRNConfig,
     models.HGRN2Config,
     models.LightNetConfig,
