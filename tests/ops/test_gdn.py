@@ -79,6 +79,8 @@ def test_chunk_bwd_dv_local_blackwell_triton_guard():
             (4, 2048, 4, 4, 64, 0.1, 1, torch.float),
             (2, 1024, 4, 4, 128, 1, 0.1, torch.float16),
             (2, 1024, 4, 8, 128, 1, 10, torch.float16),
+            # single-token decode with grouped value heads
+            (16, 1, 4, 12, 128, 1, 1, torch.float16),
         ]
     ],
 )
@@ -144,6 +146,26 @@ def test_fused_recurrent(
             )
             assert_close(name, ref, tri2, 0.002)
             assert_close(f'{name}_ht', ref_ht, tri2_ht, 0.002)
+
+
+def test_fused_recurrent_default_beta_gva():
+    """`beta=None` must default to ones over the HV value heads; sizing it from
+    q ([B, T, H]) makes the kernel read out of bounds under GVA (HV > H)."""
+    torch.manual_seed(42)
+    B, T, H, HV, D = 2, 64, 2, 4, 64
+    q = torch.randn(B, T, H, D, dtype=torch.float32, device=device)
+    k = F.normalize(torch.randn(B, T, H, D, dtype=torch.float32, device=device), p=2, dim=-1)
+    v = torch.randn(B, T, HV, D, dtype=torch.float32, device=device)
+    g = F.logsigmoid(torch.randn(B, T, HV, dtype=torch.float32, device=device))
+
+    o_default, ht_default = fused_recurrent_gated_delta_rule(
+        q=q, k=k, v=v, g=g, beta=None, output_final_state=True,
+    )
+    o_ones, ht_ones = fused_recurrent_gated_delta_rule(
+        q=q, k=k, v=v, g=g, beta=torch.ones(B, T, HV, dtype=torch.float32, device=device), output_final_state=True,
+    )
+    assert torch.equal(o_default, o_ones)
+    assert torch.equal(ht_default, ht_ones)
 
 
 @pytest.mark.parametrize(

@@ -46,7 +46,7 @@ jobs:
             // Unlike the H100 'npu_only' detection, __init__.py is NOT excluded
             // here: a change to it affects the NPU backend too, so it should
             // trigger this CI.
-            const npuPattern = /^fla\/(.+\/)?backends\/triton_ascend\/|^\.github\/workflows\/ascend-|^pyproject\.toml$|^fla\/backends\.py$|^fla\/utils\/|^fla\/modules\/|^tests\/conftest\.py$/;
+            const npuPattern = /^fla\/(.+\/)?backends\/triton_ascend(\/|\.py$)|^\.github\/workflows\/ascend-|^pyproject\.toml$|^fla\/backends\.py$|^fla\/utils\/|^fla\/modules\/|^tests\/conftest\.py$/;
             const graphPaths = new Set([
               'tests/ops/kda_graph.py',
               'tests/ops/test_kda_graph.py',
@@ -162,10 +162,16 @@ jobs:
             tests/ops/test_gdn2.py \
             tests/ops/test_kda.py \
             tests/ops/test_gla.py \
+            tests/ops/test_oja.py \
             tests/ops/test_attnres.py \
             tests/ops/test_solve_tril.py \
             tests/ops/test_delta.py \
-            tests/ops/test_precond_gated_delta.py
+            tests/ops/test_precond_gated_delta.py \
+            tests/ops/test_wall_attn.py
+
+          pytest -s -v --exitfirst \
+            tests/ops/test_simple_gla.py::test_simple_gla_ascend_verifier \
+            tests/ops/test_simple_gla.py::test_retention_ascend_registration_import_order
 
       - name: Run NPU graph tests serially
         shell: bash

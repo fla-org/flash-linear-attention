@@ -463,7 +463,9 @@ def chunk_atk_bwd_npu(
     gg = torch.zeros_like(g_raw, dtype=torch.float32)
     gbeta = torch.zeros_like(beta, dtype=torch.float32)
     gac_prev = torch.zeros_like(ac, dtype=torch.float32)
+    dh0 = torch.zeros(N, H, K, device=k.device, dtype=torch.float32) if initial_A_state is not None else None
     if dat is not None:
+        # non-empty final-state gradients enter the reverse scan at the last chunk
         if cu_seqlens is None:
             gac_prev[:, NT - 1] += dat
         else:
@@ -472,7 +474,8 @@ def chunk_atk_bwd_npu(
             valid = seqlens > 0
             idx = torch.arange(N, device=k.device)
             gac_prev[idx[valid], last_chunk[valid]] += dat[valid]
-    dh0 = torch.zeros(N, H, K, device=k.device, dtype=torch.float32) if initial_A_state is not None else None
+            if dh0 is not None:
+                dh0 += dat.masked_fill(valid[:, None, None], 0)
     ga = torch.zeros_like(a, dtype=torch.float32)
     gsa = torch.zeros_like(sa, dtype=torch.float32)
 

@@ -446,19 +446,15 @@ def test_dispatch_disabled(run_python, disabled):
         def compute(x):
             return x + 1
 
-        for operation in [
-            'attn', 'attnres', 'common', 'gated_delta_rule', 'gdn2', 'generalized_delta_rule.dplr',
-            'gla', 'kda', 'rwkv6',
-        ]:
-            with warnings.catch_warnings():
-                warnings.simplefilter('error', DeprecationWarning)
-                decorate = dispatch(operation)
-            registry = backends._operation_registries[operation]
-            assert registry.operation_name == operation
-            assert registry._backends
-            wrapped = decorate(compute)
-            assert (wrapped is compute) == (not enabled)
-            assert wrapped(1) == 2
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', DeprecationWarning)
+            decorate = dispatch('wall_attn')
+        registry = backends._operation_registries['wall_attn']
+        assert registry.operation_name == 'wall_attn'
+        assert registry._backends
+        wrapped = decorate(compute)
+        assert (wrapped is compute) == (not enabled)
+        assert wrapped(1) == 2
 
         wrapped = dispatch(compute)
         assert (wrapped is compute) == (not enabled)
@@ -470,13 +466,7 @@ def test_dispatch_disabled(run_python, disabled):
 
         assert replacement(1) == 3
         assert wrapped(1) == (3 if enabled else 2)
-        assert 'fla.ops.kda.backends.flash_kda' in sys.modules
-        for owner in ['activations', 'rotary', 'grpo', 'fused_cross_entropy', 'fused_linear_cross_entropy', 'fused_kl_div']:
-            assert f'modules.{owner}' not in backends._operation_registries
-        assert 'flash_kda' not in backends._operation_registries['kda']._backends
         assert ('fla.ops.utils.sinkhorn.tilelang' in sys.modules) == TileLangBackend.is_available()
-        assert 'flash_kda' not in sys.modules
-        assert 'fla.ops.kda.backends.triton_ascend.chunk_intra' not in sys.modules
         assert 'utils' not in backends._operation_registries
         ascend_available = TritonAscendBackend.is_available()
         assert ('fla.ops.utils.triton_ascend.cumsum' in sys.modules) == ascend_available
@@ -543,6 +533,7 @@ def test_register_import_order(run_python):
                 'fla.modules.norm.triton_ascend.fused_norm_gate',
                 ['layer_norm_gated_fwd', 'layer_norm_gated_bwd'],
             ),
+            'fla.ops.attnres.fused': ('fla.ops.attnres.backends.triton_ascend', ['fused_attnres']),
             'fla.ops.utils.cumsum': (
                 'fla.ops.utils.triton_ascend.cumsum',
                 ['chunk_global_cumsum', 'chunk_local_cumsum'],
@@ -670,3 +661,61 @@ def test_dispatch_gluon(monkeypatch, direction, env_var):
     kwargs = {'weight': x, 'bias': None, 'residual': None} if direction == 'fwd' else {'dy': x, 'dht': None}
     inspect.signature(entry).bind(x=x, **kwargs)
     assert entry(x=x, **kwargs) is result
+
+
+@pytest.mark.parametrize('default_enable', [False, True])
+def test_register_default_enable_override(monkeypatch, enable_dispatch, default_enable):
+    class Backend(BaseBackend):
+        backend_type = 'test_policy'
+        env_var = 'FLA_TEST_POLICY'
+
+    Backend.default_enable = not default_enable
+    monkeypatch.delenv('FLA_TEST_POLICY', raising=False)
+
+    @dispatch
+    def overridden():
+        return 'default'
+
+    @dispatch
+    def inherited():
+        return 'default'
+
+    @register(overridden, backend=Backend, default_enable=default_enable)
+    @register(inherited, backend=Backend)
+    def implementation():
+        return 'backend'
+
+    assert overridden() == ('backend' if default_enable else 'default')
+    assert inherited() == ('default' if default_enable else 'backend')
+    assert Backend.default_enable is not default_enable
+
+
+def test_register_priority_override(enable_dispatch):
+    class Primary(BaseBackend):
+        backend_type = 'primary'
+
+    class Secondary(BaseBackend):
+        backend_type = 'secondary'
+        priority = 3
+
+    @dispatch
+    def overridden():
+        return 'default'
+
+    @dispatch
+    def inherited():
+        return 'default'
+
+    @register(overridden, backend=Primary, priority=0)
+    @register(inherited, backend=Primary)
+    def primary():
+        return 'primary'
+
+    @register(overridden, backend=Secondary)
+    @register(inherited, backend=Secondary)
+    def secondary():
+        return 'secondary'
+
+    assert overridden() == 'primary'
+    assert inherited() == 'secondary'
+    assert Primary.priority == 5

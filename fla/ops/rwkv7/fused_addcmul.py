@@ -58,6 +58,7 @@ def fused_addcmul_fwd_kernel(
     oxr, oxw, oxk, oxv, oxa, oxg,
     use_xg: tl.constexpr,
     T,
+    T_TOTAL,
     T_OFFSET,
     BT: tl.constexpr,
     D: tl.constexpr,
@@ -65,7 +66,7 @@ def fused_addcmul_fwd_kernel(
 ):
     i_b, i_t = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64) * BT
 
-    bos = i_b * (T + T_OFFSET)
+    bos = i_b * T_TOTAL
     t_vec = i_t + T_OFFSET + tl.arange(0, BT)
     mask_t = t_vec < (T + T_OFFSET)
     o_d = tl.arange(0, BD)[None, :]
@@ -127,6 +128,7 @@ def addcmul_bwd_kernel1(
     gx,
     use_xg: tl.constexpr,
     T,
+    T_TOTAL,
     T_OFFSET,
     BT: tl.constexpr,
     D: tl.constexpr,
@@ -142,7 +144,7 @@ def addcmul_bwd_kernel1(
     mask_d = d_idx < D
     mask = mask_t & mask_d
 
-    offset_base = i_b * (T + T_OFFSET) * D
+    offset_base = i_b * T_TOTAL * D
     x_idx = offset_base + t_idx * D + d_idx
 
     b_dxr = tl.load(dxr + x_idx, mask=mask).to(DTYPE)
@@ -196,6 +198,7 @@ def addcmul_bwd1(d_xr, d_xw, d_xk, d_xv, d_xa, d_xg,
             gx=g_delta,
             use_xg=use_xg,
             T=T_SIZE,
+            T_TOTAL=T,
             T_OFFSET=T_OFFSET,
             D=D,
             BD=triton.next_power_of_2(D),
@@ -245,6 +248,7 @@ class Rwkv7FusedAddcmul(torch.autograd.Function):
                 oxr, oxw, oxk, oxv, oxa, oxg,
                 use_xg,
                 T=T_SIZE,
+                T_TOTAL=T,
                 T_OFFSET=T_OFFSET,
                 D=D,
                 BD=triton.next_power_of_2(D),

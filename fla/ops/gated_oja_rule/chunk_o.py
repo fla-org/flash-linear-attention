@@ -11,7 +11,7 @@ import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp, unflatten_program_id
-from fla.utils import check_shared_mem, is_nvidia_hopper
+from fla.utils import autotune_cache_kwargs, check_shared_mem, is_nvidia_hopper
 
 BKV_LIST = [64, 128] if check_shared_mem() else [32, 64]
 NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
@@ -28,7 +28,8 @@ NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
         for num_warps in [2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
-    key=['BT']
+    key=['BT'],
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_oja_fwd_inter(
@@ -93,9 +94,9 @@ def chunk_oja_fwd_inter(
         # [BK, BV]
         b_h = tl.load(p_h, mask=m_kv, other=0.0)
         # [BT, BV]
-        b_o = tl.dot(b_q, b_h, b_o)
+        b_o = tl.dot(b_q.to(b_h.dtype), b_h, b_o)
         # [BT, BT]
-        b_A = tl.dot(b_q, b_k, b_A)
+        b_A = tl.dot(b_q, b_k.to(b_q.dtype), b_A)
     p_g = gv + (bos * H + i_h) * V + o_t[:, None] * (H*V) + o_v[None, :]
     p_o = o + (bos * HQ + i_hq) * V + o_t[:, None] * (HQ*V) + o_v[None, :]
     o_A = tl.arange(0, BT)
@@ -174,7 +175,7 @@ def chunk_oja_fwd_intra(
         b_vg = (b_v * exp(b_gn[None, :] - b_gv)).to(b_v.dtype)
         # [BC, BC]
         b_A = tl.load(p_A, mask=m_A, other=0.0)
-        b_o = tl.dot(b_A, b_vg, b_o)
+        b_o = tl.dot(b_A, b_vg.to(b_A.dtype), b_o)
     # [BC, BV]
     b_g = tl.load(p_g, mask=m_rv, other=0.0)
     b_o *= exp(b_g - b_gn[None, :])
@@ -275,7 +276,8 @@ def chunk_oja_fwd_o(
         triton.Config({}, num_warps=num_warps)
         for num_warps in [2, 4, 8]
     ],
-    key=["BT"]
+    key=["BT"],
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_oja_bwd_kernel_dA(
@@ -338,7 +340,7 @@ def chunk_oja_bwd_kernel_dA(
         b_gv = tl.load(p_gv, mask=m_vj, other=0.0)
         b_vg = (b_v * exp(b_gn[:, None] - b_gv)).to(b_v.dtype)
         # [BC, BC]
-        b_dA = tl.dot(b_do, b_vg)
+        b_dA = tl.dot(b_do, b_vg.to(b_do.dtype))
     elif i_i == i_j:
         o_r = i_t * BT + i_i * BC + tl.arange(0, BC)
         m_rv = (o_r[:, None] < T) & (o_v[None, :] < V)
@@ -426,7 +428,8 @@ def chunk_oja_bwd_dA(
         for num_warps in [2, 4]
         for num_stages in [2, 3, 4]
     ],
-    key=['BT']
+    key=['BT'],
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_oja_bwd_kernel_dqk(
@@ -466,7 +469,7 @@ def chunk_oja_bwd_kernel_dqk(
         NT = tl.cdiv(T, BT)
         i_tg = i_b * NT + i_t
         bos, eos = i_b * T, i_b * T + T
-        all = tl.cast(B * T, tl.int64)
+        all = B * T.to(tl.int64)
 
     o_i = tl.arange(0, BT)
     m_s = o_i[:, None] >= o_i[None, :]
@@ -633,7 +636,8 @@ def chunk_oja_bwd_kernel_dv_o(
         p_do = do + (bos*H+i_h) * V + o_j[:, None] * (H*V) + o_v[None, :]
         # [BC, BV]
         b_g = tl.load(p_g, mask=m_jv, other=0.0)
-        b_do = tl.load(p_do, mask=m_jv, other=0.0) * exp(b_g - b_gn[None, :])
+        # padded rows load g=0, so mask their decay before it can produce 0 * inf
+        b_do = tl.load(p_do, mask=m_jv, other=0.0) * tl.where(m_jv, exp(b_g - b_gn[None, :]), 0.0)
         # [BC, BC]
         b_A = tl.load(p_A, mask=m_A, other=0.0)
         # [BC, BV]
