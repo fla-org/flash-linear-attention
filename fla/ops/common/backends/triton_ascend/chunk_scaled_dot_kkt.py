@@ -13,6 +13,8 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.backends import TritonAscendBackend, register
+from fla.ops.common.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp2
 from fla.utils import input_guard
@@ -121,6 +123,27 @@ def chunk_scaled_dot_kkt_fwd_kernel(
             tl.store(p_A, b_A.to(p_A.dtype.element_ty), mask=m_t[:, None])
 
 
+def chunk_scaled_dot_kkt_fwd_verifier(
+    k,
+    g=None,
+    beta=None,
+    cu_seqlens=None,
+    chunk_size=64,
+    output_dtype=torch.float32,
+    chunk_indices=None,
+) -> tuple[bool, str | None]:
+    from fla.utils import IS_NPU
+    if not IS_NPU:
+        return False, "not running on NPU"
+    if k.device.type != "npu":
+        return False, "input device is not NPU"
+    tensors = (k, beta) if g is None else (k, g, beta)
+    if all(t.dtype in (torch.float32, torch.float16, torch.bfloat16) for t in tensors):
+        return True, None
+    return False, "unsupported dtype for NPU chunk_scaled_dot_kkt_fwd"
+
+
+@register(chunk_scaled_dot_kkt_fwd, backend=TritonAscendBackend, verifier=chunk_scaled_dot_kkt_fwd_verifier)
 @input_guard
 def chunk_scaled_dot_kkt_fwd_npu(
     k: torch.Tensor,

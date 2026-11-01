@@ -424,6 +424,30 @@ register_op(OpConfig(
     test_file='tests/ops/test_gdn2.py',
 ))
 
+
+def l2norm_fp32_transform(t):
+    return F.normalize(t, p=2, dim=-1)
+
+
+register_op(OpConfig(
+    name='chunk_oja2',
+    import_path='fla.ops.gated_oja_rule2',
+    inputs={
+        'q': TensorSpec(shape_BTHD),
+        'k': TensorSpec(shape_BTHD),
+        # the slot code has M = D slots and stays in fp32, as the GSA2 layer feeds it
+        'v': TensorSpec(shape_BTHD, dtype='float32', transform=l2norm_fp32_transform),
+        'gv': TensorSpec(shape_BTHD, dtype='float32', transform=logsigmoid),
+        'b': TensorSpec(shape_BTHD, transform=sigmoid_transform),
+        'c': TensorSpec(shape_BTHD, transform=sigmoid_transform),
+    },
+    func_name='chunk_gated_oja_rule2',
+    extra_kwargs={'use_q_l2norm': True, 'use_k_l2norm': True},
+    category='gate_beta',
+    dim_constraints={'D': [64, 128, 256]},
+    test_file='tests/ops/test_gated_oja_rule2.py',
+))
+
 register_op(OpConfig(
     name='chunk_kda',
     import_path='fla.ops.kda',
@@ -496,6 +520,26 @@ register_op(OpConfig(
     extra_kwargs={'use_qk_l2norm_in_kernel': True, 'output_final_state': True},
     skip_backward=True,
     category='gdn2',
+))
+
+register_op(OpConfig(
+    name='fused_recurrent_oja2',
+    import_path='fla.ops.gated_oja_rule2',
+    inputs={
+        'q': TensorSpec(shape_BTHD),
+        'k': TensorSpec(shape_BTHD),
+        'v': TensorSpec(shape_BTHD, dtype='float32', transform=l2norm_fp32_transform),
+        'gv': TensorSpec(shape_BTHD, dtype='float32', transform=logsigmoid),
+        'b': TensorSpec(shape_BTHD, transform=sigmoid_transform),
+        'c': TensorSpec(shape_BTHD, transform=sigmoid_transform),
+    },
+    func_name='fused_recurrent_gated_oja_rule2',
+    extra_kwargs={'use_q_l2norm': True, 'use_k_l2norm': True, 'output_final_state': True},
+    skip_backward=True,
+    category='oja2',
+    dim_constraints={'D': [64, 128]},
+    default_shapes={f'B4_T{T}_H8_D128': {'B': 4, 'T': T, 'H': 8, 'D': 128} for T in (1, 16, 64)},
+    test_file='tests/ops/test_gated_oja_rule2.py',
 ))
 
 register_op(OpConfig(
