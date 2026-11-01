@@ -315,6 +315,7 @@ def test_chunk_forward(
             (4, 4096, 4, 128, 1, 1, 0, torch.float16),
             (1, 4096, 1, 64, 1, 1, 0, torch.float16),
             (2, 4096, 3, 60, 1, 1, 0, torch.float16),
+            (1, 65, 2, 64, 0.1, 1, 0, torch.float16),
         ]
     ]
 )
@@ -566,3 +567,16 @@ def test_fused_recurrent_default_beta_gva():
     )
     assert torch.equal(o_default, o_ones)
     assert torch.equal(ht_default, ht_ones)
+
+
+def test_chunk_rejects_gva():
+    """The chunk kernels index all inputs by the q/k head count, so HV > H must raise rather than
+    return a tensor with H heads built from mis-strided values."""
+    B, T, H, HV, D = 1, 64, 1, 2, 32
+    q = torch.randn(B, T, H, D, device=device)
+    k = F.normalize(torch.randn(B, T, H, D, device=device), p=2, dim=-1)
+    v = torch.randn(B, T, HV, D, device=device)
+    gv = F.logsigmoid(torch.randn(B, T, HV, D, device=device))
+    beta = torch.rand(B, T, HV, device=device)
+    with pytest.raises(ValueError, match="does not support GVA"):
+        chunk_gated_oja_rule(q=q, k=k, v=v, gv=gv, beta=beta)
