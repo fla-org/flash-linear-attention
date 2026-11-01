@@ -12,7 +12,7 @@ import triton.language as tl
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.op import exp2
-from fla.utils import autotune_cache_kwargs
+from fla.utils import autotune_cache_kwargs, check_shared_mem
 
 
 @triton.heuristics({
@@ -342,8 +342,9 @@ def chunk_gka_solve_bwd(
     dh0 = k.new_empty(N, H, K, K, dtype=torch.float) if output_dh0 else None
 
     if split is None:
-        # the single-launch kernel does not fit in shared memory for float32 with K > 64
-        split = k.dtype == torch.float32 and K > 64
+        # the single-launch kernel does not fit in shared memory for float32 with K > 64, nor at all on GPUs with less
+        # shared memory than Hopper (e.g. 99 KB per block on SM89/SM120)
+        split = (k.dtype == torch.float32 and K > 64) or not check_shared_mem('hopper', k.device.index)
     for part in ((1, 2) if split else (0,)):
         chunk_gka_bwd_kernel_dk_intra[(NT, B * H)](
             k=k,
