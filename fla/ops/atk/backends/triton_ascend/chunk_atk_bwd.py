@@ -16,7 +16,7 @@ import triton
 import triton.language as tl
 
 from fla.backends import TritonAscendBackend, register
-from fla.ops.atk.backends.triton_ascend.utils import atk_verifier
+from fla.ops.atk.backends.triton_ascend.chunk_atk_fwd import atk_verifier
 from fla.ops.atk.chunk_atk_bwd import chunk_atk_bwd
 from fla.ops.utils import prepare_chunk_indices
 from fla.utils.ascend_ub_manager import ASCEND_LAUNCH_BLOCK_BUDGET

@@ -17,7 +17,6 @@ import triton
 import triton.language as tl
 
 from fla.backends import TritonAscendBackend, register
-from fla.ops.atk.backends.triton_ascend.utils import atk_verifier
 from fla.ops.atk.chunk_atk_fwd import chunk_atk_fwd, recompute_atk_fwd
 from fla.ops.utils import prepare_chunk_indices
 from fla.utils.ascend_ub_manager import ASCEND_LAUNCH_BLOCK_BUDGET
@@ -420,6 +419,16 @@ def _atk_fwd_stages_npu(
             at = ac[:, -1, :, :].contiguous().to(k.dtype)
 
     return k_precond.to(k.dtype), ac, a, sa, at
+
+
+def atk_verifier(*args, **kwargs) -> tuple[bool, str | None]:
+    from fla.utils import IS_NPU
+    k = args[0] if args else kwargs.get('k')
+    if not IS_NPU:
+        return False, "not running on NPU"
+    if k is None or getattr(k, 'device', None) is None or k.device.type != "npu":
+        return False, "input device is not NPU"
+    return True, None
 
 
 @register(chunk_atk_fwd, backend=TritonAscendBackend, verifier=atk_verifier)
