@@ -113,8 +113,6 @@ class GLAConfig(AttentionConfigBase, PreTrainedConfig):
                 raise ValueError('attnres_block_size conflicts with residual_mode or residual_kwargs')
             self.residual_kwargs['block_size'] = attnres_block_size
         self.residual_mode = residual_mode
-        if num_hidden_layers < 0:
-            raise ValueError('num_hidden_layers must be non-negative')
 
         validate_loss_config(fuse_cross_entropy=fuse_cross_entropy, fuse_linear_cross_entropy=fuse_linear_cross_entropy)
 

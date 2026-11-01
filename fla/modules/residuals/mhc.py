@@ -21,7 +21,6 @@ class MHCState(NamedTuple):
     """Residual streams of shape `[..., num_streams, hidden_size]` and prepared routing coefficients.
 
     `pre`, `post`, and `mixing` belong to the next sublayer consuming this state.
-    Intermediate hidden-state readouts use its learned stream aggregation without recomputing routing coefficients.
     All coefficients are `None` after the final sublayer's write.
     """
 
@@ -34,18 +33,9 @@ class MHCState(NamedTuple):
 class ManifoldHyperConnection(BaseResidual[MHCState, None]):
     """Learn mHC routing and compose the HC and Sinkhorn operators.
 
-    Routing parameters are shifted one sublayer earlier; normalization parameters stay with their consuming sublayer.
-    Each sublayer except the last owns the routing parameters for the next sublayer.
-    `post` writes with the incoming state's coefficients, then prepares the next coefficients from the updated streams.
-    `pre` and `get_hidden_state` reuse these prepared coefficients; per-call context is `None`.
-    Reentrant checkpointing flattens both the streams and prepared coefficients to preserve their autograd connections.
-
-    The output module owns the first sublayer's routing parameters and uses them in `initialize`.
-    The last sublayer owns no routing parameters and clears the state's coefficients after its write.
-    The output module then averages the final streams and applies its final normalization.
-
-    Routing uses FP32, and HC operators accumulate in FP32 before returning the stream dtype.
-    HC and Sinkhorn require NVIDIA CUDA tensors in FP32, FP16, or BF16.
+    Each sublayer prepares routing for the next one; the output module owns the initial routing.
+    Hidden-state readouts reuse the prepared coefficients and average streams after the last sublayer.
+    Routing uses FP32; HC returns the stream dtype. Supported inputs are NVIDIA CUDA FP32, FP16, and BF16.
     """
 
     def __init__(

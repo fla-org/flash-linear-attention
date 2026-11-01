@@ -17,6 +17,7 @@ from fla.models import (
     DeltaFormerConfig,
     ForgettingTransformerConfig,
     GLAConfig,
+    GLAForCausalLM,
     PaTHAttentionConfig,
 )
 from fla.models.cache_utils import Cache
@@ -167,9 +168,9 @@ def test_prepare_inputs_for_generation_decode_without_cache(preparation_model):
 
 
 @pytest.mark.parametrize('first_iteration', [False, True])
-def test_prepare_inputs_cached(first_iteration, make_model):
+def test_prepare_inputs_cached(first_iteration):
     torch.manual_seed(42)
-    model = make_model(GLAConfig, hidden_size=32, vocab_size=32)
+    model = GLAForCausalLM(GLAConfig(hidden_size=32, num_hidden_layers=0, vocab_size=32, fuse_norm=False))
     cache = Cache()
     cache.update(recurrent_state=torch.zeros(2, 1, 4, 4), offset=4)
     input_ids = torch.arange(14).reshape(2, 7)

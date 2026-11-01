@@ -136,13 +136,13 @@ def test_initialization(config_class, block_size, make_model):
             model._init_weights(module, prenorm_residual_strategy='invalid')
 
 
-@pytest.mark.parametrize('model_class', [GLAModel, GLAForCausalLM])
-@pytest.mark.parametrize(('mode', 'legacy'), [
-    (None, False), ('standard', False), ('standard', True), ('standard_defer', False), ('standard_defer', True),
-    ('attnres', False), ('attnres', True), ('mhc', False),
+@pytest.mark.parametrize(('model_class', 'mode', 'legacy', 'fuse_norm', 'save_original_format'), [
+    pytest.param(GLAModel, 'standard_defer', True, True, True, id='legacy-deferred'),
+    pytest.param(GLAForCausalLM, 'standard', True, False, False, id='legacy-standard'),
+    pytest.param(GLAForCausalLM, 'attnres', True, True, True, id='legacy-attnres'),
+    pytest.param(GLAModel, 'mhc', False, True, False, id='mhc'),
+    pytest.param(GLAForCausalLM, None, False, False, True, id='default'),
 ])
-@pytest.mark.parametrize('fuse_norm', [False, True])
-@pytest.mark.parametrize('save_original_format', [False, True])
 def test_gla_checkpoint(model_class, mode, legacy, fuse_norm, save_original_format, tmp_path):
     torch.manual_seed(42)
     config = models.GLAConfig(

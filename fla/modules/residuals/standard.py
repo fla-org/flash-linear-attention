@@ -11,12 +11,7 @@ from fla.modules.residuals.base import BaseResidual
 
 
 class StandardResidual(BaseResidual[torch.Tensor, None]):
-    """Keep the accumulated residual as a Tensor and add each branch output immediately.
-
-    `pre` normalizes the current state and returns no context; `post` adds the branch output to that state.
-    Addition follows PyTorch dtype promotion rules, with no pending branch stored between sublayers.
-    The output module normalizes the final accumulated Tensor.
-    """
+    """Accumulate branch outputs directly, following PyTorch dtype promotion."""
 
     def initialize(self, x: torch.Tensor) -> torch.Tensor:
         return x

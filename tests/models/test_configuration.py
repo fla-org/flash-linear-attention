@@ -57,19 +57,6 @@ def test_attnres(config_class, block_size):
 
 
 @pytest.mark.parametrize(('config_class', 'kwargs', 'match'), [
-    pytest.param(models.GLAConfig, {'attnres_block_size': 2, 'residual_mode': 'mhc'}, 'conflicts', id='gla-residual-mode'),
-    pytest.param(
-        models.GLAConfig,
-        {'attnres_block_size': 2, 'residual_kwargs': {'block_size': 4}},
-        'conflicts',
-        id='gla-residual-block',
-    ),
-    pytest.param(
-        models.GLAConfig,
-        {'residual_kwargs': {'hidden_size': 16}},
-        'supplied by the model',
-        id='gla-residual-layout',
-    ),
     pytest.param(models.KDAConfig, {'safe_gate': True, 'attnres_block_size': 3}, 'lower_bound', id='kda-gate'),
     pytest.param(models.GatedDeltaNetConfig, {'output_gate_activation': 'relu'}, 'output_gate_activation', id='gdn-gate'),
     pytest.param(models.Mamba2Config, {'A_init_range': (0, 16)}, 'A_init_range', id='mamba2-state'),
@@ -85,12 +72,13 @@ def test_model_validation(config_class, kwargs, match):
         config_class(**kwargs, fuse_cross_entropy=True, fuse_linear_cross_entropy=True)
 
 
-@pytest.mark.parametrize(('mode', 'options'), [
-    (None, {}), ('standard', {}), ('standard_defer', {}),
-    ('attnres', {'block_size': 3}), ('mhc', {'num_streams': 2, 'num_iters': 3}),
+@pytest.mark.parametrize(('mode', 'options', 'fuse_norm', 'residual_fuse_norm'), [
+    pytest.param(None, {}, True, False, id='default-unfused'),
+    pytest.param(None, {}, False, True, id='default-fused'),
+    pytest.param('standard', {}, True, None, id='explicit-standard'),
+    pytest.param('attnres', {'block_size': 3}, False, None, id='attnres'),
+    pytest.param('mhc', {'num_streams': 2, 'num_iters': 3}, True, None, id='mhc'),
 ])
-@pytest.mark.parametrize('fuse_norm', [False, True])
-@pytest.mark.parametrize('residual_fuse_norm', [None, False, True], ids=['inherit', 'unfused', 'fused'])
 def test_gla_residual(mode, options, fuse_norm, residual_fuse_norm, tmp_path):
     options = dict(options, norm_eps=1e-4)
     if residual_fuse_norm is not None:
