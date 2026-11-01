@@ -13,37 +13,41 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.backends import TritonAscendBackend, register
+from fla.ops.gdn2.chunk_intra import chunk_gdn2_fwd_intra
 from fla.ops.gdn2.wy_fast import recompute_w_u_fwd_gdn2
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp2
 from fla.utils import ascend_compile_kwargs, input_guard
 from fla.utils.ascend_ub_manager import compute_row_tile_block_size, iter_axis_launch_chunks
 
-_BC = 16
-_TOKEN_GROUP = 8
-_INTER_MEM_MULT = 18.0
-_SAFETY_MARGIN = 0.80
-_FALLBACK_BK = 16
-_MAX_INTER_BK = 64
-_LAUNCH_BLOCK_BUDGET = 4096
+# the grouped diagonal kernel keeps the padded K dimension in one UB slab.
+MAX_FWD_INTRA_BK = 256
+SUB_CHUNK_SIZE = 16
+TOKEN_GROUP_SIZE = 8
+INTER_MEM_MULT = 18.0
+SAFETY_MARGIN = 0.80
+FALLBACK_BK = 16
+MAX_INTER_BK = 64
+LAUNCH_BLOCK_BUDGET = 4096
 # Disable auto-multi-buffer and AutoBlockify on the inter kernels for CANN 9.1.
-_INTER_COMPILE_KWARGS = ascend_compile_kwargs(blacklist_auto_blockify=True)
+INTER_COMPILE_KWARGS = ascend_compile_kwargs(blacklist_auto_blockify=True)
 
 
-def _get_inter_bk(K: int) -> int:
+def get_inter_bk(K: int) -> int:
     return compute_row_tile_block_size(
-        _BC,
+        SUB_CHUNK_SIZE,
         K,
-        _INTER_MEM_MULT,
+        INTER_MEM_MULT,
         tiling_row=False,
-        safety_margin=_SAFETY_MARGIN,
-        fallback=_FALLBACK_BK,
+        safety_margin=SAFETY_MARGIN,
+        fallback=FALLBACK_BK,
         min_block=16,
-        max_block=min(_MAX_INTER_BK, triton.next_power_of_2(K)),
+        max_block=min(MAX_INTER_BK, triton.next_power_of_2(K)),
     )
 
 
-def _launch_diag_kernel(
+def launch_diag_kernel(
     kernel,
     *,
     nt: int,
@@ -52,7 +56,7 @@ def _launch_diag_kernel(
     kernel_kwargs: dict,
     sync_stream=None,
 ) -> None:
-    budget = _LAUNCH_BLOCK_BUDGET
+    budget = LAUNCH_BLOCK_BUDGET
     chunk_indices = kernel_kwargs.get('chunk_indices')
     cu_seqlens = kernel_kwargs.get('cu_seqlens')
     nt_step = nt if nt * nc * bh_total <= budget else max(1, budget // max(nc * bh_total, 1))
@@ -72,8 +76,8 @@ def _launch_diag_kernel(
                     sync_stream.synchronize()
 
 
-def _launch_inter_kernel(kernel, *, nt: int, bh_total: int, kernel_kwargs: dict) -> None:
-    budget = _LAUNCH_BLOCK_BUDGET
+def launch_inter_kernel(kernel, *, nt: int, bh_total: int, kernel_kwargs: dict) -> None:
+    budget = LAUNCH_BLOCK_BUDGET
     chunk_indices = kernel_kwargs.get('chunk_indices')
     cu_seqlens = kernel_kwargs.get('cu_seqlens')
     nt_step = nt if nt * bh_total <= budget else max(1, budget // max(bh_total, 1))
@@ -86,7 +90,7 @@ def _launch_inter_kernel(kernel, *, nt: int, bh_total: int, kernel_kwargs: dict)
             kernel_kwargs['NT_OFFSET'] = nt_off
         for bh_off, bh_len in iter_axis_launch_chunks(bh_total, nt_len):
             kernel_kwargs['BH_OFFSET'] = bh_off
-            kernel[(nt_len, bh_len)](**kernel_kwargs, **_INTER_COMPILE_KWARGS)
+            kernel[(nt_len, bh_len)](**kernel_kwargs, **INTER_COMPILE_KWARGS)
 
 
 @triton.jit(do_not_specialize=['T', 'NT_OFFSET', 'NC_OFFSET', 'BH_OFFSET'])
@@ -464,6 +468,41 @@ def chunk_gdn2_fwd_kernel_inter_solve_npu(
         tl.store(p_Akk33, b_Ai33_for_store.to(Akk.dtype.element_ty), boundary_check=(0, 1))
 
 
+def chunk_gdn2_fwd_intra_verifier(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    gk: torch.Tensor,
+    b: torch.Tensor,
+    w_gate: torch.Tensor,
+    scale: float,
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_size: int = 64,
+    chunk_indices: torch.LongTensor | None = None,
+    safe_gate: bool = False,
+    lower_bound: float | None = None,
+    disable_recompute: bool = False,
+) -> tuple[bool, str | None]:
+    if chunk_size != 64:
+        return False, f"GDN-2 Ascend intra requires chunk_size=64, got {chunk_size}"
+    K = int(k.shape[-1])
+    BK = triton.next_power_of_2(K)
+    if BK > MAX_FWD_INTRA_BK:
+        return False, (
+            f"GDN-2 Ascend intra requires next_power_of_2(K) <= {MAX_FWD_INTRA_BK} "
+            f"for UB capacity, got K={K} (BK={BK})"
+        )
+    float_tensors = (q, k, v, gk, b, w_gate)
+    tensors = (*float_tensors, *(t for t in (cu_seqlens, chunk_indices) if t is not None))
+    if any(t.device.type != "npu" for t in tensors):
+        return False, "GDN-2 Ascend intra requires NPU tensors"
+    supported = (torch.float16, torch.bfloat16, torch.float32)
+    if any(t.dtype not in supported for t in float_tensors):
+        return False, "GDN-2 Ascend intra received an unsupported dtype"
+    return True, None
+
+
+@register(chunk_gdn2_fwd_intra, backend=TritonAscendBackend, verifier=chunk_gdn2_fwd_intra_verifier)
 @input_guard
 def chunk_gdn2_fwd_intra_npu(
     q: torch.Tensor,
@@ -484,7 +523,7 @@ def chunk_gdn2_fwd_intra_npu(
 
     B, T, H, K = k.shape
     BT = chunk_size
-    BC = _BC
+    BC = SUB_CHUNK_SIZE
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
@@ -499,7 +538,7 @@ def chunk_gdn2_fwd_intra_npu(
     sync_stream = torch.npu.current_stream(k.device)
     use_head_major_intra = not is_varlen
     # serialize split packed launches as well as dense launches to avoid CANN queue stalls.
-    sync_each_launch = use_head_major_intra or NT * NC * B * H > _LAUNCH_BLOCK_BUDGET
+    sync_each_launch = use_head_major_intra or NT * NC * B * H > LAUNCH_BLOCK_BUDGET
     if use_head_major_intra:
         q_intra = q.transpose(1, 2).contiguous()
         k_intra = k.transpose(1, 2).contiguous()
@@ -507,8 +546,8 @@ def chunk_gdn2_fwd_intra_npu(
         b_intra = b.transpose(1, 2).contiguous()
     else:
         q_intra, k_intra, g_intra, b_intra = q, k, gk, b
-    for row_group in range(BC // _TOKEN_GROUP):
-        _launch_diag_kernel(
+    for row_group in range(BC // TOKEN_GROUP_SIZE):
+        launch_diag_kernel(
             chunk_gdn2_fwd_kernel_intra_grouped_npu,
             nt=NT,
             nc=NC,
@@ -530,7 +569,7 @@ def chunk_gdn2_fwd_intra_npu(
                 BT=BT,
                 BC=BC,
                 BK=triton.next_power_of_2(K),
-                BR=_TOKEN_GROUP,
+                BR=TOKEN_GROUP_SIZE,
                 ROW_GROUP=row_group,
                 IS_HEAD_MAJOR=use_head_major_intra,
                 IS_VARLEN=is_varlen,
@@ -543,7 +582,7 @@ def chunk_gdn2_fwd_intra_npu(
             # CANN can stall when the two grouped row kernels are queued together.
             sync_stream.synchronize()
 
-    _launch_diag_kernel(
+    launch_diag_kernel(
         chunk_gdn2_fwd_kernel_diag_solve_npu,
         nt=NT,
         nc=NC,
@@ -577,20 +616,20 @@ def chunk_gdn2_fwd_intra_npu(
         K=K,
         BT=BT,
         BC=BC,
-        BK=_get_inter_bk(K),
+        BK=get_inter_bk(K),
         IS_VARLEN=is_varlen,
         NT_OFFSET=0,
         BH_OFFSET=0,
     )
     for dst_block in range(1, NC):
         for src_block in range(dst_block):
-            _launch_inter_kernel(
+            launch_inter_kernel(
                 chunk_gdn2_fwd_kernel_inter_products_npu,
                 nt=NT,
                 bh_total=B * H,
                 kernel_kwargs=dict(product_kwargs, DST_BLOCK=dst_block, SRC_BLOCK=src_block),
             )
-    _launch_inter_kernel(
+    launch_inter_kernel(
         chunk_gdn2_fwd_kernel_inter_solve_npu,
         nt=NT,
         bh_total=B * H,
