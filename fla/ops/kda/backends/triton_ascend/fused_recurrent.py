@@ -24,41 +24,18 @@ from fla.utils.ascend_ub_manager import (
     max_grid_axis_chunks,
 )
 
-# Peak fp32 live set: b_h[BK,BV] + b_q,b_k,b_g[BK] + b_v,b_o,b_beta[BV].
-RECUR_MEM_MULT = 3.0
-SAFETY_MARGIN = 0.80
-FALLBACK_BV = 32
-MAX_BV = 256
 
-
-def get_recurrent_bv(K: int, V: int) -> int:
-    bk = triton.next_power_of_2(K)
-    return compute_row_tile_block_size(
-        row_dim=bk,
-        fixed_dim=V,
-        memory_multiplier=RECUR_MEM_MULT,
-        tiling_row=False,
-        safety_margin=SAFETY_MARGIN,
-        dtype_size=4,
-        fallback=FALLBACK_BV,
-        min_block=16,
-        max_block=min(MAX_BV, triton.next_power_of_2(V)),
-    )
-
-
-@triton.heuristics(
-    {
-        "USE_INITIAL_STATE": lambda args: args["h0"] is not None,
-        "STORE_FINAL_STATE": lambda args: args["ht"] is not None,
-        "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-        "IS_CONTINUOUS_BATCHING": lambda args: args["ssm_state_indices"] is not None,
-        "IS_SPEC_DECODING": lambda args: args["num_accepted_tokens"] is not None,
-        "HAS_A": lambda args: args["A_log"] is not None,
-        "HAS_BIAS": lambda args: args["dt_bias"] is not None,
-        "USE_LOWER_BOUND": lambda args: args["lower_bound"] is not None,
-    }
-)
-@triton.jit(do_not_specialize=["T", "TASK_OFFSET"])
+@triton.heuristics({
+    "USE_INITIAL_STATE": lambda args: args["h0"] is not None,
+    "STORE_FINAL_STATE": lambda args: args["ht"] is not None,
+    "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
+    "IS_CONTINUOUS_BATCHING": lambda args: args["ssm_state_indices"] is not None,
+    "IS_SPEC_DECODING": lambda args: args["num_accepted_tokens"] is not None,
+    "HAS_A": lambda args: args["A_log"] is not None,
+    "HAS_BIAS": lambda args: args["dt_bias"] is not None,
+    "USE_LOWER_BOUND": lambda args: args["lower_bound"] is not None,
+})
+@triton.jit(do_not_specialize=["T", "task_offset"])
 def fused_recurrent_kda_fwd_kernel_npu(
     q,
     k,
@@ -67,25 +44,25 @@ def fused_recurrent_kda_fwd_kernel_npu(
     beta,
     A_log,
     dt_bias,
-    o,
     h0,
     ht,
+    o,
     cu_seqlens,
     ssm_state_indices,
     num_accepted_tokens,
     lower_bound,
-    scale: tl.constexpr,
     T: tl.int64,
+    task_offset,
     H: tl.constexpr,
     HV: tl.constexpr,
     K: tl.constexpr,
     V: tl.constexpr,
-    BK: tl.constexpr,
-    BV: tl.constexpr,
     stride_init_state_token: tl.constexpr,
     stride_final_state_token: tl.constexpr,
     stride_indices_seq: tl.constexpr,
-    TASK_OFFSET,
+    scale: tl.constexpr,
+    BK: tl.constexpr,
+    BV: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     INPLACE_FINAL_STATE: tl.constexpr,
     IS_BETA_HEADWISE: tl.constexpr,
@@ -102,61 +79,53 @@ def fused_recurrent_kda_fwd_kernel_npu(
     ALLOW_NEG_EIGVAL: tl.constexpr,
     STATE_V_FIRST: tl.constexpr,
 ):
-    task_id = tl.program_id(0) + TASK_OFFSET
+    tl.static_assert(BK >= K)
+    i_task = tl.cast(tl.program_id(0), tl.int64) + task_offset
     NV = tl.cdiv(V, BV)
-    NK = tl.cdiv(K, BK)
-
-    i_k = task_id % NK
-    pid_rest = task_id // NK
-    i_v = pid_rest % NV
-    i_nh = pid_rest // NV
+    i_v = i_task % NV
+    i_nh = i_task // NV
     i_n, i_hv = i_nh // HV, i_nh % HV
     i_h = i_hv // (HV // H)
 
     if IS_VARLEN:
-        bos, eos = (
-            tl.load(cu_seqlens + i_n).to(tl.int64),
-            tl.load(cu_seqlens + i_n + 1).to(tl.int64),
-        )
-        T_cur = (eos - bos).to(tl.int32)
+        bos = tl.load(cu_seqlens + i_n).to(tl.int64)
+        eos = tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = (eos - bos).to(tl.int32)
     else:
-        bos = tl.cast(i_n, tl.int64) * T
-        T_cur = T
+        bos = i_n * T
 
-    if T_cur > 0 or not IS_CONTINUOUS_BATCHING:
-        o_k = i_k * BK + tl.arange(0, BK)
+    if T > 0 or not IS_CONTINUOUS_BATCHING:
+        o_k = tl.arange(0, BK).to(tl.int64)
         o_v = i_v * BV + tl.arange(0, BV)
+        # block-pointer metadata requires int32 tile offsets on Ascend
+        o_v_start = tl.cast(i_v * BV, tl.int32)
 
-        base_qk = (bos * H + i_h) * K
-        base_hv = (bos * HV + i_hv)
+        o_qk = (bos * H + i_h) * K
+        o_hv = bos * HV + i_hv
 
-        p_q = q + base_qk + o_k
-        p_k = k + base_qk + o_k
-        p_v = v + base_hv * V + o_v
+        p_q = q + o_qk + o_k
+        p_k = k + o_qk + o_k
+        p_v = v + o_hv * V + o_v
+        p_g = g + o_hv * K + o_k
+        p_o = o + o_hv * V + o_v
         if IS_BETA_HEADWISE:
-            p_beta = beta + base_hv * V + o_v
+            p_beta = beta + o_hv * V + o_v
         else:
-            p_beta = beta + base_hv
+            p_beta = beta + o_hv
 
-        p_g = g + base_hv * K + o_k
-        p_o = o + base_hv * V + o_v
-
-        mask_k = o_k < K
-        mask_v = o_v < V
+        m_k = o_k < K
+        m_v = o_v < V
         if STATE_V_FIRST:
-            mask_h = mask_v[:, None] & mask_k[None, :]
-        else:
-            mask_h = mask_k[:, None] & mask_v[None, :]
-
-        if STATE_V_FIRST:
+            m_h = m_v[:, None] & m_k[None, :]
             b_h = tl.zeros([BV, BK], dtype=tl.float32)
         else:
+            m_h = m_k[:, None] & m_v[None, :]
             b_h = tl.zeros([BK, BV], dtype=tl.float32)
 
         if USE_GATE_IN_KERNEL:
             b_A = tl.load(A_log + i_hv).to(tl.float32) if HAS_A else 1.0
             if HAS_BIAS:
-                b_bias = tl.load(dt_bias + i_hv * K + o_k, mask=mask_k, other=0).to(tl.float32)
+                b_bias = tl.load(dt_bias + i_hv * K + o_k, mask=m_k, other=0).to(tl.float32)
             else:
                 b_bias = tl.zeros([BK], dtype=tl.float32)
 
@@ -166,35 +135,27 @@ def fused_recurrent_kda_fwd_kernel_npu(
                     i_t0 = tl.load(num_accepted_tokens + i_n).to(tl.int64) - 1
                 else:
                     i_t0 = 0
-                state_base = (
-                    tl.load(ssm_state_indices + i_n * stride_indices_seq + i_t0).to(tl.int64) * stride_init_state_token
-                )
-                p_h0 = h0 + state_base + i_hv * K * V
+                i_h0 = tl.load(ssm_state_indices + i_n * stride_indices_seq + i_t0).to(tl.int64)
+                p_h0 = h0 + i_h0 * stride_init_state_token + i_hv * K * V
             else:
-                p_h0 = h0 + (tl.cast(i_n, tl.int64) * HV + i_hv) * K * V
+                p_h0 = h0 + i_nh * K * V
             if STATE_V_FIRST:
                 p_h0 = p_h0 + o_v[:, None] * K + o_k[None, :]
             else:
                 p_h0 = p_h0 + o_k[:, None] * V + o_v[None, :]
-            b_h += tl.load(p_h0, mask=mask_h, other=0).to(tl.float32)
+            b_h += tl.load(p_h0, mask=m_h, other=0).to(tl.float32)
 
-        stride_qk = H * K
-        stride_hv = HV * V
-        stride_g = HV * K
-        stride_beta_scalar = HV
-        stride_beta_headwise = HV * V
-
-        for i_t in tl.range(0, T_cur):
-            b_q = tl.load(p_q, mask=mask_k, other=0).to(tl.float32)
-            b_k = tl.load(p_k, mask=mask_k, other=0).to(tl.float32)
-            b_v = tl.load(p_v, mask=mask_v, other=0).to(tl.float32)
+        for i_t in tl.range(0, T):
+            b_q = tl.load(p_q, mask=m_k, other=0).to(tl.float32)
+            b_k = tl.load(p_k, mask=m_k, other=0).to(tl.float32)
+            b_v = tl.load(p_v, mask=m_v, other=0).to(tl.float32)
 
             if USE_QK_L2NORM_IN_KERNEL:
                 b_q = b_q * (tl.rsqrt(tl.sum(b_q * b_q) + 1e-6) * scale)
                 b_k = b_k * tl.rsqrt(tl.sum(b_k * b_k) + 1e-6)
             else:
                 b_q = b_q * scale
-            b_g = tl.load(p_g, mask=mask_k, other=0).to(tl.float32)
+            b_g = tl.load(p_g, mask=m_k, other=0).to(tl.float32)
 
             if USE_GATE_IN_KERNEL:
                 b_g = b_g + b_bias
@@ -207,16 +168,13 @@ def fused_recurrent_kda_fwd_kernel_npu(
 
             if STATE_V_FIRST:
                 b_h *= exp(b_gk[None, :])
-            else:
-                b_h *= exp(b_gk[:, None])
-
-            if STATE_V_FIRST:
                 b_v -= tl.sum(b_h * b_k[None, :], 1)
             else:
+                b_h *= exp(b_gk[:, None])
                 b_v -= tl.sum(b_h * b_k[:, None], 0)
 
             if IS_BETA_HEADWISE:
-                b_beta = tl.load(p_beta, mask=mask_v, other=0).to(tl.float32)
+                b_beta = tl.load(p_beta, mask=m_v, other=0).to(tl.float32)
             else:
                 b_beta = tl.load(p_beta).to(tl.float32)
             if APPLY_BETA_SIGMOID:
@@ -231,40 +189,34 @@ def fused_recurrent_kda_fwd_kernel_npu(
             else:
                 b_h += b_k[:, None] * b_v[None, :]
                 b_o = tl.sum(b_h * b_q[:, None], 0)
-            tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=mask_v)
+            tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=m_v)
 
             if IS_CONTINUOUS_BATCHING and STORE_FINAL_STATE:
                 if INPLACE_FINAL_STATE:
-                    state_base = (
-                        tl.load(ssm_state_indices + i_n * stride_indices_seq + i_t).to(tl.int64) * stride_final_state_token
-                    )
-                    p_ht = ht + state_base + i_hv * K * V
+                    i_ht = tl.load(ssm_state_indices + i_n * stride_indices_seq + i_t).to(tl.int64)
+                    p_ht = ht + i_ht * stride_final_state_token + i_hv * K * V
                 else:
                     p_ht = ht + (bos + i_t) * stride_final_state_token + i_hv * K * V
                 if STATE_V_FIRST:
-                    p_ht = tl.make_block_ptr(p_ht, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
+                    p_ht = tl.make_block_ptr(p_ht, (V, K), (K, 1), (o_v_start, 0), (BV, BK), (1, 0))
                 else:
-                    p_ht = tl.make_block_ptr(p_ht, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
+                    p_ht = tl.make_block_ptr(p_ht, (K, V), (V, 1), (0, o_v_start), (BK, BV), (1, 0))
                 tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), boundary_check=(0, 1))
 
-            p_q += stride_qk
-            p_k += stride_qk
-            p_o += stride_hv
-            p_v += stride_hv
-            p_g += stride_g
-            if IS_BETA_HEADWISE:
-                p_beta += stride_beta_headwise
+            p_q += H * K
+            p_k += H * K
+            p_v += HV * V
+            p_g += HV * K
+            p_o += HV * V
+            p_beta += HV * V if IS_BETA_HEADWISE else HV
+
+        if STORE_FINAL_STATE and not IS_CONTINUOUS_BATCHING:
+            p_ht = ht + i_nh * K * V
+            if STATE_V_FIRST:
+                p_ht = tl.make_block_ptr(p_ht, (V, K), (K, 1), (o_v_start, 0), (BV, BK), (1, 0))
             else:
-                p_beta += stride_beta_scalar
-
-        if not IS_CONTINUOUS_BATCHING:
-            if STORE_FINAL_STATE:
-                p_ht = ht + (tl.cast(i_n, tl.int64) * HV + i_hv) * K * V
-                if STATE_V_FIRST:
-                    p_ht = tl.make_block_ptr(p_ht, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
-                else:
-                    p_ht = tl.make_block_ptr(p_ht, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
-                tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), boundary_check=(0, 1))
+                p_ht = tl.make_block_ptr(p_ht, (K, V), (V, 1), (0, o_v_start), (BK, BV), (1, 0))
+            tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), boundary_check=(0, 1))
 
 
 @register(fused_recurrent_kda_fwd, backend=TritonAscendBackend)
@@ -292,81 +244,88 @@ def fused_recurrent_kda_fwd_npu(
     lower_bound: float | None = None,
     out: torch.Tensor | None = None,
     **kwargs,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    if scale is None:
-        scale = k.shape[-1] ** -0.5
-
+) -> tuple[torch.Tensor, torch.Tensor | None]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
-    BK = triton.next_power_of_2(K)
+    if scale is None:
+        scale = K ** -0.5
 
     if initial_state is not None and not initial_state.is_contiguous():
         raise ValueError("`initial_state` must be contiguous")
     if out is None:
-        out = torch.zeros_like(v)
+        o = torch.zeros_like(v)
     else:
         assert out.shape == v.shape
         if not out.is_contiguous():
             raise ValueError("`out` must be contiguous")
+        o = out
     if inplace_final_state:
         assert initial_state is not None
-        final_state = initial_state
+        ht = initial_state
     elif output_final_state:
         num_states = B * T if ssm_state_indices is not None else N
-        if state_v_first:
-            final_state = q.new_empty(num_states, HV, V, K, dtype=torch.float32)
-        else:
-            final_state = q.new_empty(num_states, HV, K, V, dtype=torch.float32)
+        state_shape = (V, K) if state_v_first else (K, V)
+        ht = q.new_empty(num_states, HV, *state_shape, dtype=torch.float32)
     else:
-        final_state = None
+        ht = None
 
     stride_init_state_token = initial_state.stride(0) if initial_state is not None else 1
-    stride_final_state_token = final_state.stride(0) if final_state is not None else 1
-
+    stride_final_state_token = ht.stride(0) if ht is not None else 1
     stride_indices_seq = 1 if ssm_state_indices is None else ssm_state_indices.stride(0)
 
-    BV = get_recurrent_bv(K, V)
-    task_num = triton.cdiv(V, BV) * N * HV
-
-    kernel_kwargs = dict(
-        q=q,
-        k=k,
-        v=v,
-        g=g,
-        beta=beta,
-        A_log=A_log,
-        dt_bias=dt_bias,
-        o=out,
-        h0=initial_state,
-        ht=final_state,
-        cu_seqlens=cu_seqlens,
-        ssm_state_indices=ssm_state_indices,
-        num_accepted_tokens=num_accepted_tokens,
-        lower_bound=lower_bound,
-        scale=scale,
-        T=T,
-        H=H,
-        HV=HV,
-        K=K,
-        V=V,
-        BK=BK,
-        BV=BV,
-        stride_init_state_token=stride_init_state_token,
-        stride_final_state_token=stride_final_state_token,
-        stride_indices_seq=stride_indices_seq,
-        IS_BETA_HEADWISE=beta.ndim == v.ndim,
-        USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
-        INPLACE_FINAL_STATE=inplace_final_state,
-        USE_GATE_IN_KERNEL=use_gate_in_kernel,
-        APPLY_BETA_SIGMOID=use_beta_sigmoid_in_kernel,
-        ALLOW_NEG_EIGVAL=allow_neg_eigval,
-        STATE_V_FIRST=state_v_first,
+    BK = triton.next_power_of_2(K)
+    # budget for the fp32 state [BK, BV] and live query, key, gate, value, output and beta vectors
+    BV = compute_row_tile_block_size(
+        row_dim=BK,
+        fixed_dim=V,
+        memory_multiplier=3.0,
+        tiling_row=False,
+        safety_margin=0.80,
+        dtype_size=4,
+        fallback=32,
+        min_block=16,
+        max_block=min(256, triton.next_power_of_2(V)),
     )
-    max_tasks = max_grid_axis_chunks(task_num, 1, max_grid=ASCEND_MAX_GRID_DIM)
-    for task_off in range(0, task_num, max_tasks):
-        task_len = min(max_tasks, task_num - task_off)
-        kernel_kwargs["TASK_OFFSET"] = task_off
-        fused_recurrent_kda_fwd_kernel_npu[(task_len,)](**ascend_compile_kwargs(), **kernel_kwargs)
+    num_tasks = triton.cdiv(V, BV) * N * HV
+    max_tasks = max_grid_axis_chunks(num_tasks, 1, max_grid=ASCEND_MAX_GRID_DIM)
+    for task_offset in range(0, num_tasks, max_tasks):
+        task_count = min(max_tasks, num_tasks - task_offset)
+        fused_recurrent_kda_fwd_kernel_npu[(task_count,)](
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            A_log=A_log,
+            dt_bias=dt_bias,
+            h0=initial_state,
+            ht=ht,
+            o=o,
+            cu_seqlens=cu_seqlens,
+            ssm_state_indices=ssm_state_indices,
+            num_accepted_tokens=num_accepted_tokens,
+            lower_bound=lower_bound,
+            T=T,
+            task_offset=task_offset,
+            H=H,
+            HV=HV,
+            K=K,
+            V=V,
+            stride_init_state_token=stride_init_state_token,
+            stride_final_state_token=stride_final_state_token,
+            stride_indices_seq=stride_indices_seq,
+            scale=scale,
+            BK=BK,
+            BV=BV,
+            INPLACE_FINAL_STATE=inplace_final_state,
+            IS_BETA_HEADWISE=beta.ndim == v.ndim,
+            USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
+            USE_GATE_IN_KERNEL=use_gate_in_kernel,
+            APPLY_BETA_SIGMOID=use_beta_sigmoid_in_kernel,
+            ALLOW_NEG_EIGVAL=allow_neg_eigval,
+            STATE_V_FIRST=state_v_first,
+            **ascend_compile_kwargs(),
+        )
 
-    return out, final_state
+    return o, ht
