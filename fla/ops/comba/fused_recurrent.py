@@ -10,7 +10,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils.op import exp
-from fla.utils import input_guard
+from fla.utils import IS_NVIDIA_HOPPER, input_guard
 
 
 @triton.heuristics({
@@ -136,7 +136,11 @@ def fused_recurrent_comba_fwd(
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
-    BK, BV = triton.next_power_of_2(K), min(triton.next_power_of_2(V), 8)
+    BK = triton.next_power_of_2(K)
+    # BV = 16 on H100/H200 runs half as many programs per head as BV = 8 and
+    # each program amortizes the q/k/p loads and the gate over twice the columns;
+    # measured 1.1-1.4x faster at decode-like shapes, see fla-org/flash-linear-attention#1609.
+    BV = min(triton.next_power_of_2(V), 16 if IS_NVIDIA_HOPPER else 8)
     NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
     assert NK == 1, "NK > 1 is not supported yet"
     num_stages = 3
