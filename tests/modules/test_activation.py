@@ -530,3 +530,33 @@ def test_activation_layout(shape: tuple[int, ...], strides: tuple[int, ...], nee
         output = alloc_output(x=prepared, contiguous=contiguous)
         assert output.shape == shape
         assert output.is_contiguous()
+
+
+def test_activation_ascend_registration(run_python):
+    run_python(
+        """
+        import importlib
+        import inspect
+        import sys
+
+        from fla import backends
+        from fla.modules import activations
+        from fla.modules.activations import ops
+
+        backends.TritonAscendBackend.is_available = classmethod(lambda cls: True)
+        importlib.reload(activations)
+        implementation = sys.modules['fla.modules.activations.triton_ascend']
+        for name in ('sigmoid_fwd', 'sigmoid_bwd', 'swiglu_fwdbwd', 'swiglu_linear'):
+            entry = getattr(ops, name)
+            registry = backends._function_registries[inspect.unwrap(entry)]
+            target = registry._backends['triton_ascend'].get_implementation(name)
+            assert target is getattr(implementation, name + '_npu')
+            expected = inspect.signature(entry).parameters
+            actual = inspect.signature(target).parameters
+            assert tuple(expected) == tuple(actual)
+            for parameter in expected:
+                assert expected[parameter].kind == actual[parameter].kind
+                assert expected[parameter].default == actual[parameter].default
+        """,
+        FLA_DISABLE_BACKEND_DISPATCH='0',
+    )
