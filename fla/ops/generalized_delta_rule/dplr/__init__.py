@@ -14,4 +14,4 @@ __all__ = [
 ]
 
 
-from fla.ops.generalized_delta_rule.dplr.backends.tilelang import DPLRTileLangBackend  # noqa: F401
+from fla.ops.generalized_delta_rule.dplr.backends import tilelang  # noqa: F401

@@ -14,30 +14,13 @@ import triton
 import triton.language as tl
 
 from fla.backends import TritonAscendBackend, register
-from fla.ops.gated_delta_rule.backends.triton_ascend.wy_fast import (
-    MAX_TILE_BWD,
-    MAX_TILE_BWD_KV,
-    PREPARE_BWD_K_MEM_MULT,
-    PREPARE_BWD_KV_MEM_MULT,
-    allocate_time_buffer,
-    get_gate_base,
-    get_wy_block_size,
-    launch_wy_core_grid,
-    launch_wy_kernel,
-    prepare_beta_input,
-    prepare_gate_input,
-    prepare_wy_repr_bwd_da_dot2_npu,
-    prepare_wy_repr_bwd_da_gate_npu,
-    prepare_wy_repr_bwd_da_mask_dot1_npu,
-    prepare_wy_repr_bwd_kv_npu,
-)
-from fla.ops.precond_gated_delta_rule.backends.triton_ascend.chunk_precond_kkt_fwd import verify_npu_device
+from fla.ops.gated_delta_rule.backends.triton_ascend import wy_fast
 from fla.ops.precond_gated_delta_rule.chunk_precond_wy_bwd import prepare_precond_wy_repr_bwd
 from fla.ops.utils import prepare_chunk_indices
 from fla.utils import ascend_compile_kwargs, input_guard
 
 # Extra k_precond / dk_precond tiles vs the symmetric GDN finalize_k.
-PRECOND_BWD_K_MEM_MULT = PREPARE_BWD_K_MEM_MULT + 1.0
+PRECOND_BWD_K_MEM_MULT = wy_fast.PREPARE_BWD_K_MEM_MULT + 1.0
 
 
 @triton.heuristics({
@@ -73,12 +56,12 @@ def prepare_precond_wy_repr_bwd_finalize_k_npu(
         o_t = i_t * BT + tl.arange(0, BT)
         m_t = o_t < T
         if BETA_T_CONTIG:
-            beta_ptr = get_gate_base(beta, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
+            beta_ptr = wy_fast.get_gate_base(beta, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
             b_b = tl.load(beta_ptr + o_t, mask=m_t, other=0).to(tl.float32)
         else:
             b_b = tl.load(beta + (bos * HV + i_h) + o_t * HV, mask=m_t, other=0).to(tl.float32)
         if DB_T_CONTIG:
-            db_ptr = get_gate_base(db, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
+            db_ptr = wy_fast.get_gate_base(db, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
             b_db = tl.load(db_ptr + o_t, mask=m_t, other=0).to(tl.float32)
         else:
             b_db = tl.load(db + (bos * HV + i_h) + o_t * HV, mask=m_t, other=0).to(tl.float32)
@@ -141,12 +124,12 @@ def prepare_precond_wy_repr_bwd_finalize_a2_dg_npu(
     o_t = i_t * BT + tl.arange(0, BT)
     m_t = o_t < T
     if BETA_T_CONTIG:
-        beta_ptr = get_gate_base(beta, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
+        beta_ptr = wy_fast.get_gate_base(beta, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
         b_b = tl.load(beta_ptr + o_t, mask=m_t, other=0).to(tl.float32)
     else:
         b_b = tl.load(beta + (bos * HV + i_h) + o_t * HV, mask=m_t, other=0).to(tl.float32)
     if DG_T_CONTIG:
-        dg_ptr = get_gate_base(dg, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
+        dg_ptr = wy_fast.get_gate_base(dg, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
     o_i = tl.arange(0, BT)
     b_A_asymm = tl.zeros([BT, BT], dtype=tl.float32)
     i_key = i_h // (HV // H)
@@ -181,7 +164,13 @@ def prepare_precond_wy_repr_bwd_finalize_a2_dg_npu(
 
 
 def prepare_precond_wy_repr_bwd_verifier(k, k_precond, v, *args, **kwargs):
-    return verify_npu_device(k, k_precond, v)
+    from fla.utils import IS_NPU
+    if not IS_NPU:
+        return False, "not running on NPU"
+    for tensor in (k, k_precond, v):
+        if isinstance(tensor, torch.Tensor) and tensor.device.type != "npu":
+            return False, "input device is not NPU"
+    return True, None
 
 
 @register(prepare_precond_wy_repr_bwd, backend=TritonAscendBackend, verifier=prepare_precond_wy_repr_bwd_verifier)
@@ -204,9 +193,9 @@ def prepare_precond_wy_repr_bwd_npu(
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
-    BK = get_wy_block_size(BT, K, PREPARE_BWD_KV_MEM_MULT, MAX_TILE_BWD_KV)
-    BV = get_wy_block_size(BT, V, PREPARE_BWD_KV_MEM_MULT, MAX_TILE_BWD_KV)
-    BK_FIN = get_wy_block_size(BT, K, PRECOND_BWD_K_MEM_MULT, MAX_TILE_BWD)
+    BK = wy_fast.get_wy_block_size(BT, K, wy_fast.PREPARE_BWD_KV_MEM_MULT, wy_fast.MAX_TILE_BWD_KV)
+    BV = wy_fast.get_wy_block_size(BT, V, wy_fast.PREPARE_BWD_KV_MEM_MULT, wy_fast.MAX_TILE_BWD_KV)
+    BK_FIN = wy_fast.get_wy_block_size(BT, K, PRECOND_BWD_K_MEM_MULT, wy_fast.MAX_TILE_BWD)
     use_g = g is not None
     is_varlen = cu_seqlens is not None
     # Shared WY kernels still store with boundary_check, so partial chunks stay zero-filled.
@@ -215,15 +204,15 @@ def prepare_precond_wy_repr_bwd_npu(
     dk = k.new_zeros(B, T, HV, K) if zero_ws else k.new_empty(B, T, HV, K)
     dk_precond = k.new_zeros(B, T, HV, K) if zero_ws else k.new_empty(B, T, HV, K)
     dv = v.new_zeros(B, T, HV, V) if zero_ws else v.new_empty(B, T, HV, V)
-    db, db_t_contig = allocate_time_buffer(B, T, HV, dtype=beta.dtype, device=k.device)
-    beta_arg, beta_t_contig = prepare_beta_input(beta, HV)
+    db, db_t_contig = wy_fast.allocate_time_buffer(B, T, HV, dtype=beta.dtype, device=k.device)
+    beta_arg, beta_t_contig = wy_fast.prepare_beta_input(beta, HV)
     dg, dg_t_contig = None, False
     g_gate, g_t_contig = None, False
     g_k_arg = k
     g_exp_precomp = False
     if use_g:
-        dg, dg_t_contig = allocate_time_buffer(B, T, HV, dtype=g.dtype, device=k.device)
-        g_gate, g_t_contig = prepare_gate_input(g, HV)
+        dg, dg_t_contig = wy_fast.allocate_time_buffer(B, T, HV, dtype=g.dtype, device=k.device)
+        g_gate, g_t_contig = wy_fast.prepare_gate_input(g, HV)
         g_k_arg = g_gate
         if not is_varlen:
             g_k_arg = torch.exp2(g_gate.float()).to(g_gate.dtype)
@@ -242,8 +231,8 @@ def prepare_precond_wy_repr_bwd_npu(
     )
     core_base = dict(B=B, **base)
     task_num = NT * B * HV
-    launch_wy_core_grid(
-        prepare_wy_repr_bwd_kv_npu,
+    wy_fast.launch_wy_core_grid(
+        wy_fast.prepare_wy_repr_bwd_kv_npu,
         task_num=task_num,
         kernel_kwargs=dict(
             k=k,
@@ -273,8 +262,8 @@ def prepare_precond_wy_repr_bwd_npu(
             **core_base,
         ),
     )
-    launch_wy_kernel(
-        prepare_wy_repr_bwd_da_mask_dot1_npu,
+    wy_fast.launch_wy_kernel(
+        wy_fast.prepare_wy_repr_bwd_da_mask_dot1_npu,
         NT=NT,
         bh_total=B * HV,
         kernel_kwargs=dict(
@@ -285,8 +274,8 @@ def prepare_precond_wy_repr_bwd_npu(
             **base,
         ),
     )
-    launch_wy_kernel(
-        prepare_wy_repr_bwd_da_dot2_npu,
+    wy_fast.launch_wy_kernel(
+        wy_fast.prepare_wy_repr_bwd_da_dot2_npu,
         NT=NT,
         bh_total=B * HV,
         kernel_kwargs=dict(
@@ -298,8 +287,8 @@ def prepare_precond_wy_repr_bwd_npu(
         ),
     )
     if use_g:
-        launch_wy_kernel(
-            prepare_wy_repr_bwd_da_gate_npu,
+        wy_fast.launch_wy_kernel(
+            wy_fast.prepare_wy_repr_bwd_da_gate_npu,
             NT=NT,
             bh_total=B * HV,
             kernel_kwargs=dict(
@@ -310,7 +299,7 @@ def prepare_precond_wy_repr_bwd_npu(
                 **base,
             ),
         )
-    launch_wy_core_grid(
+    wy_fast.launch_wy_core_grid(
         prepare_precond_wy_repr_bwd_finalize_k_npu,
         task_num=task_num,
         kernel_kwargs=dict(
@@ -332,7 +321,7 @@ def prepare_precond_wy_repr_bwd_npu(
         ),
     )
     if use_g:
-        launch_wy_kernel(
+        wy_fast.launch_wy_kernel(
             prepare_precond_wy_repr_bwd_finalize_a2_dg_npu,
             NT=NT,
             bh_total=B * HV,

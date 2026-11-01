@@ -10,7 +10,6 @@ import triton
 import triton.language as tl
 
 from fla.backends import TritonAscendBackend, register
-from fla.ops.precond_gated_delta_rule.backends.triton_ascend.chunk_precond_kkt_fwd import verify_npu_device
 from fla.ops.precond_gated_delta_rule.fused_recurrent import fused_recurrent_precond_gated_delta_rule_fwd
 from fla.ops.utils.op import exp
 from fla.utils import ascend_compile_kwargs
@@ -221,7 +220,13 @@ def fused_recurrent_precond_gated_delta_rule_fwd_verifier(
     beta_atk=None,
     **kwargs,
 ) -> tuple[bool, str | None]:
-    return verify_npu_device(q, k, v, g, gk, gv, beta, g_atk, beta_atk)
+    from fla.utils import IS_NPU
+    if not IS_NPU:
+        return False, "not running on NPU"
+    for tensor in (q, k, v, g, gk, gv, beta, g_atk, beta_atk):
+        if isinstance(tensor, torch.Tensor) and tensor.device.type != "npu":
+            return False, "input device is not NPU"
+    return True, None
 
 
 @register(

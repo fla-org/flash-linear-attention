@@ -117,16 +117,6 @@ def chunk_precond_kkt_fwd_kernel_npu(
             tl.store(p_A, b_A.to(p_A.dtype.element_ty), mask=m_t[:, None])
 
 
-def verify_npu_device(*tensors: torch.Tensor | None) -> tuple[bool, str | None]:
-    from fla.utils import IS_NPU
-    if not IS_NPU:
-        return False, "not running on NPU"
-    for tensor in tensors:
-        if isinstance(tensor, torch.Tensor) and tensor.device.type != "npu":
-            return False, "input device is not NPU"
-    return True, None
-
-
 def chunk_precond_kkt_fwd_verifier(
     k,
     k_precond,
@@ -136,7 +126,13 @@ def chunk_precond_kkt_fwd_verifier(
     output_dtype=torch.float32,
     cu_seqlens=None,
 ) -> tuple[bool, str | None]:
-    return verify_npu_device(k, k_precond, g, beta, cu_seqlens)
+    from fla.utils import IS_NPU
+    if not IS_NPU:
+        return False, "not running on NPU"
+    for tensor in (k, k_precond, g, beta, cu_seqlens):
+        if isinstance(tensor, torch.Tensor) and tensor.device.type != "npu":
+            return False, "input device is not NPU"
+    return True, None
 
 
 @register(chunk_precond_kkt_fwd, backend=TritonAscendBackend, verifier=chunk_precond_kkt_fwd_verifier)

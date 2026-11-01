@@ -18,7 +18,7 @@ __all__ = [
 ]
 
 
-from fla.ops.gated_delta_rule.backends.flash_qla import FlashQLABackend  # noqa: F401
+from fla.ops.gated_delta_rule.backends import flash_qla  # noqa: F401
 
 if TritonAscendBackend.is_available():
     from fla.ops.gated_delta_rule.backends import triton_ascend  # noqa: F401
