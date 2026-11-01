@@ -54,7 +54,7 @@ _BETA_SIGMOID_BLOCK_SIZE = 2048
 _BETA_SIGMOID_NUM_WARPS = 8
 
 
-@dispatch('common')
+@dispatch
 def fused_beta_sigmoid_fwd(x: torch.Tensor, scale: float = 1.0) -> torch.Tensor:
     y = torch.empty_like(x, dtype=torch.float32)
     n_elements = x.numel()
@@ -70,7 +70,7 @@ def fused_beta_sigmoid_fwd(x: torch.Tensor, scale: float = 1.0) -> torch.Tensor:
     return y
 
 
-@dispatch('common')
+@dispatch
 def fused_beta_sigmoid_bwd(x: torch.Tensor, dy: torch.Tensor, scale: float = 1.0) -> torch.Tensor:
     dx = torch.empty_like(x)
     n_elements = x.numel()

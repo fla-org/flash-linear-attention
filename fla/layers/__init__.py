@@ -20,6 +20,7 @@ from .gdn2 import GatedDeltaNet2
 from .gka import GatedKalmaNet
 from .gla import GatedLinearAttention
 from .gsa import GatedSlotAttention
+from .gsa2 import GatedSlotAttention2
 from .hgrn import HGRNAttention
 from .hgrn2 import HGRN2Attention
 from .kda import KimiDeltaAttention
@@ -66,6 +67,7 @@ __all__ = [
     'GatedKalmaNet',
     'GatedLinearAttention',
     'GatedSlotAttention',
+    'GatedSlotAttention2',
     'HGRN2Attention',
     'HGRNAttention',
     'KimiDeltaAttention',
