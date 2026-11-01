@@ -520,6 +520,46 @@ for _name, _packed in (('fused_recurrent_kda', False), ('fused_recurrent_kda_var
     ))
 
 
+GDP_NUM_HOUSEHOLDER = 2
+
+
+def shape_gdp_BTHD(B, T, H, D, **kw):
+    return (B, T * GDP_NUM_HOUSEHOLDER, H, D)
+
+
+def shape_gdp_BTH(B, T, H, D, **kw):
+    return (B, T * GDP_NUM_HOUSEHOLDER, H)
+
+
+_gdp_default_shapes = {
+    'B1_T8192_H8_D64':   {'B': 1, 'T': 8192,  'H': 8,  'D': 64},
+    'B1_T32768_H8_D64':  {'B': 1, 'T': 32768, 'H': 8,  'D': 64},
+    'B4_T4096_H16_D64':  {'B': 4, 'T': 4096,  'H': 16, 'D': 64},
+    'B8_T1024_H8_D64':   {'B': 8, 'T': 1024,  'H': 8,  'D': 64},
+    'B2_T4096_H6_D128':  {'B': 2, 'T': 4096,  'H': 6,  'D': 128},
+    'B1_T8192_H6_D256':  {'B': 1, 'T': 8192,  'H': 6,  'D': 256},
+}
+
+for _name, _requires_grad in (('chunk_gated_delta_product', True), ('chunk_gated_delta_product_no_grad', False)):
+    register_op(OpConfig(
+        name=_name,
+        import_path='fla.ops.gated_delta_product',
+        inputs={
+            'q': TensorSpec(shape_BTHD, requires_grad=_requires_grad),
+            'k': TensorSpec(shape_gdp_BTHD, requires_grad=_requires_grad),
+            'v': TensorSpec(shape_gdp_BTHD, requires_grad=_requires_grad),
+            'g': TensorSpec(shape_BTH, requires_grad=_requires_grad, dtype='float32', transform=logsigmoid),
+            'beta': TensorSpec(shape_gdp_BTH, requires_grad=_requires_grad, transform=sigmoid_transform),
+        },
+        func_name='chunk_gated_delta_product',
+        extra_kwargs={'num_householder': GDP_NUM_HOUSEHOLDER, 'use_qk_l2norm_in_kernel': True},
+        skip_backward=not _requires_grad,
+        category='gate_beta',
+        default_shapes=_gdp_default_shapes,
+        test_file='tests/ops/test_gdp.py',
+    ))
+
+
 register_op(OpConfig(
     name='fused_recurrent_gdn2',
     import_path='fla.ops.gdn2',
