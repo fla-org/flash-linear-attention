@@ -12,7 +12,6 @@ from __future__ import annotations
 import torch
 import triton
 import triton.language as tl
-import triton.runtime.driver as driver
 
 from fla.backends import TritonAscendBackend, register
 from fla.ops.gated_delta_rule.wy_fast import prepare_wy_repr_bwd, recompute_w_u_fwd
@@ -22,83 +21,64 @@ from fla.utils import ascend_compile_kwargs, input_guard
 from fla.utils.ascend_ub_manager import (
     ASCEND_MAX_GRID_DIM,
     compute_row_tile_block_size,
+    get_npu_properties,
     max_grid_axis_chunks,
 )
-
-
-def get_npu_properties():
-    device = torch.npu.current_device()
-    return driver.active.utils.get_device_properties(device)
-
 
 # prepare_wy_repr_bwd stage-specific UB models
 # finalize_k / a2 keep a conservative 4.5× slab (BK=256 overflows 192KB UB).
 # kv reuses K/V slabs in-place; 2.25× is calibrated so BK=BV=256 compiles.
-_PREPARE_BWD_K_MEM_MULT = 4.5
-_PREPARE_BWD_KV_MEM_MULT = 2.25
-_SAFETY_MARGIN = 0.75
-_FALLBACK_TILE = 8
-_MAX_TILE_BWD = 128
-_MAX_TILE_BWD_KV = 256
+PREPARE_BWD_K_MEM_MULT = 4.5
+PREPARE_BWD_KV_MEM_MULT = 2.25
+SAFETY_MARGIN = 0.75
+FALLBACK_TILE = 8
+MAX_TILE_BWD = 128
+MAX_TILE_BWD_KV = 256
 
 # recompute_w_u_fwd: peak UB is max(u-slab, w-slab), not sum — tile BK/BV independently.
 # Each slab is ~3.5× BT×{BV or BK} + BT×BT (no gk/qg vs KDA).
-_RECOMPUTE_FWD_MEM_MULT = 3.5
-_MAX_TILE_FWD = 128
-_PREFERRED_TILE = 64
+RECOMPUTE_FWD_MEM_MULT = 3.5
+MAX_TILE_FWD = 128
+PREFERRED_TILE = 64
 
 
-def _g_npu_arg(g: torch.Tensor | None, HV: int) -> tuple[torch.Tensor | None, bool]:
+def prepare_gate_input(g: torch.Tensor | None, HV: int) -> tuple[torch.Tensor | None, bool]:
     if g is None or HV == 1:
         return g, False
     return g.transpose(1, 2).contiguous(), True
 
 
-def _beta_npu_arg(beta: torch.Tensor, HV: int) -> tuple[torch.Tensor, bool]:
+def prepare_beta_input(beta: torch.Tensor, HV: int) -> tuple[torch.Tensor, bool]:
     if HV == 1:
         return beta, False
     return beta.transpose(1, 2).contiguous(), True
 
 
-def _t_npu_buf(
-    B: int, T: int, HV: int, *, dtype: torch.dtype, device: torch.device,
-) -> tuple[torch.Tensor, bool]:
+def allocate_time_buffer(B: int, T: int, HV: int, *, dtype: torch.dtype, device: torch.device) -> tuple[torch.Tensor, bool]:
     if HV == 1:
         return torch.empty(B, T, HV, dtype=dtype, device=device), False
     return torch.empty(B, HV, T, dtype=dtype, device=device), True
 
 
-def _bwd_col_tile(BT: int, dim: int, mem_mult: float, max_tile: int) -> int:
+def get_wy_block_size(BT: int, dim: int, mem_mult: float, max_tile: int) -> int:
     return compute_row_tile_block_size(
-        BT, dim, mem_mult,
+        row_dim=BT,
+        fixed_dim=dim,
+        memory_multiplier=mem_mult,
         tiling_row=False,
-        safety_margin=_SAFETY_MARGIN,
-        fallback=_FALLBACK_TILE,
+        safety_margin=SAFETY_MARGIN,
+        fallback=FALLBACK_TILE,
         min_block=8,
         max_block=min(max_tile, triton.next_power_of_2(dim)),
     )
 
 
-def _candidate_fwd_tiles(dim: int) -> list[int]:
-    cap = min(_MAX_TILE_FWD, triton.next_power_of_2(dim))
-    return [b for b in (_PREFERRED_TILE, _MAX_TILE_FWD, 32, 16, _FALLBACK_TILE) if b <= cap] or [_FALLBACK_TILE]
+def get_fwd_block_sizes(dim: int) -> list[int]:
+    cap = min(MAX_TILE_FWD, triton.next_power_of_2(dim))
+    return [b for b in (PREFERRED_TILE, MAX_TILE_FWD, 32, 16, FALLBACK_TILE) if b <= cap] or [FALLBACK_TILE]
 
 
-@triton.jit
-def _g_contig_base(g, bos, i_b, i_h, T_seq, HV, IS_VARLEN: tl.constexpr):
-    if IS_VARLEN:
-        return g + bos + i_h * T_seq
-    return g + tl.cast(i_b, tl.int64) * HV * T_seq + i_h * T_seq
-
-
-@triton.jit
-def _t_block_ptr(base, T, offset, BLK, CONTIG: tl.constexpr, HV: tl.constexpr):
-    if CONTIG:
-        return tl.make_block_ptr(base, (T,), (1,), (offset,), (BLK,), (0,))
-    return tl.make_block_ptr(base, (T,), (HV,), (offset,), (BLK,), (0,))
-
-
-def _launch_wy_kernel(kernel, *, NT: int, bh_total: int, kernel_kwargs: dict) -> None:
+def launch_wy_kernel(kernel, *, NT: int, bh_total: int, kernel_kwargs: dict) -> None:
     max_nt = max_grid_axis_chunks(NT, bh_total, max_grid=ASCEND_MAX_GRID_DIM)
     chunk_indices = kernel_kwargs.get('chunk_indices')
     cu_seqlens = kernel_kwargs.get('cu_seqlens')
@@ -116,10 +96,24 @@ def _launch_wy_kernel(kernel, *, NT: int, bh_total: int, kernel_kwargs: dict) ->
             kernel[(nt_len, bh_len)](**kernel_kwargs)
 
 
-def _launch_wy_core_grid(kernel, *, task_num: int, kernel_kwargs: dict) -> None:
+def launch_wy_core_grid(kernel, *, task_num: int, kernel_kwargs: dict) -> None:
     num_core = get_npu_properties()["num_aicore"]
     # disable auto-multi-buffer on this core-grid launch
     kernel[(num_core,)](task_num=task_num, num_core=num_core, **ascend_compile_kwargs(), **kernel_kwargs)
+
+
+@triton.jit
+def get_gate_base(g, bos, i_b, i_h, T_seq, HV, IS_VARLEN: tl.constexpr):
+    if IS_VARLEN:
+        return g + bos + i_h * T_seq
+    return g + tl.cast(i_b, tl.int64) * HV * T_seq + i_h * T_seq
+
+
+@triton.jit
+def make_time_block_ptr(base, T, offset, BLK, CONTIG: tl.constexpr, HV: tl.constexpr):
+    if CONTIG:
+        return tl.make_block_ptr(base, (T,), (1,), (offset,), (BLK,), (0,))
+    return tl.make_block_ptr(base, (T,), (HV,), (offset,), (BLK,), (0,))
 
 
 @triton.heuristics({
@@ -176,20 +170,20 @@ def recompute_w_u_fwd_kernel_npu(
         u_ptr = u + (bos * HV + i_h) * V
         w_ptr = w + (bos * HV + i_h) * K
         if BETA_T_CONTIG:
-            beta_ptr = _g_contig_base(beta, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
+            beta_ptr = get_gate_base(beta, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
         else:
             beta_ptr = beta + bos * HV + i_h
-        p_b = _t_block_ptr(beta_ptr, T, i_t * BT, BT, BETA_T_CONTIG, HV)
+        p_b = make_time_block_ptr(beta_ptr, T, i_t * BT, BT, BETA_T_CONTIG, HV)
         b_b = tl.load(p_b, boundary_check=(0,))
         p_A = tl.make_block_ptr(
             A + (bos * HV + i_h) * BT, (T, BT), (HV * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0),
         )
         if USE_G:
             if G_T_CONTIG:
-                g_ptr = _g_contig_base(g, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
+                g_ptr = get_gate_base(g, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
             else:
                 g_ptr = g + bos * HV + i_h
-            p_g = _t_block_ptr(g_ptr, T, i_t * BT, BT, G_T_CONTIG, HV)
+            p_g = make_time_block_ptr(g_ptr, T, i_t * BT, BT, G_T_CONTIG, HV)
             b_g = exp2(tl.load(p_g, boundary_check=(0,)).to(tl.float32))
         for i_v in range(tl.cdiv(V, BV)):
             p_v = tl.make_block_ptr(
@@ -260,13 +254,13 @@ def prepare_wy_repr_bwd_kv_npu(
             bos = tl.cast(i_b, tl.int64) * T_seq
 
         if BETA_T_CONTIG:
-            beta_ptr = _g_contig_base(beta, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
-            p_b = _t_block_ptr(beta_ptr, T, i_t * BT, BT, True, HV)
+            beta_ptr = get_gate_base(beta, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
+            p_b = make_time_block_ptr(beta_ptr, T, i_t * BT, BT, True, HV)
         else:
             p_b = tl.make_block_ptr(beta + (bos * HV + i_h), (T,), (HV,), (i_t * BT,), (BT,), (0,))
         if DB_T_CONTIG:
-            db_ptr = _g_contig_base(db, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
-            p_db = _t_block_ptr(db_ptr, T, i_t * BT, BT, True, HV)
+            db_ptr = get_gate_base(db, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
+            p_db = make_time_block_ptr(db_ptr, T, i_t * BT, BT, True, HV)
         else:
             p_db = tl.make_block_ptr(db + (bos * HV + i_h), (T,), (HV,), (i_t * BT,), (BT,), (0,))
         p_A = tl.make_block_ptr(
@@ -283,8 +277,8 @@ def prepare_wy_repr_bwd_kv_npu(
 
         if USE_G:
             if G_T_CONTIG:
-                g_ptr = _g_contig_base(g, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
-                p_g = _t_block_ptr(g_ptr, T, i_t * BT, BT, True, HV)
+                g_ptr = get_gate_base(g, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
+                p_g = make_time_block_ptr(g_ptr, T, i_t * BT, BT, True, HV)
             else:
                 p_g = tl.make_block_ptr(g + (bos * HV + i_h), (T,), (HV,), (i_t * BT,), (BT,), (0,))
             b_g = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
@@ -355,8 +349,8 @@ def prepare_wy_repr_bwd_kv_npu(
         tl.store(p_db, b_db.to(p_db.dtype.element_ty), boundary_check=(0,))
         if USE_G:
             if DG_T_CONTIG:
-                dg_ptr = _g_contig_base(dg, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
-                p_dg = _t_block_ptr(dg_ptr, T, i_t * BT, BT, True, HV)
+                dg_ptr = get_gate_base(dg, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
+                p_dg = make_time_block_ptr(dg_ptr, T, i_t * BT, BT, True, HV)
             else:
                 p_dg = tl.make_block_ptr(dg + (bos * HV + i_h), (T,), (HV,), (i_t * BT,), (BT,), (0,))
             tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), boundary_check=(0,))
@@ -460,8 +454,8 @@ def prepare_wy_repr_bwd_da_gate_npu(
         bos = tl.cast(i_b, tl.int64) * T
 
     if G_T_CONTIG:
-        g_ptr = _g_contig_base(g, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
-        p_g = _t_block_ptr(g_ptr, T, i_t * BT, BT, True, HV)
+        g_ptr = get_gate_base(g, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
+        p_g = make_time_block_ptr(g_ptr, T, i_t * BT, BT, True, HV)
     else:
         p_g = tl.make_block_ptr(g + (bos * HV + i_h), (T,), (HV,), (i_t * BT,), (BT,), (0,))
     p_dA = tl.make_block_ptr(
@@ -505,13 +499,13 @@ def prepare_wy_repr_bwd_finalize_k_npu(
             bos = tl.cast(i_b, tl.int64) * T_seq
 
         if BETA_T_CONTIG:
-            beta_ptr = _g_contig_base(beta, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
-            p_b = _t_block_ptr(beta_ptr, T, i_t * BT, BT, True, HV)
+            beta_ptr = get_gate_base(beta, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
+            p_b = make_time_block_ptr(beta_ptr, T, i_t * BT, BT, True, HV)
         else:
             p_b = tl.make_block_ptr(beta + (bos * HV + i_h), (T,), (HV,), (i_t * BT,), (BT,), (0,))
         if DB_T_CONTIG:
-            db_ptr = _g_contig_base(db, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
-            p_db = _t_block_ptr(db_ptr, T, i_t * BT, BT, True, HV)
+            db_ptr = get_gate_base(db, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
+            p_db = make_time_block_ptr(db_ptr, T, i_t * BT, BT, True, HV)
         else:
             p_db = tl.make_block_ptr(db + (bos * HV + i_h), (T,), (HV,), (i_t * BT,), (BT,), (0,))
         p_dA = tl.make_block_ptr(
@@ -565,16 +559,16 @@ def prepare_wy_repr_bwd_finalize_a2_dg_npu(
         bos = tl.cast(i_b, tl.int64) * T
 
     if BETA_T_CONTIG:
-        beta_ptr = _g_contig_base(beta, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
-        p_b = _t_block_ptr(beta_ptr, T, i_t * BT, BT, True, HV)
+        beta_ptr = get_gate_base(beta, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
+        p_b = make_time_block_ptr(beta_ptr, T, i_t * BT, BT, True, HV)
     else:
         p_b = tl.make_block_ptr(beta + (bos * HV + i_h), (T,), (HV,), (i_t * BT,), (BT,), (0,))
     p_dA = tl.make_block_ptr(
         dA_out + (bos * HV + i_h) * BT, (BT, T), (1, HV * BT), (0, i_t * BT), (BT, BT), (0, 1),
     )
     if DG_T_CONTIG:
-        dg_ptr = _g_contig_base(dg, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
-        p_dg = _t_block_ptr(dg_ptr, T, i_t * BT, BT, True, HV)
+        dg_ptr = get_gate_base(dg, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
+        p_dg = make_time_block_ptr(dg_ptr, T, i_t * BT, BT, True, HV)
     else:
         p_dg = tl.make_block_ptr(dg + (bos * HV + i_h), (T,), (HV,), (i_t * BT,), (BT,), (0,))
 
@@ -626,8 +620,8 @@ def recompute_w_u_fwd_npu(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    B, T, H, K, V = *k.shape, v.shape[-1]
-    HV = v.shape[2]
+    B, T, H, K = k.shape
+    HV, V = v.shape[2], v.shape[-1]
     BT = A.shape[-1]
 
     if chunk_indices is None and cu_seqlens is not None:
@@ -635,15 +629,15 @@ def recompute_w_u_fwd_npu(
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     # Minimize V/K slab iterations under independent UB budgets for u- and w-slabs.
-    max_bk = _bwd_col_tile(BT, K, _RECOMPUTE_FWD_MEM_MULT, _MAX_TILE_FWD)
-    max_bv = _bwd_col_tile(BT, V, _RECOMPUTE_FWD_MEM_MULT, _MAX_TILE_FWD)
+    max_bk = get_wy_block_size(BT, K, RECOMPUTE_FWD_MEM_MULT, MAX_TILE_FWD)
+    max_bv = get_wy_block_size(BT, V, RECOMPUTE_FWD_MEM_MULT, MAX_TILE_FWD)
     BK = max(8, min(max_bk, triton.next_power_of_2(K)))
     BV = max(8, min(max_bv, triton.next_power_of_2(V)))
     best_cost = None
-    for bk in _candidate_fwd_tiles(K):
+    for bk in get_fwd_block_sizes(K):
         if bk > max_bk:
             continue
-        for bv in _candidate_fwd_tiles(V):
+        for bv in get_fwd_block_sizes(V):
             if bv > max_bv:
                 continue
             cost = triton.cdiv(V, bv) + triton.cdiv(K, bk)
@@ -652,10 +646,10 @@ def recompute_w_u_fwd_npu(
 
     u = torch.empty_like(v)
     w = k.new_empty(B, T, HV, K)
-    beta, beta_t_contig = _beta_npu_arg(beta, HV)
-    g, g_t_contig = _g_npu_arg(g, HV)
+    beta, beta_t_contig = prepare_beta_input(beta, HV)
+    g, g_t_contig = prepare_gate_input(g, HV)
 
-    _launch_wy_core_grid(
+    launch_wy_core_grid(
         recompute_w_u_fwd_kernel_npu,
         task_num=NT * B * HV,
         kernel_kwargs=dict(
@@ -696,28 +690,29 @@ def prepare_wy_repr_bwd_npu(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
-    B, T, H, K, V, HV = *k.shape, v.shape[-1], v.shape[2]
+    B, T, H, K = k.shape
+    HV, V = v.shape[2], v.shape[-1]
     BT = A.shape[-1]
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
-    BK, BV = _bwd_col_tile(BT, K, _PREPARE_BWD_KV_MEM_MULT, _MAX_TILE_BWD_KV), _bwd_col_tile(
-        BT, V, _PREPARE_BWD_KV_MEM_MULT, _MAX_TILE_BWD_KV)
-    BK_FIN = _bwd_col_tile(BT, K, _PREPARE_BWD_K_MEM_MULT, _MAX_TILE_BWD)
+    BK = get_wy_block_size(BT, K, PREPARE_BWD_KV_MEM_MULT, MAX_TILE_BWD_KV)
+    BV = get_wy_block_size(BT, V, PREPARE_BWD_KV_MEM_MULT, MAX_TILE_BWD_KV)
+    BK_FIN = get_wy_block_size(BT, K, PREPARE_BWD_K_MEM_MULT, MAX_TILE_BWD)
     use_g = g is not None
     is_varlen = cu_seqlens is not None
 
     dk = k.new_empty(B, T, HV, K)
     dv = torch.empty_like(v)
-    db, db_t_contig = _t_npu_buf(B, T, HV, dtype=beta.dtype, device=k.device)
-    beta_arg, beta_t_contig = _beta_npu_arg(beta, HV)
+    db, db_t_contig = allocate_time_buffer(B, T, HV, dtype=beta.dtype, device=k.device)
+    beta_arg, beta_t_contig = prepare_beta_input(beta, HV)
     dg, dg_t_contig = None, False
     g_gate, g_t_contig = None, False
     g_k_arg = k
     g_exp_precomp = False
     if use_g:
-        dg, dg_t_contig = _t_npu_buf(B, T, HV, dtype=g.dtype, device=k.device)
-        g_gate, g_t_contig = _g_npu_arg(g, HV)
+        dg, dg_t_contig = allocate_time_buffer(B, T, HV, dtype=g.dtype, device=k.device)
+        g_gate, g_t_contig = prepare_gate_input(g, HV)
         g_k_arg = g_gate
         if not is_varlen:
             g_k_arg = torch.exp2(g_gate.float()).to(g_gate.dtype)
@@ -736,68 +731,108 @@ def prepare_wy_repr_bwd_npu(
     )
     core_base = dict(B=B, **base)
     task_num = NT * B * HV
-    _launch_wy_core_grid(
+    launch_wy_core_grid(
         prepare_wy_repr_bwd_kv_npu,
         task_num=task_num,
         kernel_kwargs=dict(
-            k=k, v=v, beta=beta_arg, g=g_k_arg, A=A, dw=dw, du=du,
-            dk=dk, dv=dv, dA_scr=dA_scr, db=db, dg=dg_arg,
-            H=H, HV=HV, K=K, V=V, BK=BK, BV=BV, USE_G=use_g,
-            G_T_CONTIG=g_t_contig, BETA_T_CONTIG=beta_t_contig,
-            DG_T_CONTIG=dg_t_contig, DB_T_CONTIG=db_t_contig,
+            k=k,
+            v=v,
+            beta=beta_arg,
+            g=g_k_arg,
+            A=A,
+            dw=dw,
+            du=du,
+            dk=dk,
+            dv=dv,
+            dA_scr=dA_scr,
+            db=db,
+            dg=dg_arg,
+            H=H,
+            HV=HV,
+            K=K,
+            V=V,
+            BK=BK,
+            BV=BV,
+            USE_G=use_g,
+            G_T_CONTIG=g_t_contig,
+            BETA_T_CONTIG=beta_t_contig,
+            DG_T_CONTIG=dg_t_contig,
+            DB_T_CONTIG=db_t_contig,
             G_EXP_PRECOMP=g_exp_precomp,
             **core_base,
         ),
     )
-    _launch_wy_kernel(
+    launch_wy_kernel(
         prepare_wy_repr_bwd_da_mask_dot1_npu,
         NT=NT,
         bh_total=B * HV,
         kernel_kwargs=dict(
-            A=A, dA_scr=dA_scr, dA_mid=dA_mid,
+            A=A,
+            dA_scr=dA_scr,
+            dA_mid=dA_mid,
             HV=HV,
             **base,
         ),
     )
-    _launch_wy_kernel(
+    launch_wy_kernel(
         prepare_wy_repr_bwd_da_dot2_npu,
         NT=NT,
         bh_total=B * HV,
         kernel_kwargs=dict(
-            A=A, dA_mid=dA_mid, dA_out=dA_out,
+            A=A,
+            dA_mid=dA_mid,
+            dA_out=dA_out,
             HV=HV,
             **base,
         ),
     )
     if use_g:
-        _launch_wy_kernel(
+        launch_wy_kernel(
             prepare_wy_repr_bwd_da_gate_npu,
             NT=NT,
             bh_total=B * HV,
             kernel_kwargs=dict(
-                g=g_gate, dA_out=dA_out,
-                HV=HV, G_T_CONTIG=g_t_contig,
+                g=g_gate,
+                dA_out=dA_out,
+                HV=HV,
+                G_T_CONTIG=g_t_contig,
                 **base,
             ),
         )
-    _launch_wy_core_grid(
+    launch_wy_core_grid(
         prepare_wy_repr_bwd_finalize_k_npu,
         task_num=task_num,
         kernel_kwargs=dict(
-            k=k, beta=beta_arg, dA_out=dA_out, dk=dk, db=db,
-            H=H, HV=HV, K=K, BK=BK_FIN, BETA_T_CONTIG=beta_t_contig, DB_T_CONTIG=db_t_contig,
+            k=k,
+            beta=beta_arg,
+            dA_out=dA_out,
+            dk=dk,
+            db=db,
+            H=H,
+            HV=HV,
+            K=K,
+            BK=BK_FIN,
+            BETA_T_CONTIG=beta_t_contig,
+            DB_T_CONTIG=db_t_contig,
             **core_base,
         ),
     )
     if use_g:
-        _launch_wy_kernel(
+        launch_wy_kernel(
             prepare_wy_repr_bwd_finalize_a2_dg_npu,
             NT=NT,
             bh_total=B * HV,
             kernel_kwargs=dict(
-                k=k, beta=beta_arg, dA_out=dA_out, dg=dg_arg,
-                H=H, HV=HV, K=K, BK=BK_FIN,
-                BETA_T_CONTIG=beta_t_contig, DG_T_CONTIG=dg_t_contig,
+                k=k,
+                beta=beta_arg,
+                dA_out=dA_out,
+                dg=dg_arg,
+                H=H,
+                HV=HV,
+                K=K,
+                BK=BK_FIN,
+                BETA_T_CONTIG=beta_t_contig,
+                DG_T_CONTIG=dg_t_contig,
                 **base,
             ),
         )

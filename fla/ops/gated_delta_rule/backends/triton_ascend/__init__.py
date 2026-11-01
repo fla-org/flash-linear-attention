@@ -4,3 +4,5 @@
 # LICENSE file in the root directory of this source tree.
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
+from fla.ops.gated_delta_rule.backends.triton_ascend import chunk_fwd, gate, wy_fast  # noqa: F401

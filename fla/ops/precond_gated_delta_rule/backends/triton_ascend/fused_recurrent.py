@@ -10,10 +10,10 @@ import triton
 import triton.language as tl
 
 from fla.backends import TritonAscendBackend, register
-from fla.ops.precond_gated_delta_rule.backends.triton_ascend.utils import _require_npu_device
+from fla.ops.precond_gated_delta_rule.backends.triton_ascend.chunk_precond_kkt_fwd import verify_npu_device
 from fla.ops.precond_gated_delta_rule.fused_recurrent import fused_recurrent_precond_gated_delta_rule_fwd
 from fla.ops.utils.op import exp
-from fla.utils import ascend_compile_kwargs, input_guard
+from fla.utils import ascend_compile_kwargs
 
 
 @triton.heuristics({
@@ -27,7 +27,7 @@ from fla.utils import ascend_compile_kwargs, input_guard
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.jit(do_not_specialize=['T'])
-def fused_recurrent_precond_gated_delta_rule_fwd_kernel(
+def fused_recurrent_precond_gated_delta_rule_fwd_kernel_npu(
     q,
     k,
     v,
@@ -221,7 +221,7 @@ def fused_recurrent_precond_gated_delta_rule_fwd_verifier(
     beta_atk=None,
     **kwargs,
 ) -> tuple[bool, str | None]:
-    return _require_npu_device(q, k, v, g, gk, gv, beta, g_atk, beta_atk)
+    return verify_npu_device(q, k, v, g, gk, gv, beta, g_atk, beta_atk)
 
 
 @register(
@@ -250,8 +250,8 @@ def fused_recurrent_precond_gated_delta_rule_fwd_npu(
     eps: float = 1e-6,
     log_atk_scale: torch.Tensor = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    B, T, H, K, V = *k.shape, v.shape[-1]
-    HV = v.shape[2]
+    B, T, H, K = k.shape
+    HV, V = v.shape[2], v.shape[-1]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
     BK = triton.next_power_of_2(K)
     BV = min(8, triton.next_power_of_2(V)) if gv is None else triton.next_power_of_2(V)
@@ -272,7 +272,7 @@ def fused_recurrent_precond_gated_delta_rule_fwd_npu(
         final_A_state = None
 
     grid = (NV, N * HV)
-    fused_recurrent_precond_gated_delta_rule_fwd_kernel[grid](
+    fused_recurrent_precond_gated_delta_rule_fwd_kernel_npu[grid](
         q=q,
         k=k,
         v=v,
@@ -305,218 +305,3 @@ def fused_recurrent_precond_gated_delta_rule_fwd_npu(
         **ascend_compile_kwargs(),
     )
     return o, final_state, final_A_state
-
-
-class FusedRecurrentPrecondGatedDeltaRuleFunction(torch.autograd.Function):
-
-    @staticmethod
-    @input_guard
-    def forward(
-        ctx,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        g: torch.Tensor | None = None,
-        gk: torch.Tensor | None = None,
-        gv: torch.Tensor | None = None,
-        beta: torch.Tensor | None = None,
-        g_atk: torch.Tensor = None,
-        beta_atk: torch.Tensor = None,
-        scale: float = None,
-        initial_state: torch.Tensor = None,
-        initial_A_state: torch.Tensor = None,
-        output_final_state: bool = False,
-        use_qk_l2norm_in_kernel: bool = False,
-        cu_seqlens: torch.LongTensor | None = None,
-            transpose_state_layout: bool = False,
-        x: float = 1.5,
-        eps: float = 1e-6,
-        log_atk_scale: torch.Tensor = None,
-    ):
-        o, final_state, final_A_state = fused_recurrent_precond_gated_delta_rule_fwd_npu(
-            q=q,
-            k=k,
-            v=v,
-            g=g,
-            gk=gk,
-            gv=gv,
-            beta=beta,
-            g_atk=g_atk,
-            beta_atk=beta_atk,
-            scale=scale,
-            initial_state=initial_state,
-            initial_A_state=initial_A_state,
-            output_final_state=output_final_state,
-            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
-            cu_seqlens=cu_seqlens,
-            transpose_state_layout=transpose_state_layout,
-            x=x,
-            eps=eps,
-            log_atk_scale=log_atk_scale,
-        )
-
-        return o, final_state, final_A_state
-
-    @staticmethod
-    @input_guard
-    def backward(ctx, do, dht, dat):
-        raise NotImplementedError(
-            "Backward pass is not implemented yet and we do not have plans to implement it "
-            "because we haven't figured out how to compute dg without materializing the full "
-            "hidden states for all time steps.",
-        )
-
-
-def fused_recurrent_precond_gated_delta_rule(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    g: torch.Tensor | None = None,
-    gk: torch.Tensor | None = None,
-    gv: torch.Tensor | None = None,
-    beta: torch.Tensor | None = None,
-    g_atk: torch.Tensor = None,
-    beta_atk: torch.Tensor = None,
-    scale: float = None,
-    initial_state: torch.Tensor = None,
-    initial_A_state: torch.Tensor = None,
-    output_final_state: bool = False,
-    use_qk_l2norm_in_kernel: bool = True,
-    cu_seqlens: torch.LongTensor | None = None,
-    transpose_state_layout: bool = False,
-    x: float = 1.5,
-    eps: float = 1e-6,
-    log_atk_scale: torch.Tensor = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    r"""
-    Args:
-        q (torch.Tensor):
-            queries of shape `[B, T, H, K]`.
-        k (torch.Tensor):
-            keys of shape `[B, T, H, K]`.
-        v (torch.Tensor):
-            values of shape `[B, T, HV, V]`.
-            GVA (Grouped Value Attention) is applied if `HV > H`, where `HV` must be divisible by `H`.
-        g (torch.Tensor):
-            g (decays) of shape `[B, T, HV]`. Default: `None`.
-        gk (torch.Tensor):
-            gk (decays) of shape `[B, T, HV, K]`. Default: `None`.
-        gv (torch.Tensor):
-            gv (decays) of shape `[B, T, HV, V]`. Default: `None`.
-        beta (torch.Tensor):
-            betas of shape `[B, T, HV]`.
-        g_atk (torch.Tensor):
-            ATK gates (decays) in log space of shape `[B, T, H]`.
-        beta_atk (torch.Tensor):
-            ATK betas of shape `[B, T, H]`.
-        scale (Optional[float]):
-            Scale factor for the attention scores.
-            If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
-        initial_state (Optional[torch.Tensor]):
-            Initial state of shape `[N, HV, K, V]` for `N` input sequences.
-            For equal-length input sequences, `N` equals the batch size `B`.
-            Default: `None`.
-        initial_A_state (Optional[torch.Tensor]):
-            Initial ATK diagonal state of shape `[N, H, K]`; the ATK preconditioner
-            acts on the keys, so its state carries `H` (key) heads. Default: `None`.
-        output_final_state (Optional[bool]):
-            Whether to output the final state of shape `[N, HV, K, V]`. Default: `False`.
-        use_qk_l2norm_in_kernel (Optional[bool]):
-            Whether to use L2 normalization in the kernel. Default: `True`.
-        cu_seqlens (torch.LongTensor):
-            Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
-            consistent with the FlashAttention API.
-        transpose_state_layout (bool):
-            Whether to use transposed state layout `[V, K]` instead of `[K, V]`. Default: `False`.
-        x (float):
-            Squash range parameter. Default: `1.5`.
-        eps (float):
-            Epsilon for numerical stability in the squash function. Default: `1e-6`.
-        log_atk_scale (Optional[torch.Tensor]):
-            Per-head log-space center of shape `[H]`. Default: `None`.
-
-    Returns:
-        o (torch.Tensor):
-            Outputs of shape `[B, T, HV, V]`.
-        final_state (torch.Tensor):
-            Final state of shape `[N, HV, K, V]` if `output_final_state=True` else `None`.
-        final_A_state (torch.Tensor):
-            Final ATK diagonal state of shape `[N, H, K]` if `output_final_state=True` else `None`.
-
-    Examples::
-        >>> import torch
-        >>> import torch.nn.functional as F
-        >>> from einops import rearrange
-        >>> from fla.ops.precond_gated_delta_rule import fused_recurrent_precond_gated_delta_rule
-        # inputs with equal lengths
-        >>> B, T, H, HV, K, V = 4, 2048, 4, 8, 512, 512
-        >>> q = torch.randn(B, T, H, K, device='cuda')
-        >>> k = F.normalize(torch.randn(B, T, H, K, device='cuda'), p=2, dim=-1)
-        >>> v = torch.randn(B, T, HV, V, device='cuda')
-        >>> g = F.logsigmoid(torch.rand(B, T, HV, device='cuda'))
-        >>> beta = torch.rand(B, T, HV, device='cuda').sigmoid()
-        >>> g_atk = F.logsigmoid(torch.rand(B, T, H, device='cuda'))
-        >>> beta_atk = torch.rand(B, T, H, device='cuda').sigmoid()
-        >>> h0 = torch.randn(B, HV, K, V, device='cuda')
-        >>> o, ht, at = fused_recurrent_precond_gated_delta_rule(
-            q, k, v, g=g, beta=beta,
-            g_atk=g_atk, beta_atk=beta_atk,
-            initial_state=h0,
-            output_final_state=True
-        )
-        # for variable-length inputs, the batch size `B` is expected to be 1 and `cu_seqlens` is required
-        >>> q, k, v, g, beta = map(lambda x: rearrange(x, 'b t ... -> 1 (b t) ...'), (q, k, v, g, beta))
-        >>> g_atk, beta_atk = map(lambda x: rearrange(x, 'b t ... -> 1 (b t) ...'), (g_atk, beta_atk))
-        # for a batch with 4 sequences, `cu_seqlens` with 5 start/end positions are expected
-        >>> cu_seqlens = q.new_tensor([0, 2048, 4096, 6144, 8192], dtype=torch.long)
-        >>> o, ht, at = fused_recurrent_precond_gated_delta_rule(
-            q, k, v, g=g, beta=beta,
-            g_atk=g_atk, beta_atk=beta_atk,
-            initial_state=h0,
-            output_final_state=True,
-            cu_seqlens=cu_seqlens
-        )
-    """
-    if cu_seqlens is not None:
-        if q.shape[0] != 1:
-            raise ValueError(
-                f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
-                f"Please flatten variable-length inputs before processing.",
-            )
-        if initial_state is not None and initial_state.shape[0] != len(cu_seqlens) - 1:
-            raise ValueError(
-                f"The number of initial states is expected to be equal to the number of input sequences, "
-                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}.",
-            )
-    if scale is None:
-        scale = k.shape[-1] ** -0.5
-    if beta is None:
-        # beta is headwise over the HV value heads; sizing it from q would give
-        # [B, T, H] and read out of bounds in the kernel under GVA (HV > H)
-        beta = torch.ones_like(v[..., 0])
-
-    o, final_state, final_A_state = FusedRecurrentPrecondGatedDeltaRuleFunction.apply(
-        q,
-        k,
-        v,
-        g,
-        gk,
-        gv,
-        beta,
-        g_atk,
-        beta_atk,
-        scale,
-        initial_state,
-        initial_A_state,
-        output_final_state,
-        use_qk_l2norm_in_kernel,
-        cu_seqlens,
-        transpose_state_layout,
-        x,
-        eps,
-        log_atk_scale,
-    )
-    return o, final_state, final_A_state
-
-
-fused_recurrent_pgdn = fused_recurrent_precond_gated_delta_rule
