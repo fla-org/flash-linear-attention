@@ -24,6 +24,7 @@ from fla.ops.utils.cumsum import chunk_global_cumsum, chunk_local_cumsum
 from fla.ops.utils.op import exp2
 from fla.utils import (
     IS_NVIDIA_HOPPER,
+    IS_NVIDIA_SM100,
     autocast_custom_bwd,
     autocast_custom_fwd,
     autotune_cache_kwargs,
@@ -42,7 +43,6 @@ from .utils import (
     modal_omega,
     modal_phase,
     prepare_cu_seqlens,
-    segment_sum,
     validate_cyfa_inputs,
     validate_initial_state,
 )
@@ -563,9 +563,9 @@ def _scalar_decay_bwd_dqk_dv_single_k(
     dv = torch.empty_like(do)
     dg_force = torch.empty(bsz, seq_len, n_heads, device=q.device, dtype=torch.float32)
     block_k = max(triton.next_power_of_2(d_k), 16)
-    is_hopper_fp32 = IS_NVIDIA_HOPPER and q.dtype == torch.float32
-    # Keep the fused FP32 kernel below the SM90 per-block shared-memory limit.
-    block_v = min(max(triton.next_power_of_2(d_v), 16), 32 if is_hopper_fp32 else 64)
+    limit_fp32_shared_memory = q.dtype == torch.float32 and (IS_NVIDIA_HOPPER or (IS_NVIDIA_SM100 and block_k == 128))
+    # bound FP32 shared memory on SM90 and for 128-wide fused states on SM100.
+    block_v = min(max(triton.next_power_of_2(d_v), 16), 32 if limit_fp32_shared_memory else 64)
 
     _chunk_cyfa_bwd_dqk_dv_kernel[(nt, bsz * n_heads)](
         q,
@@ -590,7 +590,7 @@ def _scalar_decay_bwd_dqk_dv_single_k(
         BK=block_k,
         BV=block_v,
         num_warps=4,
-        num_stages=1 if is_hopper_fp32 else 2,
+        num_stages=1 if limit_fp32_shared_memory else 2,
     )
     return dq, dk, dv, dg_force
 
@@ -1195,15 +1195,15 @@ def _readout_backward(
 def _prune_table_grad_configs(configs, nargs, **kwargs):
     args = {**(nargs or {}), **kwargs}
     right_a = args.get('right_a')
-    if not IS_NVIDIA_HOPPER or right_a is None or right_a.dtype != torch.float32:
+    if not (IS_NVIDIA_HOPPER or IS_NVIDIA_SM100) or right_a is None or right_a.dtype != torch.float32:
         return configs
-    # Triton 3.4 rejects this four-warp FP32 dot layout on SM90 during compilation.
+    # this FP32 dot layout fails with four warps on SM90 and four/eight warps on SM100.
     return [
         config for config in configs
         if not (
             config.kwargs['BR'] == 64
             and config.kwargs['BC'] == 64
-            and config.num_warps == 4
+            and (config.num_warps == 4 or (IS_NVIDIA_SM100 and config.num_warps == 8))
         )
     ]
 
@@ -1377,7 +1377,14 @@ class ChunkCyFAFunction(torch.autograd.Function):
             chunk_indices=chunk_indices,
             output_dtype=torch.float32,
         )
-        lambdas = cyfa_clock_cumsum(delta, cu_seqlens=cu_seqlens)
+        n_seqs = q.shape[0] if cu_seqlens is None else int(cu_seqlens.numel() - 1)
+        # the clock scan already accumulates the per-segment total, so the final
+        # lambda does not need a second reduction (which would sync on varlen).
+        lambda_total = (
+            torch.empty(n_seqs, q.shape[2], device=q.device, dtype=torch.float32)
+            if output_final_state else None
+        )
+        lambdas = cyfa_clock_cumsum(delta, cu_seqlens=cu_seqlens, clock_total=lambda_total)
         if initial_lambda is not None:
             lambdas = add_segment_initial(lambdas, initial_lambda, cu_seqlens=cu_seqlens)
         write = _point_write(
@@ -1416,9 +1423,7 @@ class ChunkCyFAFunction(torch.autograd.Function):
             chunk_indices=chunk_indices,
         )
         if output_final_state:
-            flt = segment_sum(delta, cu_seqlens=cu_seqlens)
-            if initial_lambda is not None:
-                flt = flt + initial_lambda
+            flt = lambda_total if initial_lambda is None else lambda_total + initial_lambda
         else:
             flt = None
 
@@ -1573,18 +1578,31 @@ class ChunkCyFAFunction(torch.autograd.Function):
                 phase_force[:, -1, :].add_(dlt)
             else:
                 end_indices = cu_seqlens[1:].to(device=phase_force.device, dtype=torch.long) - 1
-                phase_force[0].index_add_(0, end_indices, dlt)
+                nonempty = (cu_seqlens[1:] > cu_seqlens[:-1])[:, None]
+                if phase_force.shape[1] > 0:
+                    phase_force[0].index_add_(
+                        0,
+                        end_indices.clamp(0, phase_force.shape[1] - 1),
+                        dlt.masked_fill(~nonempty, 0),
+                    )
         ddelta = chunk_global_cumsum(
             phase_force,
             reverse=True,
             cu_seqlens=cu_seqlens,
             output_dtype=torch.float32,
         )
-        dlambda0 = (
-            None
-            if initial_lambda is None
-            else segment_sum(phase_force, cu_seqlens=cu_seqlens)
-        )
+        if initial_lambda is None:
+            dlambda0 = None
+        elif cu_seqlens is None:
+            # the reverse scan starts at the full per-segment total
+            dlambda0 = ddelta[:, 0].contiguous()
+        else:
+            starts = cu_seqlens[:-1].to(dtype=torch.long).clamp(max=phase_force.shape[1] - 1)
+            nonempty = cu_seqlens[1:] > cu_seqlens[:-1]
+            dlambda0 = ddelta[0].index_select(0, starts).masked_fill(~nonempty[:, None], 0)
+        if dlt is not None and cu_seqlens is not None and initial_lambda is not None:
+            empty = (cu_seqlens[1:] == cu_seqlens[:-1])[:, None]
+            dlambda0 += dlt.masked_fill(~empty, 0)
         dg_force = dg_force_v.add_(dg_force_k)
         dg = chunk_local_cumsum(
             dg_force,

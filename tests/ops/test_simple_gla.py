@@ -6,11 +6,14 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import os
+from types import SimpleNamespace
 
 import pytest
 import torch
 import torch.nn.functional as F
 
+from fla import utils
+from fla.ops.simple_gla.backends.triton_ascend.utils import simple_gla_verifier
 from fla.ops.simple_gla.chunk import chunk_simple_gla
 from fla.ops.simple_gla.fused_chunk import fused_chunk_simple_gla
 from fla.ops.simple_gla.fused_recurrent import fused_recurrent_simple_gla
@@ -861,3 +864,59 @@ def test_simple_gla_to_mamba2(vary_A, dtype):
     assert y_rearrange.allclose(outputs_gla_fuse, 0, atol), f'y diff: {torch.abs(y_rearrange - outputs_gla_fuse).max()}'
     final_gla_fuse = final_gla_fuse.to(dtype)  # states hard-coded to float32 in FLA kernel
     assert final_rearrange.allclose(final_gla_fuse, 0, atol), f'final diff: {torch.abs(final_ssd - final_gla_fuse).max()}'
+
+
+@pytest.mark.parametrize(
+    ('is_npu', 'device', 'accepted', 'reason'),
+    [
+        (False, 'cpu', False, 'not running on NPU'),
+        (True, 'cpu', False, 'input device is not NPU'),
+        (True, None, False, 'input device is not NPU'),
+        (True, 'npu', True, None),
+    ],
+    ids=['off-npu', 'cpu-input', 'missing-input', 'npu-input'],
+)
+def test_simple_gla_ascend_verifier(monkeypatch, is_npu, device, accepted, reason):
+    monkeypatch.setattr(utils, 'IS_NPU', is_npu)
+    q = SimpleNamespace(device=SimpleNamespace(type=device)) if device is not None else None
+    assert simple_gla_verifier(q=q, k=q, v=q) == (accepted, reason)
+
+
+def test_retention_ascend_registration_import_order(run_python):
+    run_python(
+        """
+        import importlib
+        import inspect
+        import sys
+
+        from fla import backends
+        from fla.ops.simple_gla.backends.triton_ascend.utils import simple_gla_verifier
+
+        backends.TritonAscendBackend.is_available = classmethod(lambda cls: True)
+        for operation, name in [
+            ('common.chunk_o', 'chunk_bwd_dv'),
+            ('simple_gla.fused_chunk', 'fused_chunk_simple_gla'),
+            ('simple_gla.parallel', 'parallel_simple_gla'),
+            ('simple_gla.fused_recurrent', 'fused_recurrent_simple_gla'),
+        ]:
+            module = 'fla.ops.' + operation
+            owner, file = operation.split('.')
+            backend_module = f'fla.ops.{owner}.backends.triton_ascend.{file}'
+            importlib.reload(importlib.import_module(f'fla.ops.{owner}'))
+            entry = getattr(importlib.import_module(module), name)
+            implementation = sys.modules[backend_module]
+            registry = backends._function_registries[inspect.unwrap(entry)]
+            assert len(registry._backends) == 1
+            candidate = registry._backends['triton_ascend']
+            assert candidate.implementation is getattr(implementation, name + '_npu')
+            assert candidate.verifier is (simple_gla_verifier if owner == 'simple_gla' else None)
+            expected = inspect.signature(entry).parameters
+            actual = inspect.signature(candidate.implementation).parameters
+            assert expected.keys() == actual.keys()
+            for parameter in expected:
+                assert expected[parameter].kind == actual[parameter].kind
+                assert expected[parameter].default == actual[parameter].default
+        assert 'simple_gla' not in backends._operation_registries
+        """,
+        FLA_DISABLE_BACKEND_DISPATCH='0',
+    )
