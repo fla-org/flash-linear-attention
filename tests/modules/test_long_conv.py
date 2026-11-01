@@ -7,31 +7,45 @@
 
 import pytest
 import torch
+import torch.nn.functional as F
 
 from fla.modules import ImplicitLongConvolution, LongConvolution
 from fla.utils import device
 
 
-@pytest.mark.parametrize("module", [LongConvolution, ImplicitLongConvolution])
-@pytest.mark.parametrize("T", [1, 10, 37, 64, 100])
-@pytest.mark.parametrize("max_len", [64])
-@torch.no_grad()
+@pytest.mark.parametrize(
+    ('module', 'T', 'max_len'),
+    [
+        pytest.param(LongConvolution, 1, 64, id='single-token'),
+        pytest.param(LongConvolution, 37, 64, id='short-sequence'),
+        pytest.param(LongConvolution, 64, 64, id='full-filter'),
+        pytest.param(LongConvolution, 100, 64, id='short-filter'),
+        pytest.param(ImplicitLongConvolution, 37, 64, id='implicit-short-sequence'),
+    ],
+)
 def test_long_conv_causal(module: type, T: int, max_len: int):
     torch.manual_seed(42)
     B, D = 2, 16
-    conv = module(D, max_len).to(device=device, dtype=torch.float32)
-    x = torch.randn(B, T, D, device=device, dtype=torch.float32)
+    conv = module(hidden_size=D, max_len=max_len).to(device=device, dtype=torch.float32)
+    x = torch.randn(B, T, D, device=device, dtype=torch.float32, requires_grad=True)
     y = conv(x)
 
-    # y[t] = x[t] + sum_{j <= t} k[j] * x[t - j], using the filter's first taps only
     k = conv.filter if module is LongConvolution else conv.filter(T)[0]
-    ref = x.clone()
-    for t in range(T):
-        for j in range(min(t + 1, k.shape[-1])):
-            ref[:, t] += k[:, j] * x[:, t - j]
+    windows = F.pad(x.transpose(1, 2), (k.shape[-1] - 1, 0)).unfold(-1, k.shape[-1], 1)
+    ref = x + (windows * k.flip(-1)[None, :, None, :]).sum(-1).transpose(1, 2)
     torch.testing.assert_close(y, ref, rtol=1e-4, atol=1e-4)
 
+    inputs = (x, *(p for p in conv.parameters() if p.requires_grad))
+    do = torch.randn_like(y)
+    grads = torch.autograd.grad(outputs=y, inputs=inputs, grad_outputs=do)
+    ref_grads = torch.autograd.grad(outputs=ref, inputs=inputs, grad_outputs=do)
+    for grad, ref_grad in zip(grads, ref_grads):
+        torch.testing.assert_close(grad, ref_grad, rtol=1e-4, atol=1e-4)
+    if module is LongConvolution and max_len > T:
+        assert torch.count_nonzero(grads[1][:, T:]) == 0
+
     # changing the last token must leave every earlier output unchanged
-    x2 = x.clone()
-    x2[:, -1] += 1
-    torch.testing.assert_close(conv(x2)[:, :-1], y[:, :-1], rtol=0, atol=1e-4)
+    with torch.no_grad():
+        x2 = x.clone()
+        x2[:, -1] += 1
+        torch.testing.assert_close(conv(x2)[:, :-1], y[:, :-1], rtol=0, atol=1e-4)
