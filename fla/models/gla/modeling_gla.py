@@ -40,7 +40,8 @@ _RESIDUAL_KEY_MAPPING = {
 }
 
 
-def _checkpoint_with_flattened_state(function, *args, checkpoint_func):
+def checkpoint_residual_state(function, *args, checkpoint_func):
+    """Expose tensors inside residual state to reentrant checkpointing."""
     flat_args, input_spec = tree_flatten(args)
     output_spec = None
 
@@ -149,7 +150,7 @@ class GLAPreTrainedModel(FLAPreTrainedModel):
             for module in self.modules():
                 if isinstance(module, GLABlock):
                     module._gradient_checkpointing_func = partial(
-                        _checkpoint_with_flattened_state,
+                        checkpoint_residual_state,
                         checkpoint_func=module._gradient_checkpointing_func,
                     )
 
@@ -177,8 +178,6 @@ class GLAModel(GLAPreTrainedModel, FLAModel):
         self.layers = nn.ModuleList([GLABlock(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
         residual_cls = get_residual_class(config.residual_mode)
         output_kwargs = config.get_residual_kwargs(sub_layer_idx=2 * config.num_hidden_layers, is_output=True)
-        if not self.layers:
-            raise ValueError('GLA requires at least one layer (num_hidden_layers >= 1)')
         self.residual_output = residual_cls(**output_kwargs)
         for residual in self.modules():
             if isinstance(residual, BaseResidual):

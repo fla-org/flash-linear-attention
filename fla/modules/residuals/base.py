@@ -20,15 +20,9 @@ ContextT = TypeVar('ContextT')
 class BaseResidual(nn.Module, ABC, Generic[StateT, ContextT]):
     """Own normalization, learned residual parameters, and residual state transitions.
 
-    `pre` reads the incoming state and returns a normalized branch input plus per-call context.
-    `post` writes the branch output into a new state. State and context remain explicit inputs,
-    retain autograd connections, and are never cached on the module or updated in place.
-    `StateT` ties the initialized state to the inputs and outputs of subsequent state transitions and reads.
-    `ContextT` ties each `pre` context to the corresponding `post` input; use `None` when no context is needed.
-    The output module initializes the model state and performs the final readout and normalization.
-    Callers identify this separate output module with `is_output=True`.
-    Reentrant checkpointing requires flattening state inputs and outputs at the checkpoint boundary.
-    Subclasses can disable it with `supports_reentrant_checkpointing = False`.
+    `pre` returns a normalized branch input and per-call context; `post` returns the updated state.
+    State and context retain autograd connections and must not be mutated or cached on the module.
+    The output module initializes state and performs the final readout and normalization.
     """
 
     supports_reentrant_checkpointing = True

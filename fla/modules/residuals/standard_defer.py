@@ -20,16 +20,10 @@ class ResidualState(NamedTuple):
 
 
 class StandardDeferredResidual(BaseResidual[ResidualState, torch.Tensor]):
-    """Keep accumulated residual and pending branch output in a tuple, deferring their addition.
+    """Defer residual addition to fuse it with the next sublayer's normalization.
 
-    `pre` combines both tensors and returns the accumulated sum as context.
-    The first sublayer uses the initial input directly, with no pending branch to add.
-    `post` pairs this context with the new branch output, leaving addition to a later read.
-
-    For subsequent sublayers, `fuse_norm=True` combines residual addition and normalization with `prenorm=True`.
-    In this fused path, the normalized input uses the pending branch's dtype and context retains `state.x.dtype`.
-    With `fuse_norm=False`, addition remains deferred and follows PyTorch dtype promotion before normalization.
-    The output module adds the final pending branch separately, normalizes the sum, and returns that same sum as context.
+    The fused path returns the branch dtype and retains the accumulated residual dtype in context.
+    The output module adds the final branch before normalization, matching the model's final readout.
     """
 
     def initialize(self, x: torch.Tensor) -> ResidualState:
