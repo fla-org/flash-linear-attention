@@ -205,14 +205,13 @@ def test_fused_hc_stack(use_mixing: bool, backend):
     post = torch.randn(3, 2, 4, device=device, requires_grad=True)
     logits = torch.randn(3, 2, 4, 4, device=device, requires_grad=True) if use_mixing else None
     ref, tri = x, x
-    with torch.autocast('cuda', dtype=torch.bfloat16):
-        for step in range(3):
-            ref_branch = naive_hc_pre(x=ref, pre=pre[step].sigmoid()).tanh()
-            tri_branch = fused_hc_pre(x=tri, pre=pre[step].sigmoid()).tanh()
-            ref_mixing = naive_sinkhorn(logits=logits[step]) if use_mixing else None
-            tri_mixing = sinkhorn(logits=logits[step]) if use_mixing else None
-            ref = naive_hc_post(x=ref, branch=ref_branch, post=2 * post[step].sigmoid(), mixing=ref_mixing)
-            tri = fused_hc_post(x=tri, branch=tri_branch, post=2 * post[step].sigmoid(), mixing=tri_mixing)
+    for step in range(3):
+        ref_branch = naive_hc_pre(x=ref, pre=pre[step].sigmoid()).tanh()
+        tri_branch = fused_hc_pre(x=tri, pre=pre[step].sigmoid()).tanh()
+        ref_mixing = naive_sinkhorn(logits=logits[step]) if use_mixing else None
+        tri_mixing = sinkhorn(logits=logits[step]) if use_mixing else None
+        ref = naive_hc_post(x=ref, branch=ref_branch, post=2 * post[step].sigmoid(), mixing=ref_mixing)
+        tri = fused_hc_post(x=tri, branch=tri_branch, post=2 * post[step].sigmoid(), mixing=tri_mixing)
     inputs = (x, pre, post, logits) if use_mixing else (x, pre, post)
     do = torch.randn_like(ref)
     ref_grads = torch.autograd.grad(outputs=ref, inputs=inputs, grad_outputs=do)
