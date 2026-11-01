@@ -68,6 +68,18 @@ def shape_BTHNN(B, T, H, D, N, **kw):
     return (B, T, H, N, N)
 
 
+def shape_BTND(B, T, H, D, N, **kw):
+    return (B, T, N, D)
+
+
+def shape_BTN(B, T, H, D, N, **kw):
+    return (B, T, N)
+
+
+def shape_BTNN(B, T, H, D, N, **kw):
+    return (B, T, N, N)
+
+
 def shape_q_hq(B, T, H, D, HQ=None, **kw):
     """q with HQ query heads (GQA); k/v keep H heads. Used by NSA."""
     if HQ is None:
@@ -424,6 +436,30 @@ register_op(OpConfig(
     test_file='tests/ops/test_gdn2.py',
 ))
 
+
+def l2norm_fp32_transform(t):
+    return F.normalize(t, p=2, dim=-1)
+
+
+register_op(OpConfig(
+    name='chunk_oja2',
+    import_path='fla.ops.gated_oja_rule2',
+    inputs={
+        'q': TensorSpec(shape_BTHD),
+        'k': TensorSpec(shape_BTHD),
+        # the slot code has M = D slots and stays in fp32, as the GSA2 layer feeds it
+        'v': TensorSpec(shape_BTHD, dtype='float32', transform=l2norm_fp32_transform),
+        'gv': TensorSpec(shape_BTHD, dtype='float32', transform=logsigmoid),
+        'b': TensorSpec(shape_BTHD, transform=sigmoid_transform),
+        'c': TensorSpec(shape_BTHD, transform=sigmoid_transform),
+    },
+    func_name='chunk_gated_oja_rule2',
+    extra_kwargs={'use_q_l2norm': True, 'use_k_l2norm': True},
+    category='gate_beta',
+    dim_constraints={'D': [64, 128, 256]},
+    test_file='tests/ops/test_gated_oja_rule2.py',
+))
+
 register_op(OpConfig(
     name='chunk_kda',
     import_path='fla.ops.kda',
@@ -499,6 +535,26 @@ register_op(OpConfig(
 ))
 
 register_op(OpConfig(
+    name='fused_recurrent_oja2',
+    import_path='fla.ops.gated_oja_rule2',
+    inputs={
+        'q': TensorSpec(shape_BTHD),
+        'k': TensorSpec(shape_BTHD),
+        'v': TensorSpec(shape_BTHD, dtype='float32', transform=l2norm_fp32_transform),
+        'gv': TensorSpec(shape_BTHD, dtype='float32', transform=logsigmoid),
+        'b': TensorSpec(shape_BTHD, transform=sigmoid_transform),
+        'c': TensorSpec(shape_BTHD, transform=sigmoid_transform),
+    },
+    func_name='fused_recurrent_gated_oja_rule2',
+    extra_kwargs={'use_q_l2norm': True, 'use_k_l2norm': True, 'output_final_state': True},
+    skip_backward=True,
+    category='oja2',
+    dim_constraints={'D': [64, 128]},
+    default_shapes={f'B4_T{T}_H8_D128': {'B': 4, 'T': T, 'H': 8, 'D': 128} for T in (1, 16, 64)},
+    test_file='tests/ops/test_gated_oja_rule2.py',
+))
+
+register_op(OpConfig(
     name='fused_recurrent_oja',
     import_path='fla.ops.gated_oja_rule',
     inputs={
@@ -557,6 +613,19 @@ register_op(OpConfig(
         'g': TensorSpec(shape_BTH, transform=logsigmoid),
     },
     category='head_gate',
+))
+
+register_op(OpConfig(
+    name='chunk_gka',
+    import_path='fla.ops.gka',
+    inputs={
+        **_simple_qkv,
+        'g': TensorSpec(shape_BTH, transform=logsigmoid),
+        'gk': TensorSpec(shape_BTH, transform=logsigmoid),
+        'alpha': TensorSpec(shape_BTH, transform=sigmoid_transform),
+    },
+    category='head_gate',
+    dim_constraints={'D': [64, 128]},
 ))
 
 # --- RWKV ---
@@ -710,9 +779,7 @@ register_op(OpConfig(
     category='flash_attn',
 ))
 
-# --- layer-axis residual aggregation (AttnRes, mHC, ...) ---
-# These ops attend / aggregate over an `L` axis of stacked residual sources.
-# Inputs and shape sweeps are shared so future ops (mHC etc.) can reuse them.
+# attnres aggregates over an L axis of stacked residual sources.
 
 _layer_default_shapes = {
     'L8_B1_T8K_D2K':   {'L': 8,  'B': 1, 'T': 8192,  'H': 1, 'D': 2048},
@@ -758,6 +825,102 @@ register_op(OpConfig(
     output_is_tuple=False,
     default_shapes=_layer_default_shapes,
     category='naive_attnres',
+))
+
+_hc_default_shapes = {
+    'B1_T8K_H1_N4_D2K':  {'B': 1, 'T': 8192,  'H': 1, 'N': 4, 'D': 2048},
+    'B1_T8K_H1_N8_D2K':  {'B': 1, 'T': 8192,  'H': 1, 'N': 8, 'D': 2048},
+    'B1_T32K_H1_N4_D2K': {'B': 1, 'T': 32768, 'H': 1, 'N': 4, 'D': 2048},
+    'B1_T32K_H1_N8_D2K': {'B': 1, 'T': 32768, 'H': 1, 'N': 8, 'D': 2048},
+    'B1_T8K_H1_N4_D4K':  {'B': 1, 'T': 8192,  'H': 1, 'N': 4, 'D': 4096},
+    'B1_T8K_H1_N8_D4K':  {'B': 1, 'T': 8192,  'H': 1, 'N': 8, 'D': 4096},
+    'B1_T32K_H1_N4_D4K': {'B': 1, 'T': 32768, 'H': 1, 'N': 4, 'D': 4096},
+    'B1_T32K_H1_N8_D4K': {'B': 1, 'T': 32768, 'H': 1, 'N': 8, 'D': 4096},
+    'B1_T8K_H1_N4_D8K':  {'B': 1, 'T': 8192,  'H': 1, 'N': 4, 'D': 8192},
+    'B1_T8K_H1_N8_D8K':  {'B': 1, 'T': 8192,  'H': 1, 'N': 8, 'D': 8192},
+}
+
+_hc_pre_inputs = {
+    'x': TensorSpec(shape_fn=shape_BTND),
+    'pre': TensorSpec(shape_fn=shape_BTN, dtype='float32'),
+}
+
+_hc_post_inputs = {
+    'x': TensorSpec(shape_fn=shape_BTND),
+    'branch': TensorSpec(shape_fn=shape_BTD),
+    'post': TensorSpec(shape_fn=shape_BTN, dtype='float32'),
+}
+
+_mhc_post_inputs = {
+    **_hc_post_inputs,
+    'mixing': TensorSpec(shape_fn=shape_BTNN, dtype='float32'),
+}
+
+register_op(OpConfig(
+    name='fused_hc_pre',
+    import_path='fla.ops.hc',
+    inputs=_hc_pre_inputs,
+    output_is_tuple=False,
+    category='hc',
+    dim_constraints={'H': [1]},
+    default_shapes=_hc_default_shapes,
+    backend_env={'gluon': 'FLA_GLUON', 'tilelang': 'FLA_TILELANG'},
+))
+
+register_op(OpConfig(
+    name='naive_hc_pre',
+    import_path='fla.ops.hc',
+    inputs=_hc_pre_inputs,
+    output_is_tuple=False,
+    category='hc',
+    dim_constraints={'H': [1]},
+    default_shapes=_hc_default_shapes,
+))
+
+register_op(OpConfig(
+    name='fused_ihc_post',
+    import_path='fla.ops.hc',
+    inputs=_hc_post_inputs,
+    func_name='fused_hc_post',
+    output_is_tuple=False,
+    category='hc',
+    dim_constraints={'H': [1]},
+    default_shapes=_hc_default_shapes,
+    backend_env={'gluon': 'FLA_GLUON', 'tilelang': 'FLA_TILELANG'},
+))
+
+register_op(OpConfig(
+    name='naive_ihc_post',
+    import_path='fla.ops.hc',
+    inputs=_hc_post_inputs,
+    func_name='naive_hc_post',
+    output_is_tuple=False,
+    category='hc',
+    dim_constraints={'H': [1]},
+    default_shapes=_hc_default_shapes,
+))
+
+register_op(OpConfig(
+    name='fused_mhc_post',
+    import_path='fla.ops.hc',
+    inputs=_mhc_post_inputs,
+    func_name='fused_hc_post',
+    output_is_tuple=False,
+    category='hc',
+    dim_constraints={'H': [1]},
+    default_shapes=_hc_default_shapes,
+    backend_env={'gluon': 'FLA_GLUON', 'tilelang': 'FLA_TILELANG'},
+))
+
+register_op(OpConfig(
+    name='naive_mhc_post',
+    import_path='fla.ops.hc',
+    inputs=_mhc_post_inputs,
+    func_name='naive_hc_post',
+    output_is_tuple=False,
+    category='hc',
+    dim_constraints={'H': [1]},
+    default_shapes=_hc_default_shapes,
 ))
 
 _sinkhorn_default_shapes = {
