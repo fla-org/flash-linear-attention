@@ -118,7 +118,7 @@ def fused_recurrent_gdn2_fwd_kernel_npu(
             bos = i_n * T
             T_cur = T
 
-        if T_cur > 0:
+        if T_cur > 0 or not IS_CONTINUOUS_BATCHING:
             o_k = tl.arange(0, BK).to(tl.int64)
             o_v = i_v * BV + tl.arange(0, BV)
 

@@ -7,12 +7,46 @@
 
 import pytest
 import torch
+import triton
 
 from fla.ops.cyfa import chunk_cyfa, fused_recurrent_cyfa
+from fla.ops.cyfa.chunk import _prune_table_grad_configs
 from fla.ops.cyfa.naive import naive_recurrent_cyfa
-from fla.utils import IS_NVIDIA, assert_close, device
+from fla.utils import IS_NVIDIA, IS_NVIDIA_HOPPER, IS_NVIDIA_SM100, assert_close, device
 
 pytestmark = pytest.mark.skipif(not IS_NVIDIA, reason='CyFA kernels currently require NVIDIA GPUs')
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize(
+    ('dtype', 'as_kwargs'),
+    [
+        pytest.param(torch.float32, False, id='fp32-nargs'),
+        pytest.param(torch.float32, True, id='fp32-kwargs'),
+        pytest.param(torch.float16, False, id='fp16'),
+        pytest.param(torch.bfloat16, False, id='bf16'),
+        pytest.param(None, False, id='missing-right-a'),
+    ],
+)
+def test_prune_table_grad_configs(dtype, as_kwargs):
+    configs = [
+        triton.Config({'BN': 64, 'BR': 32, 'BC': 64}, num_warps=4),
+        triton.Config({'BN': 64, 'BR': 64, 'BC': 64}, num_warps=4),
+        triton.Config({'BN': 64, 'BR': 64, 'BC': 64}, num_warps=8),
+        triton.Config({'BN': 64, 'BR': 64, 'BC': 64}, num_warps=2),
+        triton.Config({'BN': 64, 'BR': 32, 'BC': 64}, num_warps=8),
+    ]
+    args = {} if dtype is None else {'right_a': torch.empty(1, dtype=dtype, device=device)}
+
+    actual = _prune_table_grad_configs(configs, None, **args) if as_kwargs else _prune_table_grad_configs(configs, args)
+
+    expected = configs
+    if dtype == torch.float32:
+        if IS_NVIDIA_SM100:
+            expected = [configs[0], configs[3], configs[4]]
+        elif IS_NVIDIA_HOPPER:
+            expected = [configs[0], *configs[2:]]
+    assert actual == expected
 
 
 def make_inputs(B, T, H, K, V, M, dtype, initial_state=False, cu_seqlens=None):
@@ -72,6 +106,8 @@ def compare_chunk(inputs, checkpoint_level):
     ('B', 'T', 'H', 'K', 'V', 'M', 'dtype', 'initial_state'),
     [
         pytest.param(1, 64, 2, 32, 32, 128, torch.float32, False, id='fp32', marks=pytest.mark.smoke),
+        pytest.param(1, 65, 2, 64, 64, 64, torch.float32, False, id='fp32-slots64', marks=pytest.mark.smoke),
+        pytest.param(1, 65, 2, 64, 64, 128, torch.float32, False, id='fp32-slots128-v64', marks=pytest.mark.smoke),
         pytest.param(2, 256, 2, 64, 64, 128, torch.float32, True, id='fp32-state'),
         pytest.param(2, 100, 3, 64, 64, 128, torch.float16, True, id='fp16-ragged'),
         pytest.param(1, 64, 1, 128, 128, 128, torch.bfloat16, False, id='bf16-d128'),
@@ -98,6 +134,45 @@ def test_chunk_varlen(cu_seqlens, dtype, initial_state, checkpoint_level):
     torch.manual_seed(42)
     cu = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
     compare_chunk(make_inputs(1, cu_seqlens[-1], 2, 64, 64, 128, dtype, initial_state, cu), checkpoint_level)
+
+
+@pytest.mark.parametrize('checkpoint_level', [0, 1])
+@pytest.mark.parametrize('empty_idx', [0, 1, 2], ids=['first', 'middle', 'last'])
+def test_chunk_varlen_empty_gradient(checkpoint_level, empty_idx):
+    torch.manual_seed(42)
+    cu = torch.tensor([0, 3, 6], dtype=torch.int32, device=device)
+    cu = torch.cat((cu[:empty_idx + 1], cu[empty_idx:]))
+    inputs = make_inputs(1, 6, 1, 32, 32, 128, torch.float16, True, cu)
+    nonempty = [i for i in range(3) if i != empty_idx]
+    ref, ref_state = naive_recurrent_cyfa(
+        **{
+            **inputs,
+            'cu_seqlens': torch.tensor([0, 3, 6], dtype=torch.int32, device=device),
+            'initial_state': tuple(x.index_select(0, torch.tensor(nonempty, device=device)) for x in inputs['initial_state']),
+        }
+    )
+    ref_state = tuple(
+        torch.cat((state[:empty_idx], initial[empty_idx:empty_idx + 1], state[empty_idx:]))
+        for state, initial in zip(ref_state, inputs['initial_state'], strict=True)
+    )
+    do = torch.randn_like(ref)
+    ds = tuple(torch.randn_like(s) for s in ref_state)
+    named_inputs = [(name, x) for name, x in inputs.items() if isinstance(x, torch.Tensor) and x.requires_grad]
+    named_inputs.extend(zip(('hk0', 'hv0', 'lambda0'), inputs['initial_state'], strict=True))
+    tensors = [x for _, x in named_inputs]
+    ref_loss = (ref * do).sum() + sum((s * d).sum() for s, d in zip(ref_state, ds, strict=True))
+    ref_grads = torch.autograd.grad(ref_loss, tensors)
+
+    actual, actual_state = chunk_cyfa(**inputs, checkpoint_level=checkpoint_level)
+    actual_loss = (actual * do).sum() + sum((s * d).sum() for s, d in zip(actual_state, ds, strict=True))
+    actual_grads = torch.autograd.grad(actual_loss, tensors)
+    for name, expected, result in [('o', ref, actual), *zip(('hkt', 'hvt', 'lambda'), ref_state, actual_state, strict=True)]:
+        assert torch.isfinite(result).all(), name
+        assert_close(name, expected.float(), result.float(), 0.006)
+    for (name, _), expected, result in zip(named_inputs, ref_grads, actual_grads, strict=True):
+        assert torch.isfinite(result).all(), name
+        tol = 0.02 if name in ('g', 'delta', 'beta', 'lambda0') else 0.012
+        assert_close('d' + name, expected.float(), result.float(), tol)
 
 
 @pytest.mark.parametrize('checkpoint_level', [0, 1])
