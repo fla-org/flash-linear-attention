@@ -5,8 +5,9 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from .chunk import chunk_kda
-from .fused_recurrent import fused_recurrent_kda
+from fla.backends import TileLangBackend, TritonAscendBackend
+from fla.ops.kda.chunk import chunk_kda
+from fla.ops.kda.fused_recurrent import fused_recurrent_kda
 
 __all__ = [
     "chunk_kda",
@@ -14,18 +15,10 @@ __all__ = [
 ]
 
 
-from fla.backends import TileLangBackend, TritonAscendBackend
-from fla.ops.kda.backends.flash_kda import FlashKDABackend  # noqa: F401
+from fla.ops.kda.backends import flash_kda  # noqa: F401
 
 if TileLangBackend.is_available():
     from fla.ops.kda.backends import tilelang  # noqa: F401
 
 if TritonAscendBackend.is_available():
-    from fla.ops.kda.backends.triton_ascend import (  # noqa: F401
-        chunk_bwd,
-        chunk_intra,
-        chunk_intra_token_parallel,
-        fused_recurrent,
-        gate,
-        wy_fast,
-    )
+    from fla.ops.kda.backends import triton_ascend  # noqa: F401

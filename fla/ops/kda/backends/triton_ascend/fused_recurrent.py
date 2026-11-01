@@ -25,24 +25,24 @@ from fla.utils.ascend_ub_manager import (
 )
 
 # Peak fp32 live set: b_h[BK,BV] + b_q,b_k,b_g[BK] + b_v,b_o,b_beta[BV].
-_RECUR_MEM_MULT = 3.0
-_SAFETY_MARGIN = 0.80
-_FALLBACK_BV = 32
-_MAX_BV = 256
+RECUR_MEM_MULT = 3.0
+SAFETY_MARGIN = 0.80
+FALLBACK_BV = 32
+MAX_BV = 256
 
 
-def _get_bv(K: int, V: int) -> int:
+def get_recurrent_bv(K: int, V: int) -> int:
     bk = triton.next_power_of_2(K)
     return compute_row_tile_block_size(
-        bk,
-        V,
-        _RECUR_MEM_MULT,
+        row_dim=bk,
+        fixed_dim=V,
+        memory_multiplier=RECUR_MEM_MULT,
         tiling_row=False,
-        safety_margin=_SAFETY_MARGIN,
+        safety_margin=SAFETY_MARGIN,
         dtype_size=4,
-        fallback=_FALLBACK_BV,
+        fallback=FALLBACK_BV,
         min_block=16,
-        max_block=min(_MAX_BV, triton.next_power_of_2(V)),
+        max_block=min(MAX_BV, triton.next_power_of_2(V)),
     )
 
 
@@ -326,7 +326,7 @@ def fused_recurrent_kda_fwd_npu(
 
     stride_indices_seq = 1 if ssm_state_indices is None else ssm_state_indices.stride(0)
 
-    BV = _get_bv(K, V)
+    BV = get_recurrent_bv(K, V)
     task_num = triton.cdiv(V, BV) * N * HV
 
     kernel_kwargs = dict(

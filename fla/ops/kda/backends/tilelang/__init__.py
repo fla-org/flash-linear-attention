@@ -70,10 +70,9 @@ def chunk_kda_bwd_wy_dqkg_fused_tilelang(
     chunk_offsets: torch.LongTensor | None = None,
     use_graph: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    from fla.ops.kda.backends.tilelang.chunk_bwd_dqkg import (
-        chunk_kda_bwd_wy_dqkg_fused_tilelang,
-    )
-    return chunk_kda_bwd_wy_dqkg_fused_tilelang(
+    from fla.ops.kda.backends.tilelang import chunk_bwd_dqkg
+
+    return chunk_bwd_dqkg.chunk_kda_bwd_wy_dqkg_fused_tilelang(
         q=q,
         k=k,
         v=v,

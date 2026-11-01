@@ -2045,3 +2045,14 @@ def test_chunk_bwd_tilelang_dispatch(monkeypatch, chunk_bwd_inputs):
 def test_chunk_bwd_tilelang_verifier_rejects_graph(chunk_bwd_inputs):
     verdict = tilelang.chunk_kda_bwd_wy_dqkg_fused_verifier(**chunk_bwd_inputs, use_graph=True)
     assert verdict == (False, 'TileLang backend does not support graph capture (use_graph=True); fall back to Triton')
+
+
+def test_chunk_bwd_ascend_verifier(chunk_bwd_inputs):
+    from fla.ops.kda.backends.triton_ascend.chunk_bwd import chunk_kda_bwd_wy_dqkg_fused_verifier
+    from fla.ops.kda.chunk_bwd import chunk_kda_bwd_wy_dqkg_fused
+
+    arguments = inspect.signature(chunk_kda_bwd_wy_dqkg_fused).bind(**chunk_bwd_inputs, chunk_size=17)
+    arguments.apply_defaults()
+    expected = (False, 'KDA Ascend bwd requires chunk_size % 16 == 0, got 17')
+    assert chunk_kda_bwd_wy_dqkg_fused_verifier(**arguments.arguments) == expected
+    assert chunk_kda_bwd_wy_dqkg_fused_verifier(*arguments.args, **arguments.kwargs) == expected

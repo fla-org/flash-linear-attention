@@ -12,68 +12,64 @@ from __future__ import annotations
 import torch
 import triton
 import triton.language as tl
-import triton.runtime.driver as driver
 
 from fla.backends import TritonAscendBackend, register
 from fla.ops.kda.wy_fast import recompute_w_u_fwd
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp2
 from fla.utils import input_guard
-from fla.utils.ascend_ub_manager import compute_row_tile_block_size
+from fla.utils.ascend_ub_manager import compute_row_tile_block_size, get_npu_properties
 
 # recompute_w_u_fwd: peak UB is max(u-slab, w-slab), not sum — tile BK/BV independently.
 # u-slab: b_A[BT,BT] + b_v/b_vb/b_u[BT,BV]  (~3.5× BT×BV + BT×BT)
 # w-slab: b_A + b_k/b_kb/b_gk/b_kg[/b_q/b_qg][BT,BK]  (4.5× or 6.5× BT×BK + BT×BT)
-_RECOMPUTE_FWD_U_MEM_MULT = 3.5
-_RECOMPUTE_FWD_W_MEM_MULT = 4.5
-_RECOMPUTE_FWD_W_MEM_MULT_QG = 6.5
-_SAFETY_MARGIN = 0.75
-_FALLBACK_TILE = 8
-_MAX_TILE_FWD = 128
-_PREFERRED_TILE = 64
+RECOMPUTE_FWD_U_MEM_MULT = 3.5
+RECOMPUTE_FWD_W_MEM_MULT = 4.5
+RECOMPUTE_FWD_W_MEM_MULT_QG = 6.5
+SAFETY_MARGIN = 0.75
+FALLBACK_TILE = 8
+MAX_TILE_FWD = 128
+PREFERRED_TILE = 64
 
 
-def get_npu_properties():
-    device = torch.npu.current_device()
-    return driver.active.utils.get_device_properties(device)
-
-
-def _launch_wy_core_grid(kernel, *, task_num: int, kernel_kwargs: dict) -> None:
+def launch_wy_core_grid(kernel, *, task_num: int, kernel_kwargs: dict) -> None:
     num_core = get_npu_properties()["num_aicore"]
     kernel[(num_core,)](task_num=task_num, num_core=num_core, **kernel_kwargs)
 
 
-def _candidate_tiles(dim: int) -> list[int]:
-    cap = min(_MAX_TILE_FWD, triton.next_power_of_2(dim))
-    tiles = [b for b in (_PREFERRED_TILE, _MAX_TILE_FWD, 32, 16, 8) if b <= cap]
-    return tiles or [_FALLBACK_TILE]
+def get_fwd_block_sizes(dim: int) -> list[int]:
+    cap = min(MAX_TILE_FWD, triton.next_power_of_2(dim))
+    tiles = [b for b in (PREFERRED_TILE, MAX_TILE_FWD, 32, 16, 8) if b <= cap]
+    return tiles or [FALLBACK_TILE]
 
 
-def _get_fwd_tiles(BT: int, K: int, V: int, *, store_qg: bool) -> tuple[int, int]:
+def get_fwd_tiles(BT: int, K: int, V: int, *, store_qg: bool) -> tuple[int, int]:
     """Minimize V/K slab iterations under independent UB budgets for u- and w-slabs."""
-    w_mult = _RECOMPUTE_FWD_W_MEM_MULT_QG if store_qg else _RECOMPUTE_FWD_W_MEM_MULT
+    w_mult = RECOMPUTE_FWD_W_MEM_MULT_QG if store_qg else RECOMPUTE_FWD_W_MEM_MULT
 
-    def _max_tile(fixed_dim: int, mem_mult: float) -> int:
+    def get_max_tile(fixed_dim: int, mem_mult: float) -> int:
         return compute_row_tile_block_size(
-            BT, fixed_dim, mem_mult,
+            row_dim=BT,
+            fixed_dim=fixed_dim,
+            memory_multiplier=mem_mult,
             tiling_row=False,
-            safety_margin=_SAFETY_MARGIN,
-            fallback=_FALLBACK_TILE,
+            safety_margin=SAFETY_MARGIN,
+            fallback=FALLBACK_TILE,
             min_block=8,
-            max_block=min(_MAX_TILE_FWD, triton.next_power_of_2(fixed_dim)),
+            max_block=min(MAX_TILE_FWD, triton.next_power_of_2(fixed_dim)),
         )
 
-    max_bk = _max_tile(K, w_mult)
-    max_bv = _max_tile(V, _RECOMPUTE_FWD_U_MEM_MULT)
+    max_bk = get_max_tile(K, w_mult)
+    max_bv = get_max_tile(V, RECOMPUTE_FWD_U_MEM_MULT)
 
     best_cost = None
     best_bk = max(8, min(max_bk, triton.next_power_of_2(K)))
     best_bv = max(8, min(max_bv, triton.next_power_of_2(V)))
 
-    for bk in _candidate_tiles(K):
+    for bk in get_fwd_block_sizes(K):
         if bk > max_bk:
             continue
-        for bv in _candidate_tiles(V):
+        for bv in get_fwd_block_sizes(V):
             if bv > max_bv:
                 continue
             cost = triton.cdiv(V, bv) + triton.cdiv(K, bk)
@@ -85,21 +81,21 @@ def _get_fwd_tiles(BT: int, K: int, V: int, *, store_qg: bool) -> tuple[int, int
     return best_bk, best_bv
 
 
-def _hv_t_npu_arg(x: torch.Tensor, HV: int) -> tuple[torch.Tensor, bool]:
+def prepare_time_contiguous_input(x: torch.Tensor, HV: int) -> tuple[torch.Tensor, bool]:
     if HV == 1:
         return x, False
     return x.transpose(1, 2).contiguous(), True
 
 
 @triton.jit
-def _beta_block_ptr(beta_ptr, T, i_t, BT, BETA_T_CONTIG: tl.constexpr, HV: tl.constexpr):
+def make_beta_block_ptr(beta_ptr, T, i_t, BT, BETA_T_CONTIG: tl.constexpr, HV: tl.constexpr):
     if BETA_T_CONTIG:
         return tl.make_block_ptr(beta_ptr, (T,), (1,), (i_t * BT,), (BT,), (0,))
     return tl.make_block_ptr(beta_ptr, (T,), (HV,), (i_t * BT,), (BT,), (0,))
 
 
 @triton.jit
-def _gk_block_ptr(gk_ptr, T, K, i_t, i_k, BT, BK, GK_T_CONTIG: tl.constexpr, HV: tl.constexpr):
+def make_gate_block_ptr(gk_ptr, T, K, i_t, i_k, BT, BK, GK_T_CONTIG: tl.constexpr, HV: tl.constexpr):
     if GK_T_CONTIG:
         return tl.make_block_ptr(gk_ptr, (T, K), (K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
     return tl.make_block_ptr(gk_ptr, (T, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
@@ -193,7 +189,7 @@ def recompute_w_u_fwd_kda_kernel_npu(
                 q_ptr = q + (bos * H + i_h) * K
                 qg_ptr = qg + (bos * HV + i_hv) * K
 
-            p_b = _beta_block_ptr(beta_ptr, T, i_t, BT, BETA_T_CONTIG, HV)
+            p_b = make_beta_block_ptr(beta_ptr, T, i_t, BT, BETA_T_CONTIG, HV)
             b_b = tl.load(p_b, boundary_check=(0,))
 
             p_A = tl.make_block_ptr(A_ptr, (T, BT), (HV * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
@@ -215,7 +211,7 @@ def recompute_w_u_fwd_kda_kernel_npu(
                 b_k = tl.load(p_k, boundary_check=(0, 1))
                 b_kb = b_k * b_b[:, None]
 
-                p_gk = _gk_block_ptr(gk_ptr, T, K, i_t, i_k, BT, BK, GK_T_CONTIG, HV)
+                p_gk = make_gate_block_ptr(gk_ptr, T, K, i_t, i_k, BT, BK, GK_T_CONTIG, HV)
                 b_gk = tl.load(p_gk, boundary_check=(0, 1)).to(tl.float32)
                 b_gk_exp = exp2(b_gk)
                 b_kb = b_kb * b_gk_exp
@@ -261,21 +257,21 @@ def recompute_w_u_fwd_npu(
     HV = v.shape[2]
     BT = A.shape[-1]
     store_qg = q is not None
-    BK, BV = _get_fwd_tiles(BT, K, V, store_qg=store_qg)
+    BK, BV = get_fwd_tiles(BT, K, V, store_qg=store_qg)
 
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
-    beta, beta_t_contig = _hv_t_npu_arg(beta, HV)
-    gk, gk_t_contig = _hv_t_npu_arg(gk, HV)
+    beta, beta_t_contig = prepare_time_contiguous_input(beta, HV)
+    gk, gk_t_contig = prepare_time_contiguous_input(gk, HV)
 
     w = (k.new_zeros if use_graph else k.new_empty)(B, T, HV, K)
     u = (torch.zeros_like if use_graph else torch.empty_like)(v)
     qg = (k.new_zeros if use_graph else k.new_empty)(B, T, HV, K) if store_qg else None
     kg = (k.new_zeros if use_graph else k.new_empty)(B, T, HV, K)
 
-    _launch_wy_core_grid(
+    launch_wy_core_grid(
         recompute_w_u_fwd_kda_kernel_npu,
         task_num=NT * B * HV,
         kernel_kwargs=dict(
