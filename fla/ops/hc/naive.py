@@ -13,7 +13,7 @@ from einops import einsum
 
 
 def naive_hc_pre(x: torch.Tensor, pre: torch.Tensor) -> torch.Tensor:
-    """PyTorch reference for the HC/mHC/iHC readout in `fused_hc_pre`.
+    """PyTorch reference for the HC/mHC/iHC weighted readout.
 
     Reduces `[..., N, D]` residual streams with `[..., N]` activated weights to a `[..., D]` branch input.
     Accumulates in FP32 and returns the stream dtype.
@@ -38,7 +38,7 @@ def naive_hc_post(
     post: torch.Tensor,
     mixing: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """PyTorch reference for the residual update in `fused_hc_post`.
+    """PyTorch reference for the HC/mHC/iHC residual update.
 
     HC mixes N residual streams before adding the branch output weighted by `post`.
     mHC uses a caller-supplied doubly stochastic mixing matrix; iHC uses `mixing=None` for the identity transition.
