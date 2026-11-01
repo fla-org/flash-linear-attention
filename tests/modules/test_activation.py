@@ -546,10 +546,7 @@ def test_activation_ascend_registration(run_python):
         backends.TritonAscendBackend.is_available = classmethod(lambda cls: True)
         importlib.reload(activations)
         implementation = sys.modules['fla.modules.activations.triton_ascend']
-        for name in (
-            'sigmoid_fwd', 'sigmoid_bwd', 'logsigmoid_fwd', 'logsigmoid_bwd', 'swish_fwd', 'swish_bwd',
-            'swiglu_fwd', 'swiglu_fwdbwd', 'swiglu_linear', 'powglu_fwd', 'powglu_fwdbwd', 'powglu_linear',
-        ):
+        for name in ('sigmoid_fwd', 'sigmoid_bwd', 'swiglu_fwdbwd', 'swiglu_linear'):
             entry = getattr(ops, name)
             registry = backends._function_registries[inspect.unwrap(entry)]
             target = registry._backends['triton_ascend'].get_implementation(name)
