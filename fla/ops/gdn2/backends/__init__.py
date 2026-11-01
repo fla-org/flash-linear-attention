@@ -4,9 +4,3 @@
 # LICENSE file in the root directory of this source tree.
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
-
-"""GDN-2 backends."""
-
-from fla.ops.gdn2.backends.triton_ascend import TritonAscendGDN2Backend
-
-__all__ = ['TritonAscendGDN2Backend']
