@@ -4,11 +4,3 @@
 # LICENSE file in the root directory of this source tree.
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
-
-"""Common backends for shared operations like chunk_gated_delta_rule_fwd_h."""
-
-from fla.ops.common.backends.intracard import IntraCardCPBackend
-from fla.ops.common.backends.tilelang import CommonTileLangBackend
-from fla.ops.common.backends.triton_ascend import TritonAscendCommonBackend
-
-__all__ = ['CommonTileLangBackend', 'IntraCardCPBackend', 'TritonAscendCommonBackend']
