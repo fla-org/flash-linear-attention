@@ -8,8 +8,8 @@
 import pytest
 import torch
 
-from fla.models import TransformerConfig
-from fla.utils import find_spec_cached
+from fla.models import TransformerConfig, TransformerForCausalLM
+from fla.utils import assert_close, device, find_spec_cached
 
 from .utils import check_forward, check_generation
 
@@ -77,3 +77,43 @@ def test_generation(
     dtype: torch.dtype,
 ):
     check_generation(L, B, T, H, D, TransformerConfig, dtype)
+
+
+@pytest.mark.skipif(device != 'cuda', reason='requires CUDA')
+@pytest.mark.parametrize(
+    ('dtype', 'window_size'),
+    [
+        pytest.param(torch.float16, 8, id='fp16-windowed'),
+        pytest.param(torch.bfloat16, 8, id='bf16-windowed'),
+        pytest.param(torch.float16, None, id='fp16-unbounded'),
+        pytest.param(torch.bfloat16, None, id='bf16-unbounded'),
+    ],
+)
+@torch.no_grad()
+def test_cached_chunk_continuation(dtype, window_size):
+    torch.manual_seed(42)
+    config = TransformerConfig(
+        hidden_size=128,
+        num_hidden_layers=2,
+        num_heads=2,
+        num_kv_heads=1,
+        window_size=window_size,
+        intermediate_size=256,
+        vocab_size=256,
+    )
+    model = TransformerForCausalLM(config).to(device=device, dtype=dtype).eval()
+    input_ids = torch.randint(0, config.vocab_size, (2, 22), device=device)
+    ref = model(input_ids=input_ids, use_cache=False).logits
+    cache = None
+    outputs = []
+    offset = 0
+    for length in (3, 2, 7, 9, 1):
+        output = model(input_ids=input_ids[:, offset:offset+length], past_key_values=cache, use_cache=True)
+        outputs.append(output.logits)
+        cache = output.past_key_values
+        offset += length
+        for layer_idx in range(config.num_hidden_layers):
+            assert cache.get_seq_length(layer_idx) == offset
+    actual = torch.cat(outputs, dim=1)
+    assert torch.isfinite(actual).all()
+    assert_close('logits', ref, actual, 0.005 if dtype == torch.float16 else 0.02)
