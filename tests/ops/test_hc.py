@@ -25,9 +25,8 @@ def test_naive_hc_pre(shape: tuple[int, ...], dtype: torch.dtype, ratio: float):
     torch.manual_seed(42)
     x = torch.randn(*shape[:-2], shape[-1], shape[-2], dtype=dtype).transpose(-1, -2).requires_grad_()
     pre = torch.randn(shape[:-1], dtype=torch.float32, requires_grad=True)
-    ref = (x.double() * pre.double().unsqueeze(-1)).sum(-2).to(dtype)
-    with torch.autocast('cpu', dtype=torch.bfloat16):
-        out = naive_hc_pre(x=x, pre=pre)
+    ref = (x.float() * pre.float().unsqueeze(-1)).sum(-2).to(dtype)
+    out = naive_hc_pre(x=x, pre=pre)
     do = torch.randn_like(ref)
     ref_grads = torch.autograd.grad(outputs=ref, inputs=(x, pre), grad_outputs=do)
     grads = torch.autograd.grad(outputs=out, inputs=(x, pre), grad_outputs=do)
@@ -55,12 +54,11 @@ def test_naive_hc_post(shape: tuple[int, ...], dtype: torch.dtype, ratio: float,
     post = torch.randn(shape[:-1], dtype=torch.float32, requires_grad=True)
     mixing = torch.randn((*shape[:-1], shape[-2]), dtype=torch.float32, requires_grad=True) if use_mixing else None
     inputs = (x, branch, post, mixing) if use_mixing else (x, branch, post)
-    ref = x.double()
+    ref = x.float()
     if use_mixing:
-        ref = (mixing.double().unsqueeze(-1) * ref.unsqueeze(-3)).sum(-2)
-    ref = (ref + post.double().unsqueeze(-1) * branch.double().unsqueeze(-2)).to(dtype)
-    with torch.autocast('cpu', dtype=torch.bfloat16):
-        out = naive_hc_post(x=x, branch=branch, post=post, mixing=mixing)
+        ref = (mixing.float().unsqueeze(-1) * ref.unsqueeze(-3)).sum(-2)
+    ref = (ref + post.float().unsqueeze(-1) * branch.float().unsqueeze(-2)).to(dtype)
+    out = naive_hc_post(x=x, branch=branch, post=post, mixing=mixing)
     do = torch.randn_like(ref)
     ref_grads = torch.autograd.grad(outputs=ref, inputs=inputs, grad_outputs=do)
     grads = torch.autograd.grad(outputs=out, inputs=inputs, grad_outputs=do)

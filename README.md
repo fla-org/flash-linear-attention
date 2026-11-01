@@ -29,6 +29,7 @@
 
 ## News
 
+- [2026-11] 🧱 Add [HC, mHC, and iHC](fla/ops/hc) PyTorch references and mathematical formulation ([#1642](https://github.com/fla-org/flash-linear-attention/pull/1642)).
 - [2026-10] 🧠 Add Gated Slot Attention 2 (GSA2) implementation to `fla` ([paper](https://arxiv.org/abs/2610.02816)).
 - [2026-10] 🛰️ Add Gated KalmaNet (GKA) implementation to `fla` ([paper](https://arxiv.org/abs/2511.21016)) - a fading-memory layer that solves a test-time ridge regression at every token.
 - [2026-10] 🌊 Add [CyFA](https://arxiv.org/abs/2609.36259) (Cyclic Flow Attention) implementation to `fla` - a Linear RNN that partitions memory by relative time through learned cyclic transport.
