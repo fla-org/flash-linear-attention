@@ -1,72 +1,49 @@
 ---
 name: fla-triton-to-gluon
-description: Port an FLA Triton kernel to Gluon when explicit layouts, asynchronous transfers, or scheduling can address a measured bottleneck.
+description: Design and optimize FLA Gluon kernels using explicit layouts, memory movement, and scheduling, including ports from Triton and improvements to existing Gluon implementations.
 ---
 
 # Triton to Gluon
 
-Use Gluon when profiling points to register pressure, layout conversion, or load/compute overlap that needs explicit control. A kernel already saturating its useful bandwidth or compute limit may not benefit. Keep the portable default path when adding hardware-specific implementations.
+Use this skill when explicit control over data ownership, communication, or scheduling can address a measured kernel bottleneck. Preserve the validated numerical algorithm and precision. A literal translation can establish parity; the optimization task also needs a reasoned execution design and evidence that it addresses the bottleneck. An already efficient kernel may have no useful Gluon improvement.
 
-Follow [fla-optimization-loop](../fla-optimization-loop/SKILL.md) for the baseline and correctness gate, and [fla-nvidia-performance](../fla-nvidia-performance/SKILL.md) for NVIDIA measurements.
+Follow [fla-optimization-loop](../fla-optimization-loop/SKILL.md) for the frozen baseline, correctness gate, and experiment log, and [fla-nvidia-performance](../fla-nvidia-performance/SKILL.md) for NVIDIA measurements. Keep the portable fallback and use [fla-dispatch-backends](../fla-dispatch-backends/SKILL.md) when changing routing. Contribution and numerical-change policies remain in [CONTRIBUTING.md](../../../CONTRIBUTING.md).
 
-## Check the target environment
+## Establish the target and read the relevant sources
 
-Gluon is experimental. Check the installed Triton API before copying [upstream examples](https://triton-lang.org/main/getting-started/tutorials/gluon/); their names and signatures can differ from the installed release.
+Record the actual execution worker's GPU architecture, Triton version/source revision, supported shapes and dtypes, and selected backend. Check installed APIs before using an upstream example; Gluon is experimental and online `main` can differ from the installed release.
 
-Gate architecture-specific code appropriately: Ampere supports `cp.async`, Hopper adds TMA/WGMMA, and Blackwell adds TMEM/tcgen05. Code under Gluon's `nvidia` namespace requires NVIDIA hardware. Keep compile-time choices in explicit constexpr arguments so the kernel, launcher, and autotune pruning use the same values.
+Use the [source map](references/sources-and-evidence.md#select-sources-by-the-decision) to read the relevant official tutorial implementation and API documentation before designing that part of the kernel. Record the source and the idea being adapted in the experiment log. Reuse source checks within an unchanged environment; do not read every tutorial for every kernel.
 
-```python
-from triton.experimental import gluon
-from triton.experimental.gluon import language as gl
-```
+Translate the profile into a specific hypothesis, such as keeping repeated reductions within a warp, removing an expensive layout conversion, reducing address-register pressure, or overlapping an operand transfer with independent computation. Identify the generated-code or hardware signal expected to change.
 
-## Port incrementally
+## Design the execution
 
-1. Record the baseline commit and retain the validated tests, reference, and tolerances. Keep the Triton fallback available.
-2. Translate loads, stores, and arithmetic with explicit layouts first. Match each tensor's contiguous dimension and preserve masking. Pass forward, state, and supported backward comparisons before adding asynchrony.
-3. Add async transfers only where load latency or addressing pressure limits the kernel. Define buffer ownership, completion, and reuse for the prologue, steady state, and drain.
-4. Add architecture-specific MMA or scheduling when profiling supports it. Recheck register/shared-memory use and retune after each change.
-5. Run the full relevant correctness gate and same-hardware benchmarks, including supported variable-length and boundary cases. Measure production entry points as well as individual kernels.
+Read [layout and dataflow design](references/layout-and-dataflow.md) when choosing or changing tensor ownership. Trace important tensors from their producers to their final consumers, including loads, reductions/scans, MMA, loop-carried state, and stores. Choose register and shared-memory layouts together, and account for conversion costs and live resources across the whole path.
 
-A literal translation establishes parity; measure it before assuming a performance gain. Preserve the validated numerical algorithm and precision while changing execution layout or scheduling.
+Read [pipelines and scheduling](references/pipelines-and-scheduling.md) before introducing async transfers, architecture-specific MMA, persistent execution, or warp specialization. Draw the relevant producer/consumer timeline and budget its buffers and registers before implementing it. For an existing async kernel, audit that timeline before changing its layouts or lifetimes.
 
-## Layout and resource constraints
+Compare plausible designs for the measured bottleneck. A small reduction kernel may benefit from ownership changes alone; a matrix-heavy kernel may need coordinated load, MMA, and epilogue pipelines. Explain why a relevant alternative is selected or ruled out. Do not require TMA, warp specialization, TMEM, or any fixed number of candidates when the workload does not justify them.
 
-- Pointer tensors and values need compatible layouts. A cross-warp `gl.convert_layout` may use shared memory; use `assert_trivial=True` when a conversion is intended to be free.
-- Broadcasts and oversized layout tiles can duplicate values and increase register use. Choose layouts from actual tensor strides rather than copying a tutorial's block sizes.
-- Account for all live shared-memory buffers and the target device's allocation limit. Prune infeasible autotune configurations; provide a streaming path when a resident design cannot fit supported shapes.
-- Large static unrolls multiplied by many autotune configurations can dominate compilation. Prune from the actual shape and live-memory budget, and reuse the worker and Triton cache during iteration.
-- Persistent schedules can trade launch overhead for worse L2 locality. Warp specialization also changes the total register budget; measure occupancy and stalls after changing either.
+Keep a compact design record with the chosen ownership, costly communication, live-memory budget, intended overlap, and expected measurement. Preserve mathematical dependencies while reconsidering tile boundaries, loop organization, register reuse, and work partitioning inherited from the Triton implementation.
 
-## Async correctness
+## Implement and measure incrementally
 
-### Transfers and buffer reuse
+1. If useful for debugging, establish a synchronous Gluon parity checkpoint with explicit layouts and complete masks. Compare outputs, states, and supported gradients before adding asynchronous execution.
+2. Implement one design change at a time. Keep layout parameters, launch warp counts, and autotune pruning consistent through explicit constexpr choices. Gate hardware-specific instructions and descriptor eligibility on the actual target and inputs.
+3. Prune configurations using peak live registers, shared memory, and TMEM where applicable. Include conversion scratch space, barriers, epilogue buffers, and allocation granularity. Bound static unrolling and autotune breadth to keep compilation practical; reuse the worker and compiler cache.
+4. Run the frozen correctness gate and benchmark passing candidates. Inspect the [generated-code evidence](references/sources-and-evidence.md#verify-the-execution-design) relevant to the hypothesis, then keep or reject the change based on correctness, resource use, and repeatable performance.
 
-`cp.async` groups are ordered as a queue. `wait_group(N)` bounds all outstanding groups, so it cannot identify a particular buffer after unrelated prefetches are interleaved. For per-buffer scheduling, use separate mbarriers and match their arrival counts to the participating threads. In the installed API, check whether `mbarrier_arrive` increments the count; a preinitialized thread count requires the non-incrementing form.
+A supported shape that cannot fit a resident design needs a valid streaming path or fallback. Preserve tail masking, address widths, initialization, and exact-zero semantics throughout the port. Synchronization and memory-proxy obligations are detailed in the pipeline reference.
 
-Wait for a load before consuming its buffer, and protect reuse until all readers finish. Even same-lane shared-memory staging needs protection against overwriting data still being read. Track each mbarrier's phase as its buffer is reused; do not run more than one phase ahead or share a completion barrier between TMA and tcgen05 without reinitializing it.
+## Validate and report
 
-TMA descriptors must satisfy the target's alignment and stride requirements. TMA stores may distinguish completion of the shared-memory read from completion of the global write. Check the installed wait API and require global completion before another operation reads the stored range.
-
-### MMA and memory ordering
-
-Hopper WGMMA requires its B operand in shared memory and uses register accumulators; consume the values returned by its wait operation so compiler dependencies remain explicit. Blackwell tcgen05 uses TMEM accumulators and mbarrier completion; respect the participating warpgroup and TMEM layout requirements. Initialize accumulators explicitly, including `use_acc=False` where supported.
-
-Generic shared-memory accesses and async operations use different memory proxies. Apply the required proxy fence when handing a buffer to an async consumer; an mbarrier alone does not replace that fence. A completed TMA load establishes the ordering needed to read its destination. Check ordering across warp-specialized partitions as well as within a single producer/consumer loop.
-
-### Tails and exact-zero cases
-
-Masked async copies can leave shared-memory elements uninitialized. Prevent invalid rows from entering reductions: zero-fill where supported, or use valid-row loads and explicitly remove every invalid contribution. Multiplying by zero does not neutralize a NaN. Keep output stores masked.
-
-Do not rely on separately compiled reductions cancelling bitwise. For a mathematically exact-zero special case, such as a single-source softmax gradient, preserve the exact-zero result explicitly and test it against the reference.
-
-## Verification commands
-
-Run from the repository root on the target GPU:
+Run from the repository root on the target GPU, with `FLA_BENCH_BASE` set to the baseline SHA recorded before optimization. Reuse that SHA rather than resolving a moving branch again:
 
 ```bash
-FLA_BENCH_BASE=$(git rev-parse origin/main)
 FLA_CI_ENV=0 python -m benchmarks.ops.verify --op chunk_kda --base "$FLA_BENCH_BASE"
 ```
 
-Replace the operation with the one being ported. The command executes the current tests; it does not freeze them. Use `--gate-k` only for quick iteration, then run the full gate. Set backend environment flags before launching a fresh process so import-time choices cannot contaminate the comparison.
+Replace the operation with the one being optimized. The command executes the current tests; it does not freeze them. Use `--gate-k` only for quick iteration, then run the full relevant gate. Set backend flags before launching a fresh process and confirm the intended implementation executed. Measure production entry points as well as individual kernels.
+
+Report which explicit control changed execution, the source informing it, the relevant generated-code/profile evidence, and per-workload results including regressions. Include supported variable-length and boundary cases. A translation or a losing candidate alone does not establish a performance limit; apply the optimization loop's no-win criteria and state unresolved validation separately.
