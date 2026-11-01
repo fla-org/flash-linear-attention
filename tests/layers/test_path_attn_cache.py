@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from fla.layers.path_attn import PaTHAttention
-from fla.models.utils import Cache
+from fla.models.cache_utils import Cache
 from fla.utils import assert_close, device
 
 

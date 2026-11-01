@@ -6,6 +6,7 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import importlib.util
+import inspect
 import os
 
 import pytest
@@ -13,6 +14,8 @@ import torch
 import torch.nn.functional as F
 from einops import repeat
 
+from fla import backends
+from fla.ops.common.chunk_o import chunk_bwd_dqkwg
 from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
 from fla.ops.gated_delta_rule.gate import fused_gdn_gate, naive_gdn_gate
 from fla.ops.gated_delta_rule.naive import naive_recurrent_gated_delta_rule
@@ -24,6 +27,7 @@ from fla.utils import (
     IS_NVIDIA_HOPPER,
     IS_NVIDIA_SM100,
     IS_NVIDIA_SM120,
+    TRITON_ABOVE_3_8_0,
     assert_close,
     device,
 )
@@ -52,10 +56,17 @@ def test_chunk_fwd_o_blackwell_triton_guard():
     from fla.ops.common.chunk_o import chunk_fwd_kernel_o
 
     tuner = _unwrap_autotuner(chunk_fwd_kernel_o)
-    # The 8-warp (BK=BV=128) config yields distinct outputs for identical
-    # inputs on Blackwell / Triton<3.8 (tl.dot recurrence race). The guard
-    # drops it, so no offered config may run more than 4 warps.
-    assert all(config.num_warps <= 4 for config in tuner.configs)
+    assert {config.num_warps for config in tuner.configs} == ({2, 4, 8} if TRITON_ABOVE_3_8_0 else {2, 4})
+
+
+def test_chunk_bwd_dv_local_blackwell_triton_guard():
+    if not IS_NVIDIA_BLACKWELL:
+        pytest.skip(reason='Blackwell guard is only active on Blackwell GPUs')
+
+    from fla.ops.common.chunk_o import chunk_bwd_kernel_dv_local
+
+    tuner = _unwrap_autotuner(chunk_bwd_kernel_dv_local)
+    assert {config.num_warps for config in tuner.configs} == ({2, 4, 8} if TRITON_ABOVE_3_8_0 else {2, 4})
 
 
 @pytest.mark.parametrize(
@@ -71,6 +82,8 @@ def test_chunk_fwd_o_blackwell_triton_guard():
             (4, 2048, 4, 4, 64, 0.1, 1, torch.float),
             (2, 1024, 4, 4, 128, 1, 0.1, torch.float16),
             (2, 1024, 4, 8, 128, 1, 10, torch.float16),
+            # single-token decode with grouped value heads
+            (16, 1, 4, 12, 128, 1, 1, torch.float16),
         ]
     ],
 )
@@ -136,6 +149,26 @@ def test_fused_recurrent(
             )
             assert_close(name, ref, tri2, 0.002)
             assert_close(f'{name}_ht', ref_ht, tri2_ht, 0.002)
+
+
+def test_fused_recurrent_default_beta_gva():
+    """`beta=None` must default to ones over the HV value heads; sizing it from
+    q ([B, T, H]) makes the kernel read out of bounds under GVA (HV > H)."""
+    torch.manual_seed(42)
+    B, T, H, HV, D = 2, 64, 2, 4, 64
+    q = torch.randn(B, T, H, D, dtype=torch.float32, device=device)
+    k = F.normalize(torch.randn(B, T, H, D, dtype=torch.float32, device=device), p=2, dim=-1)
+    v = torch.randn(B, T, HV, D, dtype=torch.float32, device=device)
+    g = F.logsigmoid(torch.randn(B, T, HV, dtype=torch.float32, device=device))
+
+    o_default, ht_default = fused_recurrent_gated_delta_rule(
+        q=q, k=k, v=v, g=g, beta=None, output_final_state=True,
+    )
+    o_ones, ht_ones = fused_recurrent_gated_delta_rule(
+        q=q, k=k, v=v, g=g, beta=torch.ones(B, T, HV, dtype=torch.float32, device=device), output_final_state=True,
+    )
+    assert torch.equal(o_default, o_ones)
+    assert torch.equal(ht_default, ht_ones)
 
 
 @pytest.mark.parametrize(
@@ -1764,3 +1797,19 @@ def test_flash_qla_chunk_forward_only(B, T, H, HV, D, dtype, monkeypatch):
     assert torch.isfinite(tri_o).all() and torch.isfinite(tri_ht).all()
     assert_close("  o", ref_o, tri_o, _FLASH_QLA_RTOL)
     assert_close(" ht", ref_ht, tri_ht.to(ref_ht.dtype), _FLASH_QLA_RTOL)
+
+
+@pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
+def test_chunk_bwd_tilelang_backend():
+    from fla.utils import IS_NVIDIA_HOPPER, TRITON_ABOVE_3_4_0
+
+    if not backends.TileLangBackend.is_available():
+        pytest.skip('TileLang is unavailable')
+    from fla.ops.common.backends.tilelang import chunk_bwd_dqkwg_tilelang
+
+    candidate = backends._function_registries[inspect.unwrap(chunk_bwd_dqkwg)]._backends['tilelang']
+    assert candidate.implementation is chunk_bwd_dqkwg_tilelang
+    assert candidate.default_enable is (IS_NVIDIA_HOPPER and TRITON_ABOVE_3_4_0)
+    expected = [(p.name, p.kind, p.default) for p in inspect.signature(chunk_bwd_dqkwg).parameters.values()]
+    actual = [(p.name, p.kind, p.default) for p in inspect.signature(chunk_bwd_dqkwg_tilelang).parameters.values()]
+    assert actual == expected

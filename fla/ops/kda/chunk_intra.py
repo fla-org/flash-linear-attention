@@ -17,12 +17,14 @@ from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.graph import get_static_buffer
 from fla.ops.utils.op import exp2, gather, unflatten_program_id
-from fla.utils import IS_GATHER_SUPPORTED, IS_TF32_SUPPORTED, autotune_cache_kwargs
+from fla.utils import IS_GATHER_SUPPORTED, IS_NPU, IS_TF32_SUPPORTED, TRITON_ABOVE_3_6_0, autotune_cache_kwargs
 
 if IS_TF32_SUPPORTED:
     SOLVE_TRIL_DOT_PRECISION = tl.constexpr('tf32')
 else:
     SOLVE_TRIL_DOT_PRECISION = tl.constexpr('ieee')
+# TF32 rounding makes safe-gate gradient error grow with context length; bf16x3 reduces it and runs faster than TF32.
+SAFE_GATE_DOT_PRECISION = tl.constexpr('bf16x3' if TRITON_ABOVE_3_6_0 and not IS_NPU else 'ieee')
 
 ################################################################################
 # Fused inter + solve_tril kernel: compute off-diagonal Akk and solve in one pass
@@ -539,8 +541,8 @@ def chunk_kda_bwd_kernel_intra(
         b_gk_diag_qk = tl.where(m_j_diag_qk, exp2(-b_g_diag_qk), 0.)
 
         b_k_exp_diag_qk = b_k * b_gk_diag_qk
-        b_dq2 += tl.dot(b_dAqk_diag_qk, b_k_exp_diag_qk) * b_gq_diag_qk
-        b_dk2 += tl.dot(b_dAkk_diag_qk, b_k_exp_diag_qk) * b_gq_diag_qk
+        b_dq2 += tl.dot(b_dAqk_diag_qk, b_k_exp_diag_qk, input_precision=SAFE_GATE_DOT_PRECISION) * b_gq_diag_qk
+        b_dk2 += tl.dot(b_dAkk_diag_qk, b_k_exp_diag_qk, input_precision=SAFE_GATE_DOT_PRECISION) * b_gq_diag_qk
     else:
         for j in range(0, min(BC, T - i_t * BT - i_i * BC)):
             # [BC]
@@ -643,8 +645,8 @@ def chunk_kda_bwd_kernel_intra(
         b_q_exp = b_q * b_gq_diag_kk
         b_kb_exp = b_k * b_b[:, None] * b_gq_diag_kk
 
-        b_dkt += tl.dot(b_dAqk_diag_kk, b_q_exp) * b_gk_diag_kk
-        b_dkt += tl.dot(b_dAkk_diag_kk, b_kb_exp) * b_gk_diag_kk
+        b_dkt += tl.dot(b_dAqk_diag_kk, b_q_exp, input_precision=SAFE_GATE_DOT_PRECISION) * b_gk_diag_kk
+        b_dkt += tl.dot(b_dAkk_diag_kk, b_kb_exp, input_precision=SAFE_GATE_DOT_PRECISION) * b_gk_diag_kk
     else:
         for j in range(0, min(BC, T - i_t * BT - i_i * BC)):
             # [BC,]
@@ -796,7 +798,7 @@ def chunk_kda_fwd_kernel_intra_sub_chunk(
     tl.store(p_Akk, b_Ai.to(Akk.dtype.element_ty), mask=m_Akk_st)
 
 
-@dispatch('kda')
+@dispatch
 def chunk_kda_fwd_intra(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -940,7 +942,7 @@ def chunk_kda_fwd_intra(
     return w, u, qg, kg, Aqk, Akk
 
 
-@dispatch('kda')
+@dispatch
 def chunk_kda_bwd_intra(
     q: torch.Tensor,
     k: torch.Tensor,

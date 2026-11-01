@@ -19,7 +19,9 @@ import torch.nn.functional as F
 
 from fla import backends
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
+from fla.modules.fused_linear_cross_entropy.ops import logsumexp_fwd as fused_linear_logsumexp_fwd
 from fla.modules.l2warp import l2_warp
+from fla.ops.utils.logsumexp import logsumexp_fwd
 from fla.utils import IS_INTEL, IS_NPU, IS_NVIDIA, assert_close, device, device_torch_lib
 
 
@@ -408,6 +410,23 @@ def test_fused_linear_cross_entropy(
         assert tri.item() == 0
         for grad in tri_grads:
             assert torch.count_nonzero(grad).item() == 0
+
+
+def test_fused_linear_logsumexp_row_tail():
+    torch.manual_seed(42)
+    x = torch.zeros(2, 1025, device=device)
+    softcap = 0.5
+    ref = (softcap * torch.tanh(x / softcap)).logsumexp(-1)
+    tri = fused_linear_logsumexp_fwd(x, scale=1.0, softcapping=softcap)
+    assert_close("lse", ref, tri, ratio=1e-2)
+
+
+def test_logsumexp_row_tail_zero_scale():
+    torch.manual_seed(42)
+    x = torch.zeros(2, 1025, device=device)
+    ref = (x * 0.0).logsumexp(-1)
+    tri = logsumexp_fwd(x, scale=0.0)
+    assert_close("lse", ref, tri, ratio=1e-2)
 
 
 def _check_parallel_linear_cross_entropy(rank, world_size, local_vocab, dtype, option, reduction):

@@ -5,10 +5,10 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
 
-class StickBreakingAttentionConfig(PretrainedConfig):
+class StickBreakingAttentionConfig(PreTrainedConfig):
 
     model_type = 'stickbreaking_attn'
     keys_to_ignore_at_inference = ['past_key_values']
@@ -40,8 +40,6 @@ class StickBreakingAttentionConfig(PretrainedConfig):
         vocab_size: int = 32000,
         **kwargs,
     ):
-        if use_cache:
-            raise ValueError("Stick-breaking attention does not support KV-cache decoding. Use use_cache=False.")
         if fuse_cross_entropy and fuse_linear_cross_entropy:
             raise ValueError("fuse_cross_entropy and fuse_linear_cross_entropy cannot both be True.")
 

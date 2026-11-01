@@ -5,12 +5,15 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+import math
+
 import pytest
 import torch
 import torch.nn.functional as F
 
 from fla.ops.kda.gate import fused_kda_gate, naive_kda_gate
 from fla.ops.precond_kda import chunk_precond_kda, fused_recurrent_precond_kda
+from fla.ops.precond_kda.fused_recurrent import fused_recurrent_precond_kda_fwd
 from fla.ops.precond_kda.naive import naive_recurrent_precond_kda
 from fla.utils import assert_close, device
 
@@ -173,6 +176,89 @@ def test_fused_recurrent(
     assert_close("o", ref, tri, 0.005)
     if tri_ht is not None:
         assert_close("ht", ref_ht, tri_ht, 0.005)
+
+
+@pytest.mark.parametrize('transpose_state_layout', [False, True], ids=['kv', 'vk'])
+def test_fused_recurrent_empty_varlen_state(transpose_state_layout):
+    torch.manual_seed(42)
+    N, T, H, K, V = 3, 3, 1, 16, 16
+    q = torch.rand(1, T, H, K, device=device)
+    k = torch.rand(1, T, H, K, device=device)
+    v = torch.rand(1, T, H, V, device=device)
+    g = F.logsigmoid(torch.randn(1, T, H, K, device=device))
+    g_atk = F.logsigmoid(torch.randn(1, T, H, device=device))
+    beta_atk = torch.rand(1, T, H, device=device)
+    beta = torch.rand(1, T, H, device=device)
+    h0 = torch.randn(N, H, K, V, device=device)
+    a0 = torch.randn(N, H, K, device=device)
+    if transpose_state_layout:
+        h0 = h0.transpose(-1, -2).contiguous()
+    h0_ref = h0.clone()
+    a0_ref = a0.clone()
+    cu_seqlens = torch.tensor([0, 1, 1, T], dtype=torch.long, device=device)
+
+    for initial_state, initial_A_state in ((None, None), (h0, a0)):
+        _, ht, at = fused_recurrent_precond_kda(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            g_atk=g_atk,
+            beta_atk=beta_atk,
+            beta=beta,
+            initial_state=initial_state,
+            initial_A_state=initial_A_state,
+            output_final_state=True,
+            transpose_state_layout=transpose_state_layout,
+            cu_seqlens=cu_seqlens,
+        )
+        expected_h = torch.zeros_like(h0_ref[1]) if initial_state is None else h0_ref[1]
+        expected_a = torch.zeros_like(a0_ref[1]) if initial_A_state is None else a0_ref[1]
+        torch.testing.assert_close(ht[1], expected_h, rtol=0, atol=0)
+        torch.testing.assert_close(at[1], expected_a, rtol=0, atol=0)
+    assert torch.equal(h0, h0_ref)
+    assert torch.equal(a0, a0_ref)
+
+
+def test_fused_recurrent_empty_spec_decoding():
+    torch.manual_seed(42)
+    H, K, V = 1, 16, 16
+    q = torch.zeros(1, 1, H, K, device=device)
+    k = torch.zeros_like(q)
+    v = torch.zeros(1, 1, H, V, device=device)
+    g = torch.zeros_like(q)
+    g_atk = torch.zeros(1, 1, H, device=device)
+    beta_atk = torch.zeros_like(g_atk)
+    beta = torch.zeros_like(g_atk)
+    state = torch.randn(1, H, K, V, device=device)
+    a_state = torch.randn(1, H, K, device=device)
+    state_ref = state.clone()
+    a_state_ref = a_state.clone()
+    invalid_state_guard = 1 << 30
+    state_indices = torch.tensor([invalid_state_guard, 0], dtype=torch.int32, device=device)[1:]
+
+    o, ht, at = fused_recurrent_precond_kda_fwd(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        g_atk=g_atk,
+        beta_atk=beta_atk,
+        beta=beta,
+        initial_state=state,
+        initial_A_state=a_state,
+        output_final_state=False,
+        inplace_final_state=True,
+        cu_seqlens=torch.tensor([0, 0], dtype=torch.int32, device=device),
+        ssm_state_indices=state_indices,
+        num_accepted_tokens=torch.zeros(1, dtype=torch.int32, device=device),
+    )
+
+    assert ht is state
+    assert at is a_state
+    assert torch.equal(o, torch.zeros_like(o))
+    assert torch.equal(state, state_ref)
+    assert torch.equal(a_state, a_state_ref)
 
 
 @pytest.mark.parametrize(
@@ -402,6 +488,87 @@ def test_chunk(
     if tri_dlog_atk_scale is not None and ref_dlog_atk_scale is not None:
         assert_close("dlog_atk_scale", ref_dlog_atk_scale, tri_dlog_atk_scale, 0.02)
     assert_close("dh0", ref_dh0, tri_dh0, 0.008)
+
+
+@pytest.mark.parametrize(
+    ("T", "P", "H", "D", "use_gate_in_kernel"),
+    [
+        pytest.param(
+            *test,
+            use_gate_in_kernel,
+            id="T{}-P{}-H{}-D{}-use_gate{}".format(*test, use_gate_in_kernel),
+        )
+        for use_gate_in_kernel in [False, True]
+        for test in [
+            (16, 6, 2, 64),
+            (22, 21, 4, 128),
+            (40, 33, 2, 64),
+            (70, 65, 2, 64),
+        ]
+    ],
+)
+def test_chunk_causality(T: int, P: int, H: int, D: int, use_gate_in_kernel: bool):
+    """Future gates must leave prefix outputs and prefix-loss gradients unchanged."""
+    torch.manual_seed(42)
+    shape = (1, T, H, D)
+    q = F.normalize(torch.randn(shape), dim=-1).bfloat16()
+    k = F.normalize(torch.randn(shape), dim=-1).bfloat16()
+    v = (0.5 * torch.randn(shape)).bfloat16()
+    g_atk = F.logsigmoid(torch.randn(shape[:-1])).bfloat16()
+    beta_atk = torch.randn(shape[:-1]).sigmoid().bfloat16()
+    beta = torch.ones(shape[:-1], dtype=torch.bfloat16)
+    log_atk_scale = torch.full((H,), -0.2)
+    g = (-0.7 * (0.75 + 0.25 * torch.rand(shape))).bfloat16().to(device)
+    A_log = torch.log(torch.empty(H).uniform_(1.0, 16.0))
+    dt_bias = 0.1 * torch.rand(H * D) - 0.05
+    q, k, v, g_atk, beta_atk, beta, log_atk_scale, A_log, dt_bias = map(
+        lambda x: x.to(device).requires_grad_(True),
+        (q, k, v, g_atk, beta_atk, beta, log_atk_scale, A_log, dt_bias),
+    )
+    do = torch.randn_like(v[:, :P])
+
+    g_edited = g.clone()
+    if use_gate_in_kernel:
+        logit = math.log(0.99 / 0.01)
+        g_edited[:, P:] = (logit / A_log.detach().exp().view(1, 1, H, 1) - dt_bias.detach().view(1, 1, H, D)).to(g.dtype)
+    else:
+        g_edited[:, P:] = -4.95
+    assert not torch.equal(g[:, P:], g_edited[:, P:])
+
+    outputs, grads = [], []
+    names = ("dq", "dk", "dv", "dg", "dg_atk", "dbeta_atk", "db", "dlog_atk_scale")
+    if use_gate_in_kernel:
+        names += ("dA", "dbias")
+    for g_i in (g, g_edited):
+        g_i = g_i.requires_grad_(True)
+        o, _, _ = chunk_precond_kda(
+            q=q,
+            k=k,
+            v=v,
+            g=g_i,
+            g_atk=g_atk,
+            beta_atk=beta_atk,
+            beta=beta,
+            log_atk_scale=log_atk_scale,
+            use_gate_in_kernel=use_gate_in_kernel,
+            safe_gate=True,
+            lower_bound=-5.0 if use_gate_in_kernel else None,
+            A_log=A_log,
+            dt_bias=dt_bias,
+        )
+        loss = (o[:, :P].float() * do.float()).sum()
+        outputs.append(o[:, :P].detach())
+        inputs = (q, k, v, g_i, g_atk, beta_atk, beta, log_atk_scale)
+        if use_gate_in_kernel:
+            inputs += (A_log, dt_bias)
+        grads.append(torch.autograd.grad(outputs=loss, inputs=inputs))
+
+    ref, tri = outputs
+    assert torch.isfinite(ref).all() and torch.isfinite(tri).all()
+    assert torch.equal(ref, tri), "future gates changed prefix outputs"
+    for name, ref, tri in zip(names, *grads):
+        assert torch.isfinite(ref).all() and torch.isfinite(tri).all(), name
+        assert torch.equal(ref, tri), f"future gates changed {name} from a prefix-only loss"
 
 
 @pytest.mark.parametrize(

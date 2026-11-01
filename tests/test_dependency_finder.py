@@ -139,8 +139,8 @@ def repository_finder():
 @pytest.mark.parametrize(
     ('changed', 'expected', 'unrelated'),
     [
-        ('fla/ops/attn/backends/tilelang/parallel.py', 'fla/ops/attn/parallel.py', 'fla/ops/common/chunk_o.py'),
-        ('fla/ops/common/backends/tilelang/chunk_bwd.py', 'fla/ops/common/chunk_o.py', 'fla/ops/attn/parallel.py'),
+        ('fla/ops/attn/backends/tilelang.py', 'fla/ops/attn/parallel.py', 'fla/ops/common/chunk_o.py'),
+        ('fla/ops/common/backends/tilelang.py', 'fla/ops/common/chunk_o.py', 'fla/ops/attn/parallel.py'),
         ('fla/ops/kda/backends/triton_ascend/chunk_bwd.py', 'fla/ops/gdn2/chunk_bwd.py', 'fla/ops/attn/parallel.py'),
         ('fla/ops/kda/backends/flash_kda.py', 'fla/ops/kda/chunk.py', 'fla/ops/attn/parallel.py'),
     ],
@@ -161,9 +161,15 @@ def test_backend_changes_follow_repository_ownership(changed, expected, unrelate
         ('fla/modules/norm/triton_ascend/fused_norm_gate.py', {'tests/modules/test_layernorm_gated.py'}),
         ('fla/modules/causal_conv1d/backends/__init__.py', {'tests/modules/test_conv.py'}),
         ('fla/modules/causal_conv1d/backends/gluon.py', {'tests/modules/test_conv.py'}),
-        pytest.param('fla/modules/causal_conv1d/backends/cuda.py', {'tests/modules/test_conv.py'}, id='cuda-module'),
+        pytest.param('fla/modules/causal_conv1d/backends/cuda/__init__.py', {'tests/modules/test_conv.py'}, id='cuda-package'),
+        pytest.param('fla/modules/causal_conv1d/backends/cuda/ops.py', {'tests/modules/test_conv.py'}, id='cuda-ops'),
+        pytest.param(
+            'fla/modules/causal_conv1d/backends/cuda/cp.py',
+            {'tests/cp/test_conv.py'},
+            id='cuda-cp',
+        ),
         ('fla/modules/fused_cross_entropy/ops.py', {'tests/modules/test_cross_entropy.py', 'tests/modules/test_l2warp.py'}),
-        ('fla/ops/attn/backends/tilelang/parallel.py', {'tests/ops/test_attn.py'}),
+        ('fla/ops/attn/backends/tilelang.py', {'tests/ops/test_attn.py'}),
         ('fla/ops/kda/backends/triton_ascend/chunk_bwd.py', {'tests/ops/test_kda.py', 'tests/ops/test_gdn2.py'}),
         pytest.param('fla/modules/activations/triton_ascend.py', {'tests/modules/test_activation.py'}, id='ascend-module'),
         (
@@ -185,3 +191,28 @@ def test_backend_changes_select_original_test_files(repository_finder, changed, 
     changed_files = [changed, *find_backend_op_files([changed], root)]
     tests = repository_finder.find_dependent_tests([root / path for path in changed_files])
     assert {str(root / path) for path in expected} <= tests
+
+
+@pytest.mark.parametrize(
+    ('changed', 'expected'),
+    [
+        ('tests/models/utils.py', {'tests/models/test_modeling.py'}),
+        ('tests/models/conftest.py', {'tests/models/test_modeling.py', 'tests/models/test_cache.py'}),
+        ('fla/models/config.py', {'tests/models/test_modeling.py', 'tests/models/test_cache.py'}),
+    ],
+)
+def test_model_support_dependencies(tmp_path, changed, expected):
+    sources = {
+        'fla/models/config.py': 'class Config: pass\n',
+        'tests/models/conftest.py': 'from fla.models.config import Config\ndef make_model(): return Config()\n',
+        'tests/models/utils.py': 'def check_forward(): pass\n',
+        'tests/models/test_modeling.py': 'from .utils import check_forward\ndef test_forward(make_model): pass\n',
+        'tests/models/test_cache.py': 'def test_cache(): pass\n',
+        'tests/test_other.py': 'def test_other(): pass\n',
+    }
+    for name, source in sources.items():
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(source)
+    finder = DependencyFinder(search_dirs=[tmp_path / 'fla'], test_dir=tmp_path / 'tests', project_root=tmp_path)
+    assert finder.find_dependent_tests([tmp_path / changed]) == {str(tmp_path / path) for path in expected}

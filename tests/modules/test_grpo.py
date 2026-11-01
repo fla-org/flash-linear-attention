@@ -131,6 +131,39 @@ def test_grpo_loss_with_old_logps_gradient_direction():
     assert logps.grad[1, 0] > 0
 
 
+@pytest.mark.parametrize("upstream", ["main", "kl", "combined"])
+def test_fused_grpo_kl_backward(upstream: str):
+    device_torch_lib.manual_seed(42)
+    B, T, V = 2, 5, 17
+    logits = torch.randn(B, T + 1, V, device=device, dtype=torch.bfloat16, requires_grad=True)
+    ref_logp = -torch.rand(B, T, device=device, dtype=torch.float32)
+    input_ids = torch.randint(0, V, (B, T + 3), device=device)
+    advantages = torch.randn(B, device=device, dtype=torch.float32)
+    completion_mask = torch.ones(B, T, device=device, dtype=torch.int32)
+    completion_mask[0, -1] = 0
+    loss_upstream = torch.randn(B, T, device=device, dtype=torch.float32)
+    kl_upstream = torch.randn_like(loss_upstream)
+    if upstream == "main":
+        kl_upstream.zero_()
+    elif upstream == "kl":
+        loss_upstream.zero_()
+
+    loss, kl = fused_grpo_loss(
+        logits, ref_logp, input_ids, advantages, 0.04, completion_mask, save_kl=True, inplace=False,
+    )
+    ((loss * loss_upstream).sum() + (kl * kl_upstream).sum()).backward()
+
+    ref_logits = logits.detach().clone().float().requires_grad_(True)
+    ref_loss, ref_kl = grpo_loss_torch(
+        ref_logits, ref_logp, input_ids, advantages, 0.04, completion_mask, save_kl=True,
+    )
+    ((ref_loss * loss_upstream).sum() + (ref_kl * kl_upstream).sum()).backward()
+
+    assert_close("loss", ref_loss, loss, 3e-3)
+    assert_close("kl", ref_kl, kl, 3e-3)
+    assert_close("dlogits", ref_logits.grad, logits.grad, 3e-3)
+
+
 @pytest.mark.parametrize("B", [2])
 @pytest.mark.parametrize("T", [16, 1024, 4096])
 @pytest.mark.parametrize("V", [32000, 65536])

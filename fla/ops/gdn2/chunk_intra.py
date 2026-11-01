@@ -29,13 +29,16 @@ from fla.ops.gdn2.chunk_intra_token_parallel import chunk_gdn2_fwd_intra_token_p
 from fla.ops.gdn2.wy_fast import recompute_w_u_fwd_gdn2
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.cache import fla_cache_autotune
+from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.op import exp2, gather, unflatten_program_id
-from fla.utils import IS_GATHER_SUPPORTED, IS_TF32_SUPPORTED, autotune_cache_kwargs
+from fla.utils import IS_GATHER_SUPPORTED, IS_NPU, IS_TF32_SUPPORTED, TRITON_ABOVE_3_6_0, autotune_cache_kwargs
 
 if IS_TF32_SUPPORTED:
     SOLVE_TRIL_DOT_PRECISION = tl.constexpr('tf32')
 else:
     SOLVE_TRIL_DOT_PRECISION = tl.constexpr('ieee')
+# TF32 rounding makes safe-gate gradient error grow with context length; bf16x3 reduces it and runs faster than TF32.
+SAFE_GATE_DOT_PRECISION = tl.constexpr('bf16x3' if TRITON_ABOVE_3_6_0 and not IS_NPU else 'ieee')
 
 
 @triton.heuristics({
@@ -69,6 +72,7 @@ def chunk_gdn2_fwd_kernel_intra_sub_chunk(
     BK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     USE_GATHER: tl.constexpr,
+    GATE_SHIFT: tl.constexpr,
 ):
     i_t, i_i, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
@@ -106,12 +110,14 @@ def chunk_gdn2_fwd_kernel_intra_sub_chunk(
     b_g = tl.load(p_g, mask=m_kc, other=0.0)
     b_b = tl.load(p_b, mask=m_kc, other=0.0)
 
+    # the first-row anchor and fixed shift cannot depend on future gates or the sequence length
     if USE_GATHER:
-        b_gn = gather(b_g, tl.full([1, BK], min(BC // 2, T - i_ti - 1), dtype=tl.int16), axis=0)
+        b_gn = gather(b_g, tl.zeros([1, BK], dtype=tl.int16), axis=0)
     else:
-        p_gn = g + (i_ti + min(BC // 2, T - i_ti - 1)) * H * K + tl.arange(0, BK)
+        p_gn = g + i_ti * H * K + tl.arange(0, BK)
         b_gn = tl.load(p_gn, mask=tl.arange(0, BK) < K, other=0.0)
         b_gn = b_gn[None, :]
+    b_gn = b_gn - 0.5 * (BC - 1) * GATE_SHIFT
 
     b_gm = (b_g - b_gn).to(tl.float32)
     b_gq = tl.where(m_c[:, None], exp2(b_gm), 0.)
@@ -457,6 +463,7 @@ def chunk_gdn2_bwd_kernel_intra(
     NC: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     SAFE_GATE: tl.constexpr,
+    GATE_SHIFT: tl.constexpr,
     USE_GATHER: tl.constexpr,
 ):
     i_kc, i_t = unflatten_program_id(tl.cdiv(K, BK) * NC)
@@ -542,10 +549,11 @@ def chunk_gdn2_bwd_kernel_intra(
 
     if SAFE_GATE:
         if USE_GATHER:
-            b_gn = gather(b_g, tl.full([1, BK], min(BC // 2, T - i_ti - 1), dtype=tl.int16), axis=0)
+            b_gn = gather(b_g, tl.zeros([1, BK], dtype=tl.int16), axis=0)
         else:
-            p_gn = g + (i_ti + min(BC // 2, T - i_ti - 1)) * H * K + o_k
+            p_gn = g + i_ti * H * K + o_k
             b_gn = tl.load(p_gn, mask=m_k, other=0)[None, :]
+        b_gn = b_gn - 0.5 * (BC - 1) * GATE_SHIFT
 
         m_dd = m_c[:, None] & ((i_i * BC + o_i)[None, :] < BT)
         p_dAqk = dAqk + o_c[:, None] * (H * BT) + (i_i * BC + o_i)[None, :]
@@ -563,8 +571,8 @@ def chunk_gdn2_bwd_kernel_intra(
         exp_neg_b_g_diag_qk = tl.where(m_j_diag_qk, exp2(-b_g_diag_qk), 0.)
 
         b_k_exp_diag_qk = b_k * exp_neg_b_g_diag_qk
-        b_dq2 += tl.dot(b_dAqk_diag_qk, b_k_exp_diag_qk) * exp_b_g_diag_qk
-        b_dk2 += tl.dot(b_dAkk_diag_qk, b_k_exp_diag_qk) * exp_b_g_diag_qk
+        b_dq2 += tl.dot(b_dAqk_diag_qk, b_k_exp_diag_qk, input_precision=SAFE_GATE_DOT_PRECISION) * exp_b_g_diag_qk
+        b_dk2 += tl.dot(b_dAkk_diag_qk, b_k_exp_diag_qk, input_precision=SAFE_GATE_DOT_PRECISION) * exp_b_g_diag_qk
     else:
         for j in range(0, min(BC, T - i_t * BT - i_i * BC)):
             b_dAqk = tl.load(dAqk + o_dA + j, mask=m_dA, other=0)
@@ -634,10 +642,11 @@ def chunk_gdn2_bwd_kernel_intra(
 
     if SAFE_GATE:
         if USE_GATHER:
-            b_gn = gather(b_g, tl.full([1, BK], min(BC // 2, T - i_ti - 1), dtype=tl.int16), axis=0)
+            b_gn = gather(b_g, tl.zeros([1, BK], dtype=tl.int16), axis=0)
         else:
-            p_gn = g + (i_ti + min(BC // 2, T - i_ti - 1)) * H * K + o_k
+            p_gn = g + i_ti * H * K + o_k
             b_gn = tl.load(p_gn, mask=m_k, other=0).to(tl.float32)[None, :]
+        b_gn = b_gn - 0.5 * (BC - 1) * GATE_SHIFT
         p_q = q + o_c[:, None] * (H * K) + o_k[None, :]
         b_q = tl.load(p_q, mask=m_kc, other=0.0)
         m_dk = ((i_i * BC + o_i)[:, None] < BT) & m_c[None, :]
@@ -658,8 +667,8 @@ def chunk_gdn2_bwd_kernel_intra(
         b_q_exp = b_q * exp_b_g_diag_kk
         b_kb_exp = b_k * b_b * exp_b_g_diag_kk
 
-        b_dkt += tl.dot(b_dAqk_diag_kk, b_q_exp) * exp_neg_b_g_diag_kk
-        b_dkt += tl.dot(b_dAkk_diag_kk, b_kb_exp) * exp_neg_b_g_diag_kk
+        b_dkt += tl.dot(b_dAqk_diag_kk, b_q_exp, input_precision=SAFE_GATE_DOT_PRECISION) * exp_neg_b_g_diag_kk
+        b_dkt += tl.dot(b_dAkk_diag_kk, b_kb_exp, input_precision=SAFE_GATE_DOT_PRECISION) * exp_neg_b_g_diag_kk
     else:
         for j in range(0, min(BC, T - i_t * BT - i_i * BC)):
             b_dAqk = tl.load(dAqk + o_dA + j * H * BT)
@@ -692,7 +701,7 @@ def chunk_gdn2_bwd_kernel_intra(
     tl.store(p_dg2, b_dg2.to(p_dg2.dtype.element_ty), mask=m_kc)
 
 
-@dispatch('gdn2')
+@dispatch
 def chunk_gdn2_fwd_intra(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -705,9 +714,16 @@ def chunk_gdn2_fwd_intra(
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
     safe_gate: bool = False,
+    lower_bound: float | None = None,
     disable_recompute: bool = False,
 ):
-    """Intra-chunk forward: build Aqk, Akk_inv, and the WY auxiliaries (w, u)."""
+    """Build Aqk, Akk_inv, and WY auxiliaries with causal safe-gate anchors.
+
+    As in chunk_kda_fwd_intra, diagonal blocks use the first cumulative gate minus a fixed shift.
+    The default strength of 2 gives a shift of 15 in natural-log units for BC=16.
+    Both fused and precomputed public gate paths use this default; direct intra callers can override it with lower_bound.
+    Forward and backward retain the same shift even for partial blocks.
+    """
     B, T, H, K = k.shape
     BT = chunk_size
     BC = 16
@@ -740,6 +756,7 @@ def chunk_gdn2_fwd_intra(
             BC=BC,
             BK=BK,
             USE_GATHER=IS_GATHER_SUPPORTED,
+            GATE_SHIFT=(-lower_bound if lower_bound is not None else 2.) * RCP_LN2,
         )
     else:
         chunk_gdn2_fwd_intra_token_parallel(
@@ -805,6 +822,7 @@ def chunk_gdn2_bwd_intra(
     chunk_indices: torch.LongTensor | None = None,
     chunk_size: int = 64,
     safe_gate: bool = False,
+    lower_bound: float | None = None,
 ):
     """Intra-chunk backward: q, k, g, b contributions from dAqk, dAkk.
 
@@ -854,6 +872,7 @@ def chunk_gdn2_bwd_intra(
         NC=NC,
         SAFE_GATE=safe_gate,
         USE_GATHER=IS_GATHER_SUPPORTED,
+        GATE_SHIFT=(-lower_bound if lower_bound is not None else 2.) * RCP_LN2,
     )
     dq = dq2
     dk = dk2

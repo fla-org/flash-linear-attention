@@ -10,7 +10,7 @@ import torch
 
 from fla.ops.based import fused_chunk_based, parallel_based
 from fla.ops.based.naive import naive_parallel_based
-from fla.utils import device
+from fla.utils import assert_close, device
 
 
 @pytest.mark.parametrize(
@@ -35,36 +35,26 @@ def test_based(
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
-    q = torch.randn((B, H, T, 16), dtype=dtype, device=device).requires_grad_()
-    k = torch.randn((B, H, T, 16), dtype=dtype, device=device).requires_grad_()
-    v = torch.randn((B, H, T, D), dtype=dtype, device=device).requires_grad_()
+    # the ops take [B, T, H, D]; the naive reference attends over dim -2, so it gets [B, H, T, D]
+    q = torch.randn((B, T, H, 16), dtype=dtype, device=device).requires_grad_()
+    k = torch.randn((B, T, H, 16), dtype=dtype, device=device).requires_grad_()
+    v = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_()
     do = torch.randn_like(v)
-    ref = naive_parallel_based(q, k, v, use_norm=True)
+    # the reference runs in fp32 so the tolerances below measure the kernels' error
+    ref = naive_parallel_based(*(x.float().transpose(1, 2) for x in (q, k, v)), use_norm=True).transpose(1, 2)
     ref.backward(do)
     ref_dq, q.grad = q.grad.clone(), None
     ref_dk, k.grad = k.grad.clone(), None
     ref_dv, v.grad = v.grad.clone(), None
 
-    tri = parallel_based(q, k, v, use_norm=True)
-    tri.backward(do)
-    tri_dq, q.grad = q.grad.clone(), None
-    tri_dk, k.grad = k.grad.clone(), None
-    tri_dv, v.grad = v.grad.clone(), None
+    for fn in (parallel_based, fused_chunk_based):
+        tri = fn(q, k, v, use_norm=True)
+        tri.backward(do)
+        tri_dq, q.grad = q.grad.clone(), None
+        tri_dk, k.grad = k.grad.clone(), None
+        tri_dv, v.grad = v.grad.clone(), None
 
-    if dtype == torch.float32:
-        assert ref.allclose(tri, 0, 1e-4)
-        assert ref_dq.allclose(tri_dq, 0, 1e-4)
-        assert ref_dk.allclose(tri_dk, 0, 1e-4)
-        assert ref_dv.allclose(tri_dv, 0, 1e-4)
-
-    tri = fused_chunk_based(q, k, v, use_norm=True)
-    tri.backward(do)
-    tri_dq, q.grad = q.grad.clone(), None
-    tri_dk, k.grad = k.grad.clone(), None
-    tri_dv, v.grad = v.grad.clone(), None
-
-    if dtype == torch.float32:
-        assert ref.allclose(tri, 0, 1e-4)
-        assert ref_dq.allclose(tri_dq, 0, 1e-4)
-        assert ref_dk.allclose(tri_dk, 0, 1e-4)
-        assert ref_dv.allclose(tri_dv, 0, 1e-4)
+        assert_close(f'{fn.__name__} o', ref, tri, 0.005)
+        assert_close(f'{fn.__name__} dq', ref_dq, tri_dq, 0.005)
+        assert_close(f'{fn.__name__} dk', ref_dk, tri_dk, 0.005)
+        assert_close(f'{fn.__name__} dv', ref_dv, tri_dv, 0.005)

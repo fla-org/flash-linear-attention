@@ -9,8 +9,10 @@ import pytest
 import torch
 
 from fla.models import YOCOConfig, YOCOForCausalLM
+from fla.models.cache_utils import Cache
+from fla.utils import assert_close, device
 
-from .test_modeling_base import run_test_generation, run_test_model_forward_backward
+from .utils import check_forward, check_generation
 
 try:
     import flash_attn  # noqa: F401
@@ -83,9 +85,7 @@ def _create_yoco_config(
     )
 
 
-# ===================================================================================
-# Test for Modeling (Forward/Backward Pass)
-# ===================================================================================
+@pytest.mark.parametrize('varlen', [False, True], ids=['dense', 'varlen'])
 @pytest.mark.parametrize(
     ['L', 'B', 'T', 'H', 'D', 'self_decoder_attn_type', 'use_l2warp', 'attnres_block_size', 'dtype'],
     [
@@ -111,11 +111,12 @@ def test_modeling(
     use_l2warp: bool,
     attnres_block_size: int | None,
     dtype: torch.dtype,
+    varlen: bool,
 ):
     if self_decoder_attn_type == 'swa' and not HAS_FLASH_ATTN:
         pytest.skip(reason="YOCO swa attention requires flash-attn (`pip install flash-attn --no-build-isolation`).")
     torch.manual_seed(42)
-    run_test_model_forward_backward(
+    check_forward(
         L,
         B,
         T,
@@ -131,12 +132,10 @@ def test_modeling(
             self_decoder_attn_type=self_decoder_attn_type,
             attnres_block_size=attnres_block_size,
         ),
+        varlen=varlen,
     )
 
 
-# ===================================================================================
-# Test for Generation
-# ===================================================================================
 @pytest.mark.parametrize(
     ['L', 'B', 'T', 'H', 'D', 'self_decoder_attn_type', 'dtype', 'tol'],
     [
@@ -168,4 +167,55 @@ def test_generation(
         self_decoder_attn_type=self_decoder_attn_type,
     )
     model = YOCOForCausalLM(config)
-    run_test_generation(L, B, T, H, D, YOCOConfig, dtype, model=model, config=config, tol=tol)
+    check_generation(L, B, T, H, D, YOCOConfig, dtype, model=model, config=config, tol=tol)
+
+
+@torch.no_grad()
+def test_packed_with_mask_matches_per_document() -> None:
+    torch.manual_seed(42)
+    config = _create_yoco_config(2, 2, 16, vocab_size=128)
+    model = YOCOForCausalLM(config).to(device=device, dtype=torch.float16).eval()
+    input_ids = torch.randint(0, config.vocab_size, (1, 12), device=device)
+    attention_mask = torch.tensor([[0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]], device=device, dtype=torch.long)
+    cu_seqlens = torch.tensor([0, 5, 12], device=device, dtype=torch.int32)
+
+    expected = torch.cat([
+        model(input_ids=input_ids[:, start:end], use_cache=False).logits
+        for start, end in ((0, 5), (5, 12))
+    ], dim=1)
+    actual = model(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        use_cache=False,
+        cu_seqlens=cu_seqlens,
+    ).logits
+
+    assert_close("logits", expected, actual, 0.005)
+
+
+@torch.no_grad()
+def test_swa_packed_with_mask_empty_cache_matches_per_document() -> None:
+    if not HAS_FLASH_ATTN:
+        pytest.skip(reason="YOCO swa attention requires flash-attn (`pip install flash-attn --no-build-isolation`).")
+
+    torch.manual_seed(42)
+    config = _create_yoco_config(2, 2, 16, vocab_size=128, self_decoder_attn_type='swa')
+    config.num_self_decoder_layers = config.num_hidden_layers
+    model = YOCOForCausalLM(config).to(device=device, dtype=torch.float16).eval()
+    input_ids = torch.randint(0, config.vocab_size, (1, 12), device=device)
+    attention_mask = torch.tensor([[0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]], device=device, dtype=torch.long)
+    cu_seqlens = torch.tensor([0, 5, 12], device=device, dtype=torch.int32)
+
+    expected = torch.cat([
+        model(input_ids=input_ids[:, start:end], past_key_values=Cache(), use_cache=True).logits
+        for start, end in ((0, 5), (5, 12))
+    ], dim=1)
+    actual = model(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        past_key_values=Cache(),
+        use_cache=True,
+        cu_seqlens=cu_seqlens,
+    ).logits
+
+    assert_close("logits", expected, actual, 0.005)

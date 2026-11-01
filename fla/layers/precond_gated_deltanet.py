@@ -18,9 +18,8 @@ from torch.nn import functional as F
 
 from fla.layers.utils import (
     get_layer_cache,
-    get_unpad_indices_and_cu,
-    index_first_axis,
-    pad_input,
+    repad_hidden_states,
+    unpad_hidden_states,
     update_layer_cache,
 )
 from fla.modules import FusedRMSNormGated, RMSNorm, ShortConvolution
@@ -33,7 +32,7 @@ from fla.ops.precond_gated_delta_rule import (
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
-    from fla.models.utils import Cache
+    from fla.models.cache_utils import Cache
 
 
 class PrecondGatedDeltaNet(nn.Module):
@@ -282,9 +281,12 @@ class PrecondGatedDeltaNet(nn.Module):
         last_state = get_layer_cache(self, past_key_values)
 
         cu_seqlens = kwargs.get('cu_seqlens')
-        if attention_mask is not None:
-            indices, cu_seqlens = get_unpad_indices_and_cu(attention_mask, q_len)
-            hidden_states = index_first_axis(rearrange(hidden_states, "b s ... -> (b s) ..."), indices).unsqueeze(0)
+        hidden_states, indices, cu_seqlens = unpad_hidden_states(
+            hidden_states,
+            cu_seqlens,
+            attention_mask,
+            q_len,
+        )
 
         if self.use_short_conv:
             conv_state_q, conv_state_k, conv_state_v = None, None, None
@@ -325,10 +327,11 @@ class PrecondGatedDeltaNet(nn.Module):
         g_atk = -self.A_log_atk.float().exp() * F.softplus(self.a_atk_proj(hidden_states).float() + self.dt_bias_atk)
         log_atk_scale = self.log_atk_scale
 
-        recurrent_state = last_state['recurrent_state'] if last_state is not None else None
-        A_state = last_state['A_state'] if last_state is not None else None
+        recurrent_state = preconditioner_state = None
+        if last_state is not None and last_state['recurrent_state'] is not None:
+            recurrent_state, preconditioner_state = last_state['recurrent_state']
         if mode == 'chunk':
-            o, recurrent_state, A_state = chunk_precond_gated_delta_rule(
+            o, recurrent_state, preconditioner_state = chunk_precond_gated_delta_rule(
                 q=q,
                 k=k,
                 v=v,
@@ -337,7 +340,7 @@ class PrecondGatedDeltaNet(nn.Module):
                 beta=beta,
                 beta_atk=beta_atk,
                 initial_state=recurrent_state,
-                initial_A_state=A_state,
+                initial_A_state=preconditioner_state,
                 output_final_state=use_cache,
                 use_qk_l2norm_in_kernel=True,
                 cu_seqlens=cu_seqlens,
@@ -346,7 +349,7 @@ class PrecondGatedDeltaNet(nn.Module):
                 log_atk_scale=log_atk_scale,
             )
         elif mode == 'fused_recurrent':
-            o, recurrent_state, A_state = fused_recurrent_precond_gated_delta_rule(
+            o, recurrent_state, preconditioner_state = fused_recurrent_precond_gated_delta_rule(
                 q=q,
                 k=k,
                 v=v,
@@ -355,7 +358,7 @@ class PrecondGatedDeltaNet(nn.Module):
                 beta=beta,
                 beta_atk=beta_atk,
                 initial_state=recurrent_state,
-                initial_A_state=A_state,
+                initial_A_state=preconditioner_state,
                 output_final_state=use_cache,
                 use_qk_l2norm_in_kernel=True,
                 cu_seqlens=cu_seqlens,
@@ -364,7 +367,7 @@ class PrecondGatedDeltaNet(nn.Module):
                 log_atk_scale=log_atk_scale,
             )
         elif mode == 'naive':
-            o, recurrent_state, A_state = naive_recurrent_precond_gated_delta_rule(
+            o, recurrent_state, preconditioner_state = naive_recurrent_precond_gated_delta_rule(
                 q=q,
                 k=k,
                 v=v,
@@ -373,7 +376,7 @@ class PrecondGatedDeltaNet(nn.Module):
                 beta=beta,
                 beta_atk=beta_atk,
                 initial_state=recurrent_state,
-                initial_A_state=A_state,
+                initial_A_state=preconditioner_state,
                 output_final_state=use_cache,
                 x=self.squash_x,
                 eps=self.squash_eps,
@@ -386,8 +389,7 @@ class PrecondGatedDeltaNet(nn.Module):
         update_layer_cache(
             self,
             past_key_values,
-            recurrent_state=recurrent_state,
-            A_state=A_state,
+            recurrent_state=(recurrent_state, preconditioner_state) if use_cache else None,
             conv_state=(conv_state_q, conv_state_k, conv_state_v) if self.use_short_conv else None,
             offset=q_len,
         )
@@ -399,7 +401,6 @@ class PrecondGatedDeltaNet(nn.Module):
             o = self.o_norm(o)
         o = rearrange(o, 'b t h d -> b t (h d)')
         o = self.o_proj(o)
-        if attention_mask is not None:
-            o = pad_input(o.squeeze(0), indices, batch_size, q_len)
+        o = repad_hidden_states(o, indices, batch_size, q_len)
 
         return o, None, past_key_values

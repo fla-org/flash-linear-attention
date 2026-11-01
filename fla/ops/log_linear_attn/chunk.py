@@ -181,7 +181,7 @@ def chunkwise_fwd_kernel(
     output_offset = -1 * (offset % BT)
     for i_t in range(NT):
         b_h_ptrs = level_scales + ((bos + tl.minimum(i_t * BT + i_idx, T - 1)) * H + i_h) * L + b_llut
-        b_h = tl.load(b_h_ptrs, mask=i_idx >= j_idx)
+        b_h = tl.load(b_h_ptrs, mask=(i_idx >= j_idx) & (i_t * BT + i_idx < T) & (i_t * BT + j_idx < T), other=0.0)
 
         o_t = (i_t * BT).to(tl.int64) + o_i
         o_to = o_t + output_offset
@@ -1034,7 +1034,7 @@ def chunkwise_bwd_kernel_diag(
     j_idx = o_i[None, :]  # 1 x BT
 
     b_h_ptrs = l + ((bos + tl.minimum(i_t * BT + i_idx, T - 1)) * H + i_h) * L + b_llut
-    b_h = tl.load(b_h_ptrs, mask=i_idx >= j_idx)
+    b_h = tl.load(b_h_ptrs, mask=(i_idx >= j_idx) & (i_t * BT + i_idx < T) & (i_t * BT + j_idx < T), other=0.0)
 
     p_g = g + bos * H + i_h + o_t * H
     p_q = q + (bos * G + i_g) * K + o_k[:, None] + o_t[None, :] * (G * K)
@@ -1081,7 +1081,7 @@ def chunkwise_bwd_kernel_diag(
         b_mask = tl.load(p_mask, mask=(o_i[:, None] < BT) & (o_i[None, :] < BT), other=0.0)
         dl_i = tl.sum(tl.where(b_mask == 1, b_dl, 0), axis=1)
         p_dl_i = dl + (bos * H + i_h) * L + i + o_t * (H * L)
-        tl.store(p_dl_i, dl_i, mask=m_t)
+        tl.store(p_dl_i, dl_i, mask=m_t & (i < L))
 
 
 def construct_binary_level_mask(level, T):

@@ -21,6 +21,22 @@ from fla.backends import (
     dispatch,
     register,
 )
+from fla.modules.activations.ops import logsigmoid_bwd, logsigmoid_fwd
+from fla.modules.causal_conv1d.ops import (
+    causal_conv1d_bwd,
+    causal_conv1d_fwd,
+    causal_conv1d_update,
+    causal_conv1d_update_states,
+)
+from fla.modules.fused_cross_entropy.ops import cross_entropy_loss
+from fla.modules.fused_kl_div.ops import fused_kl_div_bwd, fused_kl_div_fwd
+from fla.modules.fused_linear_cross_entropy.ops import fused_linear_cross_entropy_bwd, fused_linear_cross_entropy_fwd
+from fla.modules.grpo.ops import fused_grpo_loss
+from fla.modules.norm.fused_norm_gate import layer_norm_gated_bwd, layer_norm_gated_fwd
+from fla.modules.norm.l2norm import l2norm_bwd, l2norm_fwd
+from fla.modules.norm.layernorm import layer_norm_bwd, layer_norm_fwd
+from fla.modules.rotary.ops import rotary_embedding_fwdbwd
+from fla.ops.utils import chunk_global_cumsum, chunk_local_cumsum, solve_tril
 
 
 @pytest.fixture(autouse=True)
@@ -423,26 +439,22 @@ def test_dispatch_disabled(run_python, disabled):
         import warnings
 
         from fla import backends
-        from fla.backends import GluonBackend, TritonAscendBackend, dispatch, register
+        from fla.backends import GluonBackend, TileLangBackend, TritonAscendBackend, dispatch, register
 
         enabled = os.environ['FLA_DISABLE_BACKEND_DISPATCH'] != '1'
 
         def compute(x):
             return x + 1
 
-        for operation in [
-            'attn', 'attnres', 'common', 'gated_delta_rule', 'gdn2', 'generalized_delta_rule.dplr',
-            'gla', 'kda', 'rwkv6', 'utils',
-        ]:
-            with warnings.catch_warnings():
-                warnings.simplefilter('error', DeprecationWarning)
-                decorate = dispatch(operation)
-            registry = backends._operation_registries[operation]
-            assert registry.operation_name == operation
-            assert registry._backends
-            wrapped = decorate(compute)
-            assert (wrapped is compute) == (not enabled)
-            assert wrapped(1) == 2
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', DeprecationWarning)
+            decorate = dispatch('wall_attn')
+        registry = backends._operation_registries['wall_attn']
+        assert registry.operation_name == 'wall_attn'
+        assert registry._backends
+        wrapped = decorate(compute)
+        assert (wrapped is compute) == (not enabled)
+        assert wrapped(1) == 2
 
         wrapped = dispatch(compute)
         assert (wrapped is compute) == (not enabled)
@@ -454,14 +466,11 @@ def test_dispatch_disabled(run_python, disabled):
 
         assert replacement(1) == 3
         assert wrapped(1) == (3 if enabled else 2)
-        assert 'fla.ops.kda.backends.flash_kda' in sys.modules
-        for owner in ['activations', 'rotary', 'grpo', 'fused_cross_entropy', 'fused_linear_cross_entropy', 'fused_kl_div']:
-            assert f'modules.{owner}' not in backends._operation_registries
-        assert 'flash_kda' not in backends._operation_registries['kda']._backends
-        assert 'tilelang' not in sys.modules
-        assert 'flash_kda' not in sys.modules
-        assert 'fla.ops.kda.backends.triton_ascend.chunk_intra' not in sys.modules
+        assert ('fla.ops.utils.sinkhorn.tilelang' in sys.modules) == TileLangBackend.is_available()
+        assert 'utils' not in backends._operation_registries
         ascend_available = TritonAscendBackend.is_available()
+        assert ('fla.ops.utils.triton_ascend.cumsum' in sys.modules) == ascend_available
+        assert ('fla.ops.utils.triton_ascend.solve_tril' in sys.modules) == ascend_available
         assert ('fla.ops.common.backends.triton_ascend.chunk_o' in sys.modules) == ascend_available
         assert any(name.startswith('fla.ops.simple_gla.backends.triton_ascend.') for name in sys.modules) == ascend_available
         assert any(
@@ -489,44 +498,88 @@ def test_register_import_order(run_python):
         if not hasattr(math, 'tanh'):
             math.tanh = None
         backends.TritonAscendBackend.is_available = classmethod(lambda cls: True)
-        for owner, names in {
-            'activations': [
-                'sigmoid_fwd', 'sigmoid_bwd', 'logsigmoid_fwd', 'logsigmoid_bwd', 'swish_fwd', 'swish_bwd',
-                'swiglu_fwd', 'swiglu_fwdbwd', 'swiglu_linear', 'powglu_fwd', 'powglu_fwdbwd', 'powglu_linear',
-            ],
-            'rotary': ['rotary_embedding_fwdbwd'],
-            'grpo': ['fused_grpo_loss'],
-            'fused_cross_entropy': ['cross_entropy_loss'],
-            'fused_linear_cross_entropy': [
-                'logsumexp_fwd', 'fused_linear_cross_entropy_fwd', 'fused_linear_cross_entropy_bwd',
-            ],
-            'fused_kl_div': ['fused_kl_div_fwd', 'fused_kl_div_bwd'],
-            'causal_conv1d': [
-                'causal_conv1d_fwd', 'causal_conv1d_bwd', 'compute_dh0_triton',
-                'causal_conv1d_update', 'causal_conv1d_update_states',
-            ],
-            'norm.layernorm': ['layer_norm_fwd', 'layer_norm_bwd'],
-            'norm.l2norm': ['l2norm_fwd', 'l2norm_bwd'],
-            'norm.fused_norm_gate': ['layer_norm_gated_fwd', 'layer_norm_gated_bwd'],
+        for module, (backend_module, names) in {
+            'fla.modules.activations.ops': (
+                'fla.modules.activations.triton_ascend',
+                [
+                    'sigmoid_fwd', 'sigmoid_bwd', 'logsigmoid_fwd', 'logsigmoid_bwd', 'swish_fwd', 'swish_bwd',
+                    'swiglu_fwd', 'swiglu_fwdbwd', 'swiglu_linear', 'powglu_fwd', 'powglu_fwdbwd', 'powglu_linear',
+                ],
+            ),
+            'fla.modules.rotary.ops': ('fla.modules.rotary.triton_ascend', ['rotary_embedding_fwdbwd']),
+            'fla.modules.grpo.ops': ('fla.modules.grpo.triton_ascend', ['fused_grpo_loss']),
+            'fla.modules.fused_cross_entropy.ops': ('fla.modules.fused_cross_entropy.triton_ascend', ['cross_entropy_loss']),
+            'fla.modules.fused_linear_cross_entropy.ops': (
+                'fla.modules.fused_linear_cross_entropy.triton_ascend',
+                ['logsumexp_fwd', 'fused_linear_cross_entropy_fwd', 'fused_linear_cross_entropy_bwd'],
+            ),
+            'fla.modules.fused_kl_div.ops': (
+                'fla.modules.fused_kl_div.triton_ascend',
+                ['fused_kl_div_fwd', 'fused_kl_div_bwd'],
+            ),
+            'fla.modules.causal_conv1d.ops': (
+                'fla.modules.causal_conv1d.backends.triton_ascend',
+                [
+                    'causal_conv1d_fwd', 'causal_conv1d_bwd', 'compute_dh0_triton',
+                    'causal_conv1d_update', 'causal_conv1d_update_states',
+                ],
+            ),
+            'fla.modules.norm.layernorm': (
+                'fla.modules.norm.triton_ascend.layernorm',
+                ['layer_norm_fwd', 'layer_norm_bwd'],
+            ),
+            'fla.modules.norm.l2norm': ('fla.modules.norm.triton_ascend.l2norm', ['l2norm_fwd', 'l2norm_bwd']),
+            'fla.modules.norm.fused_norm_gate': (
+                'fla.modules.norm.triton_ascend.fused_norm_gate',
+                ['layer_norm_gated_fwd', 'layer_norm_gated_bwd'],
+            ),
+            'fla.ops.attnres.fused': ('fla.ops.attnres.backends.triton_ascend', ['fused_attnres']),
+            'fla.ops.atk.chunk_atk_fwd': (
+                'fla.ops.atk.backends.triton_ascend.chunk_atk_fwd', ['chunk_atk_fwd', 'recompute_atk_fwd'],
+            ),
+            'fla.ops.atk.chunk_atk_bwd': ('fla.ops.atk.backends.triton_ascend.chunk_atk_bwd', ['chunk_atk_bwd']),
+            'fla.ops.gla.chunk': (
+                'fla.ops.gla.backends.triton_ascend',
+                ['chunk_gla_fwd_intra_gk', 'chunk_gla_fwd_o_gk', 'chunk_gla_bwd_dA',
+                 'chunk_gla_bwd_dv', 'chunk_gla_bwd_dqk_intra', 'chunk_gla_bwd_dqkg'],
+            ),
+            'fla.ops.common.chunk_h': ('fla.ops.common.backends.triton_ascend.chunk_h', ['chunk_fwd_h', 'chunk_bwd_dh']),
+            'fla.ops.common.chunk_o': (
+                'fla.ops.common.backends.triton_ascend.chunk_o',
+                ['chunk_fwd_o', 'chunk_bwd_dv_local', 'chunk_bwd_dqkwg', 'chunk_bwd_dv'],
+            ),
+            'fla.ops.common.chunk_delta_h': (
+                'fla.ops.common.backends.triton_ascend.chunk_delta_h',
+                ['chunk_gated_delta_rule_fwd_h', 'chunk_gated_delta_rule_bwd_dhu'],
+            ),
+            'fla.ops.common.chunk_scaled_dot_kkt': (
+                'fla.ops.common.backends.triton_ascend.chunk_scaled_dot_kkt', ['chunk_scaled_dot_kkt_fwd'],
+            ),
+            'fla.ops.common.gate': (
+                'fla.ops.common.backends.triton_ascend.gate', ['fused_beta_sigmoid_fwd', 'fused_beta_sigmoid_bwd'],
+            ),
+            'fla.ops.utils.cumsum': (
+                'fla.ops.utils.triton_ascend.cumsum',
+                ['chunk_global_cumsum', 'chunk_local_cumsum'],
+            ),
+            'fla.ops.utils.solve_tril': ('fla.ops.utils.triton_ascend.solve_tril', ['solve_tril']),
         }.items():
-            module = f'fla.modules.{owner}' if owner.startswith('norm.') else f'fla.modules.{owner}.ops'
-            if owner == 'causal_conv1d':
-                backend_module = 'fla.modules.causal_conv1d.backends.triton_ascend'
-            elif owner.startswith('norm.'):
-                backend_module = f'fla.modules.norm.triton_ascend.{owner.split(".")[1]}'
-            else:
-                backend_module = f'fla.modules.{owner}.triton_ascend'
-            importlib.reload(importlib.import_module(f'fla.modules.{owner.split(".")[0]}'))
+            importlib.reload(importlib.import_module(module.rpartition('.')[0]))
             entries = importlib.import_module(module)
             implementation = sys.modules[backend_module]
             for name in names:
                 entry = getattr(entries, name)
+                if module.startswith('fla.ops.atk.'):
+                    assert getattr(importlib.import_module('fla.ops.atk'), name) is entry
                 registry = backends._function_registries[inspect.unwrap(entry)]
                 target = registry._backends['triton_ascend'].get_implementation(name)
                 implementation_name = 'compute_dh0_npu' if name == 'compute_dh0_triton' else name + '_npu'
                 assert target is getattr(implementation, implementation_name)
-                expected = inspect.signature(entry).parameters
+                expected = dict(inspect.signature(entry).parameters)
                 actual = inspect.signature(target).parameters
+                if name == 'chunk_gated_delta_rule_bwd_dhu':
+                    # the existing Ascend backward entry does not accept graph metadata.
+                    expected.pop('use_graph')
                 assert expected.keys() == actual.keys()
                 for parameter in expected:
                     assert expected[parameter].kind == actual[parameter].kind
@@ -537,41 +590,42 @@ def test_register_import_order(run_python):
 
 
 @pytest.mark.parametrize(
-    ('owner', 'name', 'tensor_args', 'options'),
+    ('entry', 'tensor_args', 'options'),
     [
-        ('activations', 'logsigmoid_fwd', (), {'temperature': 0.5, 'output_contiguous': True}),
-        ('activations', 'logsigmoid_bwd', ('dy',), {'temperature': 0.5, 'output_contiguous': True}),
-        ('rotary', 'rotary_embedding_fwdbwd', ('cos', 'sin'), {'interleaved': True, 'conjugate': False}),
-        ('rotary', 'rotary_embedding_fwdbwd', ('cos', 'sin'), {'interleaved': True, 'conjugate': True}),
-        ('causal_conv1d', 'causal_conv1d_fwd', ('weight', 'bias', 'residual'), {'chunk_size': 32, 'output_final_state': True}),
-        ('causal_conv1d', 'causal_conv1d_bwd', ('dy', 'dht'), {'chunk_size': 32, 'layout_fallback': True}),
-        ('causal_conv1d', 'causal_conv1d_update', ('cache', 'weight', 'bias', 'residual'), {'activation': 'silu'}),
-        ('causal_conv1d', 'causal_conv1d_update_states', ('initial_state',), {'state_len': 4}),
-        ('grpo', 'fused_grpo_loss', ('ref_logp', 'input_ids', 'advantages'), {'beta': 0.2, 'save_kl': True}),
-        ('fused_cross_entropy', 'cross_entropy_loss', ('target',), {'ignore_index': -1, 'label_smoothing': 0.1}),
-        ('fused_linear_cross_entropy', 'fused_linear_cross_entropy_fwd', ('target', 'weight'), {'reduction': 'sum'}),
-        ('fused_linear_cross_entropy', 'fused_linear_cross_entropy_bwd', ('dx', 'dw', 'db'), {}),
-        ('fused_kl_div', 'fused_kl_div_fwd', ('target_x', 'weight', 'target_weight'), {'use_dw': False}),
-        ('fused_kl_div', 'fused_kl_div_bwd', ('dx', 'dw'), {}),
-        ('norm.layernorm', 'layer_norm_fwd', ('weight', 'bias'), {'is_rms_norm': True, 'num_groups': 2}),
-        ('norm.layernorm', 'layer_norm_bwd', ('x', 'weight', 'bias'), {'recompute_output': True, 'num_groups': 2}),
-        ('norm.l2norm', 'l2norm_fwd', (), {'eps': 1e-4, 'output_dtype': torch.float32}),
-        ('norm.l2norm', 'l2norm_bwd', ('rstd', 'dy'), {'eps': 1e-4}),
-        ('norm.fused_norm_gate', 'layer_norm_gated_fwd', ('g', 'weight', 'bias'), {'activation': 'sigmoid'}),
-        ('norm.fused_norm_gate', 'layer_norm_gated_bwd', ('x', 'g', 'weight', 'bias'), {'activation': 'sigmoid'}),
+        (logsigmoid_fwd, (), {'temperature': 0.5, 'output_contiguous': True}),
+        (logsigmoid_bwd, ('dy',), {'temperature': 0.5, 'output_contiguous': True}),
+        (rotary_embedding_fwdbwd, ('cos', 'sin'), {'interleaved': True, 'conjugate': False}),
+        (rotary_embedding_fwdbwd, ('cos', 'sin'), {'interleaved': True, 'conjugate': True}),
+        (causal_conv1d_fwd, ('weight', 'bias', 'residual'), {'chunk_size': 32, 'output_final_state': True}),
+        (causal_conv1d_bwd, ('dy', 'dht'), {'chunk_size': 32, 'layout_fallback': True}),
+        (causal_conv1d_update, ('cache', 'weight', 'bias', 'residual'), {'activation': 'silu'}),
+        (causal_conv1d_update_states, ('initial_state',), {'state_len': 4}),
+        (fused_grpo_loss, ('ref_logp', 'input_ids', 'advantages'), {'beta': 0.2, 'save_kl': True}),
+        (cross_entropy_loss, ('target',), {'ignore_index': -1, 'label_smoothing': 0.1}),
+        (fused_linear_cross_entropy_fwd, ('target', 'weight'), {'reduction': 'sum'}),
+        (fused_linear_cross_entropy_bwd, ('dx', 'dw', 'db'), {}),
+        (fused_kl_div_fwd, ('target_x', 'weight', 'target_weight'), {'use_dw': False}),
+        (fused_kl_div_bwd, ('dx', 'dw'), {}),
+        (layer_norm_fwd, ('weight', 'bias'), {'is_rms_norm': True, 'num_groups': 2}),
+        (layer_norm_bwd, ('x', 'weight', 'bias'), {'recompute_output': True, 'num_groups': 2}),
+        (l2norm_fwd, (), {'eps': 1e-4, 'output_dtype': torch.float32}),
+        (l2norm_bwd, ('rstd', 'dy'), {'eps': 1e-4}),
+        (layer_norm_gated_fwd, ('g', 'weight', 'bias'), {'activation': 'sigmoid'}),
+        (layer_norm_gated_bwd, ('x', 'g', 'weight', 'bias'), {'activation': 'sigmoid'}),
+        (chunk_global_cumsum, ('cu_seqlens',), {'reverse': True, 'scale': 0.5}),
+        (chunk_local_cumsum, ('cu_seqlens', 'chunk_indices'), {'chunk_size': 64, 'use_graph': True}),
+        (solve_tril, ('cu_seqlens', 'chunk_indices'), {'output_dtype': torch.float32}),
     ],
     ids=[
         'activations-forward', 'activations-backward', 'rotary-forward', 'rotary-backward',
         'conv-forward', 'conv-backward', 'conv-update', 'conv-update-states', 'grpo', 'cross-entropy',
         'linear-cross-entropy-forward', 'linear-cross-entropy-backward', 'kl-div-forward', 'kl-div-backward',
         'layernorm-forward', 'layernorm-backward', 'l2norm-forward', 'l2norm-backward',
-        'norm-gate-forward', 'norm-gate-backward',
+        'norm-gate-forward', 'norm-gate-backward', 'global-cumsum', 'local-cumsum', 'solve-tril',
     ],
 )
 @pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='dispatch was disabled before the entry points were imported')
-def test_dispatch_modules(monkeypatch, owner, name, tensor_args, options):
-    module = f'fla.modules.{owner}' if owner.startswith('norm.') else f'fla.modules.{owner}.ops'
-    entry = getattr(importlib.import_module(module), name)
+def test_dispatch_entry_points(monkeypatch, entry, tensor_args, options):
     calls = []
     expected = object()
 
@@ -633,3 +687,61 @@ def test_dispatch_gluon(monkeypatch, direction, env_var):
     kwargs = {'weight': x, 'bias': None, 'residual': None} if direction == 'fwd' else {'dy': x, 'dht': None}
     inspect.signature(entry).bind(x=x, **kwargs)
     assert entry(x=x, **kwargs) is result
+
+
+@pytest.mark.parametrize('default_enable', [False, True])
+def test_register_default_enable_override(monkeypatch, enable_dispatch, default_enable):
+    class Backend(BaseBackend):
+        backend_type = 'test_policy'
+        env_var = 'FLA_TEST_POLICY'
+
+    Backend.default_enable = not default_enable
+    monkeypatch.delenv('FLA_TEST_POLICY', raising=False)
+
+    @dispatch
+    def overridden():
+        return 'default'
+
+    @dispatch
+    def inherited():
+        return 'default'
+
+    @register(overridden, backend=Backend, default_enable=default_enable)
+    @register(inherited, backend=Backend)
+    def implementation():
+        return 'backend'
+
+    assert overridden() == ('backend' if default_enable else 'default')
+    assert inherited() == ('default' if default_enable else 'backend')
+    assert Backend.default_enable is not default_enable
+
+
+def test_register_priority_override(enable_dispatch):
+    class Primary(BaseBackend):
+        backend_type = 'primary'
+
+    class Secondary(BaseBackend):
+        backend_type = 'secondary'
+        priority = 3
+
+    @dispatch
+    def overridden():
+        return 'default'
+
+    @dispatch
+    def inherited():
+        return 'default'
+
+    @register(overridden, backend=Primary, priority=0)
+    @register(inherited, backend=Primary)
+    def primary():
+        return 'primary'
+
+    @register(overridden, backend=Secondary)
+    @register(inherited, backend=Secondary)
+    def secondary():
+        return 'secondary'
+
+    assert overridden() == 'primary'
+    assert inherited() == 'secondary'
+    assert Primary.priority == 5

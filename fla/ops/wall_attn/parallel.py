@@ -647,7 +647,7 @@ def parallel_wall_attn_bwd_kernel_dkv(
         tl.store(p_dc, b_dc.to(p_dc.dtype.element_ty), mask=m_k)
 
 
-@dispatch('attn')
+@dispatch('wall_attn')
 def parallel_wall_attn_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -763,7 +763,7 @@ def parallel_wall_attn_bwd_preprocess(
     return delta
 
 
-@dispatch('attn')
+@dispatch('wall_attn')
 def parallel_wall_attn_bwd(
     q: torch.Tensor,
     k: torch.Tensor,

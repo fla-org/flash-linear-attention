@@ -26,7 +26,7 @@ from fla.ops.rwkv7.fused_k_update import fused_k_rwkv7
 from fla.ops.rwkv7.gate_output_correction import gate_output_correction
 
 if TYPE_CHECKING:
-    from fla.models.utils import Cache
+    from fla.models.cache_utils import Cache
 
 
 class RWKV7Attention(nn.Module):
@@ -163,7 +163,7 @@ class RWKV7Attention(nn.Module):
 
         # Initialize only when we're processing the RWKV7Attention module itself
         if isinstance(module, RWKV7Attention) and self.layer_idx is not None:
-            ratio_0_to_1 = self.layer_idx / (self.num_hidden_layers - 1)  # 0 to 1
+            ratio_0_to_1 = self.layer_idx / max(self.num_hidden_layers - 1, 1)  # 0 to 1
             ratio_1_to_almost0 = 1.0 - (self.layer_idx / self.num_hidden_layers)  # 1 to ~0
 
             # Create position-based initialization tensor

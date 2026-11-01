@@ -12,8 +12,7 @@ from transformers import AutoModelForCausalLM
 from fla.models import CyclicFlowAttentionConfig
 from fla.utils import IS_NVIDIA, assert_close, device
 
-from .test_modeling_base import run_test_generation, run_test_model_forward_backward
-from .test_modeling_utils import create_model_and_config
+from .utils import check_forward, check_generation, create_model_and_config
 
 pytestmark = pytest.mark.skipif(not IS_NVIDIA, reason='CyFA kernels currently require NVIDIA GPUs')
 
@@ -26,14 +25,16 @@ def make_model(dtype=torch.bfloat16, **kwargs):
     return AutoModelForCausalLM.from_config(config).to(device=device, dtype=dtype)
 
 
+@pytest.mark.parametrize('varlen', [False, True], ids=['dense', 'varlen'])
 @pytest.mark.parametrize('checkpoint_level', [0, 1])
 @pytest.mark.parametrize('use_short_conv', [False, True])
-def test_modeling(checkpoint_level, use_short_conv):
+def test_modeling(checkpoint_level, use_short_conv, varlen):
     torch.manual_seed(42)
-    run_test_model_forward_backward(
+    check_forward(
         4, 4, 1024, 4, 64, CyclicFlowAttentionConfig, use_l2warp=False, dtype=torch.bfloat16,
         head_dim=64, num_slots=128,
         checkpoint_level=checkpoint_level, use_short_conv=use_short_conv,
+        varlen=varlen,
     )
 
 
@@ -44,7 +45,7 @@ def test_generation(use_short_conv):
         CyclicFlowAttentionConfig, 2, 8, 64, dtype=torch.float16,
         head_dim=64, num_slots=128, use_short_conv=use_short_conv,
     )
-    run_test_generation(2, 4, 2000, 8, 64, CyclicFlowAttentionConfig, torch.float16, model=model, config=config)
+    check_generation(2, 4, 2000, 8, 64, CyclicFlowAttentionConfig, torch.float16, model=model, config=config)
 
 
 @torch.no_grad()

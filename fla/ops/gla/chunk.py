@@ -416,7 +416,7 @@ def chunk_gla_fwd_kernel_o(
     m_t = o_t < T
     m_v = o_v < V
     m_tv = m_t[:, None] & m_v[None, :]
-    m_A = m_t[:, None] & (o_i[None, :] < BT)
+    m_A = m_t[:, None] & m_s
     for i_k in range(tl.cdiv(K, BK)):
         o_k = i_k * BK + tl.arange(0, BK)
         m_k = o_k < K
@@ -449,8 +449,7 @@ def chunk_gla_fwd_kernel_o(
     # [BT, BV]
     b_v = tl.load(p_v, mask=m_tv, other=0.0)
     # [BT, BT]
-    b_A = tl.load(p_A, mask=m_A, other=0.0)
-    b_A = tl.where(m_s, b_A, 0.).to(b_v.dtype)
+    b_A = tl.load(p_A, mask=m_A, other=0.0).to(b_v.dtype)
     b_o = tl.dot(b_A, b_v, b_o)
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=m_tv)
 
@@ -889,7 +888,7 @@ def chunk_gla_bwd_kernel_inter(
     tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), mask=m_tk)
 
 
-@dispatch('gla')
+@dispatch
 def chunk_gla_fwd_intra_gk(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -986,7 +985,7 @@ def chunk_gla_fwd_intra_gk(
     return A
 
 
-@dispatch('gla')
+@dispatch
 def chunk_gla_fwd_o_gk(
     q: torch.Tensor,
     v: torch.Tensor,
@@ -1032,7 +1031,7 @@ def chunk_gla_fwd_o_gk(
     return o
 
 
-@dispatch('gla')
+@dispatch
 def chunk_gla_bwd_dA(
     v: torch.Tensor,
     do: torch.Tensor,
@@ -1067,7 +1066,7 @@ def chunk_gla_bwd_dA(
     return dA
 
 
-@dispatch('gla')
+@dispatch
 def chunk_gla_bwd_dv(
     k: torch.Tensor,
     g: torch.Tensor,
@@ -1107,7 +1106,7 @@ def chunk_gla_bwd_dv(
     return dv
 
 
-@dispatch('gla')
+@dispatch
 def chunk_gla_bwd_dqk_intra(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -1151,7 +1150,7 @@ def chunk_gla_bwd_dqk_intra(
     return dq, dk
 
 
-@dispatch('gla')
+@dispatch
 def chunk_gla_bwd_dqkg(
     q: torch.Tensor,
     k: torch.Tensor,

@@ -72,7 +72,8 @@ class LongConvolution(nn.Module):
                 Output of shape [batch_size, seq_len, hidden_size].
         """
         x = x.transpose(1, 2)
-        y = fft_conv(u=x, k=self.filter, dropout_mask=None, gelu=False)
+        # taps past seq_len would wrap around the FFT and mix later tokens into earlier outputs
+        y = fft_conv(u=x, k=self.filter[:, :x.shape[-1]], dropout_mask=None, gelu=False)
         y = y.transpose(1, 2)
         return y.to(dtype=x.dtype)
 
