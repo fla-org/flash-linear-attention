@@ -534,6 +534,30 @@ def test_register_import_order(run_python):
                 ['layer_norm_gated_fwd', 'layer_norm_gated_bwd'],
             ),
             'fla.ops.attnres.fused': ('fla.ops.attnres.backends.triton_ascend', ['fused_attnres']),
+            'fla.ops.atk.chunk_atk_fwd': (
+                'fla.ops.atk.backends.triton_ascend.chunk_atk_fwd', ['chunk_atk_fwd', 'recompute_atk_fwd'],
+            ),
+            'fla.ops.atk.chunk_atk_bwd': ('fla.ops.atk.backends.triton_ascend.chunk_atk_bwd', ['chunk_atk_bwd']),
+            'fla.ops.gla.chunk': (
+                'fla.ops.gla.backends.triton_ascend',
+                ['chunk_gla_fwd_intra_gk', 'chunk_gla_fwd_o_gk', 'chunk_gla_bwd_dA',
+                 'chunk_gla_bwd_dv', 'chunk_gla_bwd_dqk_intra', 'chunk_gla_bwd_dqkg'],
+            ),
+            'fla.ops.common.chunk_h': ('fla.ops.common.backends.triton_ascend.chunk_h', ['chunk_fwd_h', 'chunk_bwd_dh']),
+            'fla.ops.common.chunk_o': (
+                'fla.ops.common.backends.triton_ascend.chunk_o',
+                ['chunk_fwd_o', 'chunk_bwd_dv_local', 'chunk_bwd_dqkwg', 'chunk_bwd_dv'],
+            ),
+            'fla.ops.common.chunk_delta_h': (
+                'fla.ops.common.backends.triton_ascend.chunk_delta_h',
+                ['chunk_gated_delta_rule_fwd_h', 'chunk_gated_delta_rule_bwd_dhu'],
+            ),
+            'fla.ops.common.chunk_scaled_dot_kkt': (
+                'fla.ops.common.backends.triton_ascend.chunk_scaled_dot_kkt', ['chunk_scaled_dot_kkt_fwd'],
+            ),
+            'fla.ops.common.gate': (
+                'fla.ops.common.backends.triton_ascend.gate', ['fused_beta_sigmoid_fwd', 'fused_beta_sigmoid_bwd'],
+            ),
             'fla.ops.utils.cumsum': (
                 'fla.ops.utils.triton_ascend.cumsum',
                 ['chunk_global_cumsum', 'chunk_local_cumsum'],
@@ -545,12 +569,17 @@ def test_register_import_order(run_python):
             implementation = sys.modules[backend_module]
             for name in names:
                 entry = getattr(entries, name)
+                if module.startswith('fla.ops.atk.'):
+                    assert getattr(importlib.import_module('fla.ops.atk'), name) is entry
                 registry = backends._function_registries[inspect.unwrap(entry)]
                 target = registry._backends['triton_ascend'].get_implementation(name)
                 implementation_name = 'compute_dh0_npu' if name == 'compute_dh0_triton' else name + '_npu'
                 assert target is getattr(implementation, implementation_name)
-                expected = inspect.signature(entry).parameters
+                expected = dict(inspect.signature(entry).parameters)
                 actual = inspect.signature(target).parameters
+                if name == 'chunk_gated_delta_rule_bwd_dhu':
+                    # the existing Ascend backward entry does not accept graph metadata.
+                    expected.pop('use_graph')
                 assert expected.keys() == actual.keys()
                 for parameter in expected:
                     assert expected[parameter].kind == actual[parameter].kind
