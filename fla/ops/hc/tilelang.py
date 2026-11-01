@@ -21,24 +21,22 @@ class HCTileLangBackend(TileLangBackend):
 
 
 @tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_DEVICE_COMPILE_FLAGS: ['--fmad=false']})
-def hc_fwd_kernel(NT, N, D, BN, BD, IS_POST, HAS_MIXING, x_dtype, w_dtype, branch_dtype, mixing_dtype):
-    ND = tilelang.cdiv(D, BD)
+def hc_pre_fwd_kernel(NT, N, D, x_dtype, pre_dtype, BD):
+    BN = triton.next_power_of_2(N)
 
-    # flattened buffers: x [NT, N, D], w [NT, N], branch [NT, D], mixing [NT, N, N]
     @T.prim_func
     def kernel(
-        x: T.Tensor((NT * N * D,), x_dtype),
-        w: T.Tensor((NT * N,), w_dtype),
-        branch: T.Tensor((NT * D if IS_POST else 1,), branch_dtype),
-        mixing: T.Tensor((NT * N * N if HAS_MIXING else 1,), mixing_dtype),
-        o: T.Tensor((NT * N * D if IS_POST else NT * D,), x_dtype),
+        x: T.Tensor((NT, N, D), x_dtype),
+        pre: T.Tensor((NT, N), pre_dtype),
+        o: T.Tensor((NT, D), x_dtype),
     ):
-        with T.Kernel(NT, ND, threads=128) as (token, block):
+        with T.Kernel(NT, T.ceildiv(D, BD), threads=128) as (token, block):
             i_t = T.cast(token, 'int64')
-            i_c = T.cast(block, 'int64')
+            i_d = T.cast(block, 'int64') * BD
             b_o = T.alloc_fragment((BN, BD), 'float32')
+            b_pre = T.alloc_fragment((BN,), 'float32')
             b_reduced = T.alloc_fragment((BD,), 'float32')
-            if not IS_POST and N <= 4:
+            if N <= 4:
                 T.annotate_layout({
                     b_o: T.Fragment(
                         shape=(BN, BD),
@@ -46,145 +44,161 @@ def hc_fwd_kernel(NT, N, D, BN, BD, IS_POST, HAS_MIXING, x_dtype, w_dtype, branc
                         forward_index_fn=lambda i, d: i * (BD // 128) + d // 128,
                     ),
                 })
-            if IS_POST:
-                if HAS_MIXING:
-                    T.clear(b_o)
-                    # mixing[token, output stream, input stream] mixes x into a [BN, BD] tile
-                    for k in T.serial(N):
-                        for i, d in T.Parallel(BN, BD):
-                            b_o[i, d] += T.if_then_else(
-                                i < N and i_c * BD + d < D,
-                                T.cast(mixing[(i_t * N + i) * N + k], 'float32') *
-                                T.cast(x[(i_t * N + k) * D + i_c * BD + d], 'float32'),
-                                0.0,
-                            )
-                else:
-                    for i, d in T.Parallel(BN, BD):
-                        b_o[i, d] = T.if_then_else(i < N and i_c * BD + d < D, x[(i_t * N + i) * D + i_c * BD + d], 0)
-                for i, d in T.Parallel(BN, BD):
-                    if i < N and i_c * BD + d < D:
-                        o[(i_t * N + i) * D + i_c * BD + d] = (
-                            b_o[i, d] + T.cast(w[i_t * N + i], 'float32') *
-                            T.cast(branch[i_t * D + i_c * BD + d], 'float32')
-                        )
-            else:
-                for i, d in T.Parallel(BN, BD):
-                    b_o[i, d] = T.if_then_else(
-                        i < N and i_c * BD + d < D,
-                        T.cast(x[(i_t * N + i) * D + i_c * BD + d], 'float32') * T.cast(w[i_t * N + i], 'float32'),
-                        0.0,
-                    )
-                # [BN, BD] -> [BD], reducing over residual streams
-                T.reduce_sum(b_o, b_reduced, dim=0)
-                for d in T.Parallel(BD):
-                    if i_c * BD + d < D:
-                        o[i_t * D + i_c * BD + d] = b_reduced[d]
+            T.copy(x[i_t, 0, i_d], b_o)
+            T.copy(pre[i_t, 0], b_pre)
+            for i, d in T.Parallel(BN, BD):
+                b_o[i, d] *= b_pre[i]
+            T.reduce_sum(b_o, b_reduced, dim=0)
+            T.copy(b_reduced, o[i_t, i_d])
     return kernel
 
 
 @tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_DEVICE_COMPILE_FLAGS: ['--fmad=false']})
-def hc_bwd_kernel(NT, N, D, BN, BD, IS_POST, HAS_MIXING, x_dtype, w_dtype, branch_dtype, mixing_dtype):
-    ND = tilelang.cdiv(D, BD)
+def hc_post_fwd_kernel(NT, N, D, x_dtype, branch_dtype, post_dtype, mixing_dtype, BD, HAS_MIXING):
+    BN = triton.next_power_of_2(N)
 
-    # partial gradients: dw [NT, ND, N], dmixing [NT, ND, N, N]
     @T.prim_func
     def kernel(
-        x: T.Tensor((NT * N * D,), x_dtype),
-        w: T.Tensor((NT * N,), w_dtype),
-        branch: T.Tensor((NT * D if IS_POST else 1,), branch_dtype),
-        mixing: T.Tensor((NT * N * N if HAS_MIXING else 1,), mixing_dtype),
-        do: T.Tensor((NT * N * D if IS_POST else NT * D,), x_dtype),
-        dx: T.Tensor((NT * N * D,), x_dtype),
-        dbranch: T.Tensor((NT * D if IS_POST else 1,), branch_dtype),
-        dw_partial: T.Tensor((NT * ND * N,), 'float32'),
-        dmixing_partial: T.Tensor((NT * ND * N * N if HAS_MIXING else 1,), 'float32'),
+        x: T.Tensor((NT, N, D), x_dtype),
+        branch: T.Tensor((NT, D), branch_dtype),
+        post: T.Tensor((NT, N), post_dtype),
+        mixing: T.Tensor((NT, N, N), mixing_dtype),
+        o: T.Tensor((NT, N, D), x_dtype),
+    ):
+        with T.Kernel(NT, T.ceildiv(D, BD), threads=128) as (token, block):
+            i_t = T.cast(token, 'int64')
+            i_d = T.cast(block, 'int64') * BD
+            b_o = T.alloc_fragment((BN, BD), 'float32')
+            # keep broadcast loads in the 2D loop so layout inference can distribute both axes
+            if HAS_MIXING:
+                T.clear(b_o)
+                for k in T.serial(N):
+                    for i, d in T.Parallel(BN, BD):
+                        b_o[i, d] += T.if_then_else(
+                            i < N and i_d + d < D,
+                            T.cast(mixing[i_t, i, k], 'float32') * T.cast(x[i_t, k, i_d + d], 'float32'),
+                            0.0,
+                        )
+            else:
+                T.copy(x[i_t, 0, i_d], b_o)
+            for i, d in T.Parallel(BN, BD):
+                b_o[i, d] += T.if_then_else(
+                    i < N and i_d + d < D,
+                    T.cast(post[i_t, i], 'float32') * T.cast(branch[i_t, i_d + d], 'float32'),
+                    0.0,
+                )
+            T.copy(b_o, o[i_t, 0, i_d])
+    return kernel
+
+
+@tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_DEVICE_COMPILE_FLAGS: ['--fmad=false']})
+def hc_pre_bwd_kernel(NT, N, D, x_dtype, pre_dtype, BD):
+    BN = triton.next_power_of_2(N)
+    ND = tilelang.cdiv(D, BD)
+
+    @T.prim_func
+    def kernel(
+        x: T.Tensor((NT, N, D), x_dtype),
+        pre: T.Tensor((NT, N), pre_dtype),
+        do: T.Tensor((NT, D), x_dtype),
+        dx: T.Tensor((NT, N, D), x_dtype),
+        dpre: T.Tensor((NT, ND, N), 'float32'),
     ):
         with T.Kernel(NT, ND, threads=128) as (token, block):
             i_t = T.cast(token, 'int64')
             i_c = T.cast(block, 'int64')
+            i_d = i_c * BD
+            b_do = T.alloc_fragment((BD,), 'float32')
+            b_pre = T.alloc_fragment((BN,), 'float32')
+            b_tmp = T.alloc_fragment((BN, BD), 'float32')
+            b_dx = T.alloc_fragment((BN, BD), 'float32')
+            b_dpre = T.alloc_fragment((BN,), 'float32')
+            T.copy(x[i_t, 0, i_d], b_tmp)
+            T.copy(pre[i_t, 0], b_pre)
+            T.copy(do[i_t, i_d], b_do)
+            for i, d in T.Parallel(BN, BD):
+                b_tmp[i, d] *= b_do[d]
+                b_dx[i, d] = b_pre[i] * b_do[d]
+            T.reduce_sum(b_tmp, b_dpre, dim=1)
+            T.copy(b_dx, dx[i_t, 0, i_d])
+            T.copy(b_dpre, dpre[i_t, i_c, 0])
+    return kernel
+
+
+@tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_DEVICE_COMPILE_FLAGS: ['--fmad=false']})
+def hc_post_bwd_kernel(NT, N, D, x_dtype, branch_dtype, post_dtype, mixing_dtype, BD, HAS_MIXING):
+    BN = triton.next_power_of_2(N)
+    ND = tilelang.cdiv(D, BD)
+
+    @T.prim_func
+    def kernel(
+        x: T.Tensor((NT, N, D), x_dtype),
+        branch: T.Tensor((NT, D), branch_dtype),
+        post: T.Tensor((NT, N), post_dtype),
+        mixing: T.Tensor((NT, N, N), mixing_dtype),
+        do: T.Tensor((NT, N, D), x_dtype),
+        dx: T.Tensor((NT, N, D), x_dtype),
+        dbranch: T.Tensor((NT, D), branch_dtype),
+        dpost: T.Tensor((NT, ND, N), 'float32'),
+        dmixing: T.Tensor((NT, ND, N, N), 'float32'),
+    ):
+        with T.Kernel(NT, ND, threads=128) as (token, block):
+            i_t = T.cast(token, 'int64')
+            i_c = T.cast(block, 'int64')
+            i_d = i_c * BD
             b_do = T.alloc_fragment((BN, BD), 'float32')
             b_tmp = T.alloc_fragment((BN, BD), 'float32')
             b_dx = T.alloc_fragment((BN, BD), 'float32')
-            b_dw = T.alloc_fragment((BN,), 'float32')
-            b_dmixing = T.alloc_fragment((BN,), 'float32')
+            b_dpost = T.alloc_fragment((BN,), 'float32')
             b_dbranch = T.alloc_fragment((BD,), 'float32')
-            if IS_POST:
-                for i, d in T.Parallel(BN, BD):
-                    b_do[i, d] = T.if_then_else(i < N and i_c * BD + d < D, do[(i_t * N + i) * D + i_c * BD + d], 0)
-                    b_tmp[i, d] = b_do[i, d] * T.if_then_else(
-                        i_c * BD + d < D,
-                        T.cast(branch[i_t * D + i_c * BD + d], 'float32'),
-                        0.0,
-                    )
-                # [BN, BD] -> [BN], reducing over this feature tile
-                T.reduce_sum(b_tmp, b_dw, dim=1)
-                for i, d in T.Parallel(BN, BD):
-                    b_tmp[i, d] = b_do[i, d] * T.if_then_else(i < N, T.cast(w[i_t * N + i], 'float32'), 0.0)
-                # [BN, BD] -> [BD], reducing over output streams
-                T.reduce_sum(b_tmp, b_dbranch, dim=0)
-                for d in T.Parallel(BD):
-                    if i_c * BD + d < D:
-                        dbranch[i_t * D + i_c * BD + d] = b_dbranch[d]
-                if HAS_MIXING:
-                    T.clear(b_dx)
-                    # transpose the mixing axes to propagate gradients to input streams
-                    for k in T.serial(N):
-                        for i, d in T.Parallel(BN, BD):
-                            b_dx[i, d] += T.if_then_else(
-                                i < N and i_c * BD + d < D,
-                                T.cast(mixing[(i_t * N + k) * N + i], 'float32') *
-                                T.cast(do[(i_t * N + k) * D + i_c * BD + d], 'float32'),
-                                0.0,
-                            )
-                            b_tmp[i, d] = b_do[i, d] * T.if_then_else(
-                                i_c * BD + d < D,
-                                T.cast(x[(i_t * N + k) * D + i_c * BD + d], 'float32'),
-                                0.0,
-                            )
-                        # [BN, BD] -> [BN], one column of the mixing gradient
-                        T.reduce_sum(b_tmp, b_dmixing, dim=1)
-                        for i in T.Parallel(BN):
-                            if i < N:
-                                dmixing_partial[((i_t * ND + i_c) * N + i) * N + k] = b_dmixing[i]
-                else:
-                    T.copy(b_do, b_dx)
-            else:
-                # broadcast the pre-output gradient [BD] across residual streams [BN, BD]
-                for i, d in T.Parallel(BN, BD):
-                    b_do[i, d] = T.if_then_else(i_c * BD + d < D, do[i_t * D + i_c * BD + d], 0)
-                    b_dx[i, d] = b_do[i, d] * T.if_then_else(i < N, T.cast(w[i_t * N + i], 'float32'), 0.0)
-                    b_tmp[i, d] = b_do[i, d] * T.if_then_else(
-                        i < N and i_c * BD + d < D,
-                        T.cast(x[(i_t * N + i) * D + i_c * BD + d], 'float32'),
-                        0.0,
-                    )
-                # [BN, BD] -> [BN]
-                T.reduce_sum(b_tmp, b_dw, dim=1)
             for i, d in T.Parallel(BN, BD):
-                if i < N and i_c * BD + d < D:
-                    dx[(i_t * N + i) * D + i_c * BD + d] = b_dx[i, d]
-            for i in T.Parallel(BN):
-                if i < N:
-                    dw_partial[(i_t * ND + i_c) * N + i] = b_dw[i]
+                b_do[i, d] = T.if_then_else(i < N and i_d + d < D, do[i_t, i, i_d + d], 0)
+                b_tmp[i, d] = b_do[i, d] * T.if_then_else(
+                    i_d + d < D, T.cast(branch[i_t, i_d + d], 'float32'), 0.0,
+                )
+            T.reduce_sum(b_tmp, b_dpost, dim=1)
+            for i, d in T.Parallel(BN, BD):
+                b_tmp[i, d] = b_do[i, d] * T.if_then_else(i < N, T.cast(post[i_t, i], 'float32'), 0.0)
+            T.reduce_sum(b_tmp, b_dbranch, dim=0)
+            T.copy(b_dbranch, dbranch[i_t, i_d])
+            if HAS_MIXING:
+                b_dmixing = T.alloc_fragment((BN,), 'float32')
+                T.clear(b_dx)
+                # transpose the mixing axes to propagate gradients to input streams
+                for k in T.serial(N):
+                    for i, d in T.Parallel(BN, BD):
+                        b_dx[i, d] += T.if_then_else(
+                            i < N and i_d + d < D,
+                            T.cast(mixing[i_t, k, i], 'float32') * T.cast(do[i_t, k, i_d + d], 'float32'),
+                            0.0,
+                        )
+                        b_tmp[i, d] = b_do[i, d] * T.if_then_else(
+                            i_d + d < D, T.cast(x[i_t, k, i_d + d], 'float32'), 0.0,
+                        )
+                    T.reduce_sum(b_tmp, b_dmixing, dim=1)
+                    for i in T.Parallel(BN):
+                        if i < N:
+                            dmixing[i_t, i_c, i, k] = b_dmixing[i]
+            else:
+                T.copy(b_do, b_dx)
+            T.copy(b_dx, dx[i_t, 0, i_d])
+            T.copy(b_dpost, dpost[i_t, i_c, 0])
     return kernel
 
 
 @tilelang.jit
-def hc_bwd_kernel_reduce(NT, C, S, BC, BS, dtype):
-    # feature tiles along C; S is N for routing weights or N * N for mixing weights
+def hc_bwd_kernel_reduce(NT, C, S, dtype):
+    BC, BS = triton.next_power_of_2(C), triton.next_power_of_2(S)
+
     @T.prim_func
-    def kernel(partial: T.Tensor((NT * C * S,), 'float32'), grad: T.Tensor((NT * S,), dtype)):
+    def kernel(partial: T.Tensor((NT, C, S), 'float32'), grad: T.Tensor((NT, S), dtype)):
         with T.Kernel(NT, threads=128) as token:
             i_t = T.cast(token, 'int64')
             b_partial = T.alloc_fragment((BC, BS), 'float32')
             b_reduced = T.alloc_fragment((BS,), 'float32')
-            for i_c, s in T.Parallel(BC, BS):
-                b_partial[i_c, s] = T.if_then_else(i_c < C and s < S, partial[(i_t * C + i_c) * S + s], 0)
-            # [BC, BS] -> [BS]
+            T.copy(partial[i_t, 0, 0], b_partial)
             T.reduce_sum(b_partial, b_reduced, dim=0)
-            for s in T.Parallel(BS):
-                if s < S:
-                    grad[i_t * S + s] = b_reduced[s]
+            T.copy(b_reduced, grad[i_t, 0])
     return kernel
 
 
@@ -196,32 +210,33 @@ def hc_fwd_tilelang(
     is_post: bool,
 ):
     N, D = x.shape[-2:]
-    # flatten all leading batch/sequence dimensions into NT tokens
     NT = x.numel() // (N * D)
-    BD = max(128, min(256 if NT < 128 or is_post or N > 4 else 1024, triton.next_power_of_2(D)))
-    # [..., N, D] for post; [..., D] for pre
-    o = torch.empty_like(x) if is_post else x.new_empty((*x.shape[:-2], D))
-    kernel = hc_fwd_kernel(
-        NT=NT,
-        N=N,
-        D=D,
-        BN=triton.next_power_of_2(N),
-        BD=BD,
-        IS_POST=is_post,
-        HAS_MIXING=mixing is not None,
-        x_dtype=str(x.dtype).removeprefix('torch.'),
-        w_dtype=str(w.dtype).removeprefix('torch.'),
-        branch_dtype=str(branch.dtype if is_post else x.dtype).removeprefix('torch.'),
-        mixing_dtype=str(mixing.dtype if mixing is not None else x.dtype).removeprefix('torch.'),
-    )
-    dummy = x.flatten()[:1]
-    kernel(
-        x.flatten(),
-        w.flatten(),
-        branch.flatten() if is_post else dummy,
-        mixing.flatten() if mixing is not None else dummy,
-        o.flatten(),
-    )
+    BD = 256 if NT < 128 or is_post or N > 4 else 1024
+    BD = max(128, min(BD, triton.next_power_of_2(D)))
+    if is_post:
+        o = torch.empty_like(x)
+        kernel = hc_post_fwd_kernel(
+            NT=NT,
+            N=N,
+            D=D,
+            x_dtype=x.dtype,
+            branch_dtype=branch.dtype,
+            post_dtype=w.dtype,
+            mixing_dtype=mixing.dtype if mixing is not None else x.dtype,
+            BD=BD,
+            HAS_MIXING=mixing is not None,
+        )
+        kernel(
+            x.view(NT, N, D),
+            branch.view(NT, D),
+            w.view(NT, N),
+            mixing.view(NT, N, N) if mixing is not None else None,
+            o.view(NT, N, D),
+        )
+    else:
+        o = x.new_empty((*x.shape[:-2], D))
+        kernel = hc_pre_fwd_kernel(NT=NT, N=N, D=D, x_dtype=x.dtype, pre_dtype=w.dtype, BD=BD)
+        kernel(x.view(NT, N, D), w.view(NT, N), o.view(NT, D))
     return o
 
 
@@ -239,47 +254,42 @@ def hc_bwd_tilelang(
     BD = min(BD, triton.next_power_of_2(D))
     ND = triton.cdiv(D, BD)
     dx, dw = torch.empty_like(x), torch.empty_like(w)
-    dbranch = torch.empty_like(branch) if is_post else None
-    dmixing = torch.empty_like(mixing) if mixing is not None else None
     dw_partial = torch.empty((NT, ND, N), device=x.device, dtype=torch.float32)
-    dmixing_partial = torch.empty((NT, ND, N * N), device=x.device, dtype=torch.float32) if mixing is not None else None
-    kernel = hc_bwd_kernel(
-        NT=NT,
-        N=N,
-        D=D,
-        BN=triton.next_power_of_2(N),
-        BD=BD,
-        IS_POST=is_post,
-        HAS_MIXING=mixing is not None,
-        x_dtype=str(x.dtype).removeprefix('torch.'),
-        w_dtype=str(w.dtype).removeprefix('torch.'),
-        branch_dtype=str(branch.dtype if is_post else x.dtype).removeprefix('torch.'),
-        mixing_dtype=str(mixing.dtype if mixing is not None else x.dtype).removeprefix('torch.'),
-    )
-    dummy = x.flatten()[:1]
-    fp32_dummy = dw_partial.flatten()[:1]
-    kernel(
-        x.flatten(),
-        w.flatten(),
-        branch.flatten() if is_post else dummy,
-        mixing.flatten() if mixing is not None else dummy,
-        do.flatten(),
-        dx.flatten(),
-        dbranch.flatten() if dbranch is not None else dummy,
-        dw_partial.flatten(),
-        dmixing_partial.flatten() if dmixing_partial is not None else fp32_dummy,
-    )
+    dbranch, dmixing, dmixing_partial = None, None, None
+    if is_post:
+        dbranch = torch.empty_like(branch)
+        if mixing is not None:
+            dmixing = torch.empty_like(mixing)
+            dmixing_partial = torch.empty((NT, ND, N, N), device=x.device, dtype=torch.float32)
+        kernel = hc_post_bwd_kernel(
+            NT=NT,
+            N=N,
+            D=D,
+            x_dtype=x.dtype,
+            branch_dtype=branch.dtype,
+            post_dtype=w.dtype,
+            mixing_dtype=mixing.dtype if mixing is not None else x.dtype,
+            BD=BD,
+            HAS_MIXING=mixing is not None,
+        )
+        kernel(
+            x.view(NT, N, D),
+            branch.view(NT, D),
+            w.view(NT, N),
+            mixing.view(NT, N, N) if mixing is not None else None,
+            do.view(NT, N, D),
+            dx.view(NT, N, D),
+            dbranch.view(NT, D),
+            dw_partial,
+            dmixing_partial,
+        )
+    else:
+        kernel = hc_pre_bwd_kernel(NT=NT, N=N, D=D, x_dtype=x.dtype, pre_dtype=w.dtype, BD=BD)
+        kernel(x.view(NT, N, D), w.view(NT, N), do.view(NT, D), dx.view(NT, N, D), dw_partial)
     for partial, grad, size in ((dw_partial, dw, N), (dmixing_partial, dmixing, N * N)):
         if grad is not None:
-            kernel = hc_bwd_kernel_reduce(
-                NT=NT,
-                C=ND,
-                S=size,
-                BC=triton.next_power_of_2(ND),
-                BS=triton.next_power_of_2(size),
-                dtype=str(grad.dtype).removeprefix('torch.'),
-            )
-            kernel(partial.flatten(), grad.flatten())
+            kernel = hc_bwd_kernel_reduce(NT=NT, C=ND, S=size, dtype=grad.dtype)
+            kernel(partial.view(NT, ND, size), grad.view(NT, size))
     return dx, dw, dbranch, dmixing
 
 

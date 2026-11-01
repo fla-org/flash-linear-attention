@@ -70,6 +70,8 @@ def hc(request):
         pytest.param((127, 4, 1025), torch.float32, 5e-5, 'gluon', id='gluon-packed-127-tokens'),
         pytest.param((128, 4, 1025), torch.float32, 5e-5, 'triton', id='triton-packed-128-tokens'),
         pytest.param((4, 65), torch.float16, 2e-3, 'tilelang', id='tilelang-fp16-unbatched'),
+        pytest.param((2, 3, 1, 1), torch.float32, 5e-5, 'tilelang', id='tilelang-single-element-tile'),
+        pytest.param((2, 3, 3, 65), torch.float16, 2e-3, 'tilelang', id='tilelang-padded-streams-and-features'),
     ],
     indirect=['backend'],
 )
@@ -107,6 +109,8 @@ def test_fused_hc_pre(shape: tuple[int, ...], dtype: torch.dtype, ratio: float, 
         pytest.param((2, 3, 5, 65), torch.float32, 5e-5, True, 'triton', id='triton-mhc-padded-streams'),
         pytest.param((2, 3, 4, 8193), torch.float32, 5e-5, False, 'gluon', id='gluon-ihc-many-tiles'),
         pytest.param((2, 3, 8, 4096), torch.bfloat16, 6e-3, False, 'tilelang', id='tilelang-ihc-bf16-max-streams'),
+        pytest.param((2, 3, 1, 1), torch.float32, 5e-5, True, 'tilelang', id='tilelang-mhc-single-element-tile'),
+        pytest.param((2, 3, 5, 65), torch.bfloat16, 6e-3, True, 'tilelang', id='tilelang-mhc-padded-streams-and-features'),
     ],
     indirect=['backend'],
 )
