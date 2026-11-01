@@ -16,7 +16,7 @@ import triton.language as tl
 from fla.backends import dispatch
 from fla.ops.utils.op import exp
 from fla.ops.utils.softplus import softplus
-from fla.utils import input_guard
+from fla.utils import IS_NVIDIA_HOPPER, input_guard
 
 
 @triton.heuristics(
@@ -232,7 +232,7 @@ def fused_recurrent_kda_fwd_kernel(
             tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
 
 
-@dispatch('kda')
+@dispatch
 def fused_recurrent_kda_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -264,7 +264,12 @@ def fused_recurrent_kda_fwd(
     HV = v.shape[2]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
     BK = triton.next_power_of_2(K)
-    BV = 8
+    if IS_NVIDIA_HOPPER and not state_v_first:
+        # [K, V] state on H100/H200: BV=16 runs half as many programs per head as BV=8, so less repeated
+        # per-program q/k/gate work; it is faster across measured decode shapes.
+        BV = min(16, triton.next_power_of_2(V))
+    else:
+        BV = 8
 
     if out is None:
         out = torch.empty_like(v) if cu_seqlens is None else torch.zeros_like(v)

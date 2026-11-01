@@ -10,6 +10,7 @@ import inspect
 import logging
 import math
 import os
+from functools import wraps
 from types import SimpleNamespace
 from unittest.mock import create_autospec
 
@@ -20,7 +21,7 @@ import triton
 
 from fla import backends
 from fla.ops.kda import chunk_kda, fused_recurrent_kda
-from fla.ops.kda.backends import tilelang as kda_tilelang_backend
+from fla.ops.kda.backends import tilelang
 from fla.ops.kda.fused_recurrent import fused_recurrent_kda_fwd
 from fla.ops.kda.gate import fused_kda_gate, naive_kda_gate, naive_kda_lowerbound_gate
 from fla.ops.kda.naive import naive_chunk_kda, naive_recurrent_kda
@@ -1817,40 +1818,43 @@ def test_flash_kda_chunk_varlen(H, D, cu_seqlens, allow_neg_eigval, has_A, has_b
     assert_close("ht", ref_ht, tri_ht.to(ref_ht.dtype), _FLASH_KDA_RTOL)
 
 
-_TRITON_ASCEND_KDA_OPS = (
-    'kda_gate_fwd',
-    'kda_gate_bwd',
-    'kda_gate_chunk_cumsum',
-    'fused_kda_gate',
-    'fused_recurrent_kda_fwd',
-    'recompute_w_u_fwd',
-    'chunk_kda_fwd_intra',
-    'chunk_kda_fwd_intra_token_parallel',
-    'chunk_kda_bwd_intra',
-    'chunk_kda_bwd_dAv',
-    'chunk_kda_bwd_wy_dqkg_fused',
-)
-
-
 def _spy_on_triton_ascend_kda_backend():
     """Patch every op of the Triton-Ascend KDA backend to record dispatched calls."""
-    from fla import backends
+    from fla.ops.kda.chunk_bwd import chunk_kda_bwd_dAv, chunk_kda_bwd_wy_dqkg_fused
+    from fla.ops.kda.chunk_intra import chunk_kda_bwd_intra, chunk_kda_fwd_intra
+    from fla.ops.kda.chunk_intra_token_parallel import chunk_kda_fwd_intra_token_parallel
+    from fla.ops.kda.gate import kda_gate_bwd, kda_gate_chunk_cumsum, kda_gate_fwd
+    from fla.ops.kda.wy_fast import recompute_w_u_fwd
 
-    backend = backends._load_operation_registry('kda')._backends.get('triton_ascend')
-    assert backend is not None, 'Triton-Ascend KDA backend is not registered'
-
-    calls = []
-    for name in _TRITON_ASCEND_KDA_OPS:
-        original = getattr(backend, name)
+    candidates, calls = {}, []
+    for entry in (
+        kda_gate_fwd,
+        kda_gate_bwd,
+        kda_gate_chunk_cumsum,
+        fused_kda_gate,
+        fused_recurrent_kda_fwd,
+        recompute_w_u_fwd,
+        chunk_kda_fwd_intra,
+        chunk_kda_fwd_intra_token_parallel,
+        chunk_kda_bwd_intra,
+        chunk_kda_bwd_dAv,
+        chunk_kda_bwd_wy_dqkg_fused,
+    ):
+        name = entry.__name__
+        backend = backends._function_registries[inspect.unwrap(entry)]._backends.get('triton_ascend')
+        assert backend is not None, f'Triton-Ascend KDA backend is not registered for {name}'
+        candidates[name] = backend
+        original = backend.implementation
 
         def make_spy(name, original):
+            @wraps(original)
             def spy(*args, **kwargs):
                 calls.append(name)
                 return original(*args, **kwargs)
             return spy
 
-        setattr(backend, name, make_spy(name, original))
-    return backend, calls
+        backend.implementation = make_spy(name, original)
+    return candidates, calls
 
 
 def _run_chunk_kda(safe_gate: bool, chunk_size: int = 64, use_gate_in_kernel: bool = True):
@@ -1922,7 +1926,7 @@ def test_triton_ascend_backend_routing():
 
     Numerical parity can pass through the fallback, so record which implementations actually run.
     """
-    backend, calls = _spy_on_triton_ascend_kda_backend()
+    candidates, calls = _spy_on_triton_ascend_kda_backend()
     try:
         # safe_gate=True: forward and backward must hit the NPU kernels
         calls.clear()
@@ -1968,13 +1972,13 @@ def test_triton_ascend_backend_routing():
             f'(dispatched: {calls})'
         )
     finally:
-        for name in _TRITON_ASCEND_KDA_OPS:
-            delattr(backend, name)
+        for backend in candidates.values():
+            backend.implementation = backend.implementation.__wrapped__
 
 
 @pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
 @pytest.mark.parametrize('route', ['accepted', 'disabled', 'unavailable', 'training', 'gate-not-fused'])
-def test_flash_kda_registered_dispatch(monkeypatch, route):
+def test_flash_kda_dispatch(monkeypatch, route):
     from fla.ops.kda.backends.flash_kda import FlashKDABackend
     from fla.ops.kda.chunk import ChunkKDAFunction, chunk_kda
 
@@ -2016,40 +2020,39 @@ def test_flash_kda_registered_dispatch(monkeypatch, route):
 
 
 @pytest.fixture
-def kda_bwd_inputs():
+def chunk_bwd_inputs():
     x = SimpleNamespace(shape=(1, 64, 2, 64))
     return dict(q=x, k=x, v=x, v_new=x, g=x, beta=x, A=x, h=x, do=x, dh=x, dv=x, chunk_offsets=None)
 
 
 @pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
-def test_kda_tilelang_backend_dispatch(monkeypatch, kda_bwd_inputs):
-    from fla.ops.kda.backends.triton_ascend import TritonAscendKDABackend
+def test_chunk_bwd_tilelang_dispatch(monkeypatch, chunk_bwd_inputs):
     from fla.ops.kda.chunk_bwd import chunk_kda_bwd_wy_dqkg_fused
 
-    monkeypatch.setattr(TritonAscendKDABackend, 'is_available', classmethod(lambda cls: False))
-    backend = kda_tilelang_backend.KDATileLangBackend
-    monkeypatch.setattr(backend, 'is_available', classmethod(lambda cls: True))
+    monkeypatch.setattr(backends.TritonAscendBackend, 'is_available', classmethod(lambda cls: False))
+    monkeypatch.setattr(backends.TileLangBackend, 'is_available', classmethod(lambda cls: True))
     monkeypatch.setenv('FLA_TILELANG', '1')
+    registry = backends._function_registries[inspect.unwrap(chunk_kda_bwd_wy_dqkg_fused)]
+    candidate = registry._backends['tilelang']
     result = object()
-    implementation = create_autospec(backend.chunk_kda_bwd_wy_dqkg_fused, return_value=result)
-    monkeypatch.setattr(backend, 'chunk_kda_bwd_wy_dqkg_fused', implementation)
+    implementation = create_autospec(candidate.implementation, return_value=result)
+    monkeypatch.setattr(candidate, 'implementation', implementation)
 
-    assert chunk_kda_bwd_wy_dqkg_fused(**kda_bwd_inputs, use_graph=False) is result
+    assert chunk_kda_bwd_wy_dqkg_fused(**chunk_bwd_inputs, use_graph=False) is result
     implementation.assert_called_once()
 
 
-@pytest.mark.parametrize(
-    ('use_graph', 'accepted', 'reason'),
-    [
-        pytest.param(False, True, None, id='eager'),
-        pytest.param(
-            True,
-            False,
-            'TileLang backend does not support graph capture (use_graph=True); fall back to Triton',
-            id='graph',
-        ),
-    ],
-)
-def test_kda_tilelang_backend_verifier(kda_bwd_inputs, use_graph, accepted, reason):
-    backend = kda_tilelang_backend.KDATileLangBackend()
-    assert backend.chunk_kda_bwd_wy_dqkg_fused_verifier(**kda_bwd_inputs, use_graph=use_graph) == (accepted, reason)
+def test_chunk_bwd_tilelang_verifier_rejects_graph(chunk_bwd_inputs):
+    verdict = tilelang.chunk_kda_bwd_wy_dqkg_fused_verifier(**chunk_bwd_inputs, use_graph=True)
+    assert verdict == (False, 'TileLang backend does not support graph capture (use_graph=True); fall back to Triton')
+
+
+def test_chunk_bwd_ascend_verifier(chunk_bwd_inputs):
+    from fla.ops.kda.backends.triton_ascend.chunk_bwd import chunk_kda_bwd_wy_dqkg_fused_verifier
+    from fla.ops.kda.chunk_bwd import chunk_kda_bwd_wy_dqkg_fused
+
+    arguments = inspect.signature(chunk_kda_bwd_wy_dqkg_fused).bind(**chunk_bwd_inputs, chunk_size=17)
+    arguments.apply_defaults()
+    expected = (False, 'KDA Ascend bwd requires chunk_size % 16 == 0, got 17')
+    assert chunk_kda_bwd_wy_dqkg_fused_verifier(**arguments.arguments) == expected
+    assert chunk_kda_bwd_wy_dqkg_fused_verifier(*arguments.args, **arguments.kwargs) == expected
