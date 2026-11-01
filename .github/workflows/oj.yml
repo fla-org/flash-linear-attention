@@ -59,7 +59,7 @@ jobs:
     name: OJ on Ascend A2 NPU
     needs: read-config
     if: needs.read-config.outputs.has_oj == 'true' && needs.read-config.outputs.runner == 'npu-a2'
-    runs-on: linux-aarch64-a2-1
+    runs-on: linux-aarch64-a2-4
     timeout-minutes: 60
     container:
       image: ascendai/cann:9.1.0-910b-ubuntu22.04-py3.12
