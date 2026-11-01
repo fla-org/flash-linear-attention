@@ -169,24 +169,24 @@ def test_fused_recurrent(
 
 @pytest.mark.smoke
 @pytest.mark.parametrize(
-    ('packed', 'supplied_output'),
+    ('packed', 'supplied_output', 'state_v_first'),
     [
-        pytest.param(False, False, id='dense-allocated'),
-        pytest.param(False, True, id='dense-supplied'),
-        pytest.param(True, False, id='packed-zero-tail'),
-        pytest.param(True, True, id='packed-preserved-tail'),
+        pytest.param(False, False, False, id='dense-allocated'),
+        pytest.param(False, True, True, id='dense-supplied'),
+        pytest.param(True, False, False, id='packed-zero-tail'),
+        pytest.param(True, True, True, id='packed-preserved-tail'),
     ],
 )
-def test_fused_recurrent_output_buffer(packed, supplied_output):
+def test_fused_recurrent_output_buffer(packed, supplied_output, state_v_first):
     torch.manual_seed(42)
-    H, HV, D = 2, 4, 60
+    H, HV, K, V = 2, 4, 60, 160
     lengths = [2, 4] if packed else [3, 3]
     capacity = 8 if packed else 6
-    q, k = [F.normalize(torch.randn(1, capacity, H, D, device=device), dim=-1).bfloat16() for _ in range(2)]
-    v = torch.randn(1, capacity, HV, D, device=device, dtype=torch.bfloat16)
-    g = F.logsigmoid(torch.randn(1, capacity, HV, D, device=device))
+    q, k = [F.normalize(torch.randn(1, capacity, H, K, device=device), dim=-1).bfloat16() for _ in range(2)]
+    v = torch.randn(1, capacity, HV, V, device=device, dtype=torch.bfloat16)
+    g = F.logsigmoid(torch.randn(1, capacity, HV, K, device=device))
     beta = torch.rand(1, capacity, HV, device=device, dtype=torch.bfloat16)
-    initial_state = torch.randn(2, HV, D, D, device=device)
+    initial_state = torch.randn(2, HV, K, V, device=device)
     expected_output = torch.full_like(v, -3 if supplied_output else 0)
     expected_states = []
     offset = 0
@@ -205,12 +205,13 @@ def test_fused_recurrent_output_buffer(packed, supplied_output):
     else:
         inputs = {name: tensor.reshape(2, 3, *tensor.shape[2:]) for name, tensor in inputs.items()}
     out = torch.full_like(inputs['v'], -3) if supplied_output else None
-    state_pool = initial_state.clone()
+    state_pool = initial_state.transpose(-1, -2).contiguous() if state_v_first else initial_state.clone()
     output, state = fused_recurrent_kda_fwd(
         **inputs,
         initial_state=state_pool,
         output_final_state=True,
         inplace_final_state=False,
+        state_v_first=state_v_first,
         out=out,
     )
     if supplied_output and output.data_ptr() != out.data_ptr():
@@ -220,10 +221,10 @@ def test_fused_recurrent_output_buffer(packed, supplied_output):
         pytest.fail('The recurrent output contains unwritten or nonfinite values')
     if packed and not torch.equal(output[:, sum(lengths):], expected_output[:, sum(lengths):]):
         pytest.fail('Unused packed output capacity changed')
-    if not torch.equal(state_pool, initial_state):
+    if not torch.equal(state_pool.transpose(-1, -2) if state_v_first else state_pool, initial_state):
         pytest.fail('Out-of-place recurrence changed the input state')
     assert_close('o', expected_output, output, 0.005)
-    assert_close('ht', torch.cat(expected_states), state, 0.005)
+    assert_close('ht', torch.cat(expected_states), state.transpose(-1, -2) if state_v_first else state, 0.005)
 
 
 @pytest.mark.parametrize('state_v_first', [False, True], ids=['kv', 'vk'])
