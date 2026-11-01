@@ -188,7 +188,7 @@ Key rules:
 Prefer absolute `from ... import ...` imports for project code. Import the symbols you need directly; when you need a module object, import it from its parent package.
 
 ```python
-from fla.ops.kda.backends.tilelang import KDATileLangBackend
+from fla.ops.kda.backends.flash_kda import FlashKDABackend
 from fla.utils import env
 ```
 
