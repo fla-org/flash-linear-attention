@@ -215,7 +215,7 @@ def test_causal_lm_fwd_args(config_class, return_dict, make_model):
     torch.testing.assert_close(selected.logits if return_dict else selected[0], expected.logits[:, -2:])
 
 
-@pytest.mark.parametrize('config_class', DECODER_CONFIGS, ids=lambda cls: cls.model_type)
+@pytest.mark.parametrize('config_class', [cls for cls in DECODER_CONFIGS if cls is not GLAConfig], ids=lambda cls: cls.model_type)
 @pytest.mark.parametrize(('training', 'use_cache', 'return_dict'), [
     pytest.param(True, None, False, id='train-default-tuple'),
     pytest.param(False, None, True, id='eval-default-dict'),

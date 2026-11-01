@@ -70,3 +70,41 @@ def test_attnres(config_class, block_size):
 def test_model_validation(config_class, kwargs, match):
     with pytest.raises(ValueError, match=match):
         config_class(**kwargs, fuse_cross_entropy=True, fuse_linear_cross_entropy=True)
+
+
+@pytest.mark.parametrize(('mode', 'options', 'fuse_norm', 'residual_fuse_norm'), [
+    pytest.param(None, {}, True, False, id='default-unfused'),
+    pytest.param(None, {}, False, True, id='default-fused'),
+    pytest.param('standard', {}, True, None, id='explicit-standard'),
+    pytest.param('attnres', {'block_size': 3}, False, None, id='attnres'),
+    pytest.param('mhc', {'num_streams': 2, 'num_iters': 3}, True, None, id='mhc'),
+])
+def test_gla_residual(mode, options, fuse_norm, residual_fuse_norm, tmp_path):
+    options = dict(options, norm_eps=1e-4)
+    if residual_fuse_norm is not None:
+        options['fuse_norm'] = residual_fuse_norm
+    effective_fuse_norm = fuse_norm if residual_fuse_norm is None else residual_fuse_norm
+    default_mode = 'standard_defer' if effective_fuse_norm else 'standard'
+    expected_mode = default_mode if mode is None else mode
+    config = models.GLAConfig(fuse_norm=fuse_norm, residual_mode=mode, residual_kwargs=options)
+    assert config.residual_mode == expected_mode
+    options['norm_eps'] = 0.1
+    kwargs = config.get_residual_kwargs(sub_layer_idx=2)
+    assert kwargs['norm_eps'] == 1e-4
+    assert kwargs['fuse_norm'] == effective_fuse_norm
+    assert kwargs['sub_layer_idx'] == 2
+    assert kwargs['num_sublayers'] == 2 * config.num_hidden_layers
+    assert kwargs['is_output'] is False
+    assert config.get_residual_kwargs(sub_layer_idx=2 * config.num_hidden_layers, is_output=True)['is_output'] is True
+    config.save_pretrained(tmp_path)
+    restored = models.GLAConfig.from_pretrained(tmp_path)
+    assert restored.residual_mode == expected_mode
+    assert restored.residual_kwargs == config.residual_kwargs
+    assert 'attnres_block_size' not in restored.to_dict()
+    restored.attnres_block_size = 4
+    assert restored.residual_mode == 'attnres' and restored.residual_kwargs['block_size'] == 4
+    restored.attnres_block_size = None
+    assert restored.residual_mode == default_mode and 'block_size' not in restored.residual_kwargs
+    restored.save_pretrained(tmp_path)
+    reloaded = models.GLAConfig.from_pretrained(tmp_path)
+    assert reloaded.to_dict() == restored.to_dict()
