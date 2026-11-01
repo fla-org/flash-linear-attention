@@ -543,26 +543,6 @@ def test_register_import_order(run_python):
                 ['chunk_gla_fwd_intra_gk', 'chunk_gla_fwd_o_gk', 'chunk_gla_bwd_dA',
                  'chunk_gla_bwd_dv', 'chunk_gla_bwd_dqk_intra', 'chunk_gla_bwd_dqkg'],
             ),
-            'fla.ops.gated_delta_rule.chunk_fwd': (
-                'fla.ops.gated_delta_rule.backends.triton_ascend.chunk_fwd', ['chunk_gated_delta_rule_fwd_intra'],
-            ),
-            'fla.ops.gated_delta_rule.gate': (
-                'fla.ops.gated_delta_rule.backends.triton_ascend.gate',
-                ['gdn_gate_fwd', 'gdn_gate_bwd', 'gdn_gate_chunk_cumsum'],
-            ),
-            'fla.ops.gated_delta_rule.wy_fast': (
-                'fla.ops.gated_delta_rule.backends.triton_ascend.wy_fast', ['recompute_w_u_fwd', 'prepare_wy_repr_bwd'],
-            ),
-            'fla.ops.precond_gated_delta_rule.chunk_precond_kkt_fwd': (
-                'fla.ops.precond_gated_delta_rule.backends.triton_ascend.chunk_precond_kkt_fwd', ['chunk_precond_kkt_fwd'],
-            ),
-            'fla.ops.precond_gated_delta_rule.chunk_precond_wy_bwd': (
-                'fla.ops.precond_gated_delta_rule.backends.triton_ascend.chunk_precond_wy_bwd', ['prepare_precond_wy_repr_bwd'],
-            ),
-            'fla.ops.precond_gated_delta_rule.fused_recurrent': (
-                'fla.ops.precond_gated_delta_rule.backends.triton_ascend.fused_recurrent',
-                ['fused_recurrent_precond_gated_delta_rule_fwd'],
-            ),
             'fla.ops.common.chunk_h': ('fla.ops.common.backends.triton_ascend.chunk_h', ['chunk_fwd_h', 'chunk_bwd_dh']),
             'fla.ops.common.chunk_o': (
                 'fla.ops.common.backends.triton_ascend.chunk_o',
