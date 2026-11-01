@@ -5,45 +5,48 @@ description: Design and optimize FLA Gluon kernels using explicit layouts, memor
 
 # Triton to Gluon
 
-Use this skill when explicit control over data ownership, communication, or scheduling can address a measured kernel bottleneck. Preserve the validated numerical algorithm and precision. A literal translation can establish parity; the optimization task also needs a reasoned execution design and evidence that it addresses the bottleneck. An already efficient kernel may have no useful Gluon improvement.
+Use this skill when explicit control over data ownership, communication, or scheduling can address a measured kernel bottleneck. Preserve the validated numerical algorithm and precision. A literal translation can establish parity; an optimization also needs a reasoned execution design and evidence that it addresses the bottleneck.
 
 Follow [fla-optimization-loop](../fla-optimization-loop/SKILL.md) for the frozen baseline, correctness gate, and experiment log, and [fla-nvidia-performance](../fla-nvidia-performance/SKILL.md) for NVIDIA measurements. Keep the portable fallback and use [fla-dispatch-backends](../fla-dispatch-backends/SKILL.md) when changing routing. Contribution and numerical-change policies remain in [CONTRIBUTING.md](../../../CONTRIBUTING.md).
 
-## Establish the target and read the relevant sources
+## Diagnose and read
 
-Record the actual execution worker's GPU architecture, Triton version/source revision, supported shapes and dtypes, and selected backend. Check installed APIs before using an upstream example; Gluon is experimental and online `main` can differ from the installed release.
+Record the actual execution worker's GPU architecture, Triton version/source revision, supported shapes and dtypes, and selected backend. Translate the profile into a specific hypothesis: which communication, memory movement, or dependency limits performance, and which explicit control could change it?
 
-Use the [source map](references/sources-and-evidence.md#select-sources-by-the-decision) to read the relevant official tutorial implementation and API documentation before designing that part of the kernel. Record the source and the idea being adapted in the experiment log. Reuse source checks within an unchanged environment; do not read every tutorial for every kernel.
+Before designing that part of the kernel, read its relevant official tutorial implementation and API documentation. Use the table to select sections of the execution-design reference; unrelated sections can stay unloaded.
 
-Translate the profile into a specific hypothesis, such as keeping repeated reductions within a warp, removing an expensive layout conversion, reducing address-register pressure, or overlapping an operand transfer with independent computation. Identify the generated-code or hardware signal expected to change.
+| Design decision                                | Guidance                                                                    | Official tutorial                                                                                                                                                                                                 |
+| ---------------------------------------------- | --------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Tensor ownership and communication             | [Ownership](references/execution-design.md#ownership-and-communication)     | [Tensor Layouts](https://triton-lang.org/main/getting-started/tutorials/gluon/layouts.html)                                                                                                                       |
+| Register loads, shared staging, or descriptors | [Storage and movement](references/execution-design.md#storage-and-movement) | [Async Copy](https://triton-lang.org/main/getting-started/tutorials/gluon/async-copy.html), [TMA](https://triton-lang.org/main/getting-started/tutorials/gluon/tma.html)                                          |
+| Tensor-core operands and accumulators          | [MMA](references/execution-design.md#mma-operands-and-accumulators)         | [WGMMA](https://triton-lang.org/main/getting-started/tutorials/gluon/wgmma.html), [tcgen05](https://triton-lang.org/main/getting-started/tutorials/gluon/tcgen05.html)                                            |
+| Overlap, buffer ownership, and synchronization | [Pipelines](references/execution-design.md#pipelines-and-synchronization)   | [Async Copy](https://triton-lang.org/main/getting-started/tutorials/gluon/async-copy.html), [TMA](https://triton-lang.org/main/getting-started/tutorials/gluon/tma.html)                                          |
+| Persistent execution or concurrent warp roles  | [Scheduling](references/execution-design.md#scheduling)                     | [Persistent Kernels](https://triton-lang.org/main/getting-started/tutorials/gluon/persistence.html), [Warp Specialization](https://triton-lang.org/main/getting-started/tutorials/gluon/warp-specialization.html) |
 
-## Design the execution
+Gluon is experimental: the online [language API](https://triton-lang.org/main/gluon/api/language.html) and [tutorial index](https://triton-lang.org/main/getting-started/tutorials/gluon/index.html) describe upstream `main`. Prefer sources matching the installed release/revision and check signatures, defaults, and hardware requirements locally. Record the source and the idea being adapted; reuse those checks within an unchanged environment. If a feature is unavailable, select a supported design without silently upgrading the worker.
 
-Read [layout and dataflow design](references/layout-and-dataflow.md) when choosing or changing tensor ownership. Trace important tensors from their producers to their final consumers, including loads, reductions/scans, MMA, loop-carried state, and stores. Choose register and shared-memory layouts together, and account for conversion costs and live resources across the whole path.
+Consult the current index for further capabilities, such as TMA gather/scatter, TMEM copy, or multi-CTA execution, when the bottleneck warrants them. Read the code and experiments explaining a choice, then separate the transferable idea from the tutorial's shapes, precision, and device.
 
-Read [pipelines and scheduling](references/pipelines-and-scheduling.md) before introducing async transfers, architecture-specific MMA, persistent execution, or warp specialization. Draw the relevant producer/consumer timeline and budget its buffers and registers before implementing it. For an existing async kernel, audit that timeline before changing its layouts or lifetimes.
+## Design and implement
 
-Compare plausible designs for the measured bottleneck. A small reduction kernel may benefit from ownership changes alone; a matrix-heavy kernel may need coordinated load, MMA, and epilogue pipelines. Explain why a relevant alternative is selected or ruled out. Do not require TMA, warp specialization, TMEM, or any fixed number of candidates when the workload does not justify them.
+Trace important tensors from producers to final consumers. Decide ownership first, then storage and movement, MMA constraints where relevant, and the pipeline/schedule connecting them. Revisit earlier choices when a consumer or resource limit makes them unsuitable. For existing async kernels, audit buffer lifetimes and synchronization before changing layouts.
 
-Keep a compact design record with the chosen ownership, costly communication, live-memory budget, intended overlap, and expected measurement. Preserve mathematical dependencies while reconsidering tile boundaries, loop organization, register reuse, and work partitioning inherited from the Triton implementation.
+Keep a compact design record in the optimization log: chosen ownership, costly communication, peak live resources, intended overlap, and the generated-code or hardware signal expected to change. Compare plausible alternatives for the measured bottleneck. Explain relevant exclusions; no fixed number of candidates or mandatory use of TMA, warp specialization, or TMEM is needed.
 
-## Implement and measure incrementally
+Implement one design change at a time. A synchronous parity checkpoint is useful when it isolates migration errors; compare outputs, states, and supported gradients before layering on asynchrony. Preserve mathematical dependencies while reconsidering inherited tile boundaries, loop organization, register reuse, and work partitioning.
 
-1. If useful for debugging, establish a synchronous Gluon parity checkpoint with explicit layouts and complete masks. Compare outputs, states, and supported gradients before adding asynchronous execution.
-2. Implement one design change at a time. Keep layout parameters, launch warp counts, and autotune pruning consistent through explicit constexpr choices. Gate hardware-specific instructions and descriptor eligibility on the actual target and inputs.
-3. Prune configurations using peak live registers, shared memory, and TMEM where applicable. Include conversion scratch space, barriers, epilogue buffers, and allocation granularity. Bound static unrolling and autotune breadth to keep compilation practical; reuse the worker and compiler cache.
-4. Run the frozen correctness gate and benchmark passing candidates. Inspect the [generated-code evidence](references/sources-and-evidence.md#verify-the-execution-design) relevant to the hypothesis, then keep or reject the change based on correctness, resource use, and repeatable performance.
+Keep layout parameters, launch warp counts, and autotune pruning consistent through explicit constexpr choices. Prune from estimated and compiled resource use, and bound static unrolling and autotune breadth to keep compilation practical. Reuse the worker and compiler cache. Preserve masks, address widths, initialization, and exact-zero semantics, and retain a streaming path or fallback when a resident design cannot fit a supported input.
 
-A supported shape that cannot fit a resident design needs a valid streaming path or fallback. Preserve tail masking, address widths, initialization, and exact-zero semantics throughout the port. Synchronization and memory-proxy obligations are detailed in the pipeline reference.
+## Verify and report
 
-## Validate and report
+Run the frozen correctness gate before timing candidates. Inspect a representative compiled specialization's available IR, PTX/SASS, resource metadata, and relevant profiler metrics to test the design hypothesis. Check available `asm` keys and metadata fields in the installed backend. The reference identifies useful evidence alongside each design choice. Instruction presence alone does not establish overlap, and high occupancy alone does not establish speed; explain unavailable evidence without claiming an unobserved mechanism.
 
-Run from the repository root on the target GPU, with `FLA_BENCH_BASE` set to the baseline SHA recorded before optimization. Reuse that SHA rather than resolving a moving branch again:
+Use the recorded baseline SHA for final comparisons. From the repository root on the target GPU, with `FLA_BENCH_BASE` set to that SHA:
 
 ```bash
 FLA_CI_ENV=0 python -m benchmarks.ops.verify --op chunk_kda --base "$FLA_BENCH_BASE"
 ```
 
-Replace the operation with the one being optimized. The command executes the current tests; it does not freeze them. Use `--gate-k` only for quick iteration, then run the full relevant gate. Set backend flags before launching a fresh process and confirm the intended implementation executed. Measure production entry points as well as individual kernels.
+Replace the operation with the one being optimized. This command runs the current tests; it does not freeze them. `--gate-k` is only for quick iteration. Run the full relevant gate, set backend flags before launching a fresh process, and confirm the intended implementation executed. Include supported variable-length and boundary cases, and measure production entry points as well as individual kernels.
 
-Report which explicit control changed execution, the source informing it, the relevant generated-code/profile evidence, and per-workload results including regressions. Include supported variable-length and boundary cases. A translation or a losing candidate alone does not establish a performance limit; apply the optimization loop's no-win criteria and state unresolved validation separately.
+Report the explicit control used, its source, execution evidence, and per-workload results including regressions. Use focused ablations when several mechanisms changed and attribution matters. A tutorial's speedup or one losing candidate does not establish an FLA performance limit; apply the optimization loop's no-win criteria and state unresolved validation separately.
