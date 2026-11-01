@@ -439,7 +439,7 @@ def test_chunk_kda_graph_callable_skips_sentinels_between_tasks(monkeypatch):
         "fla.ops.kda.backends.triton_ascend.chunk_bwd",
         "fla.ops.kda.backends.triton_ascend.chunk_intra",
         "fla.ops.kda.backends.triton_ascend.wy_fast",
-        "fla.ops.gla.backends.triton_ascend.chunk",
+        "fla.ops.gla.backends.triton_ascend",
     ):
         module = import_module(name)
         properties = {**module.get_npu_properties(), "num_aicore": 1, "num_vectorcore": 1}

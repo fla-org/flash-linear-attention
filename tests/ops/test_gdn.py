@@ -6,6 +6,7 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import importlib.util
+import inspect
 import os
 
 import pytest
@@ -13,6 +14,8 @@ import torch
 import torch.nn.functional as F
 from einops import repeat
 
+from fla import backends
+from fla.ops.common.chunk_o import chunk_bwd_dqkwg
 from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
 from fla.ops.gated_delta_rule.gate import fused_gdn_gate, naive_gdn_gate
 from fla.ops.gated_delta_rule.naive import naive_recurrent_gated_delta_rule
@@ -1794,3 +1797,19 @@ def test_flash_qla_chunk_forward_only(B, T, H, HV, D, dtype, monkeypatch):
     assert torch.isfinite(tri_o).all() and torch.isfinite(tri_ht).all()
     assert_close("  o", ref_o, tri_o, _FLASH_QLA_RTOL)
     assert_close(" ht", ref_ht, tri_ht.to(ref_ht.dtype), _FLASH_QLA_RTOL)
+
+
+@pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
+def test_chunk_bwd_tilelang_backend():
+    from fla.utils import IS_NVIDIA_HOPPER, TRITON_ABOVE_3_4_0
+
+    if not backends.TileLangBackend.is_available():
+        pytest.skip('TileLang is unavailable')
+    from fla.ops.common.backends.tilelang import chunk_bwd_dqkwg_tilelang
+
+    candidate = backends._function_registries[inspect.unwrap(chunk_bwd_dqkwg)]._backends['tilelang']
+    assert candidate.implementation is chunk_bwd_dqkwg_tilelang
+    assert candidate.default_enable is (IS_NVIDIA_HOPPER and TRITON_ABOVE_3_4_0)
+    expected = [(p.name, p.kind, p.default) for p in inspect.signature(chunk_bwd_dqkwg).parameters.values()]
+    actual = [(p.name, p.kind, p.default) for p in inspect.signature(chunk_bwd_dqkwg_tilelang).parameters.values()]
+    assert actual == expected
