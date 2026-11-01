@@ -13,30 +13,32 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.backends import TritonAscendBackend, register
+from fla.ops.precond_gated_delta_rule.chunk_precond_kkt_fwd import chunk_precond_kkt_fwd
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp2
 from fla.utils import input_guard
 from fla.utils.ascend_ub_manager import compute_row_tile_block_size, get_npu_properties
 
 # peak live fp32 tiles: b_A[BT,BT], b_k[BT,BK], b_kp[BT,BK], tl.dot buffer
-_CHUNK_PRECOND_KKT_MEM_MULT = 5.0
-_SAFETY_MARGIN = 0.85
-_FALLBACK_BK = 16
-_MAX_BK_FWD = 128
+CHUNK_PRECOND_KKT_MEM_MULT = 5.0
+SAFETY_MARGIN = 0.85
+FALLBACK_BK = 16
+MAX_BK_FWD = 128
 
 
-def _get_fwd_bk(BT: int, K: int) -> int:
+def get_fwd_bk(BT: int, K: int) -> int:
     """UB-safe BK tile size for chunk_precond_kkt_fwd on NPU."""
     return compute_row_tile_block_size(
         BT,
         K,
-        _CHUNK_PRECOND_KKT_MEM_MULT,
+        CHUNK_PRECOND_KKT_MEM_MULT,
         tiling_row=False,
-        safety_margin=_SAFETY_MARGIN,
+        safety_margin=SAFETY_MARGIN,
         dtype_size=4,
-        fallback=_FALLBACK_BK,
+        fallback=FALLBACK_BK,
         min_block=16,
-        max_block=min(_MAX_BK_FWD, triton.next_power_of_2(K)),
+        max_block=min(MAX_BK_FWD, triton.next_power_of_2(K)),
     )
 
 
@@ -115,6 +117,25 @@ def chunk_precond_kkt_fwd_kernel_npu(
             tl.store(p_A, b_A.to(p_A.dtype.element_ty), mask=m_t[:, None])
 
 
+def chunk_precond_kkt_fwd_verifier(
+    k,
+    k_precond,
+    g,
+    beta,
+    chunk_size=64,
+    output_dtype=torch.float32,
+    cu_seqlens=None,
+) -> tuple[bool, str | None]:
+    from fla.utils import IS_NPU
+    if not IS_NPU:
+        return False, "not running on NPU"
+    for tensor in (k, k_precond, g, beta, cu_seqlens):
+        if isinstance(tensor, torch.Tensor) and tensor.device.type != "npu":
+            return False, "input device is not NPU"
+    return True, None
+
+
+@register(chunk_precond_kkt_fwd, backend=TritonAscendBackend, verifier=chunk_precond_kkt_fwd_verifier)
 @input_guard
 def chunk_precond_kkt_fwd_npu(
     k: torch.Tensor,
@@ -132,7 +153,7 @@ def chunk_precond_kkt_fwd_npu(
     chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     A = torch.zeros(B, T, HV, BT, device=k.device, dtype=output_dtype)
-    BK = _get_fwd_bk(BT, K)
+    BK = get_fwd_bk(BT, K)
 
     num_core = get_npu_properties()['num_aicore']
     g_arg = torch.permute(g, (2, 0, 1)).contiguous()
