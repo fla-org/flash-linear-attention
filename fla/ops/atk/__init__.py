@@ -16,4 +16,4 @@ __all__ = ['chunk_atk_bwd', 'chunk_atk_fwd', 'recompute_atk_fwd']
 
 
 if TritonAscendBackend.is_available():
-    from fla.ops.atk.backends.triton_ascend import chunk_atk_bwd, chunk_atk_fwd  # noqa: F401
+    from fla.ops.atk.backends import triton_ascend  # noqa: F401

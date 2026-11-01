@@ -569,6 +569,8 @@ def test_register_import_order(run_python):
             implementation = sys.modules[backend_module]
             for name in names:
                 entry = getattr(entries, name)
+                if module.startswith('fla.ops.atk.'):
+                    assert getattr(importlib.import_module('fla.ops.atk'), name) is entry
                 registry = backends._function_registries[inspect.unwrap(entry)]
                 target = registry._backends['triton_ascend'].get_implementation(name)
                 implementation_name = 'compute_dh0_npu' if name == 'compute_dh0_triton' else name + '_npu'
