@@ -79,13 +79,9 @@ def hc_fwd_kernel_gluon(
         b_o += b_w[:, None] * b_branch[None, :]
         gl.store(o + (i_t * N + o_n[:, None]) * D + o_d[None, :], b_o, mask=m_nd)
     else:
-        # keep the stream reduction in registers to avoid a shared-memory layout conversion
-        b_o = gl.full((BD,), 0, dtype=gl.float32, layout=gl.SliceLayout(0, layout))
-        for i_n in gl.static_range(N):
-            # [BD], one residual stream
-            b_x = gl.load(x + (i_t * N + i_n) * D + o_d, mask=o_d < D, other=0).to(gl.float32)
-            b_wj = gl.load(w + i_t * N + i_n).to(gl.float32)
-            b_o += b_wj * b_x
+        # [BN, BD] -> [BD], reducing over residual streams
+        b_x = gl.load(x + (i_t * N + o_n[:, None]) * D + o_d[None, :], mask=m_nd, other=0).to(gl.float32)
+        b_o = gl.sum(b_x * b_w[:, None], axis=0)
         gl.store(o + i_t * D + o_d, b_o, mask=o_d < D)
 
 
