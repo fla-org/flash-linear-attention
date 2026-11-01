@@ -10,13 +10,17 @@ import inspect
 import logging
 import math
 import os
+from types import SimpleNamespace
+from unittest.mock import create_autospec
 
 import pytest
 import torch
 import torch.nn.functional as F
 import triton
 
+from fla import backends
 from fla.ops.kda import chunk_kda, fused_recurrent_kda
+from fla.ops.kda.backends import tilelang as kda_tilelang_backend
 from fla.ops.kda.fused_recurrent import fused_recurrent_kda_fwd
 from fla.ops.kda.gate import fused_kda_gate, naive_kda_gate, naive_kda_lowerbound_gate
 from fla.ops.kda.naive import naive_chunk_kda, naive_recurrent_kda
@@ -1966,3 +1970,86 @@ def test_triton_ascend_backend_routing():
     finally:
         for name in _TRITON_ASCEND_KDA_OPS:
             delattr(backend, name)
+
+
+@pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
+@pytest.mark.parametrize('route', ['accepted', 'disabled', 'unavailable', 'training', 'gate-not-fused'])
+def test_flash_kda_registered_dispatch(monkeypatch, route):
+    from fla.ops.kda.backends.flash_kda import FlashKDABackend
+    from fla.ops.kda.chunk import ChunkKDAFunction, chunk_kda
+
+    monkeypatch.setenv('FLA_FLASH_KDA', '0' if route == 'disabled' else '1')
+    monkeypatch.setattr(FlashKDABackend, 'is_available', classmethod(lambda cls: route != 'unavailable'))
+    calls = []
+
+    def flash_forward(self, *args, **kwargs):
+        calls.append('flash_kda')
+        return args[2], None
+
+    def triton_forward(*args):
+        calls.append('triton')
+        return args[2], None
+
+    monkeypatch.setattr(FlashKDABackend, 'chunk_kda', flash_forward)
+    monkeypatch.setattr(ChunkKDAFunction, 'apply', triton_forward)
+    q = torch.ones(1, 2, 1, 128, dtype=torch.bfloat16)
+    beta = torch.ones(1, 2, 1, dtype=torch.bfloat16)
+    with torch.set_grad_enabled(route == 'training'):
+        result = chunk_kda(
+            q,
+            q,
+            q,
+            q,
+            beta,
+            use_qk_l2norm_in_kernel=True,
+            use_gate_in_kernel=route != 'gate-not-fused',
+            use_beta_sigmoid_in_kernel=True,
+            safe_gate=True,
+            lower_bound=-5,
+            state_v_first=True,
+            A_log=torch.ones(1),
+            dt_bias=torch.ones(128),
+        )
+    assert result[0] is q
+    assert result[1] is None
+    assert calls == ['flash_kda' if route == 'accepted' else 'triton']
+
+
+@pytest.fixture
+def kda_bwd_inputs():
+    x = SimpleNamespace(shape=(1, 64, 2, 64))
+    return dict(q=x, k=x, v=x, v_new=x, g=x, beta=x, A=x, h=x, do=x, dh=x, dv=x, chunk_offsets=None)
+
+
+@pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
+def test_kda_tilelang_backend_dispatch(monkeypatch, kda_bwd_inputs):
+    from fla.ops.kda.backends.triton_ascend import TritonAscendKDABackend
+    from fla.ops.kda.chunk_bwd import chunk_kda_bwd_wy_dqkg_fused
+
+    monkeypatch.setattr(TritonAscendKDABackend, 'is_available', classmethod(lambda cls: False))
+    backend = kda_tilelang_backend.KDATileLangBackend
+    monkeypatch.setattr(backend, 'is_available', classmethod(lambda cls: True))
+    monkeypatch.setenv('FLA_TILELANG', '1')
+    result = object()
+    implementation = create_autospec(backend.chunk_kda_bwd_wy_dqkg_fused, return_value=result)
+    monkeypatch.setattr(backend, 'chunk_kda_bwd_wy_dqkg_fused', implementation)
+
+    assert chunk_kda_bwd_wy_dqkg_fused(**kda_bwd_inputs, use_graph=False) is result
+    implementation.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    ('use_graph', 'accepted', 'reason'),
+    [
+        pytest.param(False, True, None, id='eager'),
+        pytest.param(
+            True,
+            False,
+            'TileLang backend does not support graph capture (use_graph=True); fall back to Triton',
+            id='graph',
+        ),
+    ],
+)
+def test_kda_tilelang_backend_verifier(kda_bwd_inputs, use_graph, accepted, reason):
+    backend = kda_tilelang_backend.KDATileLangBackend()
+    assert backend.chunk_kda_bwd_wy_dqkg_fused_verifier(**kda_bwd_inputs, use_graph=use_graph) == (accepted, reason)
