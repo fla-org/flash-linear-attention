@@ -427,6 +427,7 @@ def test_fused_recurrent_state_v_first(
             (4, 1024, 4, 4, 128, 0.1, True, True, True, torch.float16),
             (1, 64, 1, 1, 64, 1, False, False, True, torch.float),
             (2, 256, 2, 4, 64, 1, False, True, True, torch.float),
+            (2, 63, 2, 4, 64, 1, False, True, False, torch.bfloat16),
         ]
     ],
 )
@@ -782,6 +783,7 @@ def _check_fused_recurrent_indexed_state(state_v_first, packed, index_stride, ac
         "mask_p",
         "use_qk_l2norm_in_kernel",
         "use_gate_in_kernel",
+        "has_a_log",
         "dtype",
         "safe_gate",
         "disable_recompute",
@@ -792,28 +794,29 @@ def _check_fused_recurrent_indexed_state(state_v_first, packed, index_stride, ac
             *test,
             id=(
                 "B{}-T{}-H{}-HV{}-D{}-scale{}-gate_logit_normalizer{}-mask_p{}"
-                "-use_qk_l2norm{}-use_gate{}-{}-safe_gate{}-disable_recompute{}-chunk_size{}"
+                "-use_qk_l2norm{}-use_gate{}-has_a_log{}-{}-safe_gate{}-disable_recompute{}-chunk_size{}"
             ).format(*test),
         )
         for test in [
-            (1, 63, 1, 1, 64, 1, 1, 0, False, False, torch.float16, True, False, 64),
-            (2, 500, 3, 3, 60, 1, 1, 0, False, False, torch.float16, True, True, 64),
-            (2, 1000, 3, 3, 64, 0.1, 1, 0.5, False, False, torch.float16, False, True, 64),
-            (3, 1024, 4, 4, 100, 1, 0.1, 0, False, False, torch.float16, False, False, 64),
-            (4, 1024, 4, 4, 128, 0.1, 1, 0, False, False, torch.float16, True, True, 64),
-            (4, 1024, 4, 4, 128, 0.1, 1, 0, True, False, torch.float16, True, False, 64),
-            (2, 1500, 4, 4, 128, 0.1, 10, 0, False, True, torch.float16, False, True, 64),
-            (4, 2048, 8, 8, 64, 0.1, 1, 0, False, True, torch.float16, True, True, 64),
+            (1, 63, 1, 1, 64, 1, 1, 0, False, False, False, torch.float16, True, False, 64),
+            (2, 500, 3, 3, 60, 1, 1, 0, False, False, False, torch.float16, True, True, 64),
+            (2, 1000, 3, 3, 64, 0.1, 1, 0.5, False, False, False, torch.float16, False, True, 64),
+            (3, 1024, 4, 4, 100, 1, 0.1, 0, False, False, False, torch.float16, False, False, 64),
+            (4, 1024, 4, 4, 128, 0.1, 1, 0, False, False, False, torch.float16, True, True, 64),
+            (4, 1024, 4, 4, 128, 0.1, 1, 0, True, False, False, torch.float16, True, False, 64),
+            (2, 1500, 4, 4, 128, 0.1, 10, 0, False, True, True, torch.float16, False, True, 64),
+            (4, 2048, 8, 8, 64, 0.1, 1, 0, False, True, True, torch.float16, True, True, 64),
 
-            (2, 1024, 2, 4, 64, 0.1, 1, 0, False, False, torch.float16, False, False, 64),
-            (2, 1024, 2, 8, 64, 0.1, 1, 0, False, True, torch.float16, False, False, 64),
-            (2, 1024, 4, 8, 128, 0.1, 1, 0, True, True, torch.float16, False, False, 64),
-            (2, 160, 2, 4, 64, 0.1, 1, 0, False, True, torch.float16, True, True, 32),
+            (2, 1024, 2, 4, 64, 0.1, 1, 0, False, False, False, torch.float16, False, False, 64),
+            (2, 1024, 2, 8, 64, 0.1, 1, 0, False, True, True, torch.float16, False, False, 64),
+            (2, 1024, 4, 8, 128, 0.1, 1, 0, True, True, True, torch.float16, False, False, 64),
+            (2, 160, 2, 4, 64, 0.1, 1, 0, False, True, True, torch.float16, True, True, 32),
 
-            (2, 1024, 2, 4, 64, 0.1, 1, 0, True, True, torch.bfloat16, True, False, 64),
-            (2, 1024, 2, 4, 64, 0.1, 1, 0, False, True, torch.bfloat16, False, False, 64),
-            (2, 160, 2, 4, 64, 0.1, 1, 0, False, True, torch.bfloat16, True, True, 32),
-            (2, 1024, 2, 8, 128, 0.1, 1, 0, True, True, torch.bfloat16, False, False, 64),
+            (2, 1024, 2, 4, 64, 0.1, 1, 0, True, True, True, torch.bfloat16, True, False, 64),
+            (2, 1024, 2, 4, 64, 0.1, 1, 0, False, True, True, torch.bfloat16, False, False, 64),
+            (2, 160, 2, 4, 64, 0.1, 1, 0, False, True, True, torch.bfloat16, True, True, 32),
+            (2, 1024, 2, 8, 128, 0.1, 1, 0, True, True, True, torch.bfloat16, False, False, 64),
+            (1, 65, 1, 1, 64, 1, 1, 0, False, True, False, torch.float16, False, False, 64),
         ]
     ],
 )
@@ -828,6 +831,7 @@ def test_chunk(
     mask_p: float,
     use_qk_l2norm_in_kernel: bool,
     use_gate_in_kernel: bool,
+    has_a_log: bool,
     dtype: torch.dtype,
     safe_gate: bool,
     disable_recompute: bool,
@@ -838,8 +842,9 @@ def test_chunk(
     k = torch.rand(B, T, H, D, dtype=dtype)
     v = torch.rand(B, T, HV, D, dtype=dtype)
     g = torch.randn(B, T, HV, D, dtype=torch.float if not use_gate_in_kernel else dtype)
+    A_log = None
     if use_gate_in_kernel:
-        A_log = torch.randn(HV, dtype=torch.float)
+        A_log = torch.randn(HV, dtype=torch.float) if has_a_log else None
         dt_bias = torch.randn(HV * D, dtype=torch.float)
     else:
         g = F.logsigmoid(g) / gate_logit_normalizer
@@ -855,8 +860,10 @@ def test_chunk(
 
     beta = torch.randn(B, T, HV, dtype=dtype).sigmoid()
     h0 = torch.randn(B, HV, D, D, dtype=torch.float32)
+    if A_log is not None:
+        A_log = A_log.to(device).requires_grad_(True)
     if use_gate_in_kernel:
-        A_log, dt_bias = map(lambda x: x.to(device).requires_grad_(True), (A_log, dt_bias))
+        dt_bias = dt_bias.to(device).requires_grad_(True)
     q, k, v, g, beta, h0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, g, beta, h0))
 
     do = torch.randn_like(v)
@@ -873,8 +880,9 @@ def test_chunk(
         output_final_state=True,
     )
     ((ref * do).sum() + (ref_ht * dht).sum()).backward(retain_graph=True)
-    if use_gate_in_kernel:
+    if A_log is not None:
         ref_dA, A_log.grad = A_log.grad, None
+    if use_gate_in_kernel:
         ref_dbias, dt_bias.grad = dt_bias.grad, None
     ref_dq, ref_dk, ref_dv, ref_dg, ref_db, ref_dh0 = q.grad, k.grad, v.grad, g.grad, beta.grad, h0.grad
     q.grad = k.grad = v.grad = g.grad = beta.grad = h0.grad = None
@@ -885,7 +893,7 @@ def test_chunk(
         v=v.clone(),
         g=g.clone(),
         beta=beta.clone(),
-        A_log=(A_log.clone() if use_gate_in_kernel else None),
+        A_log=(A_log.clone() if A_log is not None else None),
         dt_bias=(dt_bias.clone() if use_gate_in_kernel else None),
         scale=scale,
         initial_state=h0.clone(),
@@ -898,8 +906,9 @@ def test_chunk(
         chunk_size=chunk_size,
     )
     ((tri * do).sum() + (tri_ht * dht).sum()).backward(retain_graph=True)
-    if use_gate_in_kernel:
+    if A_log is not None:
         tri_dA, A_log.grad = A_log.grad, None
+    if use_gate_in_kernel:
         tri_dbias, dt_bias.grad = dt_bias.grad, None
     tri_dq, tri_dk, tri_dv, tri_dg, tri_db, tri_dh0 = q.grad, k.grad, v.grad, g.grad, beta.grad, h0.grad
     q.grad = k.grad = v.grad = g.grad = beta.grad = h0.grad = None
@@ -911,8 +920,9 @@ def test_chunk(
     assert_close("dv", ref_dv, tri_dv, 0.008)
     assert_close("dg", ref_dg, tri_dg, 0.02)
     assert_close("db", ref_db, tri_db, 0.02)
-    if use_gate_in_kernel:
+    if A_log is not None:
         assert_close("dA", ref_dA, tri_dA, 0.003, warning=True)
+    if use_gate_in_kernel:
         assert_close("dbias", ref_dbias, tri_dbias, 0.008)
     assert_close("dh0", ref_dh0, tri_dh0, 0.008)
 
@@ -1488,6 +1498,7 @@ def test_chunk_varlen_prefill(
             (2, 64, 4, 32, False, False, -5.0),
             (4, 128, 8, 64, False, True, -5.0),
             (4, 128, 8, 128, False, True, -5.0),
+            (1, 32, 2, 16, False, True, None),
         ]
     ],
 )
@@ -1523,7 +1534,11 @@ def test_gate(
             lower_bound=LOWER_BOUND,
         )
     else:
-        ref = naive_kda_gate(g=g.clone(), A_log=A_log.clone(), dt_bias=dt_bias.clone() if dt_bias is not None else None)
+        ref = naive_kda_gate(
+            g=g.clone(),
+            A_log=A_log.clone() if A_log is not None else None,
+            dt_bias=dt_bias.clone() if dt_bias is not None else None,
+        )
     tri = fused_kda_gate(
         g=g.clone(),
         A_log=A_log.clone() if A_log is not None else None,
