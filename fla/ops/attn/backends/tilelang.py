@@ -14,9 +14,11 @@ import tilelang
 import tilelang.language as T
 import torch
 
-from fla.ops.attn.parallel import parallel_attn_bwd_preprocess
+from fla.backends import TileLangBackend, register
+from fla.ops.attn.parallel import parallel_attn_bwd, parallel_attn_bwd_preprocess, parallel_attn_fwd
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.constant import RCP_LN2
+from fla.utils import IS_NVIDIA_HOPPER, TRITON_ABOVE_3_4_0
 
 
 @tilelang.jit(pass_configs={
@@ -363,7 +365,34 @@ def parallel_attn_bwd_kernel(
     return main
 
 
-def parallel_attn_fwd(
+def parallel_attn_fwd_verifier(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g_cumsum: torch.Tensor | None,
+    sink_bias: torch.Tensor | None,
+    scale: float,
+    window_size: int | None = None,
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
+    output_dtype: torch.dtype | None = None,
+) -> tuple[bool, str | None]:
+    if q.dtype not in (torch.float16, torch.bfloat16):
+        # float32 fails tilelang layout inference at kernel-build time
+        # (see #1590, tile-ai/tilelang#3669); fall back to Triton until
+        # the upstream limitation is fixed
+        return False, f"TileLang backend does not support dtype {q.dtype}; fall back to Triton"
+    return True, None
+
+
+# work around Hopper regressions with Triton 3.4+ (see #640).
+@register(
+    parallel_attn_fwd,
+    backend=TileLangBackend,
+    verifier=parallel_attn_fwd_verifier,
+    default_enable=IS_NVIDIA_HOPPER and TRITON_ABOVE_3_4_0,
+)
+def parallel_attn_fwd_tilelang(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -433,7 +462,7 @@ def parallel_attn_fwd(
     return o, lse
 
 
-def parallel_attn_bwd(
+def parallel_attn_bwd_verifier(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -444,6 +473,37 @@ def parallel_attn_bwd(
     sink_bias: torch.Tensor | None = None,
     scale: float | None = None,
     window_size: int | None = None,
+    chunk_size: int = 128,
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
+) -> tuple[bool, str | None]:
+    if q.dtype not in (torch.float16, torch.bfloat16):
+        # float32 fails tilelang layout inference at kernel-build time
+        # (see #1590, tile-ai/tilelang#3669); fall back to Triton until
+        # the upstream limitation is fixed
+        return False, f"TileLang backend does not support dtype {q.dtype}; fall back to Triton"
+    return True, None
+
+
+# work around Hopper regressions with Triton 3.4+ (see #640).
+@register(
+    parallel_attn_bwd,
+    backend=TileLangBackend,
+    verifier=parallel_attn_bwd_verifier,
+    default_enable=IS_NVIDIA_HOPPER and TRITON_ABOVE_3_4_0,
+)
+def parallel_attn_bwd_tilelang(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    o: torch.Tensor,
+    g_cumsum: torch.Tensor | None,
+    lse: torch.Tensor,
+    do: torch.Tensor,
+    sink_bias: torch.Tensor | None = None,
+    scale: float | None = None,
+    window_size: int | None = None,
+    chunk_size: int = 128,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:

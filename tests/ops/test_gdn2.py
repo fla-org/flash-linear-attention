@@ -5,6 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+import importlib
 import inspect
 import math
 from functools import partial
@@ -14,6 +15,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from fla import backends
 from fla.ops.gdn2 import chunk_gdn2, fused_recurrent_gdn2, naive_recurrent_gdn2
 from fla.ops.gdn2.fused_recurrent import fused_recurrent_gdn2_fwd
 from fla.ops.kda.gate import naive_kda_gate, naive_kda_lowerbound_gate
@@ -1010,3 +1012,33 @@ def test_chunk_intra_default_shift(use_gate_in_kernel, monkeypatch):
     for ref, tri in zip((default,) + default_grads, (explicit,) + explicit_grads):
         assert torch.isfinite(ref).all() and torch.isfinite(tri).all()
         assert torch.equal(ref, tri)
+
+
+@pytest.mark.parametrize(
+    ('module_name', 'func_name'),
+    [
+        ('chunk_intra', 'chunk_gdn2_fwd_intra'),
+        ('chunk_bwd', 'chunk_gdn2_bwd_wy_dqkg_fused'),
+        ('fused_recurrent', 'fused_recurrent_gdn2_fwd'),
+    ],
+    ids=['forward', 'backward', 'fused-recurrent-forward'],
+)
+def test_gdn2_dispatch_uses_local_registry(monkeypatch, module_name, func_name):
+    from fla.ops.gdn2.backends.triton_ascend import TritonAscendGDN2Backend
+
+    entry = getattr(importlib.import_module(f'fla.ops.gdn2.{module_name}'), func_name)
+    if backends._DISPATCH_DISABLED:
+        pytest.skip('Backend dispatch was disabled before import')
+    assert hasattr(entry, '__wrapped__')
+    monkeypatch.setattr(TritonAscendGDN2Backend, 'is_available', classmethod(lambda cls: True))
+    monkeypatch.setattr(TritonAscendGDN2Backend, 'is_enabled', lambda self: True)
+    monkeypatch.setattr(TritonAscendGDN2Backend, f'{func_name}_verifier', lambda self, q: (True, None))
+    result = object()
+
+    def implementation(self, q):
+        assert torch.is_grad_enabled()
+        assert q.requires_grad
+        return result
+
+    monkeypatch.setattr(TritonAscendGDN2Backend, func_name, implementation)
+    assert entry(q=torch.tensor([1.0, 2.0], requires_grad=True)) is result

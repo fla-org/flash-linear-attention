@@ -8,6 +8,8 @@
 """Check intra-card CP routing, cache reuse, and grouped-head outputs and final states."""
 
 import os
+from types import SimpleNamespace
+from unittest.mock import create_autospec
 
 import pytest
 import torch
@@ -178,3 +180,35 @@ def test_chunk_gdn_grouped_heads(monkeypatch):
     assert torch.allclose(ht_intra, ht_ref, atol=1e-2, rtol=1e-2), (
         f"Final state mismatch: max diff={(ht_intra - ht_ref).abs().max().item()}"
     )
+
+
+@pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
+@pytest.mark.parametrize('extra', [{}, {'chunk_offsets': None}], ids=['chunk_offsets_omitted', 'chunk_offsets_none'])
+def test_intracard_backend_dispatch(monkeypatch, extra):
+    """KDA's eager forward passes chunk_offsets=None; the opt-in intra-card backend must still be selected."""
+    from fla.ops.common.backends.intracard import IntraCardCPBackend
+    from fla.ops.common.backends.triton_ascend import TritonAscendCommonBackend
+    from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_fwd_h
+
+    monkeypatch.setattr(TritonAscendCommonBackend, 'is_available', classmethod(lambda cls: False))
+    monkeypatch.setenv('FLA_INTRACARD_CP', '1')
+    result = object()
+    implementation = create_autospec(IntraCardCPBackend.chunk_gated_delta_rule_fwd_h, return_value=result)
+    monkeypatch.setattr(IntraCardCPBackend, 'chunk_gated_delta_rule_fwd_h', implementation)
+
+    x = SimpleNamespace(shape=(1, 64, 2, 64))
+    with torch.inference_mode():
+        assert chunk_gated_delta_rule_fwd_h(k=x, w=x, u=x, cu_seqlens=torch.tensor([0, 64]), **extra) is result
+    implementation.assert_called_once()
+
+
+def test_intracard_backend_verifier_rejects_graph_mode():
+    """Graph-mode callers pass fixed-shape chunk_offsets; intra-card CP cannot be captured."""
+    from fla.ops.common.backends.intracard import IntraCardCPBackend
+
+    x = SimpleNamespace(shape=(1, 64, 2, 64))
+    with torch.inference_mode():
+        verdict = IntraCardCPBackend().chunk_gated_delta_rule_fwd_h_verifier(
+            k=x, w=x, u=x, cu_seqlens=torch.tensor([0, 64]), chunk_offsets=torch.tensor([0, 1]),
+        )
+    assert verdict == (False, 'chunk_offsets is given (CUDA Graph mode)')
