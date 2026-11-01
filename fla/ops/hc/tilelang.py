@@ -16,10 +16,6 @@ from fla.ops.hc.fused import hc_post, hc_pre
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
-class HCTileLangBackend(TileLangBackend):
-    default_enable = False
-
-
 @tilelang.jit
 def hc_pre_fwd_kernel(NT, N, D, x_dtype, pre_dtype, BD):
     BN = triton.next_power_of_2(N)
@@ -348,12 +344,12 @@ class FusedHCPostTileLangFunction(torch.autograd.Function):
         return dx, dbranch, dpost, dmixing
 
 
-@register(hc_pre, backend=HCTileLangBackend)
+@register(hc_pre, backend=TileLangBackend, default_enable=False)
 def hc_pre_tilelang(x: torch.Tensor, pre: torch.Tensor) -> torch.Tensor:
     return FusedHCPreTileLangFunction.apply(x, pre)
 
 
-@register(hc_post, backend=HCTileLangBackend)
+@register(hc_post, backend=TileLangBackend, default_enable=False)
 def hc_post_tilelang(
     x: torch.Tensor,
     branch: torch.Tensor,

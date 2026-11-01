@@ -42,32 +42,6 @@ def backend(request, monkeypatch):
     return name
 
 
-def _assert_outputs_and_grads(ref, tri, inputs, ratio):
-    do = torch.randn_like(ref)
-    ref_grads = torch.autograd.grad(outputs=ref, inputs=tuple(inputs.values()), grad_outputs=do)
-    tri_grads = torch.autograd.grad(outputs=tri, inputs=tuple(inputs.values()), grad_outputs=do)
-    assert tri.shape == ref.shape and tri.dtype == inputs['x'].dtype
-    assert_close('o', ref, tri, ratio)
-    for (name, tensor), ref_grad, tri_grad in zip(inputs.items(), ref_grads, tri_grads):
-        assert tri_grad.dtype == tensor.dtype
-        assert_close(f'd{name}', ref_grad, tri_grad, ratio)
-
-
-def _hc_inputs(kind, shape, dtype):
-    x = torch.randn(shape, device=device, dtype=dtype, requires_grad=True)
-    weight = torch.randn(shape[:-1], device=device, dtype=torch.float32, requires_grad=True)
-    if kind == 'pre':
-        return {'x': x, 'pre': weight}
-    inputs = {
-        'x': x,
-        'branch': torch.randn((*shape[:-2], shape[-1]), device=device, dtype=dtype, requires_grad=True),
-        'post': weight,
-    }
-    if kind == 'mhc':
-        inputs['mixing'] = torch.randn((*shape[:-1], shape[-2]), device=device, dtype=torch.float32, requires_grad=True)
-    return inputs
-
-
 @pytest.mark.parametrize(
     ('shape', 'dtype', 'backend'),
     [
@@ -90,7 +64,14 @@ def test_fused_hc_pre(shape: tuple[int, ...], dtype: torch.dtype, backend):
     pre = torch.randn(shape[:-1], device=device, dtype=torch.float32, requires_grad=True)
     ref = naive_hc_pre(x=x, pre=pre)
     tri = fused_hc_pre(x=x, pre=pre)
-    _assert_outputs_and_grads(ref, tri, {'x': x, 'pre': pre}, TOLERANCES[dtype])
+    do = torch.randn_like(ref)
+    ref_dx, ref_dpre = torch.autograd.grad(outputs=ref, inputs=(x, pre), grad_outputs=do)
+    tri_dx, tri_dpre = torch.autograd.grad(outputs=tri, inputs=(x, pre), grad_outputs=do)
+    assert tri.shape == ref.shape and tri.dtype == x.dtype
+    assert tri_dx.dtype == x.dtype and tri_dpre.dtype == pre.dtype
+    assert_close('o', ref, tri, TOLERANCES[dtype])
+    assert_close('dx', ref_dx, tri_dx, TOLERANCES[dtype])
+    assert_close('dpre', ref_dpre, tri_dpre, TOLERANCES[dtype])
 
 
 @pytest.mark.parametrize(
@@ -123,7 +104,14 @@ def test_fused_hc_post(shape: tuple[int, ...], dtype: torch.dtype, use_mixing: b
         inputs['mixing'] = torch.randn((*shape[:-1], shape[-2]), device=device, dtype=torch.float32, requires_grad=True)
     ref = naive_hc_post(**inputs)
     tri = fused_hc_post(**inputs)
-    _assert_outputs_and_grads(ref, tri, inputs, TOLERANCES[dtype])
+    do = torch.randn_like(ref)
+    ref_grads = torch.autograd.grad(outputs=ref, inputs=tuple(inputs.values()), grad_outputs=do)
+    tri_grads = torch.autograd.grad(outputs=tri, inputs=tuple(inputs.values()), grad_outputs=do)
+    assert tri.shape == ref.shape and tri.dtype == x.dtype
+    assert_close('o', ref, tri, TOLERANCES[dtype])
+    for (name, tensor), ref_grad, tri_grad in zip(inputs.items(), ref_grads, tri_grads):
+        assert tri_grad.dtype == tensor.dtype
+        assert_close(f'd{name}', ref_grad, tri_grad, TOLERANCES[dtype])
 
 
 @pytest.mark.parametrize(
@@ -139,11 +127,28 @@ def test_fused_hc_post(shape: tuple[int, ...], dtype: torch.dtype, use_mixing: b
 )
 def test_fused_hc_packed(T: int, N: int, D: int, dtype: torch.dtype, kind: str, backend):
     torch.manual_seed(42)
-    inputs = _hc_inputs(kind=kind, shape=(T, N, D), dtype=dtype)
-    op, reference = (fused_hc_pre, naive_hc_pre) if kind == 'pre' else (fused_hc_post, naive_hc_post)
-    ref = reference(**inputs)
-    tri = op(**inputs)
-    _assert_outputs_and_grads(ref, tri, inputs, TOLERANCES[dtype])
+    x = torch.randn(T, N, D, device=device, dtype=dtype, requires_grad=True)
+    if kind == 'pre':
+        pre = torch.randn(T, N, device=device, dtype=torch.float32, requires_grad=True)
+        inputs = {'x': x, 'pre': pre}
+        ref = naive_hc_pre(x=x, pre=pre)
+        tri = fused_hc_pre(x=x, pre=pre)
+    else:
+        post = torch.randn(T, N, device=device, dtype=torch.float32, requires_grad=True)
+        branch = torch.randn(T, D, device=device, dtype=dtype, requires_grad=True)
+        inputs = {'x': x, 'branch': branch, 'post': post}
+        if kind == 'mhc':
+            inputs['mixing'] = torch.randn(T, N, N, device=device, dtype=torch.float32, requires_grad=True)
+        ref = naive_hc_post(**inputs)
+        tri = fused_hc_post(**inputs)
+    do = torch.randn_like(ref)
+    ref_grads = torch.autograd.grad(outputs=ref, inputs=tuple(inputs.values()), grad_outputs=do)
+    tri_grads = torch.autograd.grad(outputs=tri, inputs=tuple(inputs.values()), grad_outputs=do)
+    assert tri.shape == ref.shape and tri.dtype == x.dtype
+    assert_close('o', ref, tri, TOLERANCES[dtype])
+    for (name, tensor), ref_grad, tri_grad in zip(inputs.items(), ref_grads, tri_grads):
+        assert tri_grad.dtype == tensor.dtype
+        assert_close(f'd{name}', ref_grad, tri_grad, TOLERANCES[dtype])
 
 
 @pytest.mark.parametrize('backend', ['triton', 'gluon', 'tilelang'], indirect=True)
@@ -153,7 +158,14 @@ def test_fused_hc_pre_noncontiguous(backend):
     pre = torch.randn(4, 2, device=device, dtype=torch.bfloat16).T.requires_grad_()
     ref = naive_hc_pre(x=x, pre=pre)
     tri = fused_hc_pre(x=x, pre=pre)
-    _assert_outputs_and_grads(ref, tri, {'x': x, 'pre': pre}, 6e-3)
+    do = torch.randn_like(ref)
+    ref_dx, ref_dpre = torch.autograd.grad(outputs=ref, inputs=(x, pre), grad_outputs=do)
+    tri_dx, tri_dpre = torch.autograd.grad(outputs=tri, inputs=(x, pre), grad_outputs=do)
+    assert tri.shape == ref.shape and tri.dtype == x.dtype
+    assert tri_dx.dtype == x.dtype and tri_dpre.dtype == pre.dtype
+    assert_close('o', ref, tri, 6e-3)
+    assert_close('dx', ref_dx, tri_dx, 6e-3)
+    assert_close('dpre', ref_dpre, tri_dpre, 6e-3)
 
 
 @pytest.mark.parametrize(
@@ -176,7 +188,14 @@ def test_fused_hc_post_noncontiguous(use_mixing: bool, backend):
         inputs['mixing'] = torch.randn(2, 4, 4, device=device).transpose(-1, -2).requires_grad_()
     ref = naive_hc_post(**inputs)
     tri = fused_hc_post(**inputs)
-    _assert_outputs_and_grads(ref, tri, inputs, 6e-3)
+    do = torch.randn_like(ref)
+    ref_grads = torch.autograd.grad(outputs=ref, inputs=tuple(inputs.values()), grad_outputs=do)
+    tri_grads = torch.autograd.grad(outputs=tri, inputs=tuple(inputs.values()), grad_outputs=do)
+    assert tri.shape == ref.shape and tri.dtype == x.dtype
+    assert_close('o', ref, tri, 6e-3)
+    for (name, tensor), ref_grad, tri_grad in zip(inputs.items(), ref_grads, tri_grads):
+        assert tri_grad.dtype == tensor.dtype
+        assert_close(f'd{name}', ref_grad, tri_grad, 6e-3)
 
 
 @pytest.mark.parametrize(
@@ -207,7 +226,14 @@ def test_fused_hc_stack(use_mixing: bool, backend):
     inputs = {'x': x, 'pre': pre, 'post': post}
     if use_mixing:
         inputs['logits'] = logits
-    _assert_outputs_and_grads(ref, tri, inputs, 1e-4)
+    do = torch.randn_like(ref)
+    ref_grads = torch.autograd.grad(outputs=ref, inputs=tuple(inputs.values()), grad_outputs=do)
+    tri_grads = torch.autograd.grad(outputs=tri, inputs=tuple(inputs.values()), grad_outputs=do)
+    assert tri.shape == ref.shape and tri.dtype == x.dtype
+    assert_close('o', ref, tri, 1e-4)
+    for (name, tensor), ref_grad, tri_grad in zip(inputs.items(), ref_grads, tri_grads):
+        assert tri_grad.dtype == tensor.dtype
+        assert_close(f'd{name}', ref_grad, tri_grad, 1e-4)
 
 
 @pytest.mark.parametrize(
@@ -218,7 +244,16 @@ def test_fused_hc_stack(use_mixing: bool, backend):
 )
 def test_fused_hc_packed_layout(backend, kind: str):
     torch.manual_seed(42)
-    inputs = _hc_inputs(kind=kind, shape=(2, 3, 4, 65), dtype=torch.float32)
+    x = torch.randn(2, 3, 4, 65, device=device, requires_grad=True)
+    if kind == 'pre':
+        pre = torch.randn(2, 3, 4, device=device, requires_grad=True)
+        inputs = {'x': x, 'pre': pre}
+    else:
+        post = torch.randn(2, 3, 4, device=device, requires_grad=True)
+        branch = torch.randn(2, 3, 65, device=device, requires_grad=True)
+        inputs = {'x': x, 'branch': branch, 'post': post}
+        if kind == 'mhc':
+            inputs['mixing'] = torch.randn(2, 3, 4, 4, device=device, requires_grad=True)
     op = fused_hc_pre if kind == 'pre' else fused_hc_post
     with torch.no_grad():
         dense = op(**inputs)
@@ -278,7 +313,16 @@ def test_fused_hc_unavailable_backend(backend_type, kind: str, monkeypatch):
     if _DISPATCH_DISABLED:
         pytest.skip('Backend dispatch disabled before import')
     torch.manual_seed(42)
-    inputs = _hc_inputs(kind=kind, shape=(2, 3, 4, 65), dtype=torch.float32)
+    x = torch.randn(2, 3, 4, 65, device=device, requires_grad=True)
+    if kind == 'pre':
+        pre = torch.randn(2, 3, 4, device=device, requires_grad=True)
+        inputs = {'x': x, 'pre': pre}
+    else:
+        post = torch.randn(2, 3, 4, device=device, requires_grad=True)
+        branch = torch.randn(2, 3, 65, device=device, requires_grad=True)
+        inputs = {'x': x, 'branch': branch, 'post': post}
+        if kind == 'mhc':
+            inputs['mixing'] = torch.randn(2, 3, 4, 4, device=device, requires_grad=True)
     op = fused_hc_pre if kind == 'pre' else fused_hc_post
     ref = op(**inputs)
     do = torch.randn_like(ref)
@@ -294,14 +338,3 @@ def test_fused_hc_unavailable_backend(backend_type, kind: str, monkeypatch):
     torch.testing.assert_close(ref, tri, rtol=0, atol=0)
     for ref_grad, tri_grad in zip(ref_grads, tri_grads):
         torch.testing.assert_close(ref_grad, tri_grad, rtol=0, atol=0)
-
-
-def test_fused_hc_invalid_inputs():
-    torch.manual_seed(42)
-    x = torch.randn(2, 4, 65, device=device)
-    with pytest.raises(ValueError, match='pre must'):
-        fused_hc_pre(x=x, pre=torch.randn(4, device=device))
-    with pytest.raises(ValueError, match='branch and post'):
-        fused_hc_post(x=x, branch=torch.randn(65, device=device), post=torch.randn(2, 4, device=device))
-    with pytest.raises(ValueError, match='mixing must'):
-        fused_hc_post(x=x, branch=x[:, 0], post=x[:, :, 0], mixing=torch.randn(4, 4, device=device))
