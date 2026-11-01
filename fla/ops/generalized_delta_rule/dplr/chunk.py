@@ -453,8 +453,8 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
         )
 
 
-@dispatch('generalized_delta_rule.dplr')
 @torch.compiler.disable
+@dispatch
 def chunk_dplr_delta_rule(
     q: torch.Tensor,
     k: torch.Tensor,

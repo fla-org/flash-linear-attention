@@ -24,6 +24,7 @@ from fla.ops.utils.cumsum import chunk_global_cumsum, chunk_local_cumsum
 from fla.ops.utils.op import exp2
 from fla.utils import (
     IS_NVIDIA_HOPPER,
+    IS_NVIDIA_SM100,
     autocast_custom_bwd,
     autocast_custom_fwd,
     autotune_cache_kwargs,
@@ -562,9 +563,9 @@ def _scalar_decay_bwd_dqk_dv_single_k(
     dv = torch.empty_like(do)
     dg_force = torch.empty(bsz, seq_len, n_heads, device=q.device, dtype=torch.float32)
     block_k = max(triton.next_power_of_2(d_k), 16)
-    is_hopper_fp32 = IS_NVIDIA_HOPPER and q.dtype == torch.float32
-    # Keep the fused FP32 kernel below the SM90 per-block shared-memory limit.
-    block_v = min(max(triton.next_power_of_2(d_v), 16), 32 if is_hopper_fp32 else 64)
+    limit_fp32_shared_memory = q.dtype == torch.float32 and (IS_NVIDIA_HOPPER or (IS_NVIDIA_SM100 and block_k == 128))
+    # bound FP32 shared memory on SM90 and for 128-wide fused states on SM100.
+    block_v = min(max(triton.next_power_of_2(d_v), 16), 32 if limit_fp32_shared_memory else 64)
 
     _chunk_cyfa_bwd_dqk_dv_kernel[(nt, bsz * n_heads)](
         q,
@@ -589,7 +590,7 @@ def _scalar_decay_bwd_dqk_dv_single_k(
         BK=block_k,
         BV=block_v,
         num_warps=4,
-        num_stages=1 if is_hopper_fp32 else 2,
+        num_stages=1 if limit_fp32_shared_memory else 2,
     )
     return dq, dk, dv, dg_force
 
@@ -1190,15 +1191,15 @@ def _readout_backward(
 def _prune_table_grad_configs(configs, nargs, **kwargs):
     args = {**(nargs or {}), **kwargs}
     right_a = args.get('right_a')
-    if not IS_NVIDIA_HOPPER or right_a is None or right_a.dtype != torch.float32:
+    if not (IS_NVIDIA_HOPPER or IS_NVIDIA_SM100) or right_a is None or right_a.dtype != torch.float32:
         return configs
-    # Triton 3.4 rejects this four-warp FP32 dot layout on SM90 during compilation.
+    # this FP32 dot layout fails with four warps on SM90 and four/eight warps on SM100.
     return [
         config for config in configs
         if not (
             config.kwargs['BR'] == 64
             and config.kwargs['BC'] == 64
-            and config.num_warps == 4
+            and (config.num_warps == 4 or (IS_NVIDIA_SM100 and config.num_warps == 8))
         )
     ]
 

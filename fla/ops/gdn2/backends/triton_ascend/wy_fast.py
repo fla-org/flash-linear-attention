@@ -15,6 +15,8 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.backends import TritonAscendBackend, register
+from fla.ops.gdn2.wy_fast import recompute_w_u_fwd_gdn2
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp2
 from fla.utils import ascend_compile_kwargs, get_multiprocessor_count, input_guard
@@ -202,6 +204,58 @@ def recompute_w_u_fwd_gdn2_kernel_npu(
             tl.store(p_w, b_w.to(p_w.dtype.element_ty), mask=m_k)
 
 
+def recompute_w_u_fwd_gdn2_verifier(
+    k: torch.Tensor,
+    v: torch.Tensor,
+    b: torch.Tensor,
+    w_gate: torch.Tensor,
+    A: torch.Tensor,
+    q: torch.Tensor | None = None,
+    gk: torch.Tensor | None = None,
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
+) -> tuple[bool, str | None]:
+    if gk is None:
+        return False, "GDN-2 Ascend WY requires gk"
+    float_tensors = (k, v, b, w_gate, A, gk, *(t for t in (q,) if t is not None))
+    if any(t.ndim != 4 for t in float_tensors):
+        return False, "GDN-2 Ascend WY requires rank-4 tensors"
+    k_shape, k_device = k.shape, k.device
+    if A.shape[-1] != 64:
+        return False, f"GDN-2 Ascend WY requires chunk_size=64, got {A.shape[-1]}"
+    if A.shape[:3] != k_shape[:3]:
+        return False, "GDN-2 Ascend WY requires A to match k on [B, T, H]"
+    if any(t.shape != k_shape for t in (b, gk, *(t for t in (q,) if t is not None))):
+        return False, "GDN-2 Ascend WY requires b/gk/q shapes to match k"
+    if v.shape[:3] != k_shape[:3] or w_gate.shape != v.shape:
+        return False, "GDN-2 Ascend WY requires v/w_gate to match k on [B, T, H]"
+    if cu_seqlens is not None and k_shape[0] != 1:
+        return False, "GDN-2 Ascend WY requires batch size 1 for packed sequences"
+    if cu_seqlens is not None and cu_seqlens.ndim != 1:
+        return False, "GDN-2 Ascend WY requires cu_seqlens to be rank 1"
+    if chunk_indices is not None and (chunk_indices.ndim != 2 or chunk_indices.shape[1] != 2):
+        return False, "GDN-2 Ascend WY requires chunk_indices shape [NT, 2]"
+    K = int(k_shape[-1])
+    if not 1 <= K <= 256:
+        return False, f"GDN-2 Ascend WY requires 1 <= K <= 256, got K={K}"
+    V = int(v.shape[-1])
+    if V < 1:
+        return False, f"GDN-2 Ascend WY requires V >= 1, got V={V}"
+    tensors = (*float_tensors, *(t for t in (cu_seqlens, chunk_indices) if t is not None))
+    if any(d.type != "npu" or d != k_device for d in (t.device for t in tensors)):
+        return False, "GDN-2 Ascend WY requires tensors on the same NPU device"
+    supported = (torch.float16, torch.bfloat16, torch.float32)
+    if any(t.dtype not in supported for t in float_tensors):
+        return False, "GDN-2 Ascend WY received an unsupported dtype"
+    if A.dtype != k.dtype or A.dtype != v.dtype:
+        return False, "GDN-2 Ascend WY requires A, k, and v to have the same dtype"
+    index_tensors = tuple(t for t in (cu_seqlens, chunk_indices) if t is not None)
+    if any(t.dtype not in (torch.int32, torch.int64) for t in index_tensors):
+        return False, "GDN-2 Ascend WY requires int32 or int64 sequence indices"
+    return True, None
+
+
+@register(recompute_w_u_fwd_gdn2, backend=TritonAscendBackend, verifier=recompute_w_u_fwd_gdn2_verifier)
 @input_guard
 def recompute_w_u_fwd_gdn2_npu(
     k: torch.Tensor,

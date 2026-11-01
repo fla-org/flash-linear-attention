@@ -223,8 +223,10 @@ def kda_gate_bwd_kernel(
     else:
         b_A = exp(b_A) if HAS_A else b_A
         b_inner = b_A * b_g
-        b_sig = tl.sigmoid(b_inner)
-        b_dsig = b_sig * (1.0 - b_sig)
+        # avoid cancellation in 1 - sigmoid(z) when the bounded gate saturates
+        b_r = tl.exp(-tl.abs(b_inner))
+        b_inv = 1.0 / (1.0 + b_r)
+        b_dsig = b_r * (b_inv * b_inv)
         # Common term: dy * (LB * dsig)
         b_d_inner_term = b_dyg * (lower_bound * b_dsig)
         # dg = d_inner_term * A
@@ -248,7 +250,7 @@ def kda_gate_bwd_kernel(
         tl.store(p_db, b_db.to(p_db.dtype.element_ty), mask=m_t)
 
 
-@dispatch('kda')
+@dispatch
 def kda_gate_fwd(
     g: torch.Tensor,
     A_log: torch.Tensor | None = None,
@@ -280,7 +282,7 @@ def kda_gate_fwd(
     return yg
 
 
-@dispatch('kda')
+@dispatch
 def kda_gate_bwd(
     g: torch.Tensor,
     A_log: torch.Tensor | None = None,
@@ -361,7 +363,7 @@ class KDAGateFunction(torch.autograd.Function):
 
 
 @torch.compiler.disable
-@dispatch('kda')
+@dispatch
 def fused_kda_gate(
     g: torch.Tensor,
     A_log: torch.Tensor | None = None,
@@ -475,7 +477,7 @@ def kda_gate_chunk_cumsum_vector_kernel(
 
 
 @input_guard
-@dispatch('kda')
+@dispatch
 def kda_gate_chunk_cumsum(
     g: torch.Tensor,
     A_log: torch.Tensor | None,

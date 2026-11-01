@@ -426,7 +426,7 @@ def _atk_backward_chunk_summary(
     tl.atomic_add(gbeta_ptr, gbeta_val, mask=mask_T)
 
 
-@dispatch('atk')
+@dispatch
 def chunk_atk_bwd(
     k: torch.Tensor,
     g_raw: torch.Tensor,

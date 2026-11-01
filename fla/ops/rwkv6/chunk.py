@@ -783,7 +783,7 @@ def chunk_rwkv6_bwd_kernel_inter(
     tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), mask=m_tk)
 
 
-@dispatch('rwkv6')
+@dispatch
 def chunk_rwkv6_fwd_intra(
     q: torch.Tensor,
     k: torch.Tensor,
