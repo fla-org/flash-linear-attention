@@ -17,6 +17,8 @@ from fla.utils import IS_NVIDIA, assert_close, device
 
 pytestmark = pytest.mark.skipif(not IS_NVIDIA, reason='NVIDIA CUDA required')
 
+TOLERANCES = {torch.float32: 5e-5, torch.float16: 2e-3, torch.bfloat16: 6e-3}
+
 
 @pytest.fixture(autouse=True)
 def hc_environment(monkeypatch):
@@ -40,105 +42,108 @@ def backend(request, monkeypatch):
     return name
 
 
-@pytest.fixture
-def hc(request):
-    torch.manual_seed(42)
-    x = torch.randn(2, 3, 4, 65, device=device, requires_grad=True)
-    weight = torch.randn(2, 3, 4, device=device, requires_grad=True)
-    if request.param == 'pre':
-        return fused_hc_pre, {'x': x, 'pre': weight}
+def _assert_outputs_and_grads(ref, tri, inputs, ratio):
+    do = torch.randn_like(ref)
+    ref_grads = torch.autograd.grad(outputs=ref, inputs=tuple(inputs.values()), grad_outputs=do)
+    tri_grads = torch.autograd.grad(outputs=tri, inputs=tuple(inputs.values()), grad_outputs=do)
+    assert tri.shape == ref.shape and tri.dtype == inputs['x'].dtype
+    assert_close('o', ref, tri, ratio)
+    for (name, tensor), ref_grad, tri_grad in zip(inputs.items(), ref_grads, tri_grads):
+        assert tri_grad.dtype == tensor.dtype
+        assert_close(f'd{name}', ref_grad, tri_grad, ratio)
+
+
+def _hc_inputs(kind, shape, dtype):
+    x = torch.randn(shape, device=device, dtype=dtype, requires_grad=True)
+    weight = torch.randn(shape[:-1], device=device, dtype=torch.float32, requires_grad=True)
+    if kind == 'pre':
+        return {'x': x, 'pre': weight}
     inputs = {
         'x': x,
-        'branch': torch.randn(2, 3, 65, device=device, requires_grad=True),
+        'branch': torch.randn((*shape[:-2], shape[-1]), device=device, dtype=dtype, requires_grad=True),
         'post': weight,
     }
-    if request.param == 'mhc':
-        inputs['mixing'] = torch.randn(2, 3, 4, 4, device=device, requires_grad=True)
-    return fused_hc_post, inputs
+    if kind == 'mhc':
+        inputs['mixing'] = torch.randn((*shape[:-1], shape[-2]), device=device, dtype=torch.float32, requires_grad=True)
+    return inputs
 
 
 @pytest.mark.parametrize(
-    ('shape', 'dtype', 'ratio', 'backend'),
+    ('shape', 'dtype', 'backend'),
     [
-        pytest.param((2, 3, 1, 1), torch.float32, 5e-5, 'triton', id='triton-single-stream'),
-        pytest.param((2, 3, 3, 65), torch.float16, 2e-3, 'triton', id='triton-fp16-partial-tile'),
-        pytest.param((2, 3, 5, 65), torch.bfloat16, 6e-3, 'gluon', id='gluon-bf16-padded-streams'),
-        pytest.param((2, 3, 4, 256), torch.float32, 5e-5, 'tilelang', id='tilelang-exact-tile'),
-        pytest.param((2, 3, 4, 1025), torch.bfloat16, 6e-3, 'triton', id='triton-bf16-one-feature-tail'),
-        pytest.param((2, 3, 8, 4096), torch.float16, 2e-3, 'gluon', id='gluon-fp16-max-streams'),
-        pytest.param((2, 3, 4, 8193), torch.bfloat16, 6e-3, 'tilelang', id='tilelang-bf16-many-tiles'),
-        pytest.param((127, 4, 1025), torch.float32, 5e-5, 'gluon', id='gluon-packed-127-tokens'),
-        pytest.param((128, 4, 1025), torch.float32, 5e-5, 'triton', id='triton-packed-128-tokens'),
-        pytest.param((4, 65), torch.float16, 2e-3, 'tilelang', id='tilelang-fp16-unbatched'),
-        pytest.param((2, 3, 1, 1), torch.float32, 5e-5, 'tilelang', id='tilelang-single-element-tile'),
-        pytest.param((2, 3, 3, 65), torch.float16, 2e-3, 'tilelang', id='tilelang-padded-streams-and-features'),
+        pytest.param((2, 3, 1, 1), torch.float32, 'triton', id='triton-single-stream'),
+        pytest.param((2, 3, 3, 65), torch.float16, 'triton', id='triton-fp16-partial-tile'),
+        pytest.param((2, 3, 5, 65), torch.bfloat16, 'gluon', id='gluon-bf16-padded-streams'),
+        pytest.param((2, 3, 4, 256), torch.float32, 'tilelang', id='tilelang-exact-tile'),
+        pytest.param((2, 3, 4, 1025), torch.bfloat16, 'triton', id='triton-bf16-one-feature-tail'),
+        pytest.param((2, 3, 8, 4096), torch.float16, 'gluon', id='gluon-fp16-max-streams'),
+        pytest.param((2, 3, 4, 8193), torch.bfloat16, 'tilelang', id='tilelang-bf16-many-tiles'),
+        pytest.param((4, 65), torch.float16, 'tilelang', id='tilelang-fp16-unbatched'),
+        pytest.param((2, 3, 1, 1), torch.float32, 'tilelang', id='tilelang-single-element-tile'),
+        pytest.param((2, 3, 3, 65), torch.float16, 'tilelang', id='tilelang-padded-streams-and-features'),
     ],
     indirect=['backend'],
 )
-def test_fused_hc_pre(shape: tuple[int, ...], dtype: torch.dtype, ratio: float, backend):
+def test_fused_hc_pre(shape: tuple[int, ...], dtype: torch.dtype, backend):
     torch.manual_seed(42)
-    x = torch.randn(shape, device=device, dtype=dtype)
-    pre = torch.randn(shape[:-1], device=device, dtype=torch.float32)
-    x.requires_grad_()
-    pre.requires_grad_()
+    x = torch.randn(shape, device=device, dtype=dtype, requires_grad=True)
+    pre = torch.randn(shape[:-1], device=device, dtype=torch.float32, requires_grad=True)
     ref = naive_hc_pre(x=x, pre=pre)
     tri = fused_hc_pre(x=x, pre=pre)
-    do = torch.randn_like(ref)
-    ref_dx, ref_dpre = torch.autograd.grad(outputs=ref, inputs=(x, pre), grad_outputs=do)
-    tri_dx, tri_dpre = torch.autograd.grad(outputs=tri, inputs=(x, pre), grad_outputs=do)
-    assert tri.shape == ref.shape and tri.dtype == dtype
-    assert tri_dx.dtype == dtype and tri_dpre.dtype == pre.dtype
-    assert_close('o', ref, tri, ratio)
-    assert_close('dx', ref_dx, tri_dx, ratio)
-    assert_close('dpre', ref_dpre, tri_dpre, ratio)
+    _assert_outputs_and_grads(ref, tri, {'x': x, 'pre': pre}, TOLERANCES[dtype])
 
 
 @pytest.mark.parametrize(
-    ('shape', 'dtype', 'ratio', 'use_mixing', 'backend'),
+    ('shape', 'dtype', 'use_mixing', 'backend'),
     [
-        pytest.param((2, 3, 1, 1), torch.float32, 5e-5, False, 'triton', id='triton-ihc-single-stream'),
-        pytest.param((2, 3, 3, 65), torch.float16, 2e-3, True, 'triton', id='triton-mhc-fp16-partial-tile'),
-        pytest.param((2, 3, 5, 65), torch.bfloat16, 6e-3, False, 'gluon', id='gluon-ihc-bf16-padded-streams'),
-        pytest.param((2, 3, 4, 256), torch.float32, 5e-5, True, 'tilelang', id='tilelang-mhc-exact-tile'),
-        pytest.param((2, 3, 4, 1025), torch.bfloat16, 6e-3, False, 'triton', id='triton-ihc-bf16-one-feature-tail'),
-        pytest.param((2, 3, 8, 4096), torch.float16, 2e-3, True, 'gluon', id='gluon-mhc-fp16-max-streams'),
-        pytest.param((2, 3, 4, 8193), torch.bfloat16, 6e-3, True, 'tilelang', id='tilelang-mhc-bf16-many-tiles'),
-        pytest.param((127, 4, 1025), torch.float32, 5e-5, True, 'gluon', id='gluon-mhc-packed-127-tokens'),
-        pytest.param((128, 4, 1025), torch.float32, 5e-5, False, 'triton', id='triton-ihc-packed-128-tokens'),
-        pytest.param((4, 65), torch.float16, 2e-3, False, 'tilelang', id='tilelang-ihc-fp16-unbatched'),
-        pytest.param((2, 3, 5, 65), torch.float32, 5e-5, True, 'triton', id='triton-mhc-padded-streams'),
-        pytest.param((2, 3, 4, 8193), torch.float32, 5e-5, False, 'gluon', id='gluon-ihc-many-tiles'),
-        pytest.param((2, 3, 8, 4096), torch.bfloat16, 6e-3, False, 'tilelang', id='tilelang-ihc-bf16-max-streams'),
-        pytest.param((127, 8, 1025), torch.bfloat16, 6e-3, True, 'tilelang', id='tilelang-mhc-bf16-max-streams'),
-        pytest.param((2, 3, 8, 1), torch.float32, 5e-5, True, 'tilelang', id='tilelang-mhc-max-streams-one-feature'),
-        pytest.param((2, 3, 1, 1), torch.float32, 5e-5, True, 'tilelang', id='tilelang-mhc-single-element-tile'),
-        pytest.param((2, 3, 5, 65), torch.bfloat16, 6e-3, True, 'tilelang', id='tilelang-mhc-padded-streams-and-features'),
+        pytest.param((2, 3, 1, 1), torch.float32, False, 'triton', id='triton-ihc-single-stream'),
+        pytest.param((2, 3, 3, 65), torch.float16, True, 'triton', id='triton-mhc-fp16-partial-tile'),
+        pytest.param((2, 3, 5, 65), torch.bfloat16, False, 'gluon', id='gluon-ihc-bf16-padded-streams'),
+        pytest.param((2, 3, 4, 256), torch.float32, True, 'tilelang', id='tilelang-mhc-exact-tile'),
+        pytest.param((2, 3, 4, 1025), torch.bfloat16, False, 'triton', id='triton-ihc-bf16-one-feature-tail'),
+        pytest.param((2, 3, 8, 4096), torch.float16, True, 'gluon', id='gluon-mhc-fp16-max-streams'),
+        pytest.param((2, 3, 4, 8193), torch.bfloat16, True, 'tilelang', id='tilelang-mhc-bf16-many-tiles'),
+        pytest.param((4, 65), torch.float16, False, 'tilelang', id='tilelang-ihc-fp16-unbatched'),
+        pytest.param((2, 3, 5, 65), torch.float32, True, 'triton', id='triton-mhc-padded-streams'),
+        pytest.param((2, 3, 4, 8193), torch.float32, False, 'gluon', id='gluon-ihc-many-tiles'),
+        pytest.param((2, 3, 8, 4096), torch.bfloat16, False, 'tilelang', id='tilelang-ihc-bf16-max-streams'),
+        pytest.param((2, 3, 8, 1), torch.float32, True, 'tilelang', id='tilelang-mhc-max-streams-one-feature'),
+        pytest.param((2, 3, 1, 1), torch.float32, True, 'tilelang', id='tilelang-mhc-single-element-tile'),
+        pytest.param((2, 3, 5, 65), torch.bfloat16, True, 'tilelang', id='tilelang-mhc-padded-streams-and-features'),
     ],
     indirect=['backend'],
 )
-def test_fused_hc_post(shape: tuple[int, ...], dtype: torch.dtype, ratio: float, use_mixing: bool, backend):
+def test_fused_hc_post(shape: tuple[int, ...], dtype: torch.dtype, use_mixing: bool, backend):
     torch.manual_seed(42)
-    x = torch.randn(shape, device=device, dtype=dtype)
-    branch = torch.randn((*shape[:-2], shape[-1]), device=device, dtype=dtype)
-    post = torch.randn(shape[:-1], device=device, dtype=torch.float32)
-    mixing = torch.randn((*shape[:-1], shape[-2]), device=device, dtype=torch.float32) if use_mixing else None
-    inputs = (x, branch, post, mixing) if use_mixing else (x, branch, post)
-    for tensor in inputs:
-        tensor.requires_grad_()
-    ref = naive_hc_post(x=x, branch=branch, post=post, mixing=mixing)
-    tri = fused_hc_post(x=x, branch=branch, post=post, mixing=mixing)
-    do = torch.randn_like(ref)
-    ref_dx, ref_dbranch, ref_dpost, *ref_dmixing = torch.autograd.grad(outputs=ref, inputs=inputs, grad_outputs=do)
-    tri_dx, tri_dbranch, tri_dpost, *tri_dmixing = torch.autograd.grad(outputs=tri, inputs=inputs, grad_outputs=do)
-    assert tri.shape == ref.shape and tri.dtype == dtype
-    assert tri_dx.dtype == dtype and tri_dbranch.dtype == branch.dtype and tri_dpost.dtype == post.dtype
-    assert_close('o', ref, tri, ratio)
-    assert_close('dx', ref_dx, tri_dx, ratio)
-    assert_close('dbranch', ref_dbranch, tri_dbranch, ratio)
-    assert_close('dpost', ref_dpost, tri_dpost, ratio)
+    x = torch.randn(shape, device=device, dtype=dtype, requires_grad=True)
+    branch = torch.randn((*shape[:-2], shape[-1]), device=device, dtype=dtype, requires_grad=True)
+    post = torch.randn(shape[:-1], device=device, dtype=torch.float32, requires_grad=True)
+    inputs = {'x': x, 'branch': branch, 'post': post}
     if use_mixing:
-        assert tri_dmixing[0].dtype == mixing.dtype
-        assert_close('dmixing', ref_dmixing[0], tri_dmixing[0], ratio)
+        inputs['mixing'] = torch.randn((*shape[:-1], shape[-2]), device=device, dtype=torch.float32, requires_grad=True)
+    ref = naive_hc_post(**inputs)
+    tri = fused_hc_post(**inputs)
+    _assert_outputs_and_grads(ref, tri, inputs, TOLERANCES[dtype])
+
+
+@pytest.mark.parametrize(
+    ('T', 'N', 'D', 'dtype', 'kind', 'backend'),
+    [
+        pytest.param(127, 4, 1025, torch.float32, 'pre', 'gluon', id='gluon-pre-127-tokens'),
+        pytest.param(128, 4, 1025, torch.float32, 'pre', 'triton', id='triton-pre-128-tokens'),
+        pytest.param(127, 4, 1025, torch.float32, 'mhc', 'gluon', id='gluon-mhc-127-tokens'),
+        pytest.param(128, 4, 1025, torch.float32, 'ihc', 'triton', id='triton-ihc-128-tokens'),
+        pytest.param(127, 8, 1025, torch.bfloat16, 'mhc', 'tilelang', id='tilelang-mhc-bf16-max-streams'),
+    ],
+    indirect=['backend'],
+)
+def test_fused_hc_packed(T: int, N: int, D: int, dtype: torch.dtype, kind: str, backend):
+    torch.manual_seed(42)
+    inputs = _hc_inputs(kind=kind, shape=(T, N, D), dtype=dtype)
+    op, reference = (fused_hc_pre, naive_hc_pre) if kind == 'pre' else (fused_hc_post, naive_hc_post)
+    ref = reference(**inputs)
+    tri = op(**inputs)
+    _assert_outputs_and_grads(ref, tri, inputs, TOLERANCES[dtype])
 
 
 @pytest.mark.parametrize('backend', ['triton', 'gluon', 'tilelang'], indirect=True)
@@ -148,14 +153,7 @@ def test_fused_hc_pre_noncontiguous(backend):
     pre = torch.randn(4, 2, device=device, dtype=torch.bfloat16).T.requires_grad_()
     ref = naive_hc_pre(x=x, pre=pre)
     tri = fused_hc_pre(x=x, pre=pre)
-    do = torch.randn_like(ref)
-    ref_grads = torch.autograd.grad(outputs=ref, inputs=(x, pre), grad_outputs=do)
-    tri_grads = torch.autograd.grad(outputs=tri, inputs=(x, pre), grad_outputs=do)
-    assert tri.shape == ref.shape and tri.dtype == x.dtype
-    assert_close('o', ref, tri, 6e-3)
-    for name, tensor, ref_grad, tri_grad in zip(('dx', 'dpre'), (x, pre), ref_grads, tri_grads):
-        assert tri_grad.dtype == tensor.dtype
-        assert_close(name, ref_grad, tri_grad, 6e-3)
+    _assert_outputs_and_grads(ref, tri, {'x': x, 'pre': pre}, 6e-3)
 
 
 @pytest.mark.parametrize(
@@ -173,18 +171,12 @@ def test_fused_hc_post_noncontiguous(use_mixing: bool, backend):
     x = torch.randn(2, 65, 4, device=device).transpose(-1, -2).requires_grad_()
     branch = torch.randn(65, 2, device=device, dtype=torch.float16).T.requires_grad_()
     post = torch.randn(4, 2, device=device, dtype=torch.bfloat16).T.requires_grad_()
-    mixing = torch.randn(2, 4, 4, device=device).transpose(-1, -2).requires_grad_() if use_mixing else None
-    inputs = (x, branch, post, mixing) if use_mixing else (x, branch, post)
-    ref = naive_hc_post(x=x, branch=branch, post=post, mixing=mixing)
-    tri = fused_hc_post(x=x, branch=branch, post=post, mixing=mixing)
-    do = torch.randn_like(ref)
-    ref_grads = torch.autograd.grad(outputs=ref, inputs=inputs, grad_outputs=do)
-    tri_grads = torch.autograd.grad(outputs=tri, inputs=inputs, grad_outputs=do)
-    assert tri.shape == ref.shape and tri.dtype == x.dtype
-    assert_close('o', ref, tri, 6e-3)
-    for name, tensor, ref_grad, tri_grad in zip(('dx', 'dbranch', 'dpost', 'dmixing'), inputs, ref_grads, tri_grads):
-        assert tri_grad.dtype == tensor.dtype
-        assert_close(name, ref_grad, tri_grad, 6e-3)
+    inputs = {'x': x, 'branch': branch, 'post': post}
+    if use_mixing:
+        inputs['mixing'] = torch.randn(2, 4, 4, device=device).transpose(-1, -2).requires_grad_()
+    ref = naive_hc_post(**inputs)
+    tri = fused_hc_post(**inputs)
+    _assert_outputs_and_grads(ref, tri, inputs, 6e-3)
 
 
 @pytest.mark.parametrize(
@@ -212,23 +204,22 @@ def test_fused_hc_stack(use_mixing: bool, backend):
         tri_mixing = sinkhorn(logits=logits[step]) if use_mixing else None
         ref = naive_hc_post(x=ref, branch=ref_branch, post=2 * post[step].sigmoid(), mixing=ref_mixing)
         tri = fused_hc_post(x=tri, branch=tri_branch, post=2 * post[step].sigmoid(), mixing=tri_mixing)
-    inputs = (x, pre, post, logits) if use_mixing else (x, pre, post)
-    do = torch.randn_like(ref)
-    ref_grads = torch.autograd.grad(outputs=ref, inputs=inputs, grad_outputs=do)
-    tri_grads = torch.autograd.grad(outputs=tri, inputs=inputs, grad_outputs=do)
-    assert_close('o', ref, tri, 1e-4)
-    for name, ref_grad, tri_grad in zip(('dx', 'dpre', 'dpost', 'dlogits'), ref_grads, tri_grads):
-        assert_close(name, ref_grad, tri_grad, 1e-4)
+    inputs = {'x': x, 'pre': pre, 'post': post}
+    if use_mixing:
+        inputs['logits'] = logits
+    _assert_outputs_and_grads(ref, tri, inputs, 1e-4)
 
 
 @pytest.mark.parametrize(
-    ('backend', 'hc'),
+    ('backend', 'kind'),
     [('triton', 'pre'), ('gluon', 'ihc'), ('tilelang', 'mhc')],
-    indirect=True,
+    indirect=['backend'],
     ids=['triton-pre', 'gluon-ihc', 'tilelang-mhc'],
 )
-def test_fused_hc_packed(backend, hc):
-    op, inputs = hc
+def test_fused_hc_packed_layout(backend, kind: str):
+    torch.manual_seed(42)
+    inputs = _hc_inputs(kind=kind, shape=(2, 3, 4, 65), dtype=torch.float32)
+    op = fused_hc_pre if kind == 'pre' else fused_hc_post
     with torch.no_grad():
         dense = op(**inputs)
         packed = op(**{name: tensor.flatten(0, 1) for name, tensor in inputs.items()})
@@ -275,19 +266,20 @@ def test_fused_hc_backward_backend(use_mixing: bool, backend, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ('backend_type', 'hc'),
+    ('backend_type', 'kind'),
     [
         pytest.param(GluonBackend, 'pre', id='gluon-pre'),
         pytest.param(GluonBackend, 'ihc', id='gluon-ihc'),
         pytest.param(TileLangBackend, 'pre', id='tilelang-pre'),
         pytest.param(TileLangBackend, 'mhc', id='tilelang-mhc'),
     ],
-    indirect=['hc'],
 )
-def test_fused_hc_unavailable_backend(backend_type, hc, monkeypatch):
+def test_fused_hc_unavailable_backend(backend_type, kind: str, monkeypatch):
     if _DISPATCH_DISABLED:
         pytest.skip('Backend dispatch disabled before import')
-    op, inputs = hc
+    torch.manual_seed(42)
+    inputs = _hc_inputs(kind=kind, shape=(2, 3, 4, 65), dtype=torch.float32)
+    op = fused_hc_pre if kind == 'pre' else fused_hc_post
     ref = op(**inputs)
     do = torch.randn_like(ref)
     ref_grads = torch.autograd.grad(outputs=ref, inputs=tuple(inputs.values()), grad_outputs=do)
