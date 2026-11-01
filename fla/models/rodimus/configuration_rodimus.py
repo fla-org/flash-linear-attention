@@ -1,14 +1,31 @@
-# -*- coding: utf-8 -*-
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from typing import Dict, Optional, Union
+from transformers.configuration_utils import PreTrainedConfig
 
-from transformers.configuration_utils import PretrainedConfig
+from fla.models.configuration_utils import (
+    AttentionConfig,
+    AttentionConfigBase,
+    validate_loss_config,
+)
 
 
-class RodimusConfig(PretrainedConfig):
+class RodimusConfig(AttentionConfigBase, PreTrainedConfig):
 
     model_type = 'rodimus'
     keys_to_ignore_at_inference = ['past_key_values']
+
+    def _parse_attention_config(self, attn: AttentionConfig) -> AttentionConfig:
+        attn = super()._parse_attention_config(attn)
+        specs = [attn] if isinstance(attn, dict) else attn
+        if specs is not None:
+            for attn_spec in specs:
+                attn_spec.setdefault('qk_norm', False)
+        return attn
 
     def __init__(
         self,
@@ -18,20 +35,20 @@ class RodimusConfig(PretrainedConfig):
         attn_mode: str = "chunk",
         residual_in_fp32: bool = True,
         block_residual_in_fp32: bool = False,
-        expand_ratio: Optional[int] = 64,
-        input_gate_low_rank: Optional[Union[float, str]] = 'auto',
+        expand_ratio: int | None = 64,
+        input_gate_low_rank: float | str | None = 'auto',
         use_short_conv: bool = True,
         conv_size: int = 4,
-        hidden_ratio: Optional[float] = 4/3,
-        intermediate_size: Optional[int] = None,
+        hidden_ratio: float | None = 4/3,
+        intermediate_size: int | None = None,
         hidden_act: str = "swish",
         max_position_embeddings: int = 2048,
         norm_eps: float = 1e-5,
-        k_norm_eps: Optional[float] = None,
-        attn: Optional[Dict] = None,
-        ska_attn: Optional[Dict] = None,
+        k_norm_eps: float | None = None,
+        attn: AttentionConfig = None,
+        ska_attn: dict | None = None,
         use_cache: bool = True,
-        pad_token_id: Optional[int] = None,
+        pad_token_id: int | None = None,
         bos_token_id: int = 126080,
         eos_token_id: int = 126081,
         tie_word_embeddings: bool = True,
@@ -39,9 +56,10 @@ class RodimusConfig(PretrainedConfig):
         fuse_norm: bool = True,
         fuse_swiglu: bool = True,
         fuse_cross_entropy: bool = True,
+        fuse_linear_cross_entropy: bool = False,
         use_l2warp: bool = False,
         vocab_size: int = 126464,
-        **kwargs
+        **kwargs,
     ):
         self.block_type = block_type
         self.hidden_size = hidden_size
@@ -69,24 +87,14 @@ class RodimusConfig(PretrainedConfig):
         self.fuse_norm = fuse_norm
         self.fuse_swiglu = fuse_swiglu
         self.fuse_cross_entropy = fuse_cross_entropy
+        self.fuse_linear_cross_entropy = fuse_linear_cross_entropy
         self.use_l2warp = use_l2warp
         self.vocab_size = vocab_size
 
-        if attn is not None:
-            if not isinstance(attn, Dict):
-                raise ValueError("attn must be a dictionary")
-            if 'layers' not in attn:
-                raise ValueError("Layer indices must be provided to initialize hybrid attention layers")
-            if 'num_heads' not in attn:
-                raise ValueError("Number of heads must be provided to initialize hybrid attention layers")
-            attn['num_kv_heads'] = attn.get('num_kv_heads', attn['num_heads'])
-            attn['qkv_bias'] = attn.get('qkv_bias', False)
-            attn['qk_norm'] = attn.get('qk_norm', False)
-            attn['window_size'] = attn.get('window_size', None)
-            attn['rope_theta'] = attn.get('rope_theta', 10000.)
+        validate_loss_config(fuse_cross_entropy=fuse_cross_entropy, fuse_linear_cross_entropy=fuse_linear_cross_entropy)
 
         if ska_attn is not None:
-            if not isinstance(ska_attn, Dict):
+            if not isinstance(ska_attn, dict):
                 raise ValueError("attn must be a dictionary")
             if 'num_heads' not in ska_attn:
                 raise ValueError("Number of heads must be provided to initialize shared-key attention layers")

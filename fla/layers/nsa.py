@@ -1,21 +1,26 @@
-# -*- coding: utf-8 -*-
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional, Tuple, Union
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
 from einops import rearrange
 from transformers.utils import logging
 
+from fla.layers.utils import pad_input, unpad_input
 from fla.modules import RotaryEmbedding
 from fla.ops.nsa.parallel import parallel_nsa
 from fla.ops.utils.index import prepare_lens_from_mask
 
 if TYPE_CHECKING:
-    from fla.models.utils import Cache
+    from fla.models.cache_utils import Cache
 
 logger = logging.get_logger(__name__)
 
@@ -26,15 +31,15 @@ class NativeSparseAttention(nn.Module):
         self,
         hidden_size: int = 2048,
         num_heads: int = 64,
-        num_kv_heads: Optional[int] = 4,
+        num_kv_heads: int | None = 4,
         head_dim: int = 64,
         qkv_bias: bool = False,
-        block_size: Optional[int] = 64,
-        block_counts: Optional[Union[torch.LongTensor, int]] = 16,
-        window_size: Optional[int] = 512,
-        rope_theta: Optional[float] = 10000.,
-        max_position_embeddings: Optional[int] = None,
-        layer_idx: int = None
+        block_size: int | None = 64,
+        block_counts: torch.LongTensor | int | None = 16,
+        window_size: int | None = 512,
+        rope_theta: float | None = 10000.,
+        max_position_embeddings: int | None = None,
+        layer_idx: int = None,
     ):
         super().__init__()
 
@@ -44,6 +49,7 @@ class NativeSparseAttention(nn.Module):
             self.num_kv_heads = self.num_heads
         else:
             self.num_kv_heads = num_kv_heads
+        assert self.num_heads % self.num_kv_heads == 0, "num_heads must be divisible by num_kv_heads"
         self.num_kv_groups = num_heads // self.num_kv_heads
         self.head_dim = head_dim
         self.kv_dim = self.num_kv_heads * self.head_dim
@@ -67,12 +73,12 @@ class NativeSparseAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Cache] = None,
+        attention_mask: torch.LongTensor | None = None,
+        past_key_values: Cache | None = None,
         output_attentions: bool = False,
         use_cache: bool = False,
         **kwargs,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]:
         if attention_mask is not None:
             assert len(attention_mask.shape) == 2, (
                 "Expected attention_mask as a 0-1 matrix with shape [batch_size, seq_len] "
@@ -80,23 +86,22 @@ class NativeSparseAttention(nn.Module):
                 "Arbitrary attention masks of shape [batch_size, seq_len, seq_len] are not allowed."
             )
 
-        batch_size, seq_len, _ = hidden_states.size()
+        batch_size, q_len, _ = hidden_states.size()
 
         q = rearrange(self.q_proj(hidden_states), '... (h d) -> ... h d', d=self.head_dim)
         k = rearrange(self.k_proj(hidden_states), '... (h d) -> ... h d', d=self.head_dim)
         v = rearrange(self.v_proj(hidden_states), '... (h d) -> ... h d', d=self.head_dim)
         g = rearrange(self.g_proj(hidden_states), '... (h d) -> ... h d', d=3)
-        g_cmp, g_slc, g_swa = g.sigmoid().unbind(-1)
 
-        cu_seqlens = kwargs.get('cu_seqlens', None)
+        cu_seqlens = kwargs.get('cu_seqlens')
 
-        seqlen_offset, max_seqlen = 0, seq_len
+        seqlen_offset, max_seqlen = 0, q_len
         if past_key_values is not None:
             seqlen_offset = past_key_values.get_seq_length(self.layer_idx)
             max_seqlen = q.shape[1] + seqlen_offset
 
-            if attention_mask is not None:
-                # to deliminate the offsets of padding tokens
+            if cu_seqlens is None and attention_mask is not None:
+                # to eliminate the offsets of padding tokens
                 seqlen_offset = seqlen_offset + prepare_lens_from_mask(attention_mask) - attention_mask.shape[-1]
                 max_seqlen = q.shape[1] + max(seqlen_offset)
 
@@ -106,30 +111,51 @@ class NativeSparseAttention(nn.Module):
 
         if past_key_values is not None:
             cache_has_content = past_key_values.get_seq_length(self.layer_idx) > 0
+            assert cu_seqlens is None or not cache_has_content, \
+                "cu_seqlens should not be provided when past_key_values has content"
             k_cached, v_cached = past_key_values.update(
                 attn_state=(k.flatten(-2, -1), v.flatten(-2, -1)),
                 layer_idx=self.layer_idx,
-                offset=seq_len,
-                cache_kwargs=dict(window_size=self.window_size)
+                offset=q_len,
             )['attn_state']
             if cache_has_content:
                 k, v = k_cached, v_cached
                 k = rearrange(k, '... (h d) -> ... h d', d=self.head_dim)
                 v = rearrange(v, '... (h d) -> ... h d', d=self.head_dim)
 
-        o = parallel_nsa(
-            q=q,
-            k=k,
-            v=v,
-            g_cmp=g_cmp,
-            g_slc=g_slc,
-            g_swa=g_swa,
-            block_size=self.block_size,
-            block_counts=self.block_counts,
-            window_size=self.window_size,
-            cu_seqlens=cu_seqlens,
-        )
-        o = o.reshape(batch_size, seq_len, -1)
+        if cu_seqlens is None and attention_mask is not None:
+            (q, g), (k, v), indices_q, cu_seqlens, max_seq_lens = unpad_input(
+                (q, g), (k, v), attention_mask, q_len, keepdim=True)
+            g_cmp, g_slc, g_swa = g.sigmoid().unbind(-1)
+            o = parallel_nsa(
+                q=q,
+                k=k,
+                v=v,
+                g_cmp=g_cmp,
+                g_slc=g_slc,
+                g_swa=g_swa,
+                block_size=self.block_size,
+                block_counts=self.block_counts,
+                window_size=self.window_size,
+                cu_seqlens=cu_seqlens,
+            ).squeeze(0)
+            o = pad_input(o, indices_q, batch_size, q_len)
+        else:
+            g_cmp, g_slc, g_swa = g.sigmoid().unbind(-1)
+            o = parallel_nsa(
+                q=q,
+                k=k,
+                v=v,
+                g_cmp=g_cmp,
+                g_slc=g_slc,
+                g_swa=g_swa,
+                block_size=self.block_size,
+                block_counts=self.block_counts,
+                window_size=self.window_size,
+                cu_seqlens=cu_seqlens,
+            )
+
+        o = o.reshape(batch_size, q_len, -1)
         o = self.o_proj(o)
 
         if not output_attentions:

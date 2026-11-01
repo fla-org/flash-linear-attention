@@ -1,0 +1,123 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
+import torch
+import triton
+
+from fla.modules.activations import elu_p1, logsigmoid, powglu, sigmoid, sqrelu, swiglu, swish
+from fla.modules.activations import fast_gelu_impl as gelu
+from fla.utils import device
+
+DTYPE = torch.bfloat16
+
+
+def fwd(fn, *args):
+    return fn(*args)
+
+
+def fwdbwd(fn, *args):
+    y = fn(*args)
+    g = torch.randn_like(y)
+    y.backward(g)
+
+
+@triton.testing.perf_report(
+    triton.testing.Benchmark(
+        x_names=['B', 'T', 'D'],
+        x_vals=[
+            (b, t, d)
+            for b in [4]
+            for t in [512, 1024, 2048, 4096, 8192]
+            for d in [1024, 2048, 4096]
+        ],
+        line_arg='provider',
+        line_vals=[
+            'elu_p1_fwd', 'elu_p1_fwdbwd',
+            'sigmoid_fwd', 'sigmoid_fwdbwd',
+            'logsigmoid_fwd', 'logsigmoid_fwdbwd',
+            'swish_fwd', 'swish_fwdbwd',
+            'gelu_fwd', 'gelu_fwdbwd',
+            'sqrelu_fwd', 'sqrelu_fwdbwd',
+            'swiglu_fwd', 'swiglu_fwdbwd',
+            'powglu_fwd', 'powglu_fwdbwd',
+        ],
+        line_names=[
+            'elu_p1_fwd', 'elu_p1_fwdbwd',
+            'sigmoid_fwd', 'sigmoid_fwdbwd',
+            'logsigmoid_fwd', 'logsigmoid_fwdbwd',
+            'swish_fwd', 'swish_fwdbwd',
+            'gelu_fwd', 'gelu_fwdbwd',
+            'sqrelu_fwd', 'sqrelu_fwdbwd',
+            'swiglu_fwd', 'swiglu_fwdbwd',
+            'powglu_fwd', 'powglu_fwdbwd',
+        ],
+        styles=[('orange', '-'), ('orange', '--'),
+                ('green', '-'), ('green', '--'),
+                ('blue', '-'), ('blue', '--'),
+                ('red', '-'), ('red', '--'),
+                ('cyan', '-'), ('cyan', '--'),
+                ('magenta', '-'), ('magenta', '--'),
+                ('yellow', '-'), ('yellow', '--'),
+                ('black', '-'), ('black', '--')],
+        ylabel="Time (ms)",
+        plot_name="activation_performance",
+        args={},
+    ),
+)
+def benchmark(B, T, D, provider):
+    requires_grad = True
+    x = torch.randn(B, T, D, device=device, dtype=DTYPE, requires_grad=requires_grad)
+
+    if 'swiglu' in provider or 'powglu' in provider:
+        y = torch.randn_like(x)
+        inputs = (x, y)
+    elif 'bias_gelu' in provider:
+        bias = torch.randn(D, device=device, dtype=DTYPE, requires_grad=True)
+        inputs = (x, bias)
+    else:
+        inputs = (x,)
+
+    if provider.startswith('elu_p1'):
+        fn = elu_p1
+    elif provider.startswith('sigmoid'):
+        fn = sigmoid
+    elif provider.startswith('logsigmoid'):
+        fn = logsigmoid
+    elif provider.startswith('swish'):
+        fn = swish
+    elif provider.startswith('gelu'):
+        fn = gelu
+    elif provider.startswith('sqrelu'):
+        fn = sqrelu
+    elif provider.startswith('swiglu'):
+        fn = swiglu
+    elif provider.startswith('powglu'):
+        fn = powglu
+    else:
+        raise ValueError(provider)
+
+    if provider.endswith('fwd'):
+        def fn_to_call(): return fwd(fn, *inputs)  # noqa: E731
+    elif provider.endswith('fwdbwd'):
+        def fn_to_call(): return fwdbwd(fn, *inputs)  # noqa: E731
+    else:
+        raise ValueError(provider)
+
+    ms, min_ms, max_ms = triton.testing.do_bench(
+        fn_to_call,
+        quantiles=[0.5, 0.2, 0.8],
+    )
+    return ms, min_ms, max_ms
+
+
+if __name__ == '__main__':
+    try:
+        from runner import run_module_benchmark
+    except ModuleNotFoundError:
+        from benchmarks.modules.runner import run_module_benchmark
+
+    run_module_benchmark(benchmark, script_file=__file__, save_dir='./activation_benchmark')

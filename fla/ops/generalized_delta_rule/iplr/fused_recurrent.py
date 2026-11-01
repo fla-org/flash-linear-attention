@@ -1,19 +1,21 @@
-# -*- coding: utf-8 -*-
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
-
-from typing import Optional, Tuple
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 import triton
 import triton.language as tl
 
-from fla.utils import input_guard
+from fla.utils import autotune_cache_kwargs, input_guard
 
 
 @triton.heuristics({
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -23,6 +25,7 @@ from fla.utils import input_guard
         for num_stages in [2, 3, 4]
     ],
     key=["BK"],
+    **autotune_cache_kwargs,
 )
 @triton.jit
 def fused_recurrent_fwd_kernel(
@@ -47,7 +50,9 @@ def fused_recurrent_fwd_kernel(
     STORE_FINAL_STATE: tl.constexpr,  # whether to store final state
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_nh = tl.program_id(0), tl.program_id(1)
+    pid = tl.program_id(0).to(tl.int64)
+    NV = tl.cdiv(V, BV)
+    i_v, i_nh = pid % NV, (pid // NV).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
 
     if IS_VARLEN:
@@ -104,7 +109,7 @@ def fused_recurrent_fwd_kernel(
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'USE_DHT': lambda args: args['dht'] is not None,
     'USE_DH0': lambda args: args['dh0'] is not None,
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -113,6 +118,7 @@ def fused_recurrent_fwd_kernel(
         for num_stages in [2, 3]
     ],
     key=["BK", "BV"],
+    **autotune_cache_kwargs,
 )
 @triton.jit
 def fused_recurrent_bwd_kernel(
@@ -148,7 +154,9 @@ def fused_recurrent_bwd_kernel(
     USE_DHT: tl.constexpr,  # whether to use dht
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_nh = tl.program_id(0), tl.program_id(1)
+    pid = tl.program_id(0).to(tl.int64)
+    NV = tl.cdiv(V, BV)
+    i_v, i_nh = (pid % NV).to(tl.int64), (pid // NV).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
     dk += i_v * B * H * K * T
     db += i_v * B * H * K * T
@@ -285,25 +293,24 @@ class FusedRecurrentIPLRDeltaRuleFunction(torch.autograd.Function):
         v: torch.Tensor,
         a: torch.Tensor,
         b: torch.Tensor,
-        scale: Optional[float] = None,
-        initial_state: Optional[torch.Tensor] = None,
+        scale: float | None = None,
+        initial_state: torch.Tensor | None = None,
         output_final_state: bool = False,
-        cu_seqlens: Optional[torch.LongTensor] = None
+        cu_seqlens: torch.LongTensor | None = None,
     ):
         B, T, H, K, V = *k.shape, v.shape[-1]
         N = B if cu_seqlens is None else len(cu_seqlens) - 1
 
         BK = triton.next_power_of_2(K)
         if output_final_state:
-            final_state = q.new_empty(B, H, K, V, dtype=torch.float32)
+            final_state = q.new_empty(N, H, K, V, dtype=torch.float32)
         else:
             final_state = None
 
         ha = torch.empty_like(v, dtype=torch.float32)
 
         def grid(meta): return (
-            triton.cdiv(V, meta['BV']),
-            N * H
+            triton.cdiv(V, meta['BV']) * N * H,
         )
         o = torch.empty_like(v)
         fused_recurrent_fwd_kernel[grid](
@@ -345,7 +352,7 @@ class FusedRecurrentIPLRDeltaRuleFunction(torch.autograd.Function):
         db = b.new_empty(NV, *b.shape)
         dv = torch.empty_like(v)
         dha = torch.empty_like(ha)
-        grid = (NV, N * H)
+        grid = (NV * N * H,)
 
         if initial_state is not None and initial_state.requires_grad:
             dh0 = torch.empty_like(initial_state, dtype=torch.float32)
@@ -395,8 +402,8 @@ def fused_recurrent_iplr_delta_rule(
     scale: float = None,
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
-    cu_seqlens: Optional[torch.Tensor] = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    cu_seqlens: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     This function computes the recurrence S_t = S_t @ (I + a_t b_t^T) + v_t k_t^T in a recurrent manner.
 
@@ -415,9 +422,10 @@ def fused_recurrent_iplr_delta_rule(
             Scale factor for the RetNet attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         initial_state (Optional[torch.Tensor]):
-            Initial state of shape `[B, H, K, V]`. Default: `None`.
+            Initial state of shape `[N, H, K, V]`, where `N` is the number of sequences
+            (`B` for fixed-length inputs). Default: `None`.
         output_final_state (Optional[bool]):
-            Whether to output the final state of shape `[B, H, K, V]`. Default: `False`.
+            Whether to output the final state of shape `[N, H, K, V]`. Default: `False`.
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
@@ -427,12 +435,12 @@ def fused_recurrent_iplr_delta_rule(
         if q.shape[0] != 1:
             raise ValueError(
                 f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
-                f"Please flatten variable-length inputs before processing."
+                f"Please flatten variable-length inputs before processing.",
             )
         if initial_state is not None and initial_state.shape[0] != len(cu_seqlens) - 1:
             raise ValueError(
                 f"The number of initial states is expected to be equal to the number of input sequences, "
-                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}."
+                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}.",
             )
     if scale is None:
         scale = q.shape[-1] ** -0.5
@@ -447,6 +455,6 @@ def fused_recurrent_iplr_delta_rule(
         scale,
         initial_state,
         output_final_state,
-        cu_seqlens
+        cu_seqlens,
     )
     return o, final_state

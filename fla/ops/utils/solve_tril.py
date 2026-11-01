@@ -1,26 +1,44 @@
-# -*- coding: utf-8 -*-
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from typing import Optional
+import os
 
 import torch
 import triton
 import triton.language as tl
 
+from fla.backends import dispatch
 from fla.ops.utils.index import prepare_chunk_indices
-from fla.utils import input_guard
+from fla.ops.utils.op import make_tensor_descriptor
+from fla.utils import IS_TF32_SUPPORTED, IS_TMA_SUPPORTED, autotune_cache_kwargs, input_guard
+
+FLA_TRIL_PRECISION = os.environ.get('FLA_TRIL_PRECISION', 'ieee')
+assert FLA_TRIL_PRECISION in ['ieee', 'tf32', 'tf32x3'], \
+    f"FLA_TRIL_PRECISION must be one of 'ieee', 'tf32', or 'tf32x3', but got {FLA_TRIL_PRECISION}"
+# NOTE: `IS_TF32_SUPPORTED` keeps the tf32 configs off non-Nvidia backends now that
+# `IS_TMA_SUPPORTED` can also be true on AMD. The order is fixed instead of derived from a set so
+# the autotune config order does not vary with the interpreter hash seed.
+if IS_TMA_SUPPORTED and IS_TF32_SUPPORTED and FLA_TRIL_PRECISION != "ieee":
+    DOT_PRECISION_AUTOTUNE_LIST = ["ieee", FLA_TRIL_PRECISION]
+else:
+    DOT_PRECISION_AUTOTUNE_LIST = ["ieee"]
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
-        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        triton.Config({'DOT_PRECISION': 'ieee'}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [1, 2, 4, 8]
         for num_stages in [2, 3, 4, 5]
     ],
     key=['BT'],
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def solve_tril_16x16_kernel(
@@ -31,13 +49,15 @@ def solve_tril_16x16_kernel(
     T,
     H: tl.constexpr,
     BT: tl.constexpr,
+    USE_TMA: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    DOT_PRECISION: tl.constexpr,
 ):
-    i_t, i_bh = tl.program_id(0), tl.program_id(1)
+    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
@@ -49,31 +69,46 @@ def solve_tril_16x16_kernel(
     Ai = Ai + (bos*H + i_h) * 16
 
     offset = (i_t * 16) % BT
-    p_A = tl.make_block_ptr(A, (T, BT), (H*BT, 1), (i_t * 16, offset), (16, 16), (1, 0))
-    p_Ai = tl.make_block_ptr(Ai, (T, 16), (H*16, 1), (i_t * 16, 0), (16, 16), (1, 0))
-    # [16, 16]
-    b_A = tl.load(p_A, boundary_check=(0, 1)).to(tl.float32)
-    b_A = -tl.where(m_A, b_A, 0)
+    o_t = (i_t * 16 + o_i).to(tl.int64)
+    m_t = o_t < T
+    if not USE_TMA:
+        p_A = A + o_t[:, None] * (H*BT) + (o_i + offset)[None, :]
+        # [16, 16]
+        b_A = tl.load(p_A, mask=m_t[:, None], other=0.0).to(tl.float32)
+        b_A = tl.where(m_A, b_A, 0)
+    else:
+        desc = make_tensor_descriptor(A, [T, BT], [H*BT, 1], [16, 16])
+        desc_o = make_tensor_descriptor(Ai, [T, 16], [H*16, 1], [16, 16])
+        b_A = desc.load([i_t * 16, offset]).to(tl.float32)
+        b_A = tl.where(m_A, b_A, 0)
+    b_A = -b_A
 
     for i in range(2, min(16, T - i_t * 16)):
         # [16]
         b_a = -tl.load(A + (i_t * 16 + i) * H*BT + o_i + offset)
+        b_a = tl.where(o_i < i, b_a, 0.)
         b_a = b_a + tl.sum(b_a[:, None] * b_A, 0)
         b_A = tl.where((o_i == i)[:, None], b_a, b_A)
     b_A += m_I
-    tl.store(p_Ai, b_A.to(p_Ai.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
+    if not USE_TMA:
+        p_Ai = Ai + o_t[:, None] * (H*16) + o_i[None, :]
+        tl.store(p_Ai, b_A.to(p_Ai.dtype.element_ty, fp_downcast_rounding="rtne"), mask=m_t[:, None])
+    else:
+        desc_o.store([i_t * 16, 0], b_A.to(desc_o.dtype, fp_downcast_rounding="rtne"))
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
-        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        triton.Config({'DOT_PRECISION': DOT_PRECISION}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [1, 2, 4, 8]
         for num_stages in [2, 3, 4, 5]
+        for DOT_PRECISION in DOT_PRECISION_AUTOTUNE_LIST
     ],
     key=['H', 'BT', 'IS_VARLEN'],
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def merge_16x16_to_32x32_inverse_kernel(
@@ -84,13 +119,15 @@ def merge_16x16_to_32x32_inverse_kernel(
     T,
     H: tl.constexpr,
     BT: tl.constexpr,
-    IS_VARLEN: tl.constexpr
+    USE_TMA: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+    DOT_PRECISION: tl.constexpr,
 ):
-    i_t, i_bh = tl.program_id(0), tl.program_id(1)
+    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
@@ -101,12 +138,21 @@ def merge_16x16_to_32x32_inverse_kernel(
     A += (bos * H + i_h) * BT
     Ai += (bos * H + i_h) * BT
 
-    p_A_11 = tl.make_block_ptr(A, (T, BT), (H*BT, 1), (i_t * BT, 0), (16, 16), (1, 0))
-    p_A_22 = tl.make_block_ptr(A, (T, BT), (H*BT, 1), (i_t * BT + 16, 16), (16, 16), (1, 0))
+    o_t = (i_t * BT + o_i).to(tl.int64)
+    if not USE_TMA:
+        p_A_11 = A + o_t[:, None] * (H*BT) + o_i[None, :]
+        p_A_22 = A + (o_t[:, None] + 16) * (H*BT) + (o_i[None, :] + 16)
+        b_Ai_11 = tl.load(p_A_11, mask=(o_t[:, None] < T), other=0.0).to(tl.float32)
+        b_Ai_22 = tl.load(p_A_22, mask=(o_t[:, None] + 16 < T), other=0.0).to(tl.float32)
+    else:
+        desc = make_tensor_descriptor(A, [T, BT], [H*BT, 1], [16, 16])
+        desc_o = make_tensor_descriptor(Ai, [T, BT], [H*BT, 1], [16, 16])
+        b_Ai_11 = desc.load([i_t * BT + 0, 0]).to(tl.float32)
+        b_Ai_22 = desc.load([i_t * BT + 16, 16]).to(tl.float32)
 
     # [16, 16]
-    b_Ai_11 = -tl.where(m_A, tl.load(p_A_11, boundary_check=(0, 1)).to(tl.float32), 0)
-    b_Ai_22 = -tl.where(m_A, tl.load(p_A_22, boundary_check=(0, 1)).to(tl.float32), 0)
+    b_Ai_11 = -tl.where(m_A, b_Ai_11, 0)
+    b_Ai_22 = -tl.where(m_A, b_Ai_22, 0)
 
     for i in range(2, min(16, T - i_t * BT)):
         b_a_11 = -tl.load(A + (i_t * BT + i) * H*BT + o_i)
@@ -120,28 +166,39 @@ def merge_16x16_to_32x32_inverse_kernel(
     b_Ai_11 += m_I
     b_Ai_22 += m_I
 
-    p_A_21 = tl.make_block_ptr(A, (T, BT), (H*BT, 1), (i_t * BT + 16, 0), (16, 16), (1, 0))
-    b_A_21 = tl.load(p_A_21, boundary_check=(0, 1)).to(tl.float32)
-    b_Ai_21 = -tl.dot(tl.dot(b_Ai_22, b_A_21, input_precision='ieee'), b_Ai_11, input_precision='ieee')
+    if not USE_TMA:
+        p_A_21 = A + (o_t[:, None] + 16) * (H*BT) + o_i[None, :]
+        b_A_21 = tl.load(p_A_21, mask=(o_t[:, None] + 16 < T), other=0.0).to(tl.float32)
+    else:
+        b_A_21 = desc.load([i_t * BT + 16, 0]).to(tl.float32)
 
-    p_Ai_11 = tl.make_block_ptr(Ai, (T, BT), (H*BT, 1), (i_t * BT, 0), (16, 16), (1, 0))
-    p_Ai_21 = tl.make_block_ptr(Ai, (T, BT), (H*BT, 1), (i_t * BT + 16, 0), (16, 16), (1, 0))
-    p_Ai_22 = tl.make_block_ptr(Ai, (T, BT), (H*BT, 1), (i_t * BT + 16, 16), (16, 16), (1, 0))
-    tl.store(p_Ai_11, b_Ai_11.to(p_Ai_11.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
-    tl.store(p_Ai_22, b_Ai_22.to(p_Ai_22.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
-    tl.store(p_Ai_21, b_Ai_21.to(p_Ai_21.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
+    b_Ai_21 = -tl.dot(tl.dot(b_Ai_22, b_A_21, input_precision=DOT_PRECISION), b_Ai_11, input_precision=DOT_PRECISION)
+
+    if not USE_TMA:
+        p_Ai_11 = Ai + o_t[:, None] * (H*BT) + o_i[None, :]
+        p_Ai_21 = Ai + (o_t[:, None] + 16) * (H*BT) + o_i[None, :]
+        p_Ai_22 = Ai + (o_t[:, None] + 16) * (H*BT) + (o_i[None, :] + 16)
+        tl.store(p_Ai_11, b_Ai_11.to(p_Ai_11.dtype.element_ty, fp_downcast_rounding="rtne"), mask=(o_t[:, None] < T))
+        tl.store(p_Ai_22, b_Ai_22.to(p_Ai_22.dtype.element_ty, fp_downcast_rounding="rtne"), mask=(o_t[:, None] + 16 < T))
+        tl.store(p_Ai_21, b_Ai_21.to(p_Ai_21.dtype.element_ty, fp_downcast_rounding="rtne"), mask=(o_t[:, None] + 16 < T))
+    else:
+        desc_o.store([i_t * BT + 0, 0], b_Ai_11.to(desc_o.dtype, fp_downcast_rounding="rtne"))
+        desc_o.store([i_t * BT + 16, 0], b_Ai_21.to(desc_o.dtype, fp_downcast_rounding="rtne"))
+        desc_o.store([i_t * BT + 16, 16], b_Ai_22.to(desc_o.dtype, fp_downcast_rounding="rtne"))
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
-        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        triton.Config({'DOT_PRECISION': DOT_PRECISION}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [2, 4, 8]
         for num_stages in [2, 3, 4, 5]
+        for DOT_PRECISION in DOT_PRECISION_AUTOTUNE_LIST
     ],
     key=['H', 'BT', 'IS_VARLEN'],
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def merge_16x16_to_64x64_inverse_kernel(
@@ -152,13 +209,15 @@ def merge_16x16_to_64x64_inverse_kernel(
     T,
     H: tl.constexpr,
     BT: tl.constexpr,
-    IS_VARLEN: tl.constexpr
+    USE_TMA: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+    DOT_PRECISION: tl.constexpr,
 ):
-    i_t, i_bh = tl.program_id(0), tl.program_id(1)
+    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
@@ -169,31 +228,48 @@ def merge_16x16_to_64x64_inverse_kernel(
     A += (bos * H + i_h) * BT
     Ai += (bos * H + i_h) * BT
 
-    p_A_11 = tl.make_block_ptr(A, (T, BT), (H*BT, 1), (i_t * BT, 0), (16, 16), (1, 0))
-    p_A_22 = tl.make_block_ptr(A, (T, BT), (H*BT, 1), (i_t * BT + 16, 16), (16, 16), (1, 0))
-    p_A_33 = tl.make_block_ptr(A, (T, BT), (H*BT, 1), (i_t * BT + 32, 32), (16, 16), (1, 0))
-    p_A_44 = tl.make_block_ptr(A, (T, BT), (H*BT, 1), (i_t * BT + 48, 48), (16, 16), (1, 0))
+    o_t = (i_t * BT + o_i).to(tl.int64)
+    if not USE_TMA:
+        p_A_11 = A + o_t[:, None] * (H*BT) + o_i[None, :]
+        p_A_22 = A + (o_t[:, None] + 16) * (H*BT) + (o_i[None, :] + 16)
+        p_A_33 = A + (o_t[:, None] + 32) * (H*BT) + (o_i[None, :] + 32)
+        p_A_44 = A + (o_t[:, None] + 48) * (H*BT) + (o_i[None, :] + 48)
+        b_Ai_11 = tl.load(p_A_11, mask=(o_t[:, None] < T), other=0.0).to(tl.float32)
+        b_Ai_22 = tl.load(p_A_22, mask=(o_t[:, None] + 16 < T), other=0.0).to(tl.float32)
+        b_Ai_33 = tl.load(p_A_33, mask=(o_t[:, None] + 32 < T), other=0.0).to(tl.float32)
+        b_Ai_44 = tl.load(p_A_44, mask=(o_t[:, None] + 48 < T), other=0.0).to(tl.float32)
+    else:
+        desc = make_tensor_descriptor(A, [T, BT], [H*BT, 1], [16, 16])
+        desc_o = make_tensor_descriptor(Ai, [T, BT], [H*BT, 1], [16, 16])
+        b_Ai_11 = desc.load([i_t * BT + 0, 0]).to(tl.float32)
+        b_Ai_22 = desc.load([i_t * BT + 16, 16]).to(tl.float32)
+        b_Ai_33 = desc.load([i_t * BT + 32, 32]).to(tl.float32)
+        b_Ai_44 = desc.load([i_t * BT + 48, 48]).to(tl.float32)
 
     # [16, 16]
-    b_Ai_11 = -tl.where(m_A, tl.load(p_A_11, boundary_check=(0, 1)).to(tl.float32), 0)
-    b_Ai_22 = -tl.where(m_A, tl.load(p_A_22, boundary_check=(0, 1)).to(tl.float32), 0)
-    b_Ai_33 = -tl.where(m_A, tl.load(p_A_33, boundary_check=(0, 1)).to(tl.float32), 0)
-    b_Ai_44 = -tl.where(m_A, tl.load(p_A_44, boundary_check=(0, 1)).to(tl.float32), 0)
+    b_Ai_11 = -tl.where(m_A, b_Ai_11, 0)
+    b_Ai_22 = -tl.where(m_A, b_Ai_22, 0)
+    b_Ai_33 = -tl.where(m_A, b_Ai_33, 0)
+    b_Ai_44 = -tl.where(m_A, b_Ai_44, 0)
 
     for i in range(2, min(16, T - i_t * BT)):
         b_a_11 = -tl.load(A + (i_t * BT + i) * H*BT + o_i)
+        b_a_11 = tl.where(o_i < i, b_a_11, 0.)
         b_a_11 += tl.sum(b_a_11[:, None] * b_Ai_11, 0)
         b_Ai_11 = tl.where((o_i == i)[:, None], b_a_11, b_Ai_11)
     for i in range(16 + 2, min(32, T - i_t * BT)):
         b_a_22 = -tl.load(A + (i_t * BT + i) * H*BT + o_i + 16)
+        b_a_22 = tl.where(o_i < i - 16, b_a_22, 0.)
         b_a_22 += tl.sum(b_a_22[:, None] * b_Ai_22, 0)
         b_Ai_22 = tl.where((o_i == i - 16)[:, None], b_a_22, b_Ai_22)
     for i in range(32 + 2, min(48, T - i_t * BT)):
         b_a_33 = -tl.load(A + (i_t * BT + i) * H*BT + o_i + 32)
+        b_a_33 = tl.where(o_i < i - 32, b_a_33, 0.)
         b_a_33 += tl.sum(b_a_33[:, None] * b_Ai_33, 0)
         b_Ai_33 = tl.where((o_i == i - 32)[:, None], b_a_33, b_Ai_33)
     for i in range(48 + 2, min(64, T - i_t * BT)):
         b_a_44 = -tl.load(A + (i_t * BT + i) * H*BT + o_i + 48)
+        b_a_44 = tl.where(o_i < i - 48, b_a_44, 0.)
         b_a_44 += tl.sum(b_a_44[:, None] * b_Ai_44, 0)
         b_Ai_44 = tl.where((o_i == i - 48)[:, None], b_a_44, b_Ai_44)
     b_Ai_11 += m_I
@@ -201,70 +277,92 @@ def merge_16x16_to_64x64_inverse_kernel(
     b_Ai_33 += m_I
     b_Ai_44 += m_I
 
-    p_A_21 = tl.make_block_ptr(A, (T, BT), (H*BT, 1), (i_t * BT + 16, 0), (16, 16), (1, 0))
-    p_A_31 = tl.make_block_ptr(A, (T, BT), (H*BT, 1), (i_t * BT + 32, 0), (16, 16), (1, 0))
-    p_A_32 = tl.make_block_ptr(A, (T, BT), (H*BT, 1), (i_t * BT + 32, 16), (16, 16), (1, 0))
-    p_A_41 = tl.make_block_ptr(A, (T, BT), (H*BT, 1), (i_t * BT + 48, 0), (16, 16), (1, 0))
-    p_A_42 = tl.make_block_ptr(A, (T, BT), (H*BT, 1), (i_t * BT + 48, 16), (16, 16), (1, 0))
-    p_A_43 = tl.make_block_ptr(A, (T, BT), (H*BT, 1), (i_t * BT + 48, 32), (16, 16), (1, 0))
-    b_A_21 = tl.load(p_A_21, boundary_check=(0, 1)).to(tl.float32)
-    b_A_31 = tl.load(p_A_31, boundary_check=(0, 1)).to(tl.float32)
-    b_A_32 = tl.load(p_A_32, boundary_check=(0, 1)).to(tl.float32)
-    b_A_41 = tl.load(p_A_41, boundary_check=(0, 1)).to(tl.float32)
-    b_A_42 = tl.load(p_A_42, boundary_check=(0, 1)).to(tl.float32)
-    b_A_43 = tl.load(p_A_43, boundary_check=(0, 1)).to(tl.float32)
+    if not USE_TMA:
+        p_A_21 = A + (o_t[:, None] + 16) * (H*BT) + o_i[None, :]
+        p_A_31 = A + (o_t[:, None] + 32) * (H*BT) + o_i[None, :]
+        p_A_32 = A + (o_t[:, None] + 32) * (H*BT) + (o_i[None, :] + 16)
+        p_A_41 = A + (o_t[:, None] + 48) * (H*BT) + o_i[None, :]
+        p_A_42 = A + (o_t[:, None] + 48) * (H*BT) + (o_i[None, :] + 16)
+        p_A_43 = A + (o_t[:, None] + 48) * (H*BT) + (o_i[None, :] + 32)
+        b_A_21 = tl.load(p_A_21, mask=(o_t[:, None] + 16 < T), other=0.0).to(tl.float32)
+        b_A_31 = tl.load(p_A_31, mask=(o_t[:, None] + 32 < T), other=0.0).to(tl.float32)
+        b_A_32 = tl.load(p_A_32, mask=(o_t[:, None] + 32 < T), other=0.0).to(tl.float32)
+        b_A_41 = tl.load(p_A_41, mask=(o_t[:, None] + 48 < T), other=0.0).to(tl.float32)
+        b_A_42 = tl.load(p_A_42, mask=(o_t[:, None] + 48 < T), other=0.0).to(tl.float32)
+        b_A_43 = tl.load(p_A_43, mask=(o_t[:, None] + 48 < T), other=0.0).to(tl.float32)
+    else:
+        b_A_21 = desc.load([i_t * BT + 16, 0]).to(tl.float32)
+        b_A_31 = desc.load([i_t * BT + 32, 0]).to(tl.float32)
+        b_A_32 = desc.load([i_t * BT + 32, 16]).to(tl.float32)
+        b_A_41 = desc.load([i_t * BT + 48, 0]).to(tl.float32)
+        b_A_42 = desc.load([i_t * BT + 48, 16]).to(tl.float32)
+        b_A_43 = desc.load([i_t * BT + 48, 32]).to(tl.float32)
 
-    b_Ai_21 = -tl.dot(tl.dot(b_Ai_22, b_A_21, input_precision='ieee'), b_Ai_11, input_precision='ieee')
-    b_Ai_32 = -tl.dot(tl.dot(b_Ai_33, b_A_32, input_precision='ieee'), b_Ai_22, input_precision='ieee')
-    b_Ai_43 = -tl.dot(tl.dot(b_Ai_44, b_A_43, input_precision='ieee'), b_Ai_33, input_precision='ieee')
+    b_Ai_21 = -tl.dot(tl.dot(b_Ai_22, b_A_21, input_precision=DOT_PRECISION), b_Ai_11, input_precision=DOT_PRECISION)
+    b_Ai_32 = -tl.dot(tl.dot(b_Ai_33, b_A_32, input_precision=DOT_PRECISION), b_Ai_22, input_precision=DOT_PRECISION)
+    b_Ai_43 = -tl.dot(tl.dot(b_Ai_44, b_A_43, input_precision=DOT_PRECISION), b_Ai_33, input_precision=DOT_PRECISION)
 
     b_Ai_31 = -tl.dot(
         b_Ai_33,
-        tl.dot(b_A_31, b_Ai_11, input_precision='ieee') +
-        tl.dot(b_A_32, b_Ai_21, input_precision='ieee'),
-        input_precision='ieee'
+        tl.dot(b_A_31, b_Ai_11, input_precision=DOT_PRECISION) +
+        tl.dot(b_A_32, b_Ai_21, input_precision=DOT_PRECISION),
+        input_precision=DOT_PRECISION,
     )
     b_Ai_42 = -tl.dot(
         b_Ai_44,
-        tl.dot(b_A_42, b_Ai_22, input_precision='ieee') +
-        tl.dot(b_A_43, b_Ai_32, input_precision='ieee'),
-        input_precision='ieee'
+        tl.dot(b_A_42, b_Ai_22, input_precision=DOT_PRECISION) +
+        tl.dot(b_A_43, b_Ai_32, input_precision=DOT_PRECISION),
+        input_precision=DOT_PRECISION,
     )
     b_Ai_41 = -tl.dot(
         b_Ai_44,
-        tl.dot(b_A_41, b_Ai_11, input_precision='ieee') +
-        tl.dot(b_A_42, b_Ai_21, input_precision='ieee') +
-        tl.dot(b_A_43, b_Ai_31, input_precision='ieee'),
-        input_precision='ieee'
+        tl.dot(b_A_41, b_Ai_11, input_precision=DOT_PRECISION) +
+        tl.dot(b_A_42, b_Ai_21, input_precision=DOT_PRECISION) +
+        tl.dot(b_A_43, b_Ai_31, input_precision=DOT_PRECISION),
+        input_precision=DOT_PRECISION,
     )
 
-    p_Ai_11 = tl.make_block_ptr(Ai, (T, BT), (H*BT, 1), (i_t * BT, 0), (16, 16), (1, 0))
-    p_Ai_22 = tl.make_block_ptr(Ai, (T, BT), (H*BT, 1), (i_t * BT + 16, 16), (16, 16), (1, 0))
-    p_Ai_33 = tl.make_block_ptr(Ai, (T, BT), (H*BT, 1), (i_t * BT + 32, 32), (16, 16), (1, 0))
-    p_Ai_44 = tl.make_block_ptr(Ai, (T, BT), (H*BT, 1), (i_t * BT + 48, 48), (16, 16), (1, 0))
-    p_Ai_21 = tl.make_block_ptr(Ai, (T, BT), (H*BT, 1), (i_t * BT + 16, 0), (16, 16), (1, 0))
-    p_Ai_31 = tl.make_block_ptr(Ai, (T, BT), (H*BT, 1), (i_t * BT + 32, 0), (16, 16), (1, 0))
-    p_Ai_32 = tl.make_block_ptr(Ai, (T, BT), (H*BT, 1), (i_t * BT + 32, 16), (16, 16), (1, 0))
-    p_Ai_41 = tl.make_block_ptr(Ai, (T, BT), (H*BT, 1), (i_t * BT + 48, 0), (16, 16), (1, 0))
-    p_Ai_42 = tl.make_block_ptr(Ai, (T, BT), (H*BT, 1), (i_t * BT + 48, 16), (16, 16), (1, 0))
-    p_Ai_43 = tl.make_block_ptr(Ai, (T, BT), (H*BT, 1), (i_t * BT + 48, 32), (16, 16), (1, 0))
-    tl.store(p_Ai_11, b_Ai_11.to(p_Ai_11.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
-    tl.store(p_Ai_22, b_Ai_22.to(p_Ai_22.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
-    tl.store(p_Ai_33, b_Ai_33.to(p_Ai_33.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
-    tl.store(p_Ai_44, b_Ai_44.to(p_Ai_44.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
-    tl.store(p_Ai_21, b_Ai_21.to(p_Ai_21.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
-    tl.store(p_Ai_31, b_Ai_31.to(p_Ai_31.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
-    tl.store(p_Ai_32, b_Ai_32.to(p_Ai_32.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
-    tl.store(p_Ai_41, b_Ai_41.to(p_Ai_41.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
-    tl.store(p_Ai_42, b_Ai_42.to(p_Ai_42.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
-    tl.store(p_Ai_43, b_Ai_43.to(p_Ai_43.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
+    if not USE_TMA:
+        p_Ai_11 = Ai + o_t[:, None] * (H*BT) + o_i[None, :]
+        p_Ai_22 = Ai + (o_t[:, None] + 16) * (H*BT) + (o_i[None, :] + 16)
+        p_Ai_33 = Ai + (o_t[:, None] + 32) * (H*BT) + (o_i[None, :] + 32)
+        p_Ai_44 = Ai + (o_t[:, None] + 48) * (H*BT) + (o_i[None, :] + 48)
+        p_Ai_21 = Ai + (o_t[:, None] + 16) * (H*BT) + o_i[None, :]
+        p_Ai_31 = Ai + (o_t[:, None] + 32) * (H*BT) + o_i[None, :]
+        p_Ai_32 = Ai + (o_t[:, None] + 32) * (H*BT) + (o_i[None, :] + 16)
+        p_Ai_41 = Ai + (o_t[:, None] + 48) * (H*BT) + o_i[None, :]
+        p_Ai_42 = Ai + (o_t[:, None] + 48) * (H*BT) + (o_i[None, :] + 16)
+        p_Ai_43 = Ai + (o_t[:, None] + 48) * (H*BT) + (o_i[None, :] + 32)
+        tl.store(p_Ai_11, b_Ai_11.to(p_Ai_11.dtype.element_ty, fp_downcast_rounding="rtne"), mask=(o_t[:, None] < T))
+        tl.store(p_Ai_22, b_Ai_22.to(p_Ai_22.dtype.element_ty, fp_downcast_rounding="rtne"), mask=(o_t[:, None] + 16 < T))
+        tl.store(p_Ai_33, b_Ai_33.to(p_Ai_33.dtype.element_ty, fp_downcast_rounding="rtne"), mask=(o_t[:, None] + 32 < T))
+        tl.store(p_Ai_44, b_Ai_44.to(p_Ai_44.dtype.element_ty, fp_downcast_rounding="rtne"), mask=(o_t[:, None] + 48 < T))
+        tl.store(p_Ai_21, b_Ai_21.to(p_Ai_21.dtype.element_ty, fp_downcast_rounding="rtne"), mask=(o_t[:, None] + 16 < T))
+        tl.store(p_Ai_31, b_Ai_31.to(p_Ai_31.dtype.element_ty, fp_downcast_rounding="rtne"), mask=(o_t[:, None] + 32 < T))
+        tl.store(p_Ai_32, b_Ai_32.to(p_Ai_32.dtype.element_ty, fp_downcast_rounding="rtne"), mask=(o_t[:, None] + 32 < T))
+        tl.store(p_Ai_41, b_Ai_41.to(p_Ai_41.dtype.element_ty, fp_downcast_rounding="rtne"), mask=(o_t[:, None] + 48 < T))
+        tl.store(p_Ai_42, b_Ai_42.to(p_Ai_42.dtype.element_ty, fp_downcast_rounding="rtne"), mask=(o_t[:, None] + 48 < T))
+        tl.store(p_Ai_43, b_Ai_43.to(p_Ai_43.dtype.element_ty, fp_downcast_rounding="rtne"), mask=(o_t[:, None] + 48 < T))
+    else:
+        desc_o.store([i_t * BT + 0, 0], b_Ai_11.to(desc_o.dtype, fp_downcast_rounding="rtne"))
+        desc_o.store([i_t * BT + 16, 16], b_Ai_22.to(desc_o.dtype, fp_downcast_rounding="rtne"))
+        desc_o.store([i_t * BT + 32, 32], b_Ai_33.to(desc_o.dtype, fp_downcast_rounding="rtne"))
+        desc_o.store([i_t * BT + 48, 48], b_Ai_44.to(desc_o.dtype, fp_downcast_rounding="rtne"))
+        desc_o.store([i_t * BT + 16, 0], b_Ai_21.to(desc_o.dtype, fp_downcast_rounding="rtne"))
+        desc_o.store([i_t * BT + 32, 0], b_Ai_31.to(desc_o.dtype, fp_downcast_rounding="rtne"))
+        desc_o.store([i_t * BT + 32, 16], b_Ai_32.to(desc_o.dtype, fp_downcast_rounding="rtne"))
+        desc_o.store([i_t * BT + 48, 0], b_Ai_41.to(desc_o.dtype, fp_downcast_rounding="rtne"))
+        desc_o.store([i_t * BT + 48, 16], b_Ai_42.to(desc_o.dtype, fp_downcast_rounding="rtne"))
+        desc_o.store([i_t * BT + 48, 32], b_Ai_43.to(desc_o.dtype, fp_downcast_rounding="rtne"))
 
 
+@dispatch
 @input_guard
 def solve_tril(
     A: torch.Tensor,
-    cu_seqlens: Optional[torch.Tensor] = None,
-    output_dtype: torch.dtype = torch.float
+    cu_seqlens: torch.Tensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
+    output_dtype: torch.dtype | None = torch.float,
 ) -> torch.Tensor:
     """
     Compute the inverse of the matrix I + A
@@ -286,7 +384,8 @@ def solve_tril(
     output_dtype = A.dtype if output_dtype is None else output_dtype
 
     B, T, H, BT = A.shape
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
 
     Ai = torch.zeros_like(A, dtype=output_dtype)
@@ -305,5 +404,6 @@ def solve_tril(
         T=T,
         H=H,
         BT=BT,
+        USE_TMA=IS_TMA_SUPPORTED,
     )
     return Ai

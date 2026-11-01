@@ -1,13 +1,15 @@
-# -*- coding: utf-8 -*-
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 """
 https://github.com/corl-team/rebased/blob/main/flash_linear_attention/fla/layers/rebased_fast.py
 """
 
 from __future__ import annotations
-
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -27,14 +29,14 @@ class ReBasedLinearAttention(nn.Module):
         feature_dim: int = 16,
         num_key_value_heads: int = 16,
         num_heads: int = 16,
-        use_gamma: Optional[bool] = True,
-        use_beta: Optional[bool] = True,
-        normalize: Optional[bool] = True,
+        use_gamma: bool | None = True,
+        use_beta: bool | None = True,
+        normalize: bool | None = True,
         causal: bool = True,
         eps: float = 1e-5,
         mode: str = "parallel",
-        layer_idx: Optional[int] = None,
-        **kwargs
+        layer_idx: int | None = None,
+        **kwargs,
     ) -> ReBasedLinearAttention:
         super().__init__()
         self.hidden_size = hidden_size
@@ -63,11 +65,27 @@ class ReBasedLinearAttention(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor, **kwargs):
         mode = self.mode
-        q, k, v = self.q_proj(hidden_states), self.k_proj(hidden_states), self.v_proj(hidden_states)
-        q, k, v = map(lambda x: rearrange(x, "... (h d) -> ... h d", d=self.head_dim), [q, k, v])
+        q = rearrange(
+            self.q_proj(hidden_states),
+            "... (h d) -> ... h d",
+            h=self.num_heads,
+            d=self.feature_dim,
+        )
+        k = rearrange(
+            self.k_proj(hidden_states),
+            "... (h d) -> ... h d",
+            h=self.num_heads,
+            d=self.feature_dim,
+        )
+        v = rearrange(
+            self.v_proj(hidden_states),
+            "... (h d) -> ... h d",
+            h=self.num_key_value_heads,
+            d=self.head_dim,
+        )
         q, k = self.feature_map(q, flatten=(mode != 'parallel')), self.feature_map(k, flatten=(mode != 'parallel'))
         if mode == "fused_chunk":
-            o = fused_chunk_linear_attn(
+            o, _ = fused_chunk_linear_attn(
                 q=q,
                 k=k,
                 v=v,
@@ -75,7 +93,7 @@ class ReBasedLinearAttention(nn.Module):
                 scale=1,
             )
         elif mode == 'chunk':
-            o = chunk_linear_attn(
+            o, _ = chunk_linear_attn(
                 q=q,
                 k=k,
                 v=v,
@@ -92,6 +110,7 @@ class ReBasedLinearAttention(nn.Module):
                 use_scale=True,
                 use_normalize=True,
             )
+        o = rearrange(o, "... h d -> ... (h d)")
         o = self.o_proj(o)
         o = self.dropout(o)
         return o
@@ -102,7 +121,7 @@ class ReBasedLinearAttention(nn.Module):
         hidden_states: torch.Tensor,
         filters: torch.Tensor = None,
         *args,
-        **kwargs
+        **kwargs,
     ):
         """
         x (torch.Tensor): tensor of shape (b, d, t)

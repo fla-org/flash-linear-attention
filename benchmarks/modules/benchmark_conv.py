@@ -1,4 +1,11 @@
-# -*- coding: utf-8 -*-
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
+import os
 
 import torch
 import triton
@@ -6,6 +13,7 @@ from einops import rearrange
 
 from fla.modules.convolution import causal_conv1d
 from fla.ops.utils.index import prepare_sequence_ids
+from fla.utils import IS_NPU, IS_NVIDIA, find_spec_cached
 
 try:
     from causal_conv1d import causal_conv1d_fn
@@ -13,29 +21,28 @@ except ImportError:
     causal_conv1d_fn = None
 
 
-@triton.testing.perf_report(
-    triton.testing.Benchmark(
-        # argument names to use as an x-axis for the plot
-        x_names=['T', 'D'],
-        # different possible values for `x_name`
-        x_vals=[(128 * 2 ** i, d) for d in [256, 512, 1024, 2048, 4096] for i in range(1, 10)],
-        # argument name whose value corresponds to a different line in the plot
-        line_arg='provider',
-        # possible values for `line_arg``
-        line_vals=['causal_conv1d_fwd', 'causal_conv1d_cuda_fwd', 'causal_conv1d_fwdbwd', 'causal_conv1d_cuda_fwdbwd'],
-        # label name for the lines
-        line_names=['causal_conv1d_fwd', 'causal_conv1d_cuda_fwd', 'causal_conv1d_fwdbwd', 'causal_conv1d_cuda_fwdbwd'],
-        # line styles
-        styles=[('green', '-'), ('blue', '--'), ('red', '-.'),
-                ('cyan', ':'), ('yellow', 'dotted'), ('cyan', '--'), ('cyan', '-'), ('black', ':')],
-        ylabel="Execution Time (ms)",  # label name for the y-axis
-        # name for the plot. Used also as a file name for saving the plot.
-        plot_name="Performance",
-        args={},
-    )
-)
-def benchmark(T, D, provider):
+def _conv_benchmark_providers():
+    providers = ['causal_conv1d_fwd', 'causal_conv1d_fwdbwd']
+    if not IS_NPU and causal_conv1d_fn is not None:
+        providers.extend(['causal_conv1d_cuda_fwd', 'causal_conv1d_cuda_fwdbwd'])
+    if IS_NVIDIA and find_spec_cached('triton.experimental.gluon') is not None:
+        providers.extend(['causal_conv1d_gluon_fwd', 'causal_conv1d_gluon_fwdbwd'])
+    return providers
+
+
+_LINE_VALS = _conv_benchmark_providers()
+_STYLES = [
+    ('green', '-'), ('blue', '--'), ('red', '-.'), ('cyan', ':'),
+    ('yellow', 'dotted'), ('cyan', '--'), ('cyan', '-'), ('black', ':'),
+]
+
+
+def benchmark(T, D, provider, packed=True):
     from fla.utils import device
+    torch.manual_seed(42)
+    # select each provider independently of inherited Gluon switches.
+    os.environ['FLA_GLUON'] = '0'
+    os.environ['FLA_CONV_GLUON'] = '1' if '_gluon_' in provider else '0'
     dtype = torch.bfloat16
     requires_grad = True
     B, N, W = 1, 16, 4
@@ -52,31 +59,12 @@ def benchmark(T, D, provider):
     cu_seqlens = torch.cat([
         torch.tensor([0], dtype=torch.long),
         torch.arange(16, T)[torch.randperm(T - 16)[:N-1]],
-        torch.tensor([T], dtype=torch.long)
-    ], 0).to(device).sort()[0]
-    if provider.startswith('causal_conv1d_fwd'):
+        torch.tensor([T], dtype=torch.long),
+    ], 0).to(device).sort()[0] if packed else None
+    if provider in ('causal_conv1d_fwdbwd', 'causal_conv1d_gluon_fwdbwd'):
         results = triton.testing.do_bench(
-            lambda: causal_conv1d(x, weight, bias, activation='swish', cu_seqlens=cu_seqlens),
-            quantiles=quantiles
-        )
-    elif provider.startswith('causal_conv1d_cuda_fwd'):
-        results = triton.testing.do_bench(
-            lambda: rearrange(
-                causal_conv1d_fn(
-                    x=rearrange(x, 'b t d -> b d t'),
-                    weight=weight,
-                    bias=bias,
-                    activation='swish',
-                    seq_idx=prepare_sequence_ids(cu_seqlens).to(torch.int32).unsqueeze(0),
-                ),
-                'b d t -> b t d'
-            ),
-            quantiles=quantiles
-        )
-    elif provider.startswith('causal_conv1d_fwdbwd'):
-        results = triton.testing.do_bench(
-            lambda: causal_conv1d(x, weight, bias, activation='swish', cu_seqlens=cu_seqlens).backward(x),
-            quantiles=quantiles
+            lambda: causal_conv1d(x, weight, bias, activation='swish', cu_seqlens=cu_seqlens)[0].backward(x),
+            quantiles=quantiles,
         )
     elif provider.startswith('causal_conv1d_cuda_fwdbwd'):
         results = triton.testing.do_bench(
@@ -86,14 +74,60 @@ def benchmark(T, D, provider):
                     weight=weight,
                     bias=bias,
                     activation='swish',
-                    seq_idx=prepare_sequence_ids(cu_seqlens).to(torch.int32).unsqueeze(0),
+                    seq_idx=prepare_sequence_ids(cu_seqlens).to(torch.int32).unsqueeze(0) if packed else None,
                 ),
-                'b d t -> b t d'
+                'b d t -> b t d',
             ).backward(x),
-            quantiles=quantiles
+            quantiles=quantiles,
+        )
+    elif provider in ('causal_conv1d_fwd', 'causal_conv1d_gluon_fwd'):
+        results = triton.testing.do_bench(
+            lambda: causal_conv1d(x, weight, bias, activation='swish', cu_seqlens=cu_seqlens),
+            quantiles=quantiles,
+        )
+    elif provider.startswith('causal_conv1d_cuda_fwd'):
+        results = triton.testing.do_bench(
+            lambda: rearrange(
+                causal_conv1d_fn(
+                    x=rearrange(x, 'b t d -> b d t'),
+                    weight=weight,
+                    bias=bias,
+                    activation='swish',
+                    seq_idx=prepare_sequence_ids(cu_seqlens).to(torch.int32).unsqueeze(0) if packed else None,
+                ),
+                'b d t -> b t d',
+            ),
+            quantiles=quantiles,
         )
     return results
 
 
+benchmark = triton.testing.perf_report(
+    triton.testing.Benchmark(
+        # argument names to use as an x-axis for the plot
+        x_names=['T', 'D'],
+        # different possible values for `x_name`
+        x_vals=[(128 * 2 ** i, d) for d in [256, 512, 1024, 2048, 4096] for i in range(1, 10)],
+        # argument name whose value corresponds to a different line in the plot
+        line_arg='provider',
+        # possible values for `line_arg``
+        line_vals=_LINE_VALS,
+        # label name for the lines
+        line_names=_LINE_VALS,
+        # line styles
+        styles=_STYLES[:len(_LINE_VALS)],
+        ylabel="Execution Time (ms)",  # label name for the y-axis
+        # name for the plot. Used also as a file name for saving the plot.
+        plot_name="Performance",
+        args={},
+    ),
+)(benchmark)
+
+
 if __name__ == '__main__':
-    benchmark.run(print_data=True)
+    try:
+        from runner import run_module_benchmark
+    except ModuleNotFoundError:
+        from benchmarks.modules.runner import run_module_benchmark
+
+    run_module_benchmark(benchmark, script_file=__file__)

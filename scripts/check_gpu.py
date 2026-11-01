@@ -1,3 +1,10 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
 import subprocess
 import time
 
@@ -11,7 +18,7 @@ def get_xpu_memory_usage():
             ["xpu-smi", "stats", "-d", "0"],
             capture_output=True,
             text=True,
-            check=True
+            check=True,
         )
         return extract_gpu_memory_used(result.stdout)
     except subprocess.CalledProcessError as e:
@@ -40,7 +47,7 @@ def get_nvgpu_memory_usage():
     result = subprocess.run(
         ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
         capture_output=True,
-        text=True
+        text=True,
     )
     memory_used = int(result.stdout.strip())
     return memory_used

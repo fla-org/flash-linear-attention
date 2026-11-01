@@ -1,26 +1,32 @@
-# -*- coding: utf-8 -*-
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional, Tuple
+import math
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, repeat
 
+from fla.layers.utils import get_layer_cache, update_layer_cache
 from fla.modules import FusedRMSNormGated, RMSNorm, ShortConvolution
 from fla.modules.activations import ACT2FN
 from fla.ops.simple_gla import chunk_simple_gla, fused_recurrent_simple_gla
 
 if TYPE_CHECKING:
-    from fla.models.utils import Cache
+    from fla.models.cache_utils import Cache
 
 
 class SimpleGatedLinearAttention(nn.Module):
     r"""
-    The layer implementaion for [Gated Linear Attention Transformers with Hardware-Efficient Training](https://arxiv.org/abs/2312.06635).  # noqa
+    The layer implementation for [Gated Linear Attention Transformers with Hardware-Efficient Training](https://arxiv.org/abs/2312.06635).  # noqa
     This layer calls the simplified GLA kernel in which the gating is head-wise instead of elementwise.
 
     Args:
@@ -67,13 +73,13 @@ class SimpleGatedLinearAttention(nn.Module):
         expand_k: float = 1.,
         expand_v: float = 1.,
         num_heads: int = 4,
-        num_kv_heads: Optional[int] = None,
-        feature_map: Optional[str] = None,
+        num_kv_heads: int | None = None,
+        feature_map: str | None = None,
         use_short_conv: bool = True,
         conv_size: int = 4,
         conv_bias: bool = False,
         gate_fn: str = 'swish',
-        elementwise_affine: Optional[bool] = True,
+        elementwise_affine: bool | None = True,
         norm_eps: float = 1e-5,
         gate_logit_normalizer: int = 16,
         fuse_norm: bool = True,
@@ -87,6 +93,7 @@ class SimpleGatedLinearAttention(nn.Module):
         self.expand_v = expand_v
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads if num_kv_heads is not None else num_heads
+        assert self.num_heads % self.num_kv_heads == 0, "num_heads must be divisible by num_kv_heads"
         self.num_kv_groups = self.num_heads // self.num_kv_heads
         self.feature_map_fn = ACT2FN[feature_map] if feature_map is not None else None
 
@@ -94,8 +101,10 @@ class SimpleGatedLinearAttention(nn.Module):
         self.conv_size = conv_size
         self.conv_bias = conv_bias
 
-        self.key_dim = int(hidden_size * expand_k)
-        self.value_dim = int(hidden_size * expand_v)
+        key_dim, value_dim = hidden_size * expand_k, hidden_size * expand_v
+        self.key_dim, self.value_dim = round(key_dim), round(value_dim)
+        assert math.isclose(key_dim, self.key_dim), f"`hidden_size * expand_k` must be an integer, got {key_dim}."
+        assert math.isclose(value_dim, self.value_dim), f"`hidden_size * expand_v` must be an integer, got {value_dim}."
         self.key_dim_per_group = self.key_dim // self.num_kv_groups
         self.value_dim_per_group = self.value_dim // self.num_kv_groups
         self.layer_idx = layer_idx
@@ -139,7 +148,7 @@ class SimpleGatedLinearAttention(nn.Module):
             self.g_norm_swish_gate = FusedRMSNormGated(
                 hidden_size=self.head_v_dim,
                 elementwise_affine=elementwise_affine,
-                eps=norm_eps
+                eps=norm_eps,
             )
             self.fuse_norm_and_gate = True
         else:
@@ -147,7 +156,8 @@ class SimpleGatedLinearAttention(nn.Module):
             self.g_norm = RMSNorm(
                 hidden_size=self.head_v_dim,
                 elementwise_affine=elementwise_affine,
-                eps=norm_eps
+                eps=norm_eps,
+                dtype=torch.float32
             )
             self.gate_fn = ACT2FN[gate_fn]
         self.o_proj = nn.Linear(self.value_dim, hidden_size, bias=False)
@@ -157,12 +167,12 @@ class SimpleGatedLinearAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        past_key_values: Optional[Cache] = None,
-        use_cache: Optional[bool] = False,
-        output_attentions: Optional[bool] = False,
-        **kwargs
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Cache]]:
+        attention_mask: torch.Tensor | None = None,
+        past_key_values: Cache | None = None,
+        use_cache: bool | None = False,
+        output_attentions: bool | None = False,
+        **kwargs,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, Cache | None]:
         if attention_mask is not None:
             assert len(attention_mask.shape) == 2, (
                 "Expected attention_mask as a 0-1 matrix with shape [batch_size, seq_len] "
@@ -171,13 +181,16 @@ class SimpleGatedLinearAttention(nn.Module):
             )
 
         # launching the triton kernel for just one token will actually be slower
-        mode = 'fused_recurrent' if hidden_states.shape[1] <= 64 else self.mode
+        if torch.is_grad_enabled():
+            mode = 'chunk'
+        elif hidden_states.shape[1] <= 64:
+            mode = 'fused_recurrent'
+        else:
+            mode = self.mode
 
-        last_state = None
-        if past_key_values is not None and len(past_key_values) > self.layer_idx:
-            last_state = past_key_values[self.layer_idx]
+        last_state = get_layer_cache(self, past_key_values)
 
-        cu_seqlens = kwargs.get('cu_seqlens', None)
+        cu_seqlens = kwargs.get('cu_seqlens')
         if self.use_short_conv:
             conv_state_q, conv_state_k, conv_state_v = None, None, None
             if last_state is not None:
@@ -188,21 +201,21 @@ class SimpleGatedLinearAttention(nn.Module):
                 mask=conv_mask,
                 cache=conv_state_q,
                 output_final_state=use_cache,
-                cu_seqlens=cu_seqlens
+                cu_seqlens=cu_seqlens,
             )
             k, conv_state_k = self.k_conv1d(
                 x=self.k_proj(hidden_states),
                 mask=conv_mask,
                 cache=conv_state_k,
                 output_final_state=use_cache,
-                cu_seqlens=cu_seqlens
+                cu_seqlens=cu_seqlens,
             )
             v, conv_state_v = self.v_conv1d(
                 x=self.v_proj(hidden_states),
                 mask=conv_mask,
                 cache=conv_state_v,
                 output_final_state=use_cache,
-                cu_seqlens=cu_seqlens
+                cu_seqlens=cu_seqlens,
             )
         else:
             q = self.q_proj(hidden_states)
@@ -221,6 +234,10 @@ class SimpleGatedLinearAttention(nn.Module):
         else:
             k, v = (rearrange(x, '... (h d) -> ... h d', h=self.num_kv_heads) for x in (k, v))
         gk = F.logsigmoid(gk) / self.gate_logit_normalizer
+        if attention_mask is not None:
+            # zero the decay logit so a padded step neutrally passes the state through
+            # (exp(0) == 1) instead of applying a real, content-derived decay to it
+            gk = gk.mul_(attention_mask[:, -gk.shape[-2]:, None])
 
         recurrent_state = last_state['recurrent_state'] if last_state is not None else None
         if mode == 'chunk':
@@ -228,9 +245,10 @@ class SimpleGatedLinearAttention(nn.Module):
                 q=q,
                 k=k,
                 v=v,
-                gk=gk,
+                g=gk,
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
+                state_v_first=True,
                 cu_seqlens=cu_seqlens,
             )
         elif mode == 'fused_recurrent':
@@ -238,21 +256,22 @@ class SimpleGatedLinearAttention(nn.Module):
                 q=q,
                 k=k,
                 v=v,
-                gk=gk,
+                g=gk,
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
+                state_v_first=True,
                 cu_seqlens=cu_seqlens,
             )
         else:
             raise NotImplementedError(f"Not supported mode `{mode}`.")
 
-        if past_key_values is not None:
-            past_key_values.update(
-                recurrent_state=recurrent_state,
-                conv_state=(conv_state_q, conv_state_k, conv_state_v) if self.use_short_conv else None,
-                layer_idx=self.layer_idx,
-                offset=q.shape[1]
-            )
+        update_layer_cache(
+            self,
+            past_key_values,
+            recurrent_state=recurrent_state,
+            conv_state=(conv_state_q, conv_state_k, conv_state_v) if self.use_short_conv else None,
+            offset=q.shape[1],
+        )
 
         g = self.g_proj(hidden_states)
         if self.fuse_norm_and_gate:

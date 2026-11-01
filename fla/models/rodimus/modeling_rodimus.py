@@ -1,29 +1,31 @@
-# -*- coding: utf-8 -*-
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 from __future__ import annotations
 
 import math
 import warnings
 from functools import partial
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Optional
 
 import torch
 import torch.nn as nn
-import torch.utils.checkpoint
-from transformers.generation import GenerationMixin
-from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
-from transformers.modeling_utils import PreTrainedModel
+from transformers.modeling_layers import GradientCheckpointingLayer
+from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.utils import logging
-from transformers.utils.deprecation import deprecate_kwarg
 
-from fla.layers.attn import Attention
 from fla.layers.rodimus import RodimusAttention, SlidingWindowSharedKeyAttention, align_multiple
+from fla.models.cache_utils import Cache
+from fla.models.configuration_utils import get_attention_spec
+from fla.models.generation_utils import FLAUnsupportedCacheGenerationMixin
+from fla.models.modeling_utils import FLAForCausalLM, FLAPreTrainedModel, get_attention
 from fla.models.rodimus.configuration_rodimus import RodimusConfig
-from fla.models.utils import Cache
-from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
 from fla.modules import GatedMLP as RodimusMLP
 from fla.modules import RMSNorm
-from fla.modules.l2warp import l2_warp
 
 try:
     from torch.distributed.tensor import DTensor
@@ -33,10 +35,12 @@ except (ImportError, AttributeError):
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
+
 logger = logging.get_logger(__name__)
 
 
-class RodimusBlock(nn.Module):
+class RodimusBlock(GradientCheckpointingLayer):
+
     def __init__(self, config: RodimusConfig, layer_idx: int):
         super().__init__()
 
@@ -60,7 +64,7 @@ class RodimusBlock(nn.Module):
             hidden_ratio=None,
             intermediate_size=intermediate_size,
             hidden_act=config.hidden_act,
-            fuse_swiglu=config.fuse_swiglu
+            fuse_swiglu=config.fuse_swiglu,
         )
         norm_cls = partial(
             RMSNorm if self.fuse_norm else nn.RMSNorm,
@@ -68,19 +72,11 @@ class RodimusBlock(nn.Module):
             eps=config.norm_eps,
         )
 
-        if config.attn is not None and layer_idx in config.attn['layers']:
+        attn_spec = get_attention_spec(config.attn, layer_idx=layer_idx)
+        if attn_spec is not None:
             self._is_ori_attn = True
             self.attn_norm = norm_cls()
-            self.attn = Attention(
-                hidden_size=config.hidden_size,
-                num_heads=config.attn['num_heads'],
-                num_kv_heads=config.attn['num_kv_heads'],
-                qkv_bias=config.attn['qkv_bias'],
-                window_size=config.attn['window_size'],
-                rope_theta=config.attn['rope_theta'],
-                max_position_embeddings=config.max_position_embeddings,
-                layer_idx=layer_idx
-            )
+            self.attn = get_attention(config=config, layer_idx=layer_idx)
 
             self.mlp_norm = norm_cls()
             self.mlp = mlp_cls()
@@ -97,7 +93,7 @@ class RodimusBlock(nn.Module):
                 norm_eps=config.norm_eps,
                 k_norm_eps=config.k_norm_eps,
                 residual_in_fp32=config.residual_in_fp32,
-                layer_idx=layer_idx
+                layer_idx=layer_idx,
             )
 
             if self.block_type == "rodimus_plus":
@@ -110,7 +106,7 @@ class RodimusBlock(nn.Module):
                     window_size=config.ska_attn['window_size'],
                     rope_theta=config.ska_attn['rope_theta'],
                     max_position_embeddings=config.max_position_embeddings,
-                    layer_idx=layer_idx
+                    layer_idx=layer_idx,
                 )
 
                 self.mlp_norm = norm_cls()
@@ -119,13 +115,13 @@ class RodimusBlock(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
-        use_cache: Optional[bool] = False,
-        output_attentions: Optional[bool] = False,
-        residual: Optional[torch.Tensor] = None,
-        **kwargs: Unpack[Dict]
-    ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
+        attention_mask: torch.Tensor | None = None,
+        past_key_values: Cache | list[torch.FloatTensor] | None = None,
+        use_cache: bool | None = False,
+        output_attentions: bool | None = False,
+        residual: torch.Tensor | None = None,
+        **kwargs: Unpack[dict],
+    ) -> tuple[torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None]:
 
         if self.block_residual_in_fp32 and self.layer_idx > 0:
             assert residual is not None, 'Residual must be passed in when setting `block_residual_in_fp32=True`'
@@ -136,7 +132,7 @@ class RodimusBlock(nn.Module):
                     hidden_states,
                     residual=residual,
                     prenorm=True,
-                    residual_in_fp32=self.residual_in_fp32
+                    residual_in_fp32=self.residual_in_fp32,
                 )
             else:
                 residual = hidden_states.float() if self.residual_in_fp32 else hidden_states
@@ -148,14 +144,14 @@ class RodimusBlock(nn.Module):
                 past_key_values=past_key_values,
                 use_cache=use_cache,
                 output_attentions=output_attentions,
-                **kwargs
+                **kwargs,
             )
             if self.fuse_norm:
                 hidden_states, residual = self.mlp_norm(
                     hidden_states,
                     residual,
                     prenorm=True,
-                    residual_in_fp32=self.residual_in_fp32
+                    residual_in_fp32=self.residual_in_fp32,
                 )
             else:
                 hidden_states = residual + hidden_states
@@ -169,7 +165,7 @@ class RodimusBlock(nn.Module):
                     hidden_states,
                     residual=residual,
                     prenorm=True,
-                    residual_in_fp32=self.residual_in_fp32
+                    residual_in_fp32=self.residual_in_fp32,
                 )
             else:
                 residual = hidden_states.float() if self.residual_in_fp32 else hidden_states
@@ -181,7 +177,7 @@ class RodimusBlock(nn.Module):
                 past_key_values=past_key_values,
                 use_cache=use_cache,
                 output_attentions=output_attentions,
-                **kwargs
+                **kwargs,
             )
 
             if self.block_type == "rodimus_plus":
@@ -192,7 +188,7 @@ class RodimusBlock(nn.Module):
                         hidden_states,
                         residual,
                         prenorm=True,
-                        residual_in_fp32=self.residual_in_fp32
+                        residual_in_fp32=self.residual_in_fp32,
                     )
                 else:
                     hidden_states = residual + hidden_states
@@ -206,7 +202,7 @@ class RodimusBlock(nn.Module):
                     use_cache=use_cache,
                     output_attentions=output_attentions,
                     rodimus_caches=rodimus_caches,
-                    **kwargs
+                    **kwargs,
                 )
 
                 if self.fuse_norm:
@@ -214,7 +210,7 @@ class RodimusBlock(nn.Module):
                         hidden_states,
                         residual=residual,
                         prenorm=False,
-                        residual_in_fp32=self.residual_in_fp32
+                        residual_in_fp32=self.residual_in_fp32,
                     )
                 else:
                     hidden_states = residual + hidden_states
@@ -231,7 +227,7 @@ class RodimusBlock(nn.Module):
         return outputs
 
 
-class RodimusPreTrainedModel(PreTrainedModel):
+class RodimusPreTrainedModel(FLAPreTrainedModel):
 
     config_class = RodimusConfig
     base_model_prefix = 'model'
@@ -251,7 +247,7 @@ class RodimusPreTrainedModel(PreTrainedModel):
     def _init_weights(
         self,
         module: nn.Module,
-        prenorm_residual_strategy: Optional[str] = None,
+        prenorm_residual_strategy: str | None = None,
     ):
         num_residuals_per_layer = self.num_residuals_per_layer
 
@@ -272,7 +268,7 @@ class RodimusPreTrainedModel(PreTrainedModel):
         min_ = 1 - sigmoid_bias_max
         g_gate_bias = torch.exp(
             torch.rand(self.config.expand_ratio) * (math.log(max_) - math.log(min_))
-            + math.log(min_)
+            + math.log(min_),
         ).clamp(min=1e-4)
         g_gate_bias = g_gate_bias + torch.log(-torch.expm1(-g_gate_bias))
         tau_gate_bias = torch.logit(torch.empty((self.config.expand_ratio, )).uniform_(1/16, 0.9))
@@ -303,7 +299,7 @@ class RodimusPreTrainedModel(PreTrainedModel):
             #   > the weights of residual layers at initialization by a factor of 1/√N where N is the # of residual layers.
             #   >   -- GPT-2 :: https://openai.com/blog/better-language-models/
             #
-            # Reference (Megatron-LM): https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/model/gpt_model.py
+            # Reference (Megatron-LM): https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/models/gpt/gpt_model.py
             p = None
             if hasattr(module, 'o_proj'):
                 p = module.o_proj.weight
@@ -353,24 +349,18 @@ class RodimusModel(RodimusPreTrainedModel):
 
         self.post_init()
 
-    def get_input_embeddings(self):
-        return self.embeddings
-
-    def set_input_embeddings(self, value):
-        self.embeddings = value
-
     def forward(
         self,
-        input_ids: Optional[torch.LongTensor] = None,
+        input_ids: torch.LongTensor | None = None,
         attention_mask: Optional[torch.Tensor] = None,  # noqa
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
-        use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-        **kwargs: Unpack[Dict]
-    ) -> Union[Tuple, BaseModelOutputWithPast]:
+        inputs_embeds: torch.FloatTensor | None = None,
+        past_key_values: Cache | list[torch.FloatTensor] | None = None,
+        use_cache: bool | None = None,
+        output_attentions: bool | None = None,
+        output_hidden_states: bool | None = None,
+        return_dict: bool | None = None,
+        **kwargs: Unpack[dict],
+    ) -> tuple | BaseModelOutputWithPast:
 
         if output_attentions:
             warnings.warn("`RodimusModel` does not `output_attentions` now, setting it to `False`.")
@@ -378,7 +368,7 @@ class RodimusModel(RodimusPreTrainedModel):
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         use_cache = use_cache if use_cache is not None else (self.config.use_cache if not self.training else False)
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = return_dict if return_dict is not None else self.config.return_dict
 
         # retrieve input_ids and inputs_embeds
         if input_ids is not None and inputs_embeds is not None:
@@ -393,10 +383,6 @@ class RodimusModel(RodimusPreTrainedModel):
         if use_cache and not isinstance(past_key_values, Cache):
             past_key_values = Cache.from_legacy_cache(past_key_values)
 
-        if self.gradient_checkpointing and self.training and use_cache:
-            logger.warning_once("`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`...")
-            use_cache = False
-
         all_hidden_states = () if output_hidden_states else None
         all_attns = () if output_attentions else None
         residual = None
@@ -404,27 +390,15 @@ class RodimusModel(RodimusPreTrainedModel):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
-            if self.gradient_checkpointing and self.training:
-                hidden_states, attentions, past_key_values = self._gradient_checkpointing_func(
-                    layer.__call__,
-                    hidden_states,
-                    attention_mask,
-                    past_key_values,
-                    use_cache,
-                    output_attentions,
-                    residual,
-                    **kwargs
-                )
-            else:
-                hidden_states, attentions, past_key_values = layer(
-                    hidden_states,
-                    attention_mask=attention_mask,
-                    past_key_values=past_key_values,
-                    use_cache=use_cache,
-                    output_attentions=output_attentions,
-                    residual=residual,
-                    **kwargs
-                )
+            hidden_states, attentions, past_key_values = layer(
+                hidden_states,
+                attention_mask=attention_mask,
+                past_key_values=past_key_values,
+                use_cache=use_cache,
+                output_attentions=output_attentions,
+                residual=residual,
+                **kwargs,
+            )
 
             if self.block_residual_in_fp32:
                 hidden_states, residual = hidden_states
@@ -454,13 +428,13 @@ class RodimusModel(RodimusPreTrainedModel):
             last_hidden_state=hidden_states,
             past_key_values=past_key_values,
             hidden_states=all_hidden_states,
-            attentions=all_attns
+            attentions=all_attns,
         )
 
 
-class RodimusForCausalLM(RodimusPreTrainedModel, GenerationMixin):
+class RodimusForCausalLM(RodimusPreTrainedModel, FLAForCausalLM, FLAUnsupportedCacheGenerationMixin):
 
-    _tied_weights_keys = ["lm_head.weight"]
+    _tied_weights_keys = {"lm_head.weight": "model.embeddings.weight"}
 
     def __init__(self, config):
         super().__init__(config)
@@ -471,139 +445,3 @@ class RodimusForCausalLM(RodimusPreTrainedModel, GenerationMixin):
 
         # Initialize weights and apply final processing
         self.post_init()
-
-    def get_input_embeddings(self):
-        return self.model.embeddings
-
-    def set_input_embeddings(self, value):
-        self.model.embeddings = value
-
-    def get_output_embeddings(self):
-        return self.lm_head
-
-    def set_output_embeddings(self, new_embeddings):
-        self.lm_head = new_embeddings
-
-    def set_decoder(self, decoder):
-        self.model = decoder
-
-    def get_decoder(self):
-        return self.model
-
-    def generate(self, *args, **kwargs):
-        try:
-            return super().generate(*args, **kwargs)
-        except AttributeError as exception:
-            if 'past_key_values' in str(exception):
-                raise AttributeError(
-                    f"You tried to call `generate` with a decoding strategy that manipulates `past_key_values`, "
-                    f"which is not supported for {self.__class__.__name__}. "
-                    f"Try another generation strategy instead. "
-                    f"For the available generation strategies, check this doc: "
-                    f"https://huggingface.co/docs/transformers/en/generation_strategies#decoding-strategies"
-                )
-            else:
-                raise exception
-
-    @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
-    def prepare_inputs_for_generation(
-        self,
-        input_ids: torch.LongTensor = None,
-        past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-        use_cache: bool = True,
-        logits_to_keep: Optional[int] = None,
-        **kwargs
-    ):
-        # only last token for `inputs_ids` if the `past_key_values` is not empty.
-        if past_key_values is not None and len(past_key_values) > 0:
-            input_ids = input_ids[:, -1:]
-        # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
-        if inputs_embeds is not None and len(past_key_values) == 0:
-            model_inputs = {'inputs_embeds': inputs_embeds}
-        else:
-            # The `contiguous()` here is necessary to have a static stride during decoding. torchdynamo otherwise
-            # recompiles graphs as the stride of the inputs is a guard.
-            # Ref: https://github.com/huggingface/transformers/pull/29114
-            # TODO: use `next_tokens` directly instead.
-            model_inputs = {'input_ids': input_ids.contiguous()}
-
-        if logits_to_keep is not None:
-            model_inputs['logits_to_keep'] = logits_to_keep
-
-        model_inputs.update({
-            'past_key_values': past_key_values,
-            'use_cache': use_cache,
-            'attention_mask': attention_mask,
-        })
-        return model_inputs
-
-    @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
-    def forward(
-        self,
-        input_ids: torch.LongTensor = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-        past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
-        labels: Optional[torch.LongTensor] = None,
-        use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-        logits_to_keep: Optional[int] = 0,
-        **kwargs: Unpack[Dict]
-    ) -> Union[Tuple, CausalLMOutputWithPast]:
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
-        outputs = self.model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            inputs_embeds=inputs_embeds,
-            past_key_values=past_key_values,
-            use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-            **kwargs
-        )
-
-        hidden_states = outputs[0]
-        fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training
-
-        loss, logits = None, None
-        if not fuse_linear_and_cross_entropy or labels is None:
-            logits = self.lm_head(hidden_states if logits_to_keep is None else hidden_states[:, -logits_to_keep:])
-        if labels is not None:
-            if getattr(self, 'criterion', None) is None:
-                if fuse_linear_and_cross_entropy:
-                    criterion = FusedLinearCrossEntropyLoss(use_l2warp=self.config.use_l2warp)
-                elif self.config.fuse_cross_entropy:
-                    criterion = FusedCrossEntropyLoss(inplace_backward=True)
-                else:
-                    criterion = nn.CrossEntropyLoss()
-            else:
-                criterion = self.criterion
-            labels = labels.to(hidden_states.device)
-            labels = torch.cat((labels[..., 1:], torch.full_like(labels[:, :1], criterion.ignore_index)), 1)
-            if fuse_linear_and_cross_entropy:
-                loss = criterion(hidden_states, labels, self.lm_head.weight, self.lm_head.bias)
-            else:
-                loss = criterion(logits.view(labels.numel(), -1), labels.view(-1))
-                loss = l2_warp(loss, logits) if self.config.use_l2warp else loss
-
-        if not return_dict:
-            output = (logits,) + outputs[1:]
-            return (loss,) + output if loss is not None else output
-
-        return CausalLMOutputWithPast(
-            loss=loss,
-            logits=logits,
-            past_key_values=outputs.past_key_values,
-            hidden_states=outputs.hidden_states,
-            attentions=outputs.attentions,
-        )

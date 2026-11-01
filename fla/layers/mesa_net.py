@@ -1,16 +1,20 @@
-# -*- coding: utf-8 -*-
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Dict, Optional, Tuple
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
 from einops import rearrange
 from torch.nn import functional as F
 
-from fla.layers.utils import get_unpad_data, index_first_axis, pad_input
+from fla.layers.utils import get_layer_cache, repad_hidden_states, unpad_hidden_states, update_layer_cache
 from fla.modules import FusedRMSNormGated, RMSNorm, ShortConvolution
 from fla.modules.l2norm import l2_norm
 from fla.ops.mesa_net import chunk_mesa_net, mesa_net_decoding_one_step
@@ -18,12 +22,12 @@ from fla.ops.mesa_net import chunk_mesa_net, mesa_net_decoding_one_step
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
-    from fla.models.utils import Cache
+    from fla.models.cache_utils import Cache
 
 
 class MesaNet(nn.Module):
     """
-    The layer implementaion for [MesaNet: Sequence Modeling by Locally Optimal Test-Time Training].  # noqa
+    The layer implementation for [MesaNet: Sequence Modeling by Locally Optimal Test-Time Training].  # noqa
 
     Args:
         hidden_size (int, Optional):
@@ -67,7 +71,7 @@ class MesaNet(nn.Module):
         lambda_lower_bound: float = 0.25,
         max_cg_step_training: int = 30,
         max_cg_step_decoding: int = 30,
-        **kwargs
+        **kwargs,
     ) -> MesaNet:
         super().__init__()
 
@@ -118,18 +122,18 @@ class MesaNet(nn.Module):
             self.g_proj = nn.Linear(hidden_size, self.value_dim, bias=False)
             self.o_norm = FusedRMSNormGated(self.head_v_dim, eps=norm_eps)
         else:
-            self.o_norm = RMSNorm(self.head_v_dim, eps=norm_eps)
+            self.o_norm = RMSNorm(self.head_v_dim, eps=norm_eps, dtype=torch.float32)
         self.o_proj = nn.Linear(self.value_dim, hidden_size, bias=False)
 
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        past_key_values: Optional[Cache] = None,
-        use_cache: Optional[bool] = False,
-        output_attentions: Optional[bool] = False,
-        **kwargs: Unpack[Dict]
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Cache]]:
+        attention_mask: torch.Tensor | None = None,
+        past_key_values: Cache | None = None,
+        use_cache: bool | None = False,
+        output_attentions: bool | None = False,
+        **kwargs: Unpack[dict],
+    ) -> tuple[torch.Tensor, torch.Tensor | None, Cache | None]:
         if attention_mask is not None:
             assert len(attention_mask.shape) == 2, (
                 "Expected attention_mask as a 0-1 matrix with shape [batch_size, seq_len] "
@@ -138,29 +142,26 @@ class MesaNet(nn.Module):
             )
 
         batch_size, q_len, _ = hidden_states.shape
-        last_state = None
-        if past_key_values is not None and len(past_key_values) > self.layer_idx:
-            last_state = past_key_values[self.layer_idx]
+        last_state = get_layer_cache(self, past_key_values)
 
-        cu_seqlens = kwargs.get('cu_seqlens', None)
-        if attention_mask is not None:
-            indices, cu_seqlens, _ = get_unpad_data(attention_mask[:, -q_len:])
-            hidden_states = index_first_axis(rearrange(hidden_states, "b s ... -> (b s) ..."), indices).unsqueeze(0)
+        cu_seqlens = kwargs.get('cu_seqlens')
+        hidden_states, indices, cu_seqlens = unpad_hidden_states(hidden_states, cu_seqlens, attention_mask, q_len)
 
         conv_state_q, conv_state_k = None, None
         if last_state is not None:
             conv_state_q, conv_state_k = last_state['conv_state']
+        prev_conv_state_q = conv_state_q
         q, conv_state_q = self.q_conv1d(
             x=self.q_proj(hidden_states),
             cache=conv_state_q,
             output_final_state=use_cache,
-            cu_seqlens=cu_seqlens
+            cu_seqlens=cu_seqlens,
         )
         k, conv_state_k = self.k_conv1d(
             x=self.k_proj(hidden_states),
             cache=conv_state_k,
             output_final_state=use_cache,
-            cu_seqlens=cu_seqlens
+            cu_seqlens=cu_seqlens,
         )
         v = self.v_proj(hidden_states)
 
@@ -173,9 +174,11 @@ class MesaNet(nn.Module):
 
         last_h_kk, last_h_kv = last_state['recurrent_state'] if last_state is not None else (None, None)
 
-        # prefilling or training
+        # prefilling, training, or cached inputs without guaranteed one-step shapes
         # Note that QK will be normalized inside the kernel to avoid saving the activations, thereby reducing the memory usage.
-        if last_state is None:
+        # no-grad single-token convolution updates its cache in place
+        is_decoding = q_len == 1 if cu_seqlens is None else conv_state_q is not None and conv_state_q is prev_conv_state_q
+        if last_state is None or not is_decoding:
             o, h_kk, h_kv = chunk_mesa_net(
                 q=q,
                 k=k,
@@ -183,6 +186,8 @@ class MesaNet(nn.Module):
                 g=g,
                 beta=beta,
                 lamb=lamb,
+                h_kk_init=last_h_kk,
+                h_kv_init=last_h_kv,
                 output_final_state=use_cache,
                 max_CG_iteration=self.max_cg_step_training,
                 use_qk_l2norm_in_kernel=True,
@@ -190,28 +195,29 @@ class MesaNet(nn.Module):
             )
         # decoding
         else:
+            dim = 1 if cu_seqlens is None else 0
             q = l2_norm(q)
             k = l2_norm(k)
             o, h_kk, h_kv = mesa_net_decoding_one_step(
-                q=q.squeeze(0),
-                k=k.squeeze(0),
-                v=v.squeeze(0),
-                g=g.squeeze(0),
-                beta=beta.squeeze(0),
+                q=q.squeeze(dim),
+                k=k.squeeze(dim),
+                v=v.squeeze(dim),
+                g=g.squeeze(dim),
+                beta=beta.squeeze(dim),
                 lamb=lamb,
                 prev_h_kk=last_h_kk,
                 prev_h_kv=last_h_kv,
-                max_CG_iteration=self.max_cg_step_decoding
+                max_CG_iteration=self.max_cg_step_decoding,
             )
-            o = o.unsqueeze(0).to(q)
+            o = o.unsqueeze(dim).to(q)
 
-        if past_key_values is not None:
-            past_key_values.update(
-                recurrent_state=(h_kk, h_kv),
-                conv_state=(conv_state_q, conv_state_k),
-                layer_idx=self.layer_idx,
-                offset=q_len
-            )
+        update_layer_cache(
+            self,
+            past_key_values,
+            recurrent_state=(h_kk, h_kv),
+            conv_state=(conv_state_q, conv_state_k),
+            offset=q_len,
+        )
         if self.use_output_gate:
             g = rearrange(self.g_proj(hidden_states), '... (h d) -> ... h d', d=self.head_v_dim)
             o = self.o_norm(o, g)
@@ -219,6 +225,5 @@ class MesaNet(nn.Module):
             o = self.o_norm(o)
         o = rearrange(o, 'b t h d -> b t (h d)')
         o = self.o_proj(o)
-        if attention_mask is not None:
-            o = pad_input(o.squeeze(0), indices, batch_size, q_len)
+        o = repad_hidden_states(o, indices, batch_size, q_len)
         return o, None, past_key_values

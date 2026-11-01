@@ -14,9 +14,9 @@ jobs:
         python-version: ['3.12']
     steps:
       - name: Check out repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.0
       - name: Setup python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6.2.0
         with:
           python-version: ${{ matrix.python-version }}
       - name: Update pip
@@ -27,6 +27,6 @@ jobs:
           pre-commit install-hooks
       - name: Get changed files
         id: changed-files
-        uses: tj-actions/changed-files@v46.0.5
+        uses: tj-actions/changed-files@v47.0.6
       - name: Lint modified files
         run: pre-commit run --files ${{ steps.changed-files.outputs.all_changed_files }}

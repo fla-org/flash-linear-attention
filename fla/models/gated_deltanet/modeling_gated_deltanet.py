@@ -1,42 +1,39 @@
-# -*- coding: utf-8 -*-
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 from __future__ import annotations
 
 import math
-import warnings
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
-import torch.utils.checkpoint
-from transformers.generation import GenerationMixin
-from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
-from transformers.modeling_utils import PreTrainedModel
+from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.utils import logging
-from transformers.utils.deprecation import deprecate_kwarg
 
-from fla.layers.attn import Attention
 from fla.layers.gated_deltanet import GatedDeltaNet
 from fla.models.gated_deltanet.configuration_gated_deltanet import GatedDeltaNetConfig
-from fla.models.utils import Cache
-from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
+from fla.models.generation_utils import FLAUnsupportedCacheGenerationMixin
+from fla.models.modeling_utils import FLAForCausalLM, FLAModel, FLAPreTrainedModel, get_attention
 from fla.modules import GatedMLP as GatedDeltaNetMLP
 from fla.modules import RMSNorm
-from fla.modules.l2warp import l2_warp
-
-try:
-    from torch.distributed.tensor import DTensor
-except (ImportError, AttributeError):
-    DTensor = None
+from fla.ops.attnres import fused_attnres
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
+
+    from fla.models.cache_utils import Cache
 
 
 logger = logging.get_logger(__name__)
 
 
-class GatedDeltaNetBlock(nn.Module):
+class GatedDeltaNetBlock(GradientCheckpointingLayer):
+
     def __init__(self, config: GatedDeltaNetConfig, layer_idx: int):
         super().__init__()
 
@@ -44,31 +41,22 @@ class GatedDeltaNetBlock(nn.Module):
         self.layer_idx = layer_idx
 
         self.attn_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
-        if config.attn is not None and layer_idx in config.attn['layers']:
-            self.attn = Attention(
-                hidden_size=config.hidden_size,
-                num_heads=config.attn['num_heads'],
-                num_kv_heads=config.attn['num_kv_heads'],
-                qkv_bias=config.attn['qkv_bias'],
-                window_size=config.attn['window_size'],
-                rope_theta=config.attn['rope_theta'],
-                max_position_embeddings=config.max_position_embeddings,
-                layer_idx=layer_idx
-            )
-        else:
+        self.attn = get_attention(config=config, layer_idx=layer_idx)
+        if self.attn is None:
             self.attn = GatedDeltaNet(
-                mode=config.attn_mode,
                 hidden_size=config.hidden_size,
                 expand_v=config.expand_v,
                 head_dim=config.head_dim,
                 num_heads=config.num_heads,
                 num_v_heads=config.num_v_heads,
+                mode=config.attn_mode,
                 use_gate=config.use_gate,
                 use_short_conv=config.use_short_conv,
                 allow_neg_eigval=config.allow_neg_eigval,
                 conv_size=config.conv_size,
+                layer_idx=layer_idx,
                 norm_eps=config.norm_eps,
-                layer_idx=layer_idx
+                output_gate_activation=config.output_gate_activation,
             )
         self.mlp_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
         self.mlp = GatedDeltaNetMLP(
@@ -76,43 +64,95 @@ class GatedDeltaNetBlock(nn.Module):
             hidden_ratio=config.hidden_ratio,
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
-            fuse_swiglu=config.fuse_swiglu
+            fuse_swiglu=config.fuse_swiglu,
         )
+
+        self.use_attnres = config.attnres_block_size is not None
+        if self.use_attnres:
+            self.attn_res_proj = nn.Linear(in_features=config.hidden_size, out_features=1, bias=False)
+            self.attn_res_norm = nn.RMSNorm(normalized_shape=config.hidden_size, eps=config.norm_eps)
+            self.mlp_res_proj = nn.Linear(in_features=config.hidden_size, out_features=1, bias=False)
+            self.mlp_res_norm = nn.RMSNorm(normalized_shape=config.hidden_size, eps=config.norm_eps)
+            block_size = config.attnres_block_size
+            self.attnres_is_attn_boundary = (2 * layer_idx) % block_size == 0
+            self.attnres_is_mlp_boundary = (2 * layer_idx + 1) % block_size == 0
+            self.attn_res_proj._is_attnres_proj = True
+            self.mlp_res_proj._is_attnres_proj = True
 
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
-        use_cache: Optional[bool] = False,
-        output_attentions: Optional[bool] = False,
-        **kwargs: Unpack[Dict]
-    ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
-        residual = hidden_states
-        hidden_states = self.attn_norm(hidden_states)
+        attention_mask: torch.Tensor | None = None,
+        past_key_values: Cache | list[torch.FloatTensor] | None = None,
+        use_cache: bool | None = False,
+        output_attentions: bool | None = False,
+        attnres_states: list[torch.Tensor] | None = None,
+        **kwargs: Unpack[dict],
+    ) -> tuple[torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None]:
+        if self.use_attnres:
+            prefix_sum = hidden_states
+            if attnres_states is None:
+                # at the first layer, attnres is identity (p=1, mix=v[0]), so apply prenorm directly.
+                # this matches the L>1 kernel's output_rms_weight path and Megatron-LM's empty block_residual bypass.
+                hidden_states = self.attn_norm(prefix_sum)
+                attnres_states = [prefix_sum]
+                prefix_sum = None
+            else:
+                residuals = [*attnres_states, prefix_sum]
+                if self.attnres_is_attn_boundary:
+                    attnres_states = residuals
+                    prefix_sum = None
+                hidden_states = fused_attnres(
+                    query=self.attn_res_proj.weight,
+                    residuals=residuals,
+                    rms_weight=self.attn_res_norm.weight,
+                    output_rms_weight=self.attn_norm.weight,
+                    rms_eps=self.attn_res_norm.eps,
+                )
+        else:
+            residual = hidden_states
+            hidden_states = self.attn_norm(hidden_states)
         hidden_states, attentions, past_key_values = self.attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             past_key_values=past_key_values,
             use_cache=use_cache,
             output_attentions=output_attentions,
-            **kwargs
+            **kwargs,
         )
-        if self.config.fuse_norm:
-            hidden_states, residual = self.mlp_norm(hidden_states, residual, True)
+
+        if self.use_attnres:
+            prefix_sum = hidden_states if prefix_sum is None else prefix_sum + hidden_states
+            residuals = [*attnres_states, prefix_sum]
+            if self.attnres_is_mlp_boundary:
+                attnres_states = residuals
+                prefix_sum = None
+            hidden_states = fused_attnres(
+                query=self.mlp_res_proj.weight,
+                residuals=residuals,
+                rms_weight=self.mlp_res_norm.weight,
+                output_rms_weight=self.mlp_norm.weight,
+                rms_eps=self.mlp_res_norm.eps,
+            )
+        elif self.config.fuse_norm:
+            hidden_states, residual = self.mlp_norm(x=hidden_states, residual=residual, prenorm=True)
         else:
             hidden_states = residual + hidden_states
             residual = hidden_states
             hidden_states = self.mlp_norm(hidden_states)
         hidden_states = self.mlp(hidden_states, **kwargs)
-        hidden_states = residual + hidden_states
 
-        outputs = (hidden_states, attentions, past_key_values)
+        if self.use_attnres:
+            hidden_states = hidden_states if prefix_sum is None else prefix_sum + hidden_states
+        else:
+            hidden_states = residual + hidden_states
+
+        outputs = (hidden_states, attentions, past_key_values, attnres_states)
 
         return outputs
 
 
-class GatedDeltaNetPreTrainedModel(PreTrainedModel):
+class GatedDeltaNetPreTrainedModel(FLAPreTrainedModel):
 
     config_class = GatedDeltaNetConfig
     base_model_prefix = 'model'
@@ -123,49 +163,28 @@ class GatedDeltaNetPreTrainedModel(PreTrainedModel):
     def __init__(self, *inputs, **kwargs):
         super().__init__(*inputs, **kwargs)
 
-    def _init_weights(
-        self,
-        module: nn.Module,
-        prenorm_residual_strategy: Optional[str] = None,
-        num_residuals_per_layer: int = 2,
-    ):
-        if isinstance(module, GatedDeltaNet):
-
-            # --- A_log ---
-            A = torch.empty(module.num_v_heads, dtype=torch.float32).uniform_(0, 16)
+    def _init_weights(self, module: nn.Module, prenorm_residual_strategy: str | None = None, num_residuals_per_layer: int = 2):
+        if isinstance(module, GatedDeltaNet) and next(module.parameters()).device.type != 'meta':
             with torch.no_grad():
-                if not isinstance(module.A_log, DTensor):
-                    module.A_log.copy_(torch.log(A))
-                else:
-                    logger.warning_once("`A_log` is a DTensor, skipping initialization")
-            module.A_log._no_weight_decay = True
-
-            # --- dt_bias ---
-            # hard coded for now
-            dt_min = 0.001
-            dt_max = 0.1
-            dt_init_floor = 1e-4
-            dt = torch.exp(
-                torch.rand(module.num_v_heads) * (math.log(dt_max) - math.log(dt_min))
-                + math.log(dt_min)
-            )
-            dt = torch.clamp(dt, min=dt_init_floor)
-            # Inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
-            inv_dt = dt + torch.log(-torch.expm1(-dt))
-            with torch.no_grad():
-                if not isinstance(module.dt_bias, DTensor):
+                if not getattr(module.A_log, '_is_hf_initialized', False):
+                    module.A_log.copy_(nn.init.uniform_(module.A_log, a=0, b=16).log())
+                module.A_log._no_weight_decay = True
+                if not getattr(module.dt_bias, '_is_hf_initialized', False):
+                    dt = torch.exp(
+                        nn.init.uniform_(module.dt_bias) * (math.log(0.1) - math.log(0.001)) + math.log(0.001),
+                    ).clamp(min=1e-4)
+                    # inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
+                    inv_dt = dt + torch.log(-torch.expm1(-dt))
                     module.dt_bias.copy_(inv_dt)
-                else:
-                    logger.warning_once("`dt_bias` is a DTensor, skipping initialization")
-            # Just to be explicit. Without this we already don't put wd on dt_bias because of the check
-            # name.endswith("bias") in param_grouping.py
-            module.dt_bias._no_weight_decay = True
-            module.dt_bias._no_reinit = True
+                module.dt_bias._no_weight_decay = True
 
         elif isinstance(module, (nn.Linear, nn.Conv1d)):
-            # Slightly different from the TF version which uses truncated_normal for initialization
-            # cf https://github.com/pytorch/pytorch/pull/5617
-            nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
+            if getattr(module, '_is_attnres_proj', False):
+                nn.init.zeros_(module.weight)
+            else:
+                # unlike the TF version, which uses truncated_normal for initialization:
+                # cf https://github.com/pytorch/pytorch/pull/5617
+                nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
@@ -174,22 +193,16 @@ class GatedDeltaNetPreTrainedModel(PreTrainedModel):
             module.reset_parameters()
 
         if prenorm_residual_strategy is not None:
-            # Reinitialize selected weights subject to the OpenAI GPT-2 Paper Scheme:
-            #   > A modified initialization which accounts for the accumulation on the residual path with model depth. Scale
-            #   > the weights of residual layers at initialization by a factor of 1/√N where N is the # of residual layers.
-            #   >   -- GPT-2 :: https://openai.com/blog/better-language-models/
-            #
-            # Reference (Megatron-LM): https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/model/gpt_model.py
+            # scale residual weights by 1/sqrt(N), where N is the number of residual layers:
+            # https://openai.com/blog/better-language-models/
+            # reference: https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/models/gpt/gpt_model.py
             p = None
             if hasattr(module, 'o_proj'):
                 p = module.o_proj.weight
             elif hasattr(module, 'down_proj'):
                 p = module.down_proj.weight
             if p is not None:
-                # Special Scaled Initialization --> There are 2 Layer Norms per Transformer Block
-                # Following Pytorch init, except scale by 1/sqrt(2 * n_layer)
-                # We need to reinit p since this code could be called multiple times
-                # Having just p *= scale would repeatedly scale it down
+                # reinitialize before scaling; repeated initialization must not compound the scale factor.
                 if prenorm_residual_strategy == 'rescale':
                     nn.init.kaiming_uniform_(p, a=math.sqrt(5))
                     with torch.no_grad():
@@ -200,255 +213,43 @@ class GatedDeltaNetPreTrainedModel(PreTrainedModel):
                     raise ValueError(f"Invalid prenorm_residual_strategy: {prenorm_residual_strategy}")
 
 
-class GatedDeltaNetModel(GatedDeltaNetPreTrainedModel):
+class GatedDeltaNetModel(GatedDeltaNetPreTrainedModel, FLAModel):
 
     def __init__(self, config: GatedDeltaNetConfig):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
-        self.embeddings = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
-        self.layers = nn.ModuleList([GatedDeltaNetBlock(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
+        self.embeddings = nn.Embedding(
+            num_embeddings=config.vocab_size,
+            embedding_dim=config.hidden_size,
+            padding_idx=self.padding_idx,
+        )
+        self.layers = nn.ModuleList(
+            modules=[GatedDeltaNetBlock(config=config, layer_idx=layer_idx) for layer_idx in range(config.num_hidden_layers)],
+        )
         self.norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
+
+        self.use_attnres = config.attnres_block_size is not None
+        if self.use_attnres:
+            self.res_proj = nn.Linear(in_features=config.hidden_size, out_features=1, bias=False)
+            self.res_norm = nn.RMSNorm(normalized_shape=config.hidden_size, eps=config.norm_eps)
+            self.res_proj._is_attnres_proj = True
 
         self.gradient_checkpointing = False
 
         self.post_init()
 
-    def get_input_embeddings(self):
-        return self.embeddings
 
-    def set_input_embeddings(self, value):
-        self.embeddings = value
+class GatedDeltaNetForCausalLM(GatedDeltaNetPreTrainedModel, FLAForCausalLM, FLAUnsupportedCacheGenerationMixin):
 
-    def forward(
-        self,
-        input_ids: Optional[torch.LongTensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,  # noqa
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
-        use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-        **kwargs: Unpack[Dict]
-    ) -> Union[Tuple, BaseModelOutputWithPast]:
-        if output_attentions:
-            warnings.warn("`GatedDeltaNetModel` does not `output_attentions` now, setting it to `False`.")
-            output_attentions = False
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        use_cache = use_cache if use_cache is not None else (self.config.use_cache if not self.training else False)
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
-        # retrieve input_ids and inputs_embeds
-        if input_ids is not None and inputs_embeds is not None:
-            raise ValueError("You cannot specify both input_ids and inputs_embeds at the same time")
-        if input_ids is None and inputs_embeds is None:
-            raise ValueError("You have to specify either input_ids or inputs_embeds")
-
-        if inputs_embeds is None:
-            inputs_embeds = self.embeddings(input_ids)
-        hidden_states = inputs_embeds
-
-        if use_cache and not isinstance(past_key_values, Cache):
-            past_key_values = Cache.from_legacy_cache(past_key_values)
-
-        if self.gradient_checkpointing and self.training and use_cache:
-            logger.warning_once("`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`...")
-            use_cache = False
-
-        all_hidden_states = () if output_hidden_states else None
-        all_attns = () if output_attentions else None
-        for layer in self.layers:
-            if output_hidden_states:
-                all_hidden_states += (hidden_states,)
-
-            if self.gradient_checkpointing and self.training:
-                hidden_states, attentions, past_key_values = self._gradient_checkpointing_func(
-                    layer.__call__,
-                    hidden_states,
-                    attention_mask,
-                    past_key_values,
-                    use_cache,
-                    output_attentions,
-                    **kwargs
-                )
-            else:
-                hidden_states, attentions, past_key_values = layer(
-                    hidden_states,
-                    attention_mask=attention_mask,
-                    past_key_values=past_key_values,
-                    use_cache=use_cache,
-                    output_attentions=output_attentions,
-                    **kwargs
-                )
-
-            if output_attentions:
-                all_attns += (attentions,)
-
-        hidden_states = self.norm(hidden_states)
-
-        # add hidden states from the last decoder layer
-        if output_hidden_states:
-            all_hidden_states += (hidden_states,)
-
-        if not return_dict:
-            return tuple(i for i in [hidden_states, past_key_values, all_hidden_states, all_attns] if i is not None)
-        return BaseModelOutputWithPast(
-            last_hidden_state=hidden_states,
-            past_key_values=past_key_values,
-            hidden_states=all_hidden_states,
-            attentions=all_attns
-        )
-
-
-class GatedDeltaNetForCausalLM(GatedDeltaNetPreTrainedModel, GenerationMixin):
-
-    _tied_weights_keys = ["lm_head.weight"]
+    _tied_weights_keys = {"lm_head.weight": "model.embeddings.weight"}
 
     def __init__(self, config):
         super().__init__(config)
         self.model = GatedDeltaNetModel(config)
         self.vocab_size = config.vocab_size
-        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        self.lm_head = nn.Linear(in_features=config.hidden_size, out_features=config.vocab_size, bias=False)
         self.criterion = None
 
-        # Initialize weights and apply final processing
         self.post_init()
-
-    def get_input_embeddings(self):
-        return self.model.embeddings
-
-    def set_input_embeddings(self, value):
-        self.model.embeddings = value
-
-    def get_output_embeddings(self):
-        return self.lm_head
-
-    def set_output_embeddings(self, new_embeddings):
-        self.lm_head = new_embeddings
-
-    def set_decoder(self, decoder):
-        self.model = decoder
-
-    def get_decoder(self):
-        return self.model
-
-    def generate(self, *args, **kwargs):
-        try:
-            return super().generate(*args, **kwargs)
-        except AttributeError as exception:
-            if 'past_key_values' in str(exception):
-                raise AttributeError(
-                    f"You tried to call `generate` with a decoding strategy that manipulates `past_key_values`, "
-                    f"which is not supported for {self.__class__.__name__}. "
-                    f"Try another generation strategy instead. "
-                    f"For the available generation strategies, check this doc: "
-                    f"https://huggingface.co/docs/transformers/en/generation_strategies#decoding-strategies"
-                )
-            else:
-                raise exception
-
-    @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
-    def prepare_inputs_for_generation(
-        self,
-        input_ids: torch.LongTensor = None,
-        past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-        use_cache: bool = True,
-        logits_to_keep: Optional[int] = None,
-        **kwargs
-    ):
-        # only last token for `inputs_ids` if the `past_key_values` is not empty.
-        if past_key_values is not None and len(past_key_values) > 0:
-            input_ids = input_ids[:, -1:]
-        # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
-        if inputs_embeds is not None and len(past_key_values) == 0:
-            model_inputs = {'inputs_embeds': inputs_embeds}
-        else:
-            # The `contiguous()` here is necessary to have a static stride during decoding. torchdynamo otherwise
-            # recompiles graphs as the stride of the inputs is a guard.
-            # Ref: https://github.com/huggingface/transformers/pull/29114
-            # TODO: use `next_tokens` directly instead.
-            model_inputs = {'input_ids': input_ids.contiguous()}
-
-        if logits_to_keep is not None:
-            model_inputs['logits_to_keep'] = logits_to_keep
-
-        model_inputs.update({
-            'past_key_values': past_key_values,
-            'use_cache': use_cache,
-            'attention_mask': attention_mask,
-        })
-        return model_inputs
-
-    @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
-    def forward(
-        self,
-        input_ids: torch.LongTensor = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-        past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
-        labels: Optional[torch.LongTensor] = None,
-        use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-        logits_to_keep: Optional[int] = 0,
-        **kwargs: Unpack[Dict]
-    ) -> Union[Tuple, CausalLMOutputWithPast]:
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
-        outputs = self.model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            inputs_embeds=inputs_embeds,
-            past_key_values=past_key_values,
-            use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-            **kwargs
-        )
-
-        hidden_states = outputs[0]
-        fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training and labels is not None
-
-        loss, logits = None, None
-        if not fuse_linear_and_cross_entropy or labels is None:
-            logits = self.lm_head(hidden_states if logits_to_keep is None else hidden_states[:, -logits_to_keep:])
-        if labels is not None:
-            if getattr(self, 'criterion', None) is None:
-                if fuse_linear_and_cross_entropy:
-                    criterion = FusedLinearCrossEntropyLoss(use_l2warp=self.config.use_l2warp)
-                elif self.config.fuse_cross_entropy:
-                    criterion = FusedCrossEntropyLoss(inplace_backward=True)
-                else:
-                    criterion = nn.CrossEntropyLoss()
-            else:
-                criterion = self.criterion
-            labels = labels.to(hidden_states.device)
-            labels = torch.cat((labels[..., 1:], torch.full_like(labels[:, :1], criterion.ignore_index)), 1)
-            if fuse_linear_and_cross_entropy:
-                loss = criterion(hidden_states, labels, self.lm_head.weight, self.lm_head.bias)
-            else:
-                loss = criterion(logits.view(labels.numel(), -1), labels.view(-1))
-                loss = l2_warp(loss, logits) if self.config.use_l2warp else loss
-
-        if not return_dict:
-            output = (logits,) + outputs[1:]
-            return (loss,) + output if loss is not None else output
-
-        return CausalLMOutputWithPast(
-            loss=loss,
-            logits=logits,
-            past_key_values=outputs.past_key_values,
-            hidden_states=outputs.hidden_states,
-            attentions=outputs.attentions,
-        )

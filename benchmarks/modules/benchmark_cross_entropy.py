@@ -1,11 +1,24 @@
-# -*- coding: utf-8 -*-
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
+import argparse
+import os
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import triton
 
+from fla.backends import GluonBackend
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
+
+LOGITS_PROVIDERS = ['triton', 'triton_bwd']
+if GluonBackend.is_available() and os.environ.get('FLA_DISABLE_BACKEND_DISPATCH') != '1':
+    LOGITS_PROVIDERS.extend(['gluon', 'gluon_bwd'])
 
 
 @triton.testing.perf_report(
@@ -27,7 +40,7 @@ from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
         # name for the plot. Used also as a file name for saving the plot.
         plot_name="Performance",
         args={},
-    )
+    ),
 )
 def benchmark(T, provider):
     from fla.utils import device
@@ -63,5 +76,70 @@ def benchmark(T, provider):
     return results
 
 
+@triton.testing.perf_report(
+    triton.testing.Benchmark(
+        x_names=['N', 'V', 'label_smoothing', 'logit_softcapping', 'dtype'],
+        x_vals=[
+            (1024, 32000, 0.0, None, torch.bfloat16),
+            (2048, 128256, 0.0, None, torch.bfloat16),
+            (63, 131071, 0.0, None, torch.bfloat16),
+            (1024, 32000, 0.0, 3.0, torch.bfloat16),
+            (2047, 65539, 0.0, 3.0, torch.bfloat16),
+            (7, 129, 0.0, None, torch.bfloat16),
+            (7, 8193, 0.0, None, torch.float16),
+            (1024, 16384, 0.0, None, torch.bfloat16),
+            (1024, 16384, 0.0, None, torch.float32),
+            (1025, 32000, 0.1, None, torch.bfloat16),
+            (511, 32003, 0.1, 3.0, torch.float32),
+        ],
+        line_arg='provider',
+        line_vals=LOGITS_PROVIDERS,
+        line_names=LOGITS_PROVIDERS,
+        styles=[('blue', '-'), ('blue', '--'), ('red', '-'), ('red', '--')][:len(LOGITS_PROVIDERS)],
+        ylabel='Execution Time (ms)',
+        plot_name='CrossEntropyLogits',
+        args={},
+    ),
+)
+def benchmark_logits(
+    N: int,
+    V: int,
+    label_smoothing: float,
+    logit_softcapping: float | None,
+    dtype: torch.dtype,
+    provider: str,
+):
+    from fla.utils import device
+
+    torch.manual_seed(42)
+    os.environ['FLA_GLUON'] = '0'
+    os.environ['FLA_CE_GLUON'] = '1' if provider.startswith('gluon') else '0'
+    logits = torch.randn(N, V, device=device, dtype=dtype, requires_grad=True)
+    target = torch.randint(V, (N,), device=device)
+    target[::7] = -100
+    criterion = FusedCrossEntropyLoss(label_smoothing=label_smoothing, logit_softcapping=logit_softcapping)
+    quantiles = [0.5, 0.2, 0.8]
+    if provider.endswith('_bwd'):
+        return triton.testing.do_bench(
+            lambda: criterion(input=logits, target=target).backward(),
+            grad_to_none=[logits],
+            quantiles=quantiles,
+        )
+    return triton.testing.do_bench(lambda: criterion(input=logits, target=target), quantiles=quantiles)
+
+
 if __name__ == '__main__':
-    benchmark.run(print_data=True)
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--logits-only', action='store_true', help='Compare Triton and Gluon CE without the linear projection')
+    args = parser.parse_args()
+
+    try:
+        from runner import run_module_benchmark
+    except ModuleNotFoundError:
+        from benchmarks.modules.runner import run_module_benchmark
+
+    run_module_benchmark(
+        mark=benchmark_logits if args.logits_only else benchmark,
+        script_file=__file__,
+        visualize=not args.logits_only,
+    )

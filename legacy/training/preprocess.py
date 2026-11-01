@@ -1,10 +1,15 @@
-# -*- coding: utf-8 -*-
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 from __future__ import annotations
 
 import argparse
 from itertools import chain
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import torch
 from datasets import load_dataset
@@ -15,12 +20,12 @@ logger = logging.get_logger(__name__)
 
 
 def tokenize(
-    examples: Dict[str, List[Any]],
+    examples: dict[str, list[Any]],
     tokenizer: AutoTokenizer,
     seq_len: int = 2048,
     ctx_len: int = None,
-    return_offsets: bool = False
-) -> Dict[str, List[List[int]]]:
+    return_offsets: bool = False,
+) -> dict[str, list[list[int]]]:
     """
     Tokenize the input text and split into chunks of specified context length.
 
@@ -63,7 +68,7 @@ def tokenize(
 
 def preprocess(
     dataset: str,
-    name: Optional[str] = None,
+    name: str | None = None,
     split: str = 'train',
     seed: int = 42,
     output: str = 'data',
@@ -72,7 +77,7 @@ def preprocess(
     batch_size: int = 2048,
     seq_len: int = 2048,
     ctx_len: int = None,
-    return_offsets: bool = False
+    return_offsets: bool = False,
 ) -> None:
     """
     Load, tokenize, and save the processed dataset.
@@ -123,7 +128,7 @@ def preprocess(
         batch_size=batch_size,
         remove_columns=remove_columns,
         num_proc=num_proc,
-        desc="Running tokenizer on dataset"
+        desc="Running tokenizer on dataset",
     )
 
     logger.info(f'Saving processed dataset to {tokenized_path}')
@@ -156,5 +161,5 @@ if __name__ == "__main__":
         batch_size=args.batch_size,
         seq_len=args.seq_len,
         ctx_len=args.ctx_len,
-        return_offsets=args.return_offsets
+        return_offsets=args.return_offsets,
     )

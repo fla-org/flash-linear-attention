@@ -1,4 +1,9 @@
-# -*- coding: utf-8 -*-
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 from einops import rearrange
@@ -10,7 +15,7 @@ def naive_chunk_rwkv6(
     v: torch.Tensor,
     w: torch.Tensor,
     u: torch.Tensor,
-    chunk_size: int = 32
+    chunk_size: int = 32,
 ):
     assert q.shape[-2] % chunk_size == 0
     orig_dtype = q.dtype

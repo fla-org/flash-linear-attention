@@ -14,10 +14,14 @@ docs/_build
 build
 dist
 *.egg-info
+dist-packages/*
 
 # experimental results
 exp
 results
+profile/
+*.ncu-rep
+*.nsys-rep
 wandb
 *.csv
 *.png
@@ -29,13 +33,18 @@ log.*
 *.cfg
 *.ini
 
+# virtual environments
+.env
+.venv
+env
+venv
+
 # pycache
 __pycache__
 
 # saved model
 *.pkl
 *.pt
-
 
 # vscode
 .vscode

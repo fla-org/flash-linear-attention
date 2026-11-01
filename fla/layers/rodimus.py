@@ -1,10 +1,14 @@
-# -*- coding: utf-8 -*-
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 from __future__ import annotations
 
 import warnings
-from typing import TYPE_CHECKING, Dict, Optional, Tuple, Union
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -13,22 +17,30 @@ import torch.utils.checkpoint
 from einops import rearrange, repeat
 from transformers.utils import logging
 
-from fla.layers.utils import get_unpad_data, index_first_axis, pad_input, unpad_input
+from fla.layers.utils import (
+    get_layer_cache,
+    pad_input,
+    repad_hidden_states,
+    require_cache_layer_idx,
+    unpad_hidden_states,
+    unpad_input,
+    update_layer_cache,
+)
 from fla.modules import RMSNorm, RotaryEmbedding, ShortConvolution
 from fla.modules.layernorm_gated import RMSNormGated
-from fla.ops.gla import chunk_gla, fused_chunk_gla, fused_recurrent_gla
+from fla.ops.gla import chunk_gla, fused_recurrent_gla
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
-    from fla.models.utils import Cache
+    from fla.models.cache_utils import Cache
 
 try:
     from flash_attn import flash_attn_func, flash_attn_varlen_func
 except ImportError:
     warnings.warn(
         "Flash Attention is not installed. Please install it via `pip install flash-attn --no-build-isolation`",
-        category=ImportWarning
+        category=ImportWarning,
     )
     flash_attn_func = None
 
@@ -54,15 +66,15 @@ class RodimusAttention(nn.Module):
         block_type: str = 'rodimus',
         mode: str = 'chunk',
         hidden_size: int = 1024,
-        input_gate_low_rank: Optional[Union[float, str]] = 'auto',
+        input_gate_low_rank: float | str | None = 'auto',
         expand_ratio: int = 64,
         use_short_conv: bool = True,
         conv_size: int = 4,
         conv_bias: bool = True,
         norm_eps: float = 1e-5,
-        k_norm_eps: Optional[float] = None,
+        k_norm_eps: float | None = None,
         residual_in_fp32: bool = True,
-        layer_idx: int = None
+        layer_idx: int = None,
     ):
         super().__init__()
 
@@ -85,7 +97,7 @@ class RodimusAttention(nn.Module):
         self.residual_in_fp32 = residual_in_fp32
         self.layer_idx = layer_idx
 
-        assert mode in ['chunk', 'fused_recurrent', 'fused_chunk'], f"Not supported mode `{mode}`."
+        assert mode in ['chunk', 'fused_recurrent'], f"Not supported mode `{mode}`."
 
         self.gate_proj = nn.Linear(self.hidden_size, self.d_inner, bias=False)
         self.up_proj = nn.Linear(self.hidden_size, self.d_inner, bias=False)
@@ -97,7 +109,7 @@ class RodimusAttention(nn.Module):
                 hidden_size=self.d_inner,
                 kernel_size=conv_size,
                 bias=conv_bias,
-                activation='silu'
+                activation='silu',
             )
 
         self.residual_weight = nn.Parameter(torch.ones(
@@ -117,12 +129,12 @@ class RodimusAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        past_key_values: Optional[Cache] = None,
-        use_cache: Optional[bool] = False,
-        output_attentions: Optional[bool] = False,
-        **kwargs: Unpack[Dict]
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Cache]]:
+        attention_mask: torch.Tensor | None = None,
+        past_key_values: Cache | None = None,
+        use_cache: bool | None = False,
+        output_attentions: bool | None = False,
+        **kwargs: Unpack[dict],
+    ) -> tuple[torch.Tensor, torch.Tensor | None, Cache | None]:
         if attention_mask is not None:
             assert len(attention_mask.shape) == 2, (
                 "Expected attention_mask as a 0-1 matrix with shape [batch_size, seq_len] "
@@ -134,14 +146,10 @@ class RodimusAttention(nn.Module):
         # mode = 'fused_recurrent' if hidden_states.shape[1] <= 64 else self.mode
         mode = 'fused_recurrent' if hidden_states.shape[1] == 1 else self.mode
 
-        last_state = None
-        if past_key_values is not None and len(past_key_values) > self.layer_idx:
-            last_state = past_key_values[self.layer_idx]
+        last_state = get_layer_cache(self, past_key_values)
 
-        cu_seqlens = kwargs.get('cu_seqlens', None)
-        if attention_mask is not None:
-            indices, cu_seqlens, _ = get_unpad_data(attention_mask[:, -q_len:])
-            hidden_states = index_first_axis(rearrange(hidden_states, "b s ... -> (b s) ..."), indices).unsqueeze(0)
+        cu_seqlens = kwargs.get('cu_seqlens')
+        hidden_states, indices, cu_seqlens = unpad_hidden_states(hidden_states, cu_seqlens, attention_mask, q_len)
 
         hidden_states, final_gate = self.up_proj(hidden_states), self.gate_proj(hidden_states)
 
@@ -153,7 +161,7 @@ class RodimusAttention(nn.Module):
                 x=hidden_states,
                 cache=conv_state,
                 output_final_state=use_cache,
-                cu_seqlens=cu_seqlens
+                cu_seqlens=cu_seqlens,
             )
         else:
             shift_hidden_states = hidden_states
@@ -185,18 +193,8 @@ class RodimusAttention(nn.Module):
                 gk=rt_gate_log,
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
+                state_v_first=True,
                 cu_seqlens=cu_seqlens,
-                head_first=False,
-            )
-        elif mode == 'fused_chunk':
-            o, recurrent_state = fused_chunk_gla(
-                q=q,
-                k=k,
-                v=v,
-                g=rt_gate_log,
-                initial_state=recurrent_state,
-                output_final_state=use_cache,
-                head_first=False,
             )
         elif mode == 'chunk':
             q, k, rt_gate_log = map(lambda x: x.to(v.dtype), (q, k, rt_gate_log))
@@ -207,8 +205,8 @@ class RodimusAttention(nn.Module):
                 g=rt_gate_log,
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
+                state_v_first=True,
                 cu_seqlens=cu_seqlens,
-                head_first=False,
             )
         else:
             raise NotImplementedError(f"Not supported mode `{mode}`.")
@@ -216,11 +214,12 @@ class RodimusAttention(nn.Module):
         rodimus_caches = None
         if past_key_values is not None:
             if self.block_type == 'rodimus':
-                past_key_values.update(
+                update_layer_cache(
+                    self,
+                    past_key_values,
                     recurrent_state=recurrent_state,
                     conv_state=conv_state if self.use_short_conv else None,
-                    layer_idx=self.layer_idx,
-                    offset=q_len
+                    offset=q_len,
                 )
             else:
                 rodimus_caches = (recurrent_state, conv_state if self.use_short_conv else None)
@@ -231,8 +230,7 @@ class RodimusAttention(nn.Module):
         o = self.activation_norm(o, final_gate)
         o = self.down_proj(o)
 
-        if attention_mask is not None:
-            o = pad_input(o.squeeze(0), indices, batch_size, q_len)
+        o = repad_hidden_states(o, indices, batch_size, q_len)
 
         if self.block_type == 'rodimus':
             return o, None, past_key_values
@@ -248,9 +246,9 @@ class SlidingWindowSharedKeyAttention(nn.Module):
         qkv_bias: bool = False,
         qk_norm: bool = False,
         window_size: int = 2048,
-        rope_theta: Optional[float] = 10000.,
-        max_position_embeddings: Optional[int] = None,
-        layer_idx: int = None
+        rope_theta: float | None = 10000.,
+        max_position_embeddings: int | None = None,
+        layer_idx: int = None,
     ):
         super().__init__()
 
@@ -271,21 +269,21 @@ class SlidingWindowSharedKeyAttention(nn.Module):
         self.o_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
 
         if qk_norm:
-            self.q_norm = RMSNorm(self.head_dim)
-            self.k_norm = RMSNorm(self.head_dim)
+            self.q_norm = RMSNorm(self.head_dim, dtype=torch.float32)
+            self.k_norm = RMSNorm(self.head_dim, dtype=torch.float32)
 
         self.rotary = RotaryEmbedding(dim=self.head_dim, base=self.rope_theta)
 
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Cache] = None,
+        attention_mask: torch.LongTensor | None = None,
+        past_key_values: Cache | None = None,
         output_attentions: bool = False,
         use_cache: bool = False,
         **kwargs,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-        rodimus_caches = kwargs.get('rodimus_caches', None)
+    ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]:
+        rodimus_caches = kwargs.get('rodimus_caches')
 
         if attention_mask is not None:
             assert len(attention_mask.shape) == 2, (
@@ -304,15 +302,16 @@ class SlidingWindowSharedKeyAttention(nn.Module):
             q, k = self.q_norm(q), self.k_norm(k)
 
         # equivalent to cu_seqlens in `flash_attn`
-        cu_seqlens = kwargs.get('cu_seqlens', None)
+        cu_seqlens = kwargs.get('cu_seqlens')
 
+        layer_idx = require_cache_layer_idx(self, past_key_values)
         seqlen_offset, max_seqlen = 0, q.shape[1]
         if past_key_values is not None:
-            seqlen_offset = past_key_values.get_seq_length(self.layer_idx)
+            seqlen_offset = past_key_values.get_seq_length(layer_idx)
             max_seqlen = q.shape[1] + seqlen_offset
 
-            if attention_mask is not None:
-                # to deliminate the offsets of padding tokens
+            if cu_seqlens is None and attention_mask is not None:
+                # to eliminate the offsets of padding tokens
                 seqlen_offset = seqlen_offset + attention_mask.sum(-1) - attention_mask.shape[-1]
                 max_seqlen = q.shape[1] + max(seqlen_offset)
 
@@ -326,19 +325,26 @@ class SlidingWindowSharedKeyAttention(nn.Module):
             else:
                 recurrent_state, conv_state = None, None
 
-            cache_has_content = past_key_values.get_seq_length(self.layer_idx) > 0
+            cache_has_content = past_key_values.get_seq_length(layer_idx) > 0
+            attn_state = [k.flatten(-2, -1), v.flatten(-2, -1)]
+            cached_attn_state = past_key_values[layer_idx]['attn_state'] if cache_has_content else None
             k_cached, v_cached = past_key_values.update(
                 recurrent_state=recurrent_state,
                 conv_state=conv_state,
-                attn_state=[k.flatten(-2, -1), v.flatten(-2, -1)],
-                layer_idx=self.layer_idx,
+                attn_state=attn_state,
+                layer_idx=layer_idx,
                 offset=q_len,
-                cache_kwargs=dict(window_size=self.window_size)
+                cache_kwargs=dict(window_size=self.window_size),
             )['attn_state']
-            if cache_has_content:
-                k, v = k_cached, v_cached
-                k = rearrange(k, '... (h d) -> ... h d', d=self.head_dim)
-                v = rearrange(v, '... (h d) -> ... h d', d=self.head_dim)
+            if self.window_size is not None and q_len > 1 and attention_mask is None and cached_attn_state is not None:
+                k_cached, v_cached = cached_attn_state
+                k = torch.cat([rearrange(k_cached, '... (h d) -> ... h d', d=self.head_dim), k], dim=1)
+                v = torch.cat([rearrange(v_cached, '... (h d) -> ... h d', d=self.head_dim), v], dim=1)
+                k = k[:, -(self.window_size + q_len - 1):]
+                v = v[:, -(self.window_size + q_len - 1):]
+            elif cache_has_content:
+                k = rearrange(k_cached, '... (h d) -> ... h d', d=self.head_dim)
+                v = rearrange(v_cached, '... (h d) -> ... h d', d=self.head_dim)
 
         if flash_attn_func is None:
             raise ImportError("Please install Flash Attention via `pip install flash-attn --no-build-isolation` first")
@@ -346,12 +352,12 @@ class SlidingWindowSharedKeyAttention(nn.Module):
         q, k, v = map(autocast_to_fp16, (q, k, v))
         k = repeat(k, "... h d -> ... (n h) d", n=self.num_heads)
         # Contains at least one padding token in the sequence
-        if attention_mask is not None:
+        if cu_seqlens is None and attention_mask is not None:
             q, (k, v), indices_q, cu_seqlens, max_seq_lens = unpad_input(
                 q=q,
                 states=(k, v),
                 attention_mask=attention_mask[:, -max(self.window_size, q_len):],
-                q_len=q_len
+                q_len=q_len,
             )
             cu_seqlens_q, cu_seqlens_k = cu_seqlens
             max_seqlen_q, max_seqlen_k = max_seq_lens
@@ -362,7 +368,7 @@ class SlidingWindowSharedKeyAttention(nn.Module):
                 max_seqlen_q=max_seqlen_q,
                 max_seqlen_k=max_seqlen_k,
                 causal=True,
-                window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0)
+                window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0),
             )
             o = pad_input(o, indices_q, batch_size, q_len)
         elif cu_seqlens is not None:
@@ -373,13 +379,13 @@ class SlidingWindowSharedKeyAttention(nn.Module):
                 max_seqlen_q=max_seqlen,
                 max_seqlen_k=max_seqlen,
                 causal=True,
-                window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0)
+                window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0),
             ).unsqueeze(0)
         else:
             o = flash_attn_func(
                 q, k, v,
                 causal=True,
-                window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0)
+                window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0),
             )
         o = o.reshape(batch_size, q_len, -1)
         o = self.o_proj(o.to(dtype=self.o_proj.weight.dtype))

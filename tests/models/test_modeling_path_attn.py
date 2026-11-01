@@ -1,26 +1,30 @@
-# -*- coding: utf-8 -*-
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import pytest
 import torch
 
 from fla.models import PaTHAttentionConfig
-from fla.utils import check_shared_mem
 
-from .test_modeling_base import run_test_generation, run_test_model_forward_backward
+from .utils import check_forward, check_generation
 
 
-# ===================================================================================
-# Test for Modeling (Forward/Backward Pass)
-# ===================================================================================
+@pytest.mark.parametrize('varlen', [False, True], ids=['dense', 'varlen'])
 @pytest.mark.parametrize(
-    ['L', 'B', 'T', 'H', 'D', 'use_l2warp', 'dtype'],
+    ['L', 'B', 'T', 'H', 'D', 'use_l2warp', 'attnres_block_size', 'dtype'],
     [
-        pytest.param(*test, id="L{}-B{}-T{}-H{}-D{}-use_l2warp{}-{}".format(*test))
+        pytest.param(*test, id="L{}-B{}-T{}-H{}-D{}-l2{}-bs{}-{}".format(*test))
         for test in [
-            (4, 4, 1024, 4, 64, False, torch.bfloat16),
-            (4, 4, 1024, 4, 128, False, torch.bfloat16),
+            (4, 4, 1024, 4, 64,  False, None, torch.float16),
+            (4, 4, 1024, 4, 128, False, None, torch.float16),
+            (4, 4, 1024, 4, 64,  False, 1,    torch.float16),
+            (4, 4, 1024, 4, 64,  False, 4,    torch.float16),
         ]
-    ]
+    ],
 )
 def test_modeling(
     L: int,
@@ -29,15 +33,22 @@ def test_modeling(
     H: int,
     D: int,
     use_l2warp: bool,
+    attnres_block_size: int | None,
     dtype: torch.dtype,
+    varlen: bool,
 ):
-    if not check_shared_mem('hopper') and D > 64:
-        pytest.skip("For PaTHAttention, head dimension 128 only supported on Hopper or later. Stay tuned for Ampere support!")
-    run_test_model_forward_backward(L, B, T, H, D, PaTHAttentionConfig, use_l2warp=use_l2warp, dtype=dtype)
-
-# ===================================================================================
-# Test for Generation
-# ===================================================================================
+    check_forward(
+        L,
+        B,
+        T,
+        H,
+        D,
+        PaTHAttentionConfig,
+        use_l2warp=use_l2warp,
+        attnres_block_size=attnres_block_size,
+        dtype=dtype,
+        varlen=varlen,
+    )
 
 
 @pytest.mark.parametrize(
@@ -48,7 +59,7 @@ def test_modeling(
             (2, 4, 2000, 8, 64, torch.float16),
             (2, 2, 2000, 8, 128, torch.float16),
         ]
-    ]
+    ],
 )
 def test_generation(
     L: int,
@@ -58,6 +69,4 @@ def test_generation(
     D: int,
     dtype: torch.dtype,
 ):
-    if not check_shared_mem('hopper') and D > 64:
-        pytest.skip("For PaTHAttention, head dimension 128 only supported on Hopper or later. Stay tuned for Ampere support!")
-    run_test_generation(L, B, T, H, D, PaTHAttentionConfig, dtype)
+    check_generation(L, B, T, H, D, PaTHAttentionConfig, dtype)

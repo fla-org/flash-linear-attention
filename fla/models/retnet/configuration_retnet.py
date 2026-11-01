@@ -1,13 +1,23 @@
-# -*- coding: utf-8 -*-
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 from __future__ import annotations
 
-from typing import Dict, Optional
+from transformers.configuration_utils import PreTrainedConfig
 
-from transformers.configuration_utils import PretrainedConfig
+from fla.models.configuration_utils import (
+    AttentionConfig,
+    AttentionConfigBase,
+    validate_attnres_config,
+    validate_loss_config,
+)
 
 
-class RetNetConfig(PretrainedConfig):
+class RetNetConfig(AttentionConfigBase, PreTrainedConfig):
 
     model_type = 'retnet'
     keys_to_ignore_at_inference = ['past_key_values']
@@ -18,22 +28,22 @@ class RetNetConfig(PretrainedConfig):
         hidden_size: int = 2048,
         expand_k: float = 1.0,
         expand_v: float = 2.0,
-        hidden_ratio: Optional[int] = 2,
-        intermediate_size: Optional[int] = None,
+        hidden_ratio: int | None = 2,
+        intermediate_size: int | None = None,
         num_hidden_layers: int = 24,
         num_heads: int = 8,
-        num_kv_heads: Optional[int] = None,
-        feature_map: Optional[str] = None,
+        num_kv_heads: int | None = None,
+        feature_map: str | None = None,
         hidden_act: str = "swish",
         use_short_conv: bool = False,
         conv_size: int = 4,
         use_output_gate: bool = True,
         max_position_embeddings: int = 2048,
-        elementwise_affine: Optional[bool] = True,
+        elementwise_affine: bool | None = True,
         norm_eps: float = 1e-6,
-        attn: Optional[Dict] = None,
+        attn: AttentionConfig = None,
         use_cache: bool = True,
-        pad_token_id: Optional[int] = None,
+        pad_token_id: int | None = None,
         bos_token_id: int = 1,
         eos_token_id: int = 2,
         tie_word_embeddings: bool = False,
@@ -41,9 +51,11 @@ class RetNetConfig(PretrainedConfig):
         fuse_norm: bool = True,
         fuse_swiglu: bool = True,
         fuse_cross_entropy: bool = True,
+        fuse_linear_cross_entropy: bool = False,
         use_l2warp: bool = False,
         vocab_size: int = 32000,
-        **kwargs
+        attnres_block_size: int | None = None,
+        **kwargs,
     ) -> RetNetConfig:
         self.attn_mode = attn_mode
         self.hidden_size = hidden_size
@@ -70,20 +82,14 @@ class RetNetConfig(PretrainedConfig):
         self.fuse_norm = fuse_norm
         self.fuse_swiglu = fuse_swiglu
         self.fuse_cross_entropy = fuse_cross_entropy
+        self.fuse_linear_cross_entropy = fuse_linear_cross_entropy
         self.use_l2warp = use_l2warp
         self.vocab_size = vocab_size
+        self.attnres_block_size = attnres_block_size
 
-        if attn is not None:
-            if not isinstance(attn, Dict):
-                raise ValueError("attn must be a dictionary")
-            if 'layers' not in attn:
-                raise ValueError("Layer indices must be provided to initialize hybrid attention layers")
-            if 'num_heads' not in attn:
-                raise ValueError("Number of heads must be provided to initialize hybrid attention layers")
-            attn['num_kv_heads'] = attn.get('num_kv_heads', attn['num_heads'])
-            attn['qkv_bias'] = attn.get('qkv_bias', False)
-            attn['window_size'] = attn.get('window_size', None)
-            attn['rope_theta'] = attn.get('rope_theta', 10000.)
+        validate_loss_config(fuse_cross_entropy=fuse_cross_entropy, fuse_linear_cross_entropy=fuse_linear_cross_entropy)
+
+        validate_attnres_config(attnres_block_size=attnres_block_size)
 
         super().__init__(
             pad_token_id=pad_token_id,

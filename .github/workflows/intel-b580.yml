@@ -1,0 +1,26 @@
+name: intel-b580-ci
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+on:
+  pull_request:
+    branches: [ '*' ]
+    types: [opened, synchronize, reopened, closed]
+  push:
+    branches:
+      - main
+
+jobs:
+  test-b580-pytorch-2-7:
+    name: Test B580 (PyTorch 2.7)
+    if: github.event_name != 'pull_request' || github.event.action != 'closed'
+    uses: ./.github/workflows/reusable-ci-tests.yml
+    with:
+      runner: 'intel-b580'
+      gpu_type: 'intel'
+      conda_env_name: 'pytorch_2_7'
+      pytorch_version: '2.7.0'
+      skip_gpu_check: false
+      skip_models_tests: true

@@ -1,18 +1,21 @@
-# -*- coding: utf-8 -*-
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
-
-from typing import Optional, Tuple
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 import triton
 import triton.language as tl
 
 from fla.ops.utils.index import prepare_chunk_indices
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
+from fla.ops.utils.op import unflatten_program_id
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, input_guard
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -20,7 +23,8 @@ from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
         for BD in [16, 32, 64, 128]
         for num_warps in [1, 2, 4, 8]
     ],
-    key=['BT']
+    key=['BT'],
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def mean_pooling_fwd_kernel(
@@ -33,14 +37,15 @@ def mean_pooling_fwd_kernel(
     D: tl.constexpr,
     BT: tl.constexpr,
     BD: tl.constexpr,
-    IS_VARLEN: tl.constexpr
+    IS_VARLEN: tl.constexpr,
 ):
-    i_d, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_d, i_t = unflatten_program_id(tl.cdiv(D, BD))
+    i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_tg = i_t
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
         NT = tl.cdiv(T, BT)
     else:
@@ -48,17 +53,20 @@ def mean_pooling_fwd_kernel(
         i_tg = i_b * NT + i_t
         bos, eos = i_b * T, i_b * T + T
 
-    p_x = tl.make_block_ptr(x + (bos * H + i_h) * D, (T, D), (H*D, 1), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
-    p_o = tl.make_block_ptr(o + (i_tg * H + i_h) * D, (D,), (1,), (i_d * BD,), (BD,), (0,))
+    o_t = i_t * BT + tl.arange(0, BT)
+    o_d = i_d * BD + tl.arange(0, BD)
+    m_x = (o_t[:, None] < T) & (o_d[None, :] < D)
+    p_x = x + (bos * H + i_h) * D + o_t[:, None] * (H*D) + o_d[None, :]
+    p_o = o + (i_tg * H + i_h) * D + o_d
     # [BT, BD]
-    b_x = tl.load(p_x, boundary_check=(0, 1)).to(tl.float32)
+    b_x = tl.load(p_x, mask=m_x, other=0.0).to(tl.float32)
     # [BD]
     b_o = tl.sum(b_x, axis=0) / min(BT, T - i_t * BT)
-    tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0,))
+    tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=o_d < D)
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -66,7 +74,8 @@ def mean_pooling_fwd_kernel(
         for BD in [16, 32, 64, 128]
         for num_warps in [1, 2, 4, 8]
     ],
-    key=['BT']
+    key=['BT'],
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def mean_pooling_bwd_kernel(
@@ -79,14 +88,15 @@ def mean_pooling_bwd_kernel(
     D: tl.constexpr,
     BT: tl.constexpr,
     BD: tl.constexpr,
-    IS_VARLEN: tl.constexpr
+    IS_VARLEN: tl.constexpr,
 ):
-    i_d, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_d, i_t = unflatten_program_id(tl.cdiv(D, BD))
+    i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_tg = i_t
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
         NT = tl.cdiv(T, BT)
     else:
@@ -94,27 +104,32 @@ def mean_pooling_bwd_kernel(
         i_tg = i_b * NT + i_t
         bos, eos = i_b * T, i_b * T + T
 
-    p_dx = tl.make_block_ptr(dx + (bos * H + i_h) * D, (T, D), (H*D, 1), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
-    p_do = tl.make_block_ptr(do + (i_tg * H + i_h) * D, (D,), (1,), (i_d * BD,), (BD,), (0,))
+    o_t = i_t * BT + tl.arange(0, BT)
+    o_d = i_d * BD + tl.arange(0, BD)
+    m_x = (o_t[:, None] < T) & (o_d[None, :] < D)
+    p_dx = dx + (bos * H + i_h) * D + o_t[:, None] * (H*D) + o_d[None, :]
+    p_do = do + (i_tg * H + i_h) * D + o_d
     # [BD]
-    b_do = tl.load(p_do, boundary_check=(0,)).to(tl.float32)
+    b_do = tl.load(p_do, mask=o_d < D, other=0.0).to(tl.float32)
     # [BT, BD]
     b_dx = b_do / tl.full((BT,), min(BT, T - i_t * BT), dtype=tl.float32)[:, None]
-    tl.store(p_dx, b_dx.to(p_dx.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_dx, b_dx.to(p_dx.dtype.element_ty), mask=m_x)
 
 
 def mean_pooling_fwd(
     x: torch.Tensor,
     chunk_size: int,
-    cu_seqlens: Optional[torch.LongTensor] = None
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
 ) -> torch.Tensor:
     B, T, H, D = x.shape
     BT = chunk_size
-    chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     o = x.new_empty(B, NT, H, D)
-    def grid(meta): return (triton.cdiv(D, meta['BD']), NT, B * H)
+    def grid(meta): return (triton.cdiv(D, meta['BD']) * NT, B * H)
     mean_pooling_fwd_kernel[grid](
         x,
         o,
@@ -133,15 +148,17 @@ def mean_pooling_bwd(
     batch_size: int,
     seq_len: int,
     chunk_size: int,
-    cu_seqlens: Optional[torch.LongTensor] = None
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
 ) -> torch.Tensor:
     B, T, H, D = batch_size, seq_len, *do.shape[-2:]
     BT = chunk_size
-    chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     dx = do.new_empty(B, T, H, D)
-    def grid(meta): return (triton.cdiv(D, meta['BD']), NT, B * H)
+    def grid(meta): return (triton.cdiv(D, meta['BD']) * NT, B * H)
     mean_pooling_bwd_kernel[grid](
         do,
         dx,
@@ -164,7 +181,7 @@ class MeanPoolingFunction(torch.autograd.Function):
         ctx,
         x: torch.Tensor,
         chunk_size: int,
-        cu_seqlens: Optional[torch.LongTensor] = None
+        cu_seqlens: torch.LongTensor | None = None,
     ) -> torch.Tensor:
         o = mean_pooling_fwd(x, chunk_size, cu_seqlens)
         ctx.batch_size = x.shape[0]
@@ -177,8 +194,8 @@ class MeanPoolingFunction(torch.autograd.Function):
     @input_guard
     @autocast_custom_bwd
     def backward(
-        ctx, do
-    ) -> Tuple[torch.Tensor, None, None]:
+        ctx, do,
+    ) -> tuple[torch.Tensor, None, None]:
         batch_size = ctx.batch_size
         seq_len = ctx.seq_len
         chunk_size = ctx.chunk_size
@@ -190,18 +207,18 @@ class MeanPoolingFunction(torch.autograd.Function):
 def mean_pooling(
     x: torch.Tensor,
     chunk_size: int,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    head_first: bool = False
+    cu_seqlens: torch.LongTensor | None = None,
+    **kwargs,
 ) -> torch.Tensor:
-    if head_first:
-        x = x.transpose(1, 2)
+    if 'head_first' in kwargs:
+        raise DeprecationWarning(
+            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
+        )
     if cu_seqlens is not None:
         if x.shape[0] != 1:
             raise ValueError(
                 f"The batch size is expected to be 1 rather than {x.shape[0]} when using `cu_seqlens`."
-                f"Please flatten variable-length inputs before processing."
+                f"Please flatten variable-length inputs before processing.",
             )
     o = MeanPoolingFunction.apply(x, chunk_size, cu_seqlens)
-    if head_first:
-        o = o.transpose(1, 2)
     return o

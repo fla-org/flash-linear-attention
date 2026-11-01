@@ -1,3 +1,10 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
 import torch
 import torch.nn as nn
 import triton
@@ -16,7 +23,7 @@ def token_shift_ref(x):
         # argument names to use as an x-axis for the plot
         x_names=['T'],
         # different possible values for `x_name`
-        x_vals=[128 * 2 ** i for i in range(0, 8)],
+        x_vals=[128 * 2 ** i for i in range(0, 9)],
         # argument name whose value corresponds to a different line in the plot
         line_arg='provider',
         # possible values for `line_arg``
@@ -30,7 +37,7 @@ def token_shift_ref(x):
         # name for the plot. Used also as a file name for saving the plot.
         plot_name="Performance",
         args={},
-    )
+    ),
 )
 def benchmark(T, provider):
     from fla.utils import device
@@ -56,4 +63,9 @@ def benchmark(T, provider):
 
 
 if __name__ == '__main__':
-    benchmark.run(print_data=True)
+    try:
+        from runner import run_module_benchmark
+    except ModuleNotFoundError:
+        from benchmarks.modules.runner import run_module_benchmark
+
+    run_module_benchmark(benchmark, script_file=__file__)

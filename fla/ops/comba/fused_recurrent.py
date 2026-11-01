@@ -1,20 +1,22 @@
-# -*- coding: utf-8 -*-
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
-
-from typing import Optional, Tuple
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 import triton
 import triton.language as tl
 
 from fla.ops.utils.op import exp
-from fla.utils import input_guard
+from fla.utils import IS_NVIDIA_HOPPER, input_guard
 
 
 @triton.heuristics({
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.jit(do_not_specialize=['T'])
 def fused_recurrent_comba_fwd_kernel(
@@ -41,9 +43,11 @@ def fused_recurrent_comba_fwd_kernel(
     STORE_FINAL_STATE: tl.constexpr,  # whether to store final state
     IS_BETA_HEADWISE: tl.constexpr,  # whether beta is headwise vector or scalar,
     USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
-    IS_VARLEN: tl.constexpr
+    IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    pid = tl.program_id(0).to(tl.int64)
+    NK, NV = tl.cdiv(K, BK), tl.cdiv(V, BV)
+    i_k, i_v, i_nh = pid % NK, (pid // NK) % NV, (pid // (NK * NV)).to(tl.int64)
     i_n, i_hv = i_nh // HV, i_nh % HV
     i_h = i_hv // (HV // H)
     if IS_VARLEN:
@@ -127,12 +131,16 @@ def fused_recurrent_comba_fwd(
     initial_state: torch.Tensor,
     output_final_state: bool,
     use_qk_l2norm_in_kernel: bool = False,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    cu_seqlens: torch.LongTensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
-    BK, BV = triton.next_power_of_2(K), min(triton.next_power_of_2(V), 8)
+    BK = triton.next_power_of_2(K)
+    # BV = 16 on H100/H200 runs half as many programs per head as BV = 8 and
+    # each program amortizes the q/k/p loads and the gate over twice the columns;
+    # measured 1.1-1.4x faster at decode-like shapes, see fla-org/flash-linear-attention#1609.
+    BV = min(triton.next_power_of_2(V), 16 if IS_NVIDIA_HOPPER else 8)
     NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
     assert NK == 1, "NK > 1 is not supported yet"
     num_stages = 3
@@ -144,7 +152,7 @@ def fused_recurrent_comba_fwd(
     else:
         final_state = None
 
-    grid = (NK, NV, N * HV)
+    grid = (NK * NV * N * HV,)
     fused_recurrent_comba_fwd_kernel[grid](
         q=q,
         k=k,
@@ -190,7 +198,7 @@ class FusedRecurrentCombaFunction(torch.autograd.Function):
         initial_state: torch.Tensor,
         output_final_state: bool,
         use_qk_l2norm_in_kernel: bool = False,
-        cu_seqlens: Optional[torch.LongTensor] = None,
+        cu_seqlens: torch.LongTensor | None = None,
     ):
         o, final_state = fused_recurrent_comba_fwd(
             q=q,
@@ -203,7 +211,7 @@ class FusedRecurrentCombaFunction(torch.autograd.Function):
             initial_state=initial_state,
             output_final_state=output_final_state,
             use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
-            cu_seqlens=cu_seqlens
+            cu_seqlens=cu_seqlens,
         )
 
         return o, final_state
@@ -214,7 +222,7 @@ class FusedRecurrentCombaFunction(torch.autograd.Function):
         raise NotImplementedError(
             "Backward pass is not implemented yet and we do not have plans to implement it "
             "because we haven't figured out how to compute dg without materializing the full "
-            "hidden states for all time steps."
+            "hidden states for all time steps.",
         )
 
 
@@ -229,8 +237,8 @@ def fused_recurrent_comba(
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
     use_qk_l2norm_in_kernel: bool = False,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    cu_seqlens: torch.LongTensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
         q (torch.Tensor):
@@ -303,17 +311,19 @@ def fused_recurrent_comba(
         if q.shape[0] != 1:
             raise ValueError(
                 f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
-                f"Please flatten variable-length inputs before processing."
+                f"Please flatten variable-length inputs before processing.",
             )
         if initial_state is not None and initial_state.shape[0] != len(cu_seqlens) - 1:
             raise ValueError(
                 f"The number of initial states is expected to be equal to the number of input sequences, "
-                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}."
+                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}.",
             )
     if scale is None:
         scale = k.shape[-1] ** -0.5
     if beta is None:
-        beta = torch.ones_like(q[..., 0])
+        # beta is headwise over the HV value heads; sizing it from q would give
+        # [B, T, H] and read out of bounds in the kernel under GVA (HV > H)
+        beta = torch.ones_like(v[..., 0])
     if p is None:
         p = k
     o, final_state = FusedRecurrentCombaFunction.apply(

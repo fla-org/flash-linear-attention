@@ -1,3 +1,10 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+#
 # Copyright 2024 state-spaces/mamba2 org and HuggingFace Inc. team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,122 +20,59 @@
 # limitations under the License.
 
 import math
-from dataclasses import dataclass
-from typing import Optional, Tuple, Union
 
 import torch
-import torch.utils.checkpoint
 from torch import nn
-from transformers.generation import GenerationMixin
-from transformers.modeling_utils import PreTrainedModel
-from transformers.utils import ModelOutput, logging
+from torch.distributed._tensor.placement_types import Placement, Replicate
+from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.tensor import DTensor
+from transformers.modeling_layers import GradientCheckpointingLayer
+from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
+from transformers.utils import logging
 from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.mamba2 import Mamba2
+from fla.models.cache_utils import Cache
+from fla.models.generation_utils import FLAGenerationMixin
 from fla.models.mamba2.configuration_mamba2 import Mamba2Config
-from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
-from fla.modules.l2warp import l2_warp
-
-try:
-    from torch.distributed.tensor import DTensor
-except (ImportError, AttributeError):
-    DTensor = None
+from fla.models.modeling_utils import FLAPreTrainedModel
+from fla.modules import RMSNorm
 
 logger = logging.get_logger(__name__)
 
 
-class Mamba2Cache:
-    """
-    Arguments:
-        config: Mamba2Config
-        batch_size: int
-        dtype: torch.dtype
-        device: torch.device
+def tensor_to_dtensor(
+    tensor: torch.Tensor,
+    device_mesh: DeviceMesh,
+    current_placement: Placement | list[Placement],
+    desired_placement: Placement | list[Placement] | None = None,
+    run_check: bool = False,
+):
+    if isinstance(tensor, DTensor):
+        return tensor
 
-    Attributes:
-        dtype: (`torch.dtype`):
-            The default `dtype` used to initializing the cache.
-        conv_kernel_size: (`int`):
-            Model's convolution kernel size taken from config.
-        n_groups: (`int`):
-            Model's number of groups taken from the config - similar to tensor parallel in Transformer.
-        state_size: (`int`):
-            Model's SSM state size taken from config.
-        num_heads: (`int`):
-            The number of heads used in the linear attention / SSM.
-        head_dim: (`int`):
-            The respective dimension of the heads used in the linear attention / SSM.
-        intermediate_size: (`int`):
-            Model's intermediate_size based on (expand * hidden_dim) from config.
-        conv_states: (`torch.Tensor`):
-            A tensor of shape `[num_layers, batch_size, conv_kernel_size, intermediate_size + 2 * n_groups * state_size]`
-            that holds convolutional states.
-        ssm_states: (`torch.Tensor`):
-            A tensor of shape `[num_layers, batch_size, num_heads, head_dim, state_size]` that holds ssm states.
-    """
+    if isinstance(current_placement, Placement):
+        current_placement = [current_placement]
 
-    def __init__(
-        self,
-        config: Mamba2Config,
-        batch_size: int,
-        dtype: torch.dtype = torch.float16,
-        device: Optional[str] = None,
-    ):
-        self.dtype = dtype
-        self.conv_kernel_size = config.conv_kernel
-        self.n_groups = config.n_groups
-        self.state_size = config.state_size
-        self.num_heads = config.num_heads
-        self.head_dim = config.head_dim
-        self.intermediate_size = int(config.expand * config.hidden_size)
+    dtensor = DTensor.from_local(tensor, device_mesh=device_mesh, run_check=run_check, placements=current_placement)
 
-        self.conv_states = torch.zeros(
-            config.num_hidden_layers,
-            batch_size,
-            self.intermediate_size + 2 * self.n_groups * self.state_size,
-            self.conv_kernel_size,
-            device=device,
-            dtype=dtype,
-        )
-        self.ssm_states = torch.zeros(
-            config.num_hidden_layers,
-            batch_size,
-            self.num_heads,
-            self.head_dim,
-            self.state_size,
-            device=device,
-            dtype=dtype,
-        )
+    if desired_placement is not None:
+        if isinstance(desired_placement, Placement):
+            desired_placement = [desired_placement]
 
-    def update_conv_state(
-        self,
-        layer_idx: int,
-        new_conv_state: torch.Tensor,
-        cache_init: bool = False
-    ) -> torch.Tensor:
-        if cache_init:
-            self.conv_states[layer_idx] = new_conv_state.to(self.conv_states.device)
-        else:
-            self.conv_states[layer_idx] = self.conv_states[layer_idx].roll(shifts=-1, dims=-1)
-            self.conv_states[layer_idx][:, :, -1] = new_conv_state[:, 0, :].to(self.conv_states.device)
-        return self.conv_states[layer_idx]
+        dtensor = dtensor.redistribute(device_mesh=device_mesh, placements=desired_placement, async_op=True)
 
-    def update_ssm_state(self, layer_idx: int, new_ssm_state: torch.Tensor):
-        self.ssm_states[layer_idx] = new_ssm_state.to(self.ssm_states.device)
-        return self.ssm_states[layer_idx]
-
-    def reset(self):
-        self.conv_states.zero_()
-        self.ssm_states.zero_()
+    return dtensor
 
 
-class Mamba2Block(nn.Module):
+class Mamba2Block(GradientCheckpointingLayer):
+
     def __init__(self, config, layer_idx):
         super().__init__()
         self.config = config
         self.layer_idx = layer_idx
         self.residual_in_fp32 = config.residual_in_fp32
-        self.norm = RMSNorm(config.hidden_size, eps=config.norm_eps)
+        self.norm = RMSNorm(config.hidden_size, eps=config.norm_eps, dtype=torch.float32)
         self.mixer = Mamba2(
             num_heads=config.num_heads,
             head_dim=config.head_dim,
@@ -137,14 +81,18 @@ class Mamba2Block(nn.Module):
             expand=config.expand,
             n_groups=config.n_groups,
             conv_kernel=config.conv_kernel,
+            conv_init=config.conv_init,
             use_conv_bias=config.use_conv_bias,
             hidden_act=config.hidden_act,
-            rms_norm=config.rms_norm,
+            A_init_range=config.A_init_range,
+            D_has_hdim=config.D_has_hdim,
+            rmsnorm=config.rmsnorm,
+            norm_before_gate=config.norm_before_gate,
             chunk_size=config.chunk_size,
-            time_step_rank=config.time_step_rank,
-            time_step_limit=config.time_step_limit,
-            time_step_min=config.time_step_min,
-            time_step_max=config.time_step_max,
+            dt_limit=config.dt_limit,
+            dt_min=config.dt_min,
+            dt_max=config.dt_max,
+            dt_init_floor=config.dt_init_floor,
             use_bias=config.use_bias,
             norm_eps=config.norm_eps,
             layer_idx=layer_idx,
@@ -152,29 +100,33 @@ class Mamba2Block(nn.Module):
 
     def forward(
         self,
-        hidden_states,
-        cache_params: Optional[Mamba2Cache] = None,
-        cache_position: Optional[torch.LongTensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
+        hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+        past_key_values: Cache | list[torch.FloatTensor] | None = None,
+        use_cache: bool | None = False,
+        output_attentions: bool | None = False,
+        **kwargs,
     ):
         residual = hidden_states
         hidden_states = self.norm(hidden_states)
         if self.residual_in_fp32:
             residual = residual.to(torch.float32)
 
-        hidden_states = self.mixer(
-            hidden_states,
-            cache_params=cache_params,
-            cache_position=cache_position,
+        hidden_states, attentions, past_key_values = self.mixer(
+            hidden_states=hidden_states,
             attention_mask=attention_mask,
+            past_key_values=past_key_values,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            **kwargs,
         )
         hidden_states = residual + hidden_states
         if self.residual_in_fp32:
             hidden_states = hidden_states.to(dtype=self.norm.weight.dtype)
-        return hidden_states
+        return hidden_states, attentions, past_key_values
 
 
-class Mamba2PreTrainedModel(PreTrainedModel):
+class Mamba2PreTrainedModel(FLAPreTrainedModel):
     """
     An abstract class to handle weights initialization and a simple interface for downloading and loading pretrained
     models.
@@ -184,7 +136,7 @@ class Mamba2PreTrainedModel(PreTrainedModel):
     base_model_prefix = "backbone"
     _no_split_modules = ["Mamba2Block"]
     supports_gradient_checkpointing = True
-    _is_stateful = True
+    _supports_cache_class = True
 
     def _init_weights(
         self,
@@ -192,36 +144,59 @@ class Mamba2PreTrainedModel(PreTrainedModel):
         num_residuals_per_layer: int = 1,
     ):
         """Initialize the weights."""
-        if isinstance(module, Mamba2):
+        if isinstance(module, Mamba2) and next(module.parameters()).device.type != 'meta':
 
             # --- A_log ---
-            A = torch.arange(1, module.num_heads + 1)
-            with torch.no_grad():
-                if not isinstance(module.A_log, DTensor):
-                    module.A_log.copy_(torch.log(A))
-                else:
-                    logger.warning_once("`A_log` is a DTensor, skipping initialization")
+            if not getattr(module.A_log, '_is_hf_initialized', False):
+                A = torch.empty(module.num_heads, dtype=torch.float32).uniform_(*self.config.A_init_range)
+                with torch.no_grad():
+                    A_log = torch.log(A)
+                    if isinstance(module.A_log, DTensor):
+                        A_log = tensor_to_dtensor(
+                            tensor=A_log,
+                            device_mesh=module.A_log.device_mesh,
+                            current_placement=[Replicate()] * len(module.A_log.placements),
+                            desired_placement=module.A_log.placements,
+                            run_check=True,
+                        )
+
+                    module.A_log.copy_(A_log)
+
             module.A_log._no_weight_decay = True
 
             # --- D ---
-            nn.init.ones_(module.D)
+            if not getattr(module.D, '_is_hf_initialized', False):
+                nn.init.ones_(module.D)
             module.D._no_weight_decay = True
 
-            # --- dt_bias ---
-            dt = torch.exp(
-                torch.rand(self.config.num_heads)
-                * (math.log(self.config.time_step_max) - math.log(self.config.time_step_min))
-                + math.log(self.config.time_step_min)
-            ).clamp(min=self.config.time_step_floor)
+            # --- conv1d ---
+            if self.config.conv_init is not None:
+                nn.init.uniform_(module.conv1d.weight, -self.config.conv_init, self.config.conv_init)
+                module.conv1d.weight._no_reinit = True
 
-            # Inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
-            inv_dt = dt + torch.log(-torch.expm1(-dt))
-            with torch.no_grad():
-                if not isinstance(module.dt_bias, DTensor):
+            # --- dt_bias ---
+            if not getattr(module.dt_bias, '_is_hf_initialized', False):
+                dt = torch.exp(
+                    torch.rand(self.config.num_heads)
+                    * (math.log(self.config.dt_max) - math.log(self.config.dt_min))
+                    + math.log(self.config.dt_min),
+                ).clamp(min=self.config.dt_init_floor)
+
+                # Inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
+                inv_dt = dt + torch.log(-torch.expm1(-dt))
+                with torch.no_grad():
+                    if isinstance(module.dt_bias, DTensor):
+                        inv_dt = tensor_to_dtensor(
+                            tensor=inv_dt,
+                            device_mesh=module.dt_bias.device_mesh,
+                            current_placement=[Replicate()] * len(module.dt_bias.placements),
+                            desired_placement=module.dt_bias.placements,
+                            run_check=True,
+                        )
+
                     module.dt_bias.copy_(inv_dt)
-                else:
-                    logger.warning_once("`dt_bias` is a DTensor, skipping initialization")
             module.dt_bias._no_reinit = True
+            module.dt_bias._no_weight_decay = True
 
         elif isinstance(module, (nn.Linear, nn.Conv1d)):
             # Slightly different from the TF version which uses truncated_normal for initialization
@@ -243,7 +218,7 @@ class Mamba2PreTrainedModel(PreTrainedModel):
             #   > the weights of residual layers at initialization by a factor of 1/√N where N is the # of residual layers.
             #   >   -- GPT-2 :: https://openai.com/blog/better-language-models/
             #
-            # Reference (Megatron-LM): https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/model/gpt_model.py
+            # Reference (Megatron-LM): https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/models/gpt/gpt_model.py
             p = None
             if hasattr(module, 'o_proj'):
                 # p = module.o_proj.weight
@@ -253,7 +228,7 @@ class Mamba2PreTrainedModel(PreTrainedModel):
                 p = module.out_proj.weight
             elif hasattr(module, 'down_proj'):
                 p = module.down_proj.weight
-            if p is not None:
+            if p is not None and not getattr(p, '_is_hf_initialized', False):
                 # Special Scaled Initialization --> There are 2 Layer Norms per Transformer Block
                 # Following Pytorch init, except scale by 1/sqrt(2 * n_layer)
                 # We need to reinit p since this code could be called multiple times
@@ -261,63 +236,6 @@ class Mamba2PreTrainedModel(PreTrainedModel):
                 nn.init.kaiming_uniform_(p, a=math.sqrt(5))
                 with torch.no_grad():
                     p /= math.sqrt(num_residuals_per_layer * self.config.num_hidden_layers)
-
-
-@dataclass
-# Copied from transformers.models.mamba.modeling_mamba.MambaOutput with MAMBA->MAMBA2,Mamba->Mamba2
-class Mamba2Output(ModelOutput):
-    """
-    Class for the MAMBA2 model outputs.
-
-    Args:
-        last_hidden_state (`torch.FloatTensor` of shape `(batch_size, sequence_length, hidden_size)`):
-            Sequence of hidden-states at the output of the last layer of the model.
-        cache_params (`Mamba2Cache`):
-            The state of the model at the last time step. Can be used in a forward method with the next `input_ids` to
-            avoid providing the old `input_ids`.
-
-            Includes both the State space model state matrices after the selective scan, and the Convolutional states
-        hidden_states (`tuple(torch.FloatTensor)`, *optional*,
-            returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
-            Tuple of `torch.FloatTensor` (one for the output of the embeddings, if the model has an embedding layer, +
-            one for the output of each layer) of shape `(batch_size, sequence_length, hidden_size)`.
-
-            Hidden-states of the model at the output of each layer plus the optional initial embedding outputs.
-    """
-
-    last_hidden_state: Optional[torch.FloatTensor] = None
-    cache_params: Optional[Mamba2Cache] = None
-    hidden_states: Optional[Tuple[torch.FloatTensor]] = None
-
-
-@dataclass
-# Copied from transformers.models.mamba.modeling_mamba.MambaCausalLMOutput with Mamba->Mamba2
-class Mamba2CausalLMOutput(ModelOutput):
-    """
-    Base class for causal language model (or autoregressive) outputs.
-
-    Args:
-        loss (`torch.FloatTensor` of shape `(1,)`, *optional*, returned when `labels` is provided):
-            Language modeling loss (for next-token prediction).
-        logits (`torch.FloatTensor` of shape `(batch_size, sequence_length, config.vocab_size)`):
-            Prediction scores of the language modeling head (scores for each vocabulary token before SoftMax).
-        cache_params (`Mamba2Cache`):
-            The state of the model at the last time step. Can be used in a forward method with the next `input_ids` to
-            avoid providing the old `input_ids`.
-
-            Includes both the State space model state matrices after the selective scan, and the Convolutional states
-        hidden_states (`tuple(torch.FloatTensor)`, *optional*,
-            returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
-            Tuple of `torch.FloatTensor` (one for the output of the embeddings, if the model has an embedding layer, +
-            one for the output of each layer) of shape `(batch_size, sequence_length, hidden_size)`.
-
-            Hidden-states of the model at the output of each layer plus the optional initial embedding outputs.
-    """
-
-    loss: Optional[torch.FloatTensor] = None
-    logits: Optional[torch.FloatTensor] = None
-    cache_params: Optional[Mamba2Cache] = None
-    hidden_states: Optional[Tuple[torch.FloatTensor]] = None
 
 
 class Mamba2Model(Mamba2PreTrainedModel):
@@ -328,7 +246,7 @@ class Mamba2Model(Mamba2PreTrainedModel):
         self.layers = nn.ModuleList([Mamba2Block(config, layer_idx=idx) for idx in range(config.num_hidden_layers)])
 
         self.gradient_checkpointing = False
-        self.norm_f = RMSNorm(config.hidden_size, eps=config.norm_eps)
+        self.norm_f = RMSNorm(config.hidden_size, eps=config.norm_eps, dtype=torch.float32)
         # Initialize weights and apply final processing
         self._register_load_state_dict_pre_hook(self.load_hook)
         self.post_init()
@@ -339,78 +257,54 @@ class Mamba2Model(Mamba2PreTrainedModel):
                 state_dict[k.replace("embedding.", "embeddings.")] = state_dict.pop(k)
                 break
 
-    def get_input_embeddings(self):
-        return self.embeddings
-
     def set_input_embeddings(self, new_embeddings):
         self.embeddings = new_embeddings
 
     def forward(
         self,
-        input_ids: Optional[torch.LongTensor] = None,
-        inputs_embeds: Optional[torch.LongTensor] = None,
-        cache_params: Optional[Mamba2Cache] = None,
-        use_cache: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-        cache_position: Optional[torch.LongTensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
+        input_ids: torch.LongTensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        inputs_embeds: torch.FloatTensor | None = None,
+        past_key_values: Cache | list[torch.FloatTensor] | None = None,
+        use_cache: bool | None = None,
+        output_attentions: bool | None = None,
+        output_hidden_states: bool | None = None,
+        return_dict: bool | None = None,
         **kwargs,
-    ) -> Union[Tuple, Mamba2Output]:
+    ) -> tuple | BaseModelOutputWithPast:
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
         use_cache = use_cache if use_cache is not None else (self.config.use_cache if not self.training else False)
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = return_dict if return_dict is not None else self.config.return_dict
 
-        if (input_ids is None) ^ (inputs_embeds is not None):  # ^ is python for xor
+        if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
 
         if inputs_embeds is None:
             inputs_embeds = self.embeddings(input_ids)
 
-        if self.gradient_checkpointing and self.training and use_cache:
-            use_cache = False
-
-        if use_cache:
-            if cache_params is None:
-                cache_params = Mamba2Cache(
-                    self.config, inputs_embeds.size(0), device=inputs_embeds.device, dtype=inputs_embeds.dtype
-                )
-                cache_position = torch.arange(0, self.config.conv_kernel, device=inputs_embeds.device)
-            elif cache_position is None:
-                # cases when we do manual forward instead of using `model.generate` which will initiate
-                # `cache_position` and makes sure it is not None, throw error here instead of doing some
-                # hack to conjecture the current cache position
-                raise ValueError(
-                    "You have to specify the `cache_position` manually when `use_cache=True` and `cache_params` is passed, "
-                    "you don't have to pass a `cache_params` if you are in prefilling stage because in that case it will "
-                    "be initialized for you automatically"
-                )
-        else:
-            cache_params = None
+        if use_cache and not isinstance(past_key_values, Cache):
+            past_key_values = Cache.from_legacy_cache(past_key_values)
 
         hidden_states = inputs_embeds
         all_hidden_states = () if output_hidden_states else None
+        all_attns = () if output_attentions else None
         for mixer_block in self.layers:
-            if self.gradient_checkpointing and self.training:
-                hidden_states = self._gradient_checkpointing_func(
-                    mixer_block.__call__,
-                    hidden_states,
-                    cache_params,
-                    cache_position,
-                    attention_mask,
-                )
-            else:
-                hidden_states = mixer_block(
-                    hidden_states,
-                    cache_params=cache_params,
-                    cache_position=cache_position,
-                    attention_mask=attention_mask,
-                )
-
             if output_hidden_states:
                 all_hidden_states = all_hidden_states + (hidden_states,)
+
+            hidden_states, attentions, past_key_values = mixer_block(
+                hidden_states,
+                attention_mask=attention_mask,
+                past_key_values=past_key_values,
+                use_cache=use_cache,
+                output_attentions=output_attentions,
+                **kwargs,
+            )
+
+            if output_attentions:
+                all_attns = all_attns + (attentions,)
 
         hidden_states = self.norm_f(hidden_states)
 
@@ -418,17 +312,18 @@ class Mamba2Model(Mamba2PreTrainedModel):
             all_hidden_states = all_hidden_states + (hidden_states,)
 
         if not return_dict:
-            return tuple(v for v in [hidden_states, cache_params, all_hidden_states] if v is not None)
+            return tuple(i for i in [hidden_states, past_key_values, all_hidden_states, all_attns] if i is not None)
 
-        return Mamba2Output(
+        return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
-            cache_params=cache_params if use_cache else None,
+            past_key_values=past_key_values,
             hidden_states=all_hidden_states,
+            attentions=all_attns,
         )
 
 
-class Mamba2ForCausalLM(Mamba2PreTrainedModel, GenerationMixin):
-    _tied_weights_keys = []
+class Mamba2ForCausalLM(Mamba2PreTrainedModel, FLAGenerationMixin):
+    _tied_weights_keys = {"lm_head.weight": "backbone.embeddings.weight"}
 
     def __init__(self, config):
         super().__init__(config)
@@ -439,131 +334,55 @@ class Mamba2ForCausalLM(Mamba2PreTrainedModel, GenerationMixin):
         # Initialize weights and apply final processing
         self.post_init()
 
-    def get_output_embeddings(self):
-        return self.lm_head
-
-    def set_output_embeddings(self, new_embeddings):
-        self.lm_head = new_embeddings
-
-    def get_input_embeddings(self):
-        return self.backbone.get_input_embeddings()
-
     def set_input_embeddings(self, new_embeddings):
         return self.backbone.set_input_embeddings(new_embeddings)
 
     @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
-    def prepare_inputs_for_generation(
-        self,
-        input_ids,
-        inputs_embeds=None,
-        use_cache=None,
-        cache_params: Optional[Mamba2Cache] = None,
-        cache_position: Optional[torch.LongTensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        logits_to_keep: Optional[int] = None,
-        **kwargs,
-    ):
-        if use_cache:
-            # `cache_position` should have been initialized in `generate`
-            if cache_position is None:
-                raise ValueError(
-                    "`cache_position` should not be None as it should have been initialized in "
-                    "`model.generate`, you are responsible for passing in a valid `cache_position` if "
-                    "you are calling `prepare_inputs_for_generation` directly with `use_cache=True`"
-                )
-            if cache_position[0] > 0:
-                input_ids = input_ids[:, -1][..., None]
-
-                if attention_mask is not None:
-                    attention_mask = None
-            else:
-                # we initialize the `cache_position` to full size of `conv_states` at prefill stage
-                # considering padding will be applied when input length is shorter, and truncation
-                # will be applied when it is longer, so it will be equivalent to always have it match
-                # the length of `cache_params.conv_states`, which is `config.conv_kernel`
-                cache_position = torch.arange(0, self.config.conv_kernel, device=input_ids.device)
-
-        if inputs_embeds is not None and cache_params is None:
-            model_inputs = {"inputs_embeds": inputs_embeds}
-        else:
-            model_inputs = {"input_ids": input_ids}
-
-        if logits_to_keep is not None:
-            model_inputs['logits_to_keep'] = logits_to_keep
-
-        model_inputs.update({
-            'attention_mask': attention_mask,
-            'cache_params': cache_params,
-            'use_cache': use_cache,
-            'cache_position': cache_position,
-            'logits_to_keep': logits_to_keep
-        })
-        return model_inputs
-
-    @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
     def forward(
         self,
-        input_ids: Optional[torch.LongTensor] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        cache_params: Optional[Mamba2Cache] = None,
-        labels: Optional[torch.LongTensor] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-        use_cache: Optional[bool] = None,
-        cache_position: Optional[torch.Tensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        logits_to_keep: Optional[int] = 0,
-        **kwargs,  # for now we need this for generation
-    ) -> Union[Tuple, Mamba2CausalLMOutput]:
-        r"""
-        labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
-            Labels for language modeling. Note that the labels **are shifted** inside the model, i.e. you can set
-            `labels = input_ids` Indices are selected in `[-100, 0, ..., config.vocab_size]` All labels set to `-100`
-            are ignored (masked), the loss is only computed for labels in `[0, ..., config.vocab_size]`
-        """
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        input_ids: torch.LongTensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        inputs_embeds: torch.FloatTensor | None = None,
+        past_key_values: Cache | list[torch.FloatTensor] | None = None,
+        labels: torch.LongTensor | None = None,
+        use_cache: bool | None = None,
+        output_attentions: bool | None = None,
+        output_hidden_states: bool | None = None,
+        return_dict: bool | None = None,
+        logits_to_keep: int | torch.Tensor | None = 0,
+        num_items_in_batch: int | torch.Tensor | None = None,
+        **kwargs,
+    ) -> tuple | CausalLMOutputWithPast:
+        return_dict = return_dict if return_dict is not None else self.config.return_dict
 
         outputs = self.backbone(
-            input_ids,
-            cache_params=cache_params,
+            input_ids=input_ids,
+            attention_mask=attention_mask,
             inputs_embeds=inputs_embeds,
+            past_key_values=past_key_values,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
-            use_cache=use_cache,
-            cache_position=cache_position,
-            attention_mask=attention_mask,
+            **kwargs,
         )
         hidden_states = outputs[0]
-        fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training and labels is not None
 
-        loss, logits = None, None
-        if not fuse_linear_and_cross_entropy or labels is None:
-            logits = self.lm_head(hidden_states if logits_to_keep is None else hidden_states[:, -logits_to_keep:])
-        if labels is not None:
-            if getattr(self, 'criterion', None) is None:
-                if fuse_linear_and_cross_entropy:
-                    criterion = FusedLinearCrossEntropyLoss(use_l2warp=self.config.use_l2warp)
-                elif self.config.fuse_cross_entropy:
-                    criterion = FusedCrossEntropyLoss(inplace_backward=True)
-                else:
-                    criterion = nn.CrossEntropyLoss()
-            else:
-                criterion = self.criterion
-            labels = labels.to(hidden_states.device)
-            labels = torch.cat((labels[..., 1:], torch.full_like(labels[:, :1], criterion.ignore_index)), 1)
-            if fuse_linear_and_cross_entropy:
-                loss = criterion(hidden_states, labels, self.lm_head.weight, self.lm_head.bias)
-            else:
-                loss = criterion(logits.view(labels.numel(), -1), labels.view(-1))
-                loss = l2_warp(loss, logits) if self.config.use_l2warp else loss
+        loss, logits = self._compute_logits_and_loss(
+            hidden_states=hidden_states,
+            labels=labels,
+            logits_to_keep=logits_to_keep,
+            num_items_in_batch=num_items_in_batch,
+        )
 
         if not return_dict:
             output = (logits,) + outputs[1:]
             return (loss,) + output if loss is not None else output
 
-        return Mamba2CausalLMOutput(
+        return CausalLMOutputWithPast(
             loss=loss,
             logits=logits,
-            cache_params=outputs.cache_params,
+            past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
         )

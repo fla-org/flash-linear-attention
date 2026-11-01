@@ -1,20 +1,22 @@
-# -*- coding: utf-8 -*-
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
-
-from typing import Optional, Tuple
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 import triton
 import triton.language as tl
 
-from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
-from fla.utils import input_guard
+from fla.modules.norm.l2norm import l2norm_bwd, l2norm_fwd
+from fla.utils import IS_NVIDIA_HOPPER, input_guard
 
 
 @triton.heuristics({
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.jit(do_not_specialize=['T'])
 def fused_recurrent_delta_rule_fwd_kernel(
@@ -40,15 +42,17 @@ def fused_recurrent_delta_rule_fwd_kernel(
     IS_BETA_HEADWISE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_k, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    pid = tl.program_id(0).to(tl.int64)
+    NV, NK = tl.cdiv(V, BV), tl.cdiv(K, BK)
+    i_v, i_k, i_nh = pid % NV, (pid // NV) % NK, (pid // (NV * NK)).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
-        all = T
+        all = T.to(tl.int64)
         T = eos - bos
     else:
         bos, eos = i_n * T, i_n * T + T
-        all = B * T
+        all = B * T.to(tl.int64)
 
     p_q = q + (bos * H + i_h) * K + i_k * BK + tl.arange(0, BK)
     p_k = k + (bos * H + i_h) * K + i_k * BK + tl.arange(0, BK)
@@ -101,7 +105,7 @@ def fused_recurrent_delta_rule_fwd_kernel(
 @triton.heuristics({
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'USE_FINAL_STATE_GRADIENT': lambda args: args['dht'] is not None,
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.jit(do_not_specialize=['T'])
 def fused_recurrent_delta_rule_bwd_kernel(
@@ -132,25 +136,27 @@ def fused_recurrent_delta_rule_bwd_kernel(
     USE_FINAL_STATE_GRADIENT: tl.constexpr,  # whether to use dht
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_k, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    pid = tl.program_id(0).to(tl.int64)
+    NV = tl.cdiv(V, BV)
+    i_v, i_k, i_nh = pid % NV, (pid // NV) % NK, (pid // (NV * NK)).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
-        all = T
+        all = T.to(tl.int64)
         T = eos - bos
     else:
         bos, eos = i_n * T, i_n * T + T
-        all = B * T
+        all = B * T.to(tl.int64)
 
     mask_k = i_k * BK + tl.arange(0, BK) < K
     mask_v = i_v * BV + tl.arange(0, BV) < V
 
-    p_q = q + (bos * H + i_h) * K + i_k * BK + tl.arange(0, BK) + (T - 1) * H*K
-    p_k = k + (bos * H + i_h) * K + i_k * BK + tl.arange(0, BK) + (T - 1) * H*K
-    p_v = v + (bos * H + i_h) * V + i_v * BV + tl.arange(0, BV) + (T - 1) * H*V
-    p_do = do + (bos * H + i_h) * V + i_v * BV + tl.arange(0, BV) + (T - 1) * H*V
-    p_dk = dk + ((i_v * all + bos) * H + i_h) * K + i_k * BK + tl.arange(0, BK) + (T - 1) * H*K
-    p_dv = dv + ((i_k * all + bos) * H + i_h) * V + i_v * BV + tl.arange(0, BV) + (T - 1) * H*V
+    p_q = q + (bos * H + i_h) * K + i_k * BK + tl.arange(0, BK) + (T - 1).to(tl.int64) * H*K
+    p_k = k + (bos * H + i_h) * K + i_k * BK + tl.arange(0, BK) + (T - 1).to(tl.int64) * H*K
+    p_v = v + (bos * H + i_h) * V + i_v * BV + tl.arange(0, BV) + (T - 1).to(tl.int64) * H*V
+    p_do = do + (bos * H + i_h) * V + i_v * BV + tl.arange(0, BV) + (T - 1).to(tl.int64) * H*V
+    p_dk = dk + ((i_v * all + bos) * H + i_h) * K + i_k * BK + tl.arange(0, BK) + (T - 1).to(tl.int64) * H*K
+    p_dv = dv + ((i_k * all + bos) * H + i_h) * V + i_v * BV + tl.arange(0, BV) + (T - 1).to(tl.int64) * H*V
     if IS_BETA_HEADWISE:
         p_beta = beta + (bos + T - 1) * H*V + i_h * V + i_v * BV + tl.arange(0, BV)
         p_dbeta = db + ((i_v * NK + i_k) * all + bos + T - 1) * H*V + i_h * V + tl.arange(0, BV)
@@ -259,11 +265,13 @@ def fused_recurrent_delta_rule_fwd(
     scale: float,
     initial_state: torch.Tensor,
     output_final_state: bool,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    cu_seqlens: torch.LongTensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
-    BK, BV = triton.next_power_of_2(K), min(triton.next_power_of_2(V), 8)
+    BK = triton.next_power_of_2(K)
+    # BV = 16 on H100/H200: see fla-org/flash-linear-attention#1609.
+    BV = min(triton.next_power_of_2(V), 16 if IS_NVIDIA_HOPPER else 8)
     NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
     assert NK == 1, "NK > 1 is not supported yet"
     num_stages = 1
@@ -275,7 +283,7 @@ def fused_recurrent_delta_rule_fwd(
     else:
         final_state = None
 
-    grid = (NV, NK, N * H)
+    grid = (NV * NK * N * H,)
     u = torch.empty_like(v)
     fused_recurrent_delta_rule_fwd_kernel[grid](
         q,
@@ -312,8 +320,8 @@ def fused_recurrent_delta_rule_bwd(
     do: torch.Tensor,
     scale: float,
     initial_state: torch.Tensor,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    cu_seqlens: torch.LongTensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
     BK, BV = triton.next_power_of_2(K), min(triton.next_power_of_2(V), 32)
@@ -331,7 +339,7 @@ def fused_recurrent_delta_rule_bwd(
         db = q.new_empty(NV, NK, B, T, H, V)
     else:
         db = q.new_empty(NV, B, T, H)
-    grid = (NV, NK, N * H)
+    grid = (NV * NK * N * H,)
 
     if initial_state is not None and initial_state.requires_grad:
         dh0 = torch.empty_like(initial_state, dtype=torch.float32)
@@ -363,7 +371,7 @@ def fused_recurrent_delta_rule_bwd(
         NK=NK,
         IS_BETA_HEADWISE=beta_vector,
         num_warps=num_warps,
-        num_stages=num_stages
+        num_stages=num_stages,
     )
     dq = dq.sum(0)
     dk = dk.sum(0)
@@ -387,7 +395,7 @@ class FusedRecurrentFunction(torch.autograd.Function):
         initial_state: torch.Tensor,
         output_final_state: bool,
         use_qk_l2norm_in_kernel: bool = False,
-        cu_seqlens: Optional[torch.LongTensor] = None,
+        cu_seqlens: torch.LongTensor | None = None,
     ):
         if use_qk_l2norm_in_kernel:
             q, q_rstd = l2norm_fwd(q)
@@ -443,8 +451,8 @@ def fused_recurrent_delta_rule(
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
     use_qk_l2norm_in_kernel: bool = False,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    cu_seqlens: torch.LongTensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
         q (torch.Tensor):
@@ -508,12 +516,12 @@ def fused_recurrent_delta_rule(
         if q.shape[0] != 1:
             raise ValueError(
                 f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
-                f"Please flatten variable-length inputs before processing."
+                f"Please flatten variable-length inputs before processing.",
             )
         if initial_state is not None and initial_state.shape[0] != len(cu_seqlens) - 1:
             raise ValueError(
                 f"The number of initial states is expected to be equal to the number of input sequences, "
-                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}."
+                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}.",
             )
     if scale is None:
         scale = k.shape[-1] ** -0.5

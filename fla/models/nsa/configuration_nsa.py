@@ -1,11 +1,16 @@
-# -*- coding: utf-8 -*-
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from typing import Optional
+from transformers.configuration_utils import PreTrainedConfig
 
-from transformers.configuration_utils import PretrainedConfig
+from fla.models.configuration_utils import validate_attnres_config, validate_loss_config
 
 
-class NSAConfig(PretrainedConfig):
+class NSAConfig(PreTrainedConfig):
 
     model_type = 'nsa'
     keys_to_ignore_at_inference = ['past_key_values']
@@ -19,26 +24,28 @@ class NSAConfig(PretrainedConfig):
         head_dim: int = 32,
         qkv_bias: bool = False,
         block_size: int = 64,
-        block_counts: Optional[int] = 16,
-        window_size: Optional[int] = 512,
-        rope_theta: Optional[float] = 10000.,
+        block_counts: int | None = 16,
+        window_size: int | None = 512,
+        rope_theta: float | None = 10000.,
         max_position_embeddings: int = 2048,
-        hidden_ratio: Optional[int] = 4,
-        intermediate_size: Optional[int] = None,
+        hidden_ratio: int | None = 4,
+        intermediate_size: int | None = None,
         hidden_act: str = "swish",
         initializer_range: float = 0.02,
-        elementwise_affine: Optional[bool] = True,
+        elementwise_affine: bool | None = True,
         norm_eps: float = 1e-6,
         use_cache: bool = True,
-        pad_token_id: Optional[int] = None,
+        pad_token_id: int | None = None,
         bos_token_id: int = 1,
         eos_token_id: int = 2,
         tie_word_embeddings: bool = False,
         fuse_norm: bool = True,
         fuse_swiglu: bool = True,
         fuse_cross_entropy: bool = True,
+        fuse_linear_cross_entropy: bool = False,
         use_l2warp: bool = False,
         vocab_size: int = 32000,
+        attnres_block_size: int | None = None,
         **kwargs,
     ):
         self.hidden_size = hidden_size
@@ -65,8 +72,14 @@ class NSAConfig(PretrainedConfig):
         self.fuse_norm = fuse_norm
         self.fuse_swiglu = fuse_swiglu
         self.fuse_cross_entropy = fuse_cross_entropy
+        self.fuse_linear_cross_entropy = fuse_linear_cross_entropy
         self.use_l2warp = use_l2warp
         self.vocab_size = vocab_size
+        self.attnres_block_size = attnres_block_size
+
+        validate_loss_config(fuse_cross_entropy=fuse_cross_entropy, fuse_linear_cross_entropy=fuse_linear_cross_entropy)
+
+        validate_attnres_config(attnres_block_size=attnres_block_size)
 
         super().__init__(
             pad_token_id=pad_token_id,

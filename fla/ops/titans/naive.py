@@ -1,4 +1,9 @@
-# -*- coding: utf-8 -*-
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 import torch.nn.functional as F
@@ -8,7 +13,7 @@ from fla.ops.titans.log_impl import combine_params_log
 
 def cal_n(theta, eta, seq_len):
     n = torch.zeros(*theta.shape, seq_len, dtype=theta.dtype).to(
-        theta.device
+        theta.device,
     )  # [batch_size, num_heads, seq_len, seq_len]
 
     # 1. deal with diagonal elements
@@ -115,7 +120,7 @@ def combine_params(theta, alpha, eta, seq_len):
 
 
 def titans_linear(
-    q, k, v, w, b, theta, alpha, eta, eps, chunk_size, initial_state, output_final_state
+    q, k, v, w, b, theta, alpha, eta, eps, chunk_size, initial_state, output_final_state,
 ):
     """
     Implementation of Titans Linear function based on the update rules:
@@ -200,7 +205,7 @@ def titans_linear(
 
     # Stack outputs along sequence dimension
     output = torch.stack(outputs, dim=-2).squeeze(
-        -3
+        -3,
     )  # (batch_size, num_heads, seq_len, dim)
 
     if output_final_state:
@@ -209,7 +214,7 @@ def titans_linear(
 
 
 def chunk_titans_linear(
-    q, k, v, w, b, theta, alpha, eta, eps, chunk_size, initial_state, output_final_state
+    q, k, v, w, b, theta, alpha, eta, eps, chunk_size, initial_state, output_final_state,
 ):
     B, H, T, D = q.shape
     num_batch = T // chunk_size
@@ -227,7 +232,7 @@ def chunk_titans_linear(
     # [num_heads, 1, head_dim]
     if initial_state is None:
         M_prev = torch.zeros((B, H, D, D), device=v.device, dtype=v.dtype).to(
-            torch.float32
+            torch.float32,
         )
     else:
         M_prev = initial_state
@@ -244,7 +249,7 @@ def chunk_titans_linear(
 
         # beta, beta_T, f, f_T, g, G, m_T, n = combine_params(theta_i, alpha_i, eta_i, chunk_size)
         beta, beta_T, f, f_T, g, G, m_T, n = combine_params_log(
-            theta_i, alpha_i, eta_i, chunk_size
+            theta_i, alpha_i, eta_i, chunk_size,
         )
 
         m_T = m_T.unsqueeze(-1).unsqueeze(-1)
@@ -313,18 +318,16 @@ def chunk_titans_linear_ref(
     chunk_size: int = 16,  # chunk size
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
-    head_first: bool = False,
     use_chunk: bool = True,
 ):
     assert q.dtype == k.dtype == v.dtype
     assert k.shape[-1] == v.shape[-1], "DK must equal to DV."
-    if not head_first:
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
-        eta = eta.transpose(1, 2)
-        alpha = alpha.transpose(1, 2)
-        theta = theta.transpose(1, 2)
+    q = q.transpose(1, 2)
+    k = k.transpose(1, 2)
+    v = v.transpose(1, 2)
+    eta = eta.transpose(1, 2)
+    alpha = alpha.transpose(1, 2)
+    theta = theta.transpose(1, 2)
     seq_len = q.shape[-2]
     pad_len = (chunk_size - (seq_len % chunk_size)) % chunk_size
     if pad_len > 0:
@@ -370,6 +373,5 @@ def chunk_titans_linear_ref(
             output_final_state,
         )
     o = o[:, :, :seq_len, :]
-    if not head_first:
-        o = o.transpose(1, 2)
+    o = o.transpose(1, 2)
     return o, final_state

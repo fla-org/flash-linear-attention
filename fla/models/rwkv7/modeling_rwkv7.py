@@ -1,31 +1,35 @@
-# -*- coding: utf-8 -*-
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 from __future__ import annotations
 
 import math
 import warnings
-from typing import TYPE_CHECKING, Dict, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Optional
 
 import torch
 import torch.nn as nn
-import torch.utils.checkpoint
-from transformers.generation import GenerationMixin
+from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
-from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
 from transformers.utils.deprecation import deprecate_kwarg
 
-from fla.layers.attn import Attention
 from fla.layers.rwkv7 import RWKV7Attention
+from fla.models.cache_utils import Cache
+from fla.models.generation_utils import FLAUnsupportedCacheGenerationMixin
+from fla.models.modeling_utils import FLAForCausalLM, FLAPreTrainedModel, get_attention
 from fla.models.rwkv7.configuration_rwkv7 import RWKV7Config
-from fla.models.utils import Cache
-from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, LayerNorm
+from fla.modules import LayerNorm
 from fla.modules.activations import ACT2FN
-from fla.modules.l2warp import l2_warp
 from fla.modules.token_shift import token_shift
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
+
 
 logger = logging.get_logger(__name__)
 
@@ -35,8 +39,8 @@ class RWKV7FeedForward(nn.Module):
     def __init__(
         self,
         hidden_size: int,
-        hidden_ratio: Optional[int] = None,
-        intermediate_size: Optional[int] = None,
+        hidden_ratio: int | None = None,
+        intermediate_size: int | None = None,
         hidden_act: str = 'sqrelu',
         layer_idx: int = None,
         num_hidden_layers: int = None,
@@ -82,40 +86,36 @@ class RWKV7FeedForward(nn.Module):
                 module.x_k.data = 1.0 - torch.pow(ddd, ratio_1_to_almost0**4).squeeze()
 
             # Initialize key and value weights as in CMix_x070
-            torch.nn.init.orthogonal_(module.key.weight)
+            original_dtype = module.key.weight.dtype
+            module.key.weight.data = nn.init.orthogonal_(module.key.weight.data.to(torch.float32)).to(original_dtype)
             module.value.weight.data.zero_()
 
     def forward(
         self,
         x: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        state: Optional[Cache] = None,
-        cu_seqlens: Optional[torch.LongTensor] = None,
-        **kwargs
+        attention_mask: torch.Tensor | None = None,
+        state: Cache | None = None,
+        cu_seqlens: torch.LongTensor | None = None,
+        **kwargs,
     ) -> torch.Tensor:
         if attention_mask is not None:
             x = x.mul(attention_mask[:, -x.shape[-2]:, None])
-        if x.shape[1] == 1 and state is not None and state[self.layer_idx]['ffn_state'] is not None:
-            shifted = state[self.layer_idx]['ffn_state'].unsqueeze(1)
-            delta = shifted - x
-        elif state is not None and state[self.layer_idx]['ffn_state'] is not None:
-            shifted = self.time_shift(x)
-            shifted[:, 0] = state[self.layer_idx]['ffn_state'][-1]
-            delta = shifted - x
+        if state is not None:
+            delta, ffn_state = token_shift(x, cu_seqlens, cache=state[self.layer_idx]['ffn_state'], output_cache=True)
         else:
-            delta = token_shift(x, cu_seqlens)
+            delta, ffn_state = token_shift(x, cu_seqlens, output_cache=True)
         if state is not None:
             # no need to update the offset twice
-            state.update(ffn_state=x[:, -1], layer_idx=self.layer_idx, offset=0)
+            state.update(ffn_state=ffn_state, layer_idx=self.layer_idx, offset=0)
         return self.value(self.act_fn(self.key(x.addcmul(delta, self.x_k)))), state
 
 
-class RWKV7Block(nn.Module):
+class RWKV7Block(GradientCheckpointingLayer):
 
     def __init__(
         self,
         config: RWKV7Config,
-        layer_idx: int
+        layer_idx: int,
     ) -> RWKV7Block:
         super().__init__()
 
@@ -126,25 +126,15 @@ class RWKV7Block(nn.Module):
             self.pre_norm = (LayerNorm if config.fuse_norm else nn.LayerNorm)(
                 config.hidden_size,
                 bias=config.norm_bias,
-                eps=config.norm_eps
+                eps=config.norm_eps,
             )
         self.attn_norm = (LayerNorm if config.fuse_norm else nn.LayerNorm)(
             config.hidden_size,
             bias=config.norm_bias,
-            eps=config.norm_eps
+            eps=config.norm_eps,
         )
-        if config.attn is not None and layer_idx in config.attn['layers']:
-            self.attn = Attention(
-                hidden_size=config.hidden_size,
-                num_heads=config.attn['num_heads'],
-                num_kv_heads=config.attn['num_kv_heads'],
-                qkv_bias=config.attn['qkv_bias'],
-                window_size=config.attn['window_size'],
-                rope_theta=config.attn['rope_theta'],
-                max_position_embeddings=config.max_position_embeddings,
-                layer_idx=layer_idx
-            )
-        else:
+        self.attn = get_attention(config=config, layer_idx=layer_idx)
+        if self.attn is None:
             self.attn = RWKV7Attention(
                 mode=config.attn_mode,
                 hidden_size=config.hidden_size,
@@ -158,12 +148,12 @@ class RWKV7Block(nn.Module):
                 fuse_norm=config.fuse_norm,
                 layer_idx=layer_idx,
                 value_dim=config.value_dim[layer_idx],
-                num_hidden_layers=config.num_hidden_layers
+                num_hidden_layers=config.num_hidden_layers,
             )
         self.ffn_norm = (LayerNorm if config.fuse_norm else nn.LayerNorm)(
             config.hidden_size,
             bias=config.norm_bias,
-            eps=config.norm_eps
+            eps=config.norm_eps,
         )
         self.ffn = RWKV7FeedForward(
             hidden_size=config.hidden_size,
@@ -171,20 +161,20 @@ class RWKV7Block(nn.Module):
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
             layer_idx=layer_idx,
-            num_hidden_layers=config.num_hidden_layers
+            num_hidden_layers=config.num_hidden_layers,
         )
 
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        past_key_values: Optional[Cache] = None,
-        use_cache: Optional[bool] = False,
-        output_attentions: Optional[bool] = False,
+        attention_mask: torch.Tensor | None = None,
+        past_key_values: Cache | None = None,
+        use_cache: bool | None = False,
+        output_attentions: bool | None = False,
         v_first: torch.Tensor = None,
-        cu_seqlens: Optional[torch.LongTensor] = None,
+        cu_seqlens: torch.LongTensor | None = None,
         **kwargs,
-    ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
+    ) -> tuple[torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None]:
         residual = self.pre_norm(hidden_states) if hasattr(self, 'pre_norm') else hidden_states
         hidden_states = self.attn_norm(residual)
         hidden_states, attentions, past_key_values, v_first = self.attn(
@@ -195,7 +185,7 @@ class RWKV7Block(nn.Module):
             output_attentions=output_attentions,
             v_first=v_first,
             cu_seqlens=cu_seqlens,
-            **kwargs
+            **kwargs,
         )
         if self.config.fuse_norm:
             hidden_states, residual = self.ffn_norm(hidden_states, residual, True)
@@ -204,7 +194,7 @@ class RWKV7Block(nn.Module):
             residual = hidden_states
             hidden_states = self.ffn_norm(hidden_states)
         hidden_states, past_key_values = self.ffn(
-            hidden_states, attention_mask, past_key_values, cu_seqlens, **kwargs
+            hidden_states, attention_mask, past_key_values, cu_seqlens, **kwargs,
         )
         hidden_states = residual + hidden_states
 
@@ -213,7 +203,7 @@ class RWKV7Block(nn.Module):
         return outputs
 
 
-class RWKV7PreTrainedModel(PreTrainedModel):
+class RWKV7PreTrainedModel(FLAPreTrainedModel):
 
     config_class = RWKV7Config
     base_model_prefix = 'model'
@@ -234,16 +224,18 @@ class RWKV7PreTrainedModel(PreTrainedModel):
     ):
         if isinstance(module, nn.Embedding):
             # https://github.com/BlinkDL/RWKV-LM/blob/main/RWKV-v7/train_temp/src/model.py#L396C12-L399C58
-            scale = -1e-4
-            nn.init.uniform_(module.weight, a=scale, b=-scale)
+            if not getattr(module.weight, '_is_hf_initialized', False):
+                scale = -1e-4
+                nn.init.uniform_(module.weight, a=scale, b=-scale)
         elif isinstance(module, nn.Linear) and hasattr(self, 'lm_head') and module is self.lm_head:
             # https://github.com/BlinkDL/RWKV-LM/blob/main/RWKV-v7/train_temp/src/model.py#L403
-            if self.config.vocab_size > self.config.hidden_size:
-                scale = 0.5 * math.sqrt(self.config.vocab_size / self.config.hidden_size)
-            else:
-                scale = 0.5
-            original_dtype = module.weight.dtype
-            module.weight.data = nn.init.orthogonal_(module.weight.data.to(torch.float32), gain=scale).to(original_dtype)
+            if not getattr(module.weight, '_is_hf_initialized', False):
+                if self.config.vocab_size > self.config.hidden_size:
+                    scale = 0.5 * math.sqrt(self.config.vocab_size / self.config.hidden_size)
+                else:
+                    scale = 0.5
+                original_dtype = module.weight.dtype
+                module.weight.data = nn.init.orthogonal_(module.weight.data.to(torch.float32), gain=scale).to(original_dtype)
         # Init Attention parameters
         elif isinstance(module, (nn.Linear, nn.Conv1d)) and getattr(module, '_in_rwkv_module', False) is False:
             # Slightly different from the TF version which uses truncated_normal for initialization
@@ -262,7 +254,7 @@ class RWKV7PreTrainedModel(PreTrainedModel):
             #   > the weights of residual layers at initialization by a factor of 1/√N where N is the # of residual layers.
             #   >   -- GPT-2 :: https://openai.com/blog/better-language-models/
             #
-            # Reference (Megatron-LM): https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/model/gpt_model.py
+            # Reference (Megatron-LM): https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/models/gpt/gpt_model.py
             p = None
             if hasattr(module, 'o_proj'):
                 p = module.o_proj.weight
@@ -290,18 +282,12 @@ class RWKV7Model(RWKV7PreTrainedModel):
         self.norm = (LayerNorm if config.fuse_norm else nn.LayerNorm)(
             config.hidden_size,
             bias=config.norm_bias,
-            eps=config.norm_eps
+            eps=config.norm_eps,
         )
 
         self.gradient_checkpointing = False
 
         self.post_init()
-
-    def get_input_embeddings(self):
-        return self.embeddings
-
-    def set_input_embeddings(self, value):
-        self.embeddings = value
 
     def load_state_dict(self, state_dict, strict=True, assign=False):
         """
@@ -349,30 +335,30 @@ class RWKV7Model(RWKV7PreTrainedModel):
             # If the parent method does not support `assign`, fall back to strict loading
             logger.warning(
                 "`assign` parameter is not supported by the parent `load_state_dict` method. "
-                "Falling back to default behavior."
+                "Falling back to default behavior.",
             )
             super().load_state_dict(state_dict, strict=strict)
 
     def forward(
         self,
-        input_ids: Optional[torch.LongTensor] = None,
+        input_ids: torch.LongTensor | None = None,
         attention_mask: Optional[torch.Tensor] = None,  # noqa
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        past_key_values: Optional[Cache] = None,
-        use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-        cu_seqlens: Optional[torch.LongTensor] = None,
-        **kwargs: Unpack[Dict]
-    ) -> Union[Tuple, BaseModelOutputWithPast]:
+        inputs_embeds: torch.FloatTensor | None = None,
+        past_key_values: Cache | None = None,
+        use_cache: bool | None = None,
+        output_attentions: bool | None = None,
+        output_hidden_states: bool | None = None,
+        return_dict: bool | None = None,
+        cu_seqlens: torch.LongTensor | None = None,
+        **kwargs: Unpack[dict],
+    ) -> tuple | BaseModelOutputWithPast:
         if output_attentions:
             warnings.warn("`RWKV7Model` does not `output_attentions` now, setting it to `False`.")
             output_attentions = False
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         use_cache = use_cache if use_cache is not None else (self.config.use_cache if not self.training else False)
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = return_dict if return_dict is not None else self.config.return_dict
 
         # retrieve input_ids and inputs_embeds
         if input_ids is not None and inputs_embeds is not None:
@@ -387,10 +373,6 @@ class RWKV7Model(RWKV7PreTrainedModel):
         if use_cache and not isinstance(past_key_values, Cache):
             past_key_values = Cache.from_legacy_cache(past_key_values)
 
-        if self.gradient_checkpointing and self.training and use_cache:
-            logger.warning_once("`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`...")
-            use_cache = False
-
         all_hidden_states = () if output_hidden_states else None
         all_attns = () if output_attentions else None
 
@@ -399,29 +381,16 @@ class RWKV7Model(RWKV7PreTrainedModel):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
-            if self.gradient_checkpointing and self.training:
-                hidden_states, attentions, past_key_values, v_first = self._gradient_checkpointing_func(
-                    layer.__call__,
-                    hidden_states,
-                    attention_mask,
-                    past_key_values,
-                    use_cache,
-                    output_attentions,
-                    v_first,
-                    cu_seqlens,
-                    **kwargs
-                )
-            else:
-                hidden_states, attentions, past_key_values, v_first = layer(
-                    hidden_states,
-                    attention_mask=attention_mask,
-                    past_key_values=past_key_values,
-                    use_cache=use_cache,
-                    output_attentions=output_attentions,
-                    v_first=v_first,
-                    cu_seqlens=cu_seqlens,
-                    **kwargs
-                )
+            hidden_states, attentions, past_key_values, v_first = layer(
+                hidden_states,
+                attention_mask=attention_mask,
+                past_key_values=past_key_values,
+                use_cache=use_cache,
+                output_attentions=output_attentions,
+                v_first=v_first,
+                cu_seqlens=cu_seqlens,
+                **kwargs,
+            )
 
             if output_attentions:
                 all_attns += (attentions,)
@@ -438,13 +407,13 @@ class RWKV7Model(RWKV7PreTrainedModel):
             last_hidden_state=hidden_states,
             past_key_values=past_key_values,
             hidden_states=all_hidden_states,
-            attentions=all_attns
+            attentions=all_attns,
         )
 
 
-class RWKV7ForCausalLM(RWKV7PreTrainedModel, GenerationMixin):
+class RWKV7ForCausalLM(RWKV7PreTrainedModel, FLAForCausalLM, FLAUnsupportedCacheGenerationMixin):
 
-    _tied_weights_keys = ["lm_head.weight"]
+    _tied_weights_keys = {"lm_head.weight": "model.embeddings.weight"}
 
     def __init__(self, config):
         super().__init__(config)
@@ -456,94 +425,28 @@ class RWKV7ForCausalLM(RWKV7PreTrainedModel, GenerationMixin):
         # Initialize weights and apply final processing
         self.post_init()
 
-    def get_input_embeddings(self):
-        return self.model.embeddings
-
-    def set_input_embeddings(self, value):
-        self.model.embeddings = value
-
-    def get_output_embeddings(self):
-        return self.lm_head
-
-    def set_output_embeddings(self, new_embeddings):
-        self.lm_head = new_embeddings
-
-    def set_decoder(self, decoder):
-        self.model = decoder
-
-    def get_decoder(self):
-        return self.model
-
-    def generate(self, *args, **kwargs):
-        try:
-            return super().generate(*args, **kwargs)
-        except AttributeError as exception:
-            if 'past_key_values' in str(exception):
-                raise AttributeError(
-                    f"You tried to call `generate` with a decoding strategy that manipulates `past_key_values`, "
-                    f"which is not supported for {self.__class__.__name__}. "
-                    f"Try another generation strategy instead. "
-                    f"For the available generation strategies, check this doc: "
-                    f"https://huggingface.co/docs/transformers/en/generation_strategies#decoding-strategies"
-                )
-            else:
-                raise exception
-
-    @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
-    def prepare_inputs_for_generation(
-        self,
-        input_ids: torch.LongTensor = None,
-        past_key_values: Optional[Cache] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-        use_cache: bool = True,
-        logits_to_keep: Optional[int] = None,
-        **kwargs
-    ):
-        # only last token for `inputs_ids` if the `past_key_values` is not empty.
-        if past_key_values is not None and len(past_key_values) > 0:
-            input_ids = input_ids[:, -1:]
-        # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
-        if inputs_embeds is not None and len(past_key_values) == 0:
-            model_inputs = {'inputs_embeds': inputs_embeds}
-        else:
-            # The `contiguous()` here is necessary to have a static stride during decoding. torchdynamo otherwise
-            # recompiles graphs as the stride of the inputs is a guard.
-            # Ref: https://github.com/huggingface/transformers/pull/29114
-            # TODO: use `next_tokens` directly instead.
-            model_inputs = {'input_ids': input_ids.contiguous()}
-
-        if logits_to_keep is not None:
-            model_inputs['logits_to_keep'] = logits_to_keep
-
-        model_inputs.update({
-            'past_key_values': past_key_values,
-            'use_cache': use_cache,
-            'attention_mask': attention_mask,
-        })
-        return model_inputs
-
     @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
     def forward(
         self,
         input_ids: torch.LongTensor = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-        past_key_values: Optional[Cache] = None,
-        labels: Optional[torch.LongTensor] = None,
-        shift_labels: Optional[torch.LongTensor] = None,
-        use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-        logits_to_keep: Optional[int] = 0,
-        **kwargs: Unpack[Dict]
-    ) -> Union[Tuple, CausalLMOutputWithPast]:
+        attention_mask: torch.Tensor | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        past_key_values: Cache | None = None,
+        labels: torch.LongTensor | None = None,
+        shift_labels: torch.LongTensor | None = None,
+        use_cache: bool | None = None,
+        output_attentions: bool | None = None,
+        output_hidden_states: bool | None = None,
+        return_dict: bool | None = None,
+        logits_to_keep: int | torch.Tensor | None = 0,
+        num_items_in_batch: int | torch.Tensor | None = None,
+        **kwargs: Unpack[dict],
+    ) -> tuple | CausalLMOutputWithPast:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = return_dict if return_dict is not None else self.config.return_dict
 
         outputs = self.model(
             input_ids=input_ids,
@@ -554,37 +457,18 @@ class RWKV7ForCausalLM(RWKV7PreTrainedModel, GenerationMixin):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
-            **kwargs
+            **kwargs,
         )
 
         hidden_states = outputs[0]
-        fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training and labels is not None
 
-        loss, logits = None, None
-        has_labels = (labels is not None) or (shift_labels is not None)
-        if not (fuse_linear_and_cross_entropy and has_labels):
-            logits = self.lm_head(hidden_states if logits_to_keep is None else hidden_states[:, -logits_to_keep:])
-        if has_labels:
-            if getattr(self, 'criterion', None) is None:
-                if fuse_linear_and_cross_entropy:
-                    criterion = FusedLinearCrossEntropyLoss(use_l2warp=self.config.use_l2warp)
-                elif self.config.fuse_cross_entropy:
-                    criterion = FusedCrossEntropyLoss(inplace_backward=True)
-                else:
-                    criterion = nn.CrossEntropyLoss()
-            else:
-                criterion = self.criterion
-
-            # shift_labels: See https://github.com/huggingface/transformers/pull/36607/files.
-            if shift_labels is None:
-                shift_labels = torch.cat((labels[..., 1:], torch.full_like(labels[:, :1], criterion.ignore_index)), 1)
-            shift_labels = shift_labels.to(hidden_states.device)
-
-            if fuse_linear_and_cross_entropy:
-                loss = criterion(hidden_states, shift_labels, self.lm_head.weight, self.lm_head.bias)
-            else:
-                loss = criterion(logits.view(shift_labels.numel(), -1), shift_labels.view(-1))
-                loss = l2_warp(loss, logits) if self.config.use_l2warp else loss
+        loss, logits = self._compute_logits_and_loss(
+            hidden_states=hidden_states,
+            labels=labels,
+            logits_to_keep=logits_to_keep,
+            num_items_in_batch=num_items_in_batch,
+            shift_labels=shift_labels,
+        )
 
         if not return_dict:
             output = (logits,) + outputs[1:]

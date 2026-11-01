@@ -1,0 +1,264 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
+"""
+Compare CP KDA graph replay with eager outputs and gradients.
+
+Each rank captures a fwd+bwd step (cp_context + use_graph) once,
+replays it with several cu_seqlens layouts (different splits and zero-length tail padding),
+and compares against the eager CP path on the same shard.
+The recorded region includes cross-rank state all-gathers, so ranks must capture and replay in lockstep.
+"""
+
+import pytest
+import torch
+import torch.distributed as dist
+import torch.nn.functional as F
+
+from fla.ops.cp import FLACPContext, build_cp_context
+from fla.ops.kda import chunk_kda
+from fla.utils import IS_TF32_SUPPORTED, assert_close, device
+from tests.ops.kda_graph import MAX_NUM_SEQS, VARLEN_CASES, D, H, T, make_inputs
+
+pytestmark = pytest.mark.skipif(not IS_TF32_SUPPORTED, reason="requires NVIDIA Ampere or newer")
+
+TOKEN_NAMES = ["q", "k", "v", "g", "beta"]
+INPUT_NAMES = TOKEN_NAMES + ["A_log", "dt_bias"]
+OUTPUT_NAMES = ["o", "dq", "dk", "dv", "dg", "db", "dA", "dbias"]
+
+
+def _make_inputs(seed: int, device: torch.device) -> dict[str, torch.Tensor]:
+    """Same seed on every rank reproduces one logical global batch; ranks slice their shard."""
+    generator = torch.Generator(device).manual_seed(seed)
+    dtype = torch.bfloat16
+    hv = H
+    q = torch.randn(1, T, H, D, dtype=dtype, device=device, generator=generator)
+    k = F.normalize(torch.randn(1, T, H, D, dtype=torch.float32, device=device, generator=generator), p=2, dim=-1).to(dtype)
+    v = torch.randn(1, T, hv, D, dtype=dtype, device=device, generator=generator)
+    g = torch.randn(1, T, hv, D, dtype=dtype, device=device, generator=generator)
+    A_log = torch.log(torch.empty(1, 1, hv, 1, device=device).uniform_(1, 16, generator=generator))
+    dt_bias = torch.randn(hv * D, dtype=torch.float32, device=device, generator=generator)
+    beta = torch.rand(1, T, hv, dtype=dtype, device=device, generator=generator).sigmoid()
+    do = torch.randn(1, T, hv, D, dtype=dtype, device=device, generator=generator)
+    return dict(q=q, k=k, v=v, g=g, beta=beta, A_log=A_log, dt_bias=dt_bias, do=do)
+
+
+def _run_graph(rank, world_size):
+    device = torch.device('cuda', rank)
+    part = T // world_size
+    lo, hi = rank * part, (rank + 1) * part
+    group = dist.group.WORLD
+
+    cu_static = torch.zeros(MAX_NUM_SEQS + 1, dtype=torch.long, device=device)
+    pre_dev = torch.zeros(1, dtype=torch.int32, device=device)
+    post_dev = torch.zeros(1, dtype=torch.int32, device=device)
+
+    def refresh(base):
+        local = base.cu_seqlens
+        cu_static[: len(local)] = local
+        cu_static[len(local):] = local[-1]
+        pre_dev.fill_(base.pre_num_ranks)
+        post_dev.fill_(base.post_num_ranks)
+
+    # one persistent context around the static buffers; host fields are only read eagerly
+    base0 = build_cp_context(torch.tensor(VARLEN_CASES[0][1], dtype=torch.long, device=device), group=group)
+    refresh(base0)
+    ctx = FLACPContext(
+        group=group,
+        cu_seqlens=cu_static,
+        cu_seqlens_cpu=None,
+        is_last_rank=base0.is_last_rank,
+        pre_num_ranks=base0.pre_num_ranks,
+        is_first_rank=base0.is_first_rank,
+        post_num_ranks=base0.post_num_ranks,
+        pre_num_ranks_dev=pre_dev,
+        post_num_ranks_dev=post_dev,
+    )
+
+    def shard_leaves(inputs):
+        leaves = {n: inputs[n][:, lo:hi].detach().clone().requires_grad_() for n in TOKEN_NAMES}
+        for n in ("A_log", "dt_bias"):
+            leaves[n] = inputs[n].detach().clone().requires_grad_()
+        return leaves
+
+    initial_inputs = _make_inputs(0, device)
+    leaves = shard_leaves(initial_inputs)
+    do = initial_inputs["do"][:, lo:hi].detach().clone()
+
+    def step():
+        for t in leaves.values():
+            if t.grad is not None:
+                t.grad.zero_()
+        o, _ = chunk_kda(
+            q=leaves["q"],
+            k=leaves["k"],
+            v=leaves["v"],
+            g=leaves["g"],
+            beta=leaves["beta"],
+            use_gate_in_kernel=True,
+            cp_context=ctx,
+            use_graph=True,
+            max_num_seqs=MAX_NUM_SEQS,
+            A_log=leaves["A_log"],
+            dt_bias=leaves["dt_bias"],
+        )
+        (o * do).sum().backward()
+        return o
+
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        for _ in range(3):
+            step()
+    torch.cuda.current_stream().wait_stream(stream)
+    dist.barrier()
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        o_captured = step()
+
+    for seed, (tag, sequence_offsets) in enumerate(VARLEN_CASES, start=1):
+        inputs = _make_inputs(seed * 17, device)
+        for n in TOKEN_NAMES:
+            leaves[n].data.copy_(inputs[n][:, lo:hi])
+        for n in ("A_log", "dt_bias"):
+            leaves[n].data.copy_(inputs[n])
+        do.copy_(inputs["do"][:, lo:hi])
+        cu = torch.tensor(sequence_offsets, dtype=torch.long, device=device)
+        refresh(build_cp_context(cu, group=group))
+
+        dist.barrier()
+        graph.replay()
+        torch.cuda.synchronize()
+        got = [o_captured.clone()] + [leaves[n].grad.clone() for n in INPUT_NAMES]
+        dist.barrier()
+
+        # eager CP reference on the same shard
+        ref_leaves = shard_leaves(inputs)
+        o, _ = chunk_kda(
+            q=ref_leaves["q"],
+            k=ref_leaves["k"],
+            v=ref_leaves["v"],
+            g=ref_leaves["g"],
+            beta=ref_leaves["beta"],
+            use_gate_in_kernel=True,
+            cp_context=build_cp_context(cu, group=group),
+            A_log=ref_leaves["A_log"],
+            dt_bias=ref_leaves["dt_bias"],
+        )
+        (o * inputs["do"][:, lo:hi]).sum().backward()
+        ref = [o.detach()] + [ref_leaves[n].grad for n in INPUT_NAMES]
+        dist.barrier()
+
+        for name, r, g in zip(OUTPUT_NAMES, ref, got):
+            assert_close(f"{tag}::{name}", r, g, ratio=8e-3)
+
+    # destroying a communicator recorded in a CUDA graph can hang; process exit reaps it
+    dist.barrier()
+
+
+def test_chunk_kda(run_distributed):
+    # a communicator recorded by a CUDA graph must outlive the graph; worker exit reaps it
+    run_distributed(worker=_run_graph, world_size=2, destroy_process_group=False)
+
+
+def _eager_cp(inputs, sequence_offsets, gate):
+    """Eager CP reference: world_size=1 crosses no rank, so only real tokens matter."""
+    leaves = {n: inputs[n].detach().clone().requires_grad_() for n in ("q", "k", "v", "g", "beta")}
+    extra = {}
+    if gate:
+        leaves["A_log"] = inputs["A_log"].detach().clone().requires_grad_()
+        leaves["dt_bias"] = inputs["dt_bias"].detach().clone().requires_grad_()
+        extra = dict(A_log=leaves["A_log"], dt_bias=leaves["dt_bias"])
+    cu = torch.tensor(sequence_offsets, dtype=torch.long, device=device)
+    o, _ = chunk_kda(
+        q=leaves["q"],
+        k=leaves["k"],
+        v=leaves["v"],
+        g=leaves["g"],
+        beta=leaves["beta"],
+        use_gate_in_kernel=gate,
+        cp_context=build_cp_context(cu, group=dist.group.WORLD),
+        **extra,
+    )
+    (o * inputs["do"]).sum().backward()
+    out = [o.detach(), leaves["q"].grad, leaves["k"].grad, leaves["v"].grad, leaves["g"].grad, leaves["beta"].grad]
+    out += [leaves["A_log"].grad, leaves["dt_bias"].grad] if gate else [None, None]
+    return out
+
+
+def test_chunk_kda_single_rank(single_rank_group, monkeypatch):
+    # keep the eager reference on the same backend as graph capture
+    monkeypatch.setenv("FLA_TILELANG", "0")
+    gate = True
+    cu = torch.tensor(VARLEN_CASES[0][1], dtype=torch.long, device=device)
+    pre_dev = torch.zeros(1, dtype=torch.int32, device=device)
+    post_dev = torch.zeros(1, dtype=torch.int32, device=device)
+    base = build_cp_context(cu, group=dist.group.WORLD)
+    ctx = FLACPContext(
+        group=dist.group.WORLD,
+        cu_seqlens=cu,
+        cu_seqlens_cpu=base.cu_seqlens_cpu,
+        is_last_rank=base.is_last_rank,
+        pre_num_ranks=base.pre_num_ranks,
+        is_first_rank=base.is_first_rank,
+        post_num_ranks=base.post_num_ranks,
+        pre_num_ranks_dev=pre_dev,
+        post_num_ranks_dev=post_dev,
+    )
+
+    initial_inputs = make_inputs(seed=0, gate=gate, safe_gate=False)
+    names = ["q", "k", "v", "g", "beta", "A_log", "dt_bias"]
+    leaves = {n: initial_inputs[n].detach().clone().requires_grad_() for n in names}
+    do = initial_inputs["do"].detach().clone()
+
+    def step():
+        for t in leaves.values():
+            if t.grad is not None:
+                t.grad.zero_()
+        o, _ = chunk_kda(
+            q=leaves["q"],
+            k=leaves["k"],
+            v=leaves["v"],
+            g=leaves["g"],
+            beta=leaves["beta"],
+            use_gate_in_kernel=gate,
+            cp_context=ctx,
+            use_graph=True,
+            max_num_seqs=MAX_NUM_SEQS,
+            A_log=leaves["A_log"],
+            dt_bias=leaves["dt_bias"],
+        )
+        (o * do).sum().backward()
+        return o.detach().clone()
+
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        for _ in range(3):
+            step()
+    torch.cuda.current_stream().wait_stream(stream)
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        o_captured = step()
+
+    names_out = ["o", "dq", "dk", "dv", "dg", "db", "dA", "dbias"]
+    for seed, (tag, sequence_offsets) in enumerate(VARLEN_CASES, start=1):
+        inputs = make_inputs(seed=seed * 17, gate=gate, safe_gate=False)
+        for n in names:
+            leaves[n].data.copy_(inputs[n])
+        do.copy_(inputs["do"])
+        cu.copy_(torch.tensor(sequence_offsets, dtype=torch.long, device=device))
+
+        graph.replay()
+        torch.cuda.synchronize()
+
+        got = [o_captured] + [leaves[n].grad for n in names]
+        ref = _eager_cp(inputs, sequence_offsets, gate)
+        for name, r, g in zip(names_out, ref, got):
+            assert_close(f"cp_world1::{tag}::{name}", r, g, 2e-3)

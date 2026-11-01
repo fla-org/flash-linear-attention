@@ -1,4 +1,10 @@
-# coding=utf-8
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+#
 # Copyright 2024 The HuggingFace Inc. team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,22 +18,23 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""MAMBA configuration"""
 
 import math
 
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
+
+from fla.models.configuration_utils import validate_loss_config
 
 
-class MambaConfig(PretrainedConfig):
+class MambaConfig(PreTrainedConfig):
     """
     This is the configuration class to store the configuration of a [`MambaModel`]. It is used to instantiate a MAMBA
     model according to the specified arguments, defining the model architecture. Instantiating a configuration with the
     defaults will yield a similar configuration to that of the MAMBA
     [state-spaces/mamba-2.8b](https://huggingface.co/state-spaces/mamba-2.8b) architecture.
 
-    Configuration objects inherit from [`PretrainedConfig`] and can be used to control the model outputs. Read the
-    documentation from [`PretrainedConfig`] for more information.
+    Configuration objects inherit from [`PreTrainedConfig`] and can be used to control the model outputs. Read the
+    documentation from [`PreTrainedConfig`] for more information.
 
 
     Args:
@@ -62,18 +69,18 @@ class MambaConfig(PretrainedConfig):
         residual_in_fp32 (`bool`, *optional*):
             Whether or not residuals should be in `float32`.
             If set to `False` residuals will keep the same `dtype` as the rest of the model. Default: `True`.
-        time_step_rank (`Union[int,str]`, *optional*):
+        dt_rank (`Union[int,str]`, *optional*):
             Rank of the the discretization projection matrix.
             `"auto"` means that it will default to `math.ceil(self.hidden_size / 16)`. Default: `"auto"`.
-        time_step_scale (`float`, *optional*):
-            Scale used used to scale `dt_proj.bias`. Default: 1.0.
-        time_step_min (`float`, *optional*):
-            Minimum `time_step` used to bound `dt_proj.bias`. Default: 0.001.
-        time_step_max (`float`, *optional*):
-            Maximum `time_step` used to bound `dt_proj.bias`. Default: 0.1.
-        time_step_init_scheme (`float`, *optional*):
-            Init scheme used for `dt_proj.weight`. Should be one of `["random","uniform"]`. Default: `"random"`.
-        time_step_floor (`float`, *optional*):
+        dt_scale (`float`, *optional*):
+            Scale used to initialize `dt_proj.weight`. Default: 1.0.
+        dt_min (`float`, *optional*):
+            Minimum `dt` used to bound `dt_proj.bias`. Default: 0.001.
+        dt_max (`float`, *optional*):
+            Maximum `dt` used to bound `dt_proj.bias`. Default: 0.1.
+        dt_init_scheme (`str`, *optional*):
+            Init scheme used for `dt_proj.weight`. Should be one of `["random","constant"]`. Default: `"random"`.
+        dt_init_floor (`float`, *optional*):
             Minimum clamping value of the `dt_proj.bias` layer initialization. Default: 0.0001.
         window_size (`int`, *optional*):
             The window size used for sliding window attention. Default: 2048.
@@ -117,16 +124,17 @@ class MambaConfig(PretrainedConfig):
         hidden_act: str = "silu",
         initializer_range: float = 0.02,
         residual_in_fp32: bool = False,
-        time_step_rank: str = "auto",
-        time_step_scale: float = 1.0,
-        time_step_min: float = 0.001,
-        time_step_max: float = 0.1,
-        time_step_init_scheme: str = "random",
-        time_step_floor: float = 1e-4,
+        dt_rank: str | int = "auto",
+        dt_scale: float = 1.0,
+        dt_min: float = 0.001,
+        dt_max: float = 0.1,
+        dt_init_scheme: str = "random",
+        dt_init_floor: float = 1e-4,
         rescale_prenorm_residual: bool = False,
         use_cache: bool = True,
         fuse_norm: bool = True,
         fuse_cross_entropy: bool = True,
+        fuse_linear_cross_entropy: bool = False,
         use_l2warp: bool = False,
         tie_word_embeddings: bool = False,
         **kwargs,
@@ -146,23 +154,26 @@ class MambaConfig(PretrainedConfig):
         self.use_conv_bias = use_conv_bias
         self.hidden_act = hidden_act
         self.initializer_range = initializer_range
-        self.time_step_rank = math.ceil(self.hidden_size / 16) if time_step_rank == "auto" else time_step_rank
-        self.time_step_scale = time_step_scale
-        self.time_step_min = time_step_min
-        self.time_step_max = time_step_max
-        self.time_step_init_scheme = time_step_init_scheme
-        self.time_step_floor = time_step_floor
+        self.dt_rank = math.ceil(self.hidden_size / 16) if dt_rank == "auto" else dt_rank
+        self.dt_scale = dt_scale
+        self.dt_min = dt_min
+        self.dt_max = dt_max
+        self.dt_init_scheme = dt_init_scheme
+        self.dt_init_floor = dt_init_floor
         self.rescale_prenorm_residual = rescale_prenorm_residual
         self.residual_in_fp32 = residual_in_fp32
         self.use_cache = use_cache
         self.fuse_norm = fuse_norm
         self.fuse_cross_entropy = fuse_cross_entropy
+        self.fuse_linear_cross_entropy = fuse_linear_cross_entropy
         self.use_l2warp = use_l2warp
+
+        validate_loss_config(fuse_cross_entropy=fuse_cross_entropy, fuse_linear_cross_entropy=fuse_linear_cross_entropy)
 
         super().__init__(
             bos_token_id=bos_token_id,
             eos_token_id=eos_token_id,
             pad_token_id=pad_token_id,
             tie_word_embeddings=tie_word_embeddings,
-            **kwargs
+            **kwargs,
         )
