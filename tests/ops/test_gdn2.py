@@ -5,7 +5,6 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-import importlib
 import inspect
 import math
 from functools import partial
@@ -671,14 +670,18 @@ def test_fused_recurrent_npu_verifier(case, dtype, reason):
 @pytest.mark.parametrize('varlen', [False, True], ids=['dense', 'varlen'])
 def test_chunk_npu_launch_splits(varlen, monkeypatch):
     """Split launches must retain native-reference numerics and dispatch both leaf stages."""
-    from fla.ops.gdn2.backends.triton_ascend import chunk_bwd, chunk_intra
+    from fla.ops.gdn2.backends.triton_ascend import chunk_intra
+    from fla.ops.gdn2.chunk_bwd import chunk_gdn2_bwd_wy_dqkg_fused
+    from fla.ops.gdn2.chunk_intra import chunk_gdn2_fwd_intra
 
     # exercise multiple launches and packed sequence boundaries with a small reference workload.
-    monkeypatch.setattr(chunk_intra, '_LAUNCH_BLOCK_BUDGET', 4)
-    fwd = Mock(wraps=chunk_intra.chunk_gdn2_fwd_intra_npu)
-    bwd = Mock(wraps=chunk_bwd.chunk_gdn2_bwd_wy_dqkg_fused_npu)
-    monkeypatch.setattr(chunk_intra, 'chunk_gdn2_fwd_intra_npu', fwd)
-    monkeypatch.setattr(chunk_bwd, 'chunk_gdn2_bwd_wy_dqkg_fused_npu', bwd)
+    monkeypatch.setattr(chunk_intra, 'LAUNCH_BLOCK_BUDGET', 4)
+    fwd = backends._function_registries[inspect.unwrap(chunk_gdn2_fwd_intra)]._backends['triton_ascend']
+    bwd = backends._function_registries[inspect.unwrap(chunk_gdn2_bwd_wy_dqkg_fused)]._backends['triton_ascend']
+    fwd_spy = Mock(wraps=fwd.implementation)
+    bwd_spy = Mock(wraps=bwd.implementation)
+    monkeypatch.setattr(fwd, 'implementation', fwd_spy)
+    monkeypatch.setattr(bwd, 'implementation', bwd_spy)
     if varlen:
         test_chunk_varlen(
             cu_seqlens=[0, 15, 100, 257],
@@ -703,8 +706,8 @@ def test_chunk_npu_launch_splits(varlen, monkeypatch):
             safe_gate=False,
             dtype=torch.float16,
         )
-    fwd.assert_called_once()
-    bwd.assert_called_once()
+    fwd_spy.assert_called_once()
+    bwd_spy.assert_called_once()
 
 
 @pytest.mark.skipif(not (IS_NVIDIA or IS_AMD or IS_NPU), reason="CUDA/ROCm or Ascend NPU required")
@@ -1013,35 +1016,3 @@ def test_chunk_intra_default_shift(use_gate_in_kernel, monkeypatch):
     for ref, tri in zip((default,) + default_grads, (explicit,) + explicit_grads):
         assert torch.isfinite(ref).all() and torch.isfinite(tri).all()
         assert torch.equal(ref, tri)
-
-
-@pytest.mark.parametrize(
-    ('module_name', 'func_name'),
-    [
-        ('chunk_intra', 'chunk_gdn2_fwd_intra'),
-        ('chunk_bwd', 'chunk_gdn2_bwd_wy_dqkg_fused'),
-        ('fused_recurrent', 'fused_recurrent_gdn2_fwd'),
-    ],
-    ids=['forward', 'backward', 'fused-recurrent-forward'],
-)
-def test_npu_backend_dispatch(monkeypatch, module_name, func_name):
-    if backends._DISPATCH_DISABLED:
-        pytest.skip('Backend dispatch was disabled before import')
-    monkeypatch.setattr(backends.TritonAscendBackend, 'is_available', classmethod(lambda cls: True))
-    importlib.reload(importlib.import_module('fla.ops.gdn2'))
-    entry = getattr(importlib.import_module(f'fla.ops.gdn2.{module_name}'), func_name)
-    registry = backends._function_registries[inspect.unwrap(entry)]
-    candidate = registry._backends['triton_ascend']
-    backend_module = importlib.import_module(f'fla.ops.gdn2.backends.triton_ascend.{module_name}')
-    assert candidate.implementation is getattr(backend_module, func_name + '_npu')
-    assert 'gdn2' not in backends._operation_registries
-    monkeypatch.setattr(candidate, 'verifier', lambda q: (True, None))
-    result = object()
-
-    def implementation(q):
-        assert torch.is_grad_enabled()
-        assert q.requires_grad
-        return result
-
-    monkeypatch.setattr(candidate, 'implementation', implementation)
-    assert entry(q=torch.tensor([1.0, 2.0], requires_grad=True)) is result

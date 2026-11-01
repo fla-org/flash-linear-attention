@@ -4,3 +4,5 @@
 # LICENSE file in the root directory of this source tree.
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
+from fla.ops.gdn2.backends.triton_ascend import chunk_bwd, chunk_intra, fused_recurrent  # noqa: F401

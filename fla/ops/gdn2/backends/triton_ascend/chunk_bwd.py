@@ -21,27 +21,27 @@ from fla.ops.utils.op import exp2
 from fla.utils import ascend_compile_kwargs, input_guard
 from fla.utils.ascend_ub_manager import compute_row_tile_block_size, get_npu_properties
 
-_BC = 16
-_BWD_MEM_MULT = 10.0
-_SAFETY_MARGIN = 0.80
-_FALLBACK_TILE = 16
-_MAX_TILE = 128
+SUB_CHUNK_SIZE = 16
+BWD_MEM_MULT = 10.0
+SAFETY_MARGIN = 0.80
+FALLBACK_TILE = 16
+MAX_TILE = 128
 
 
-def _get_tile(size: int) -> int:
+def get_bwd_tile(size: int) -> int:
     return compute_row_tile_block_size(
-        _BC,
+        SUB_CHUNK_SIZE,
         size,
-        _BWD_MEM_MULT,
+        BWD_MEM_MULT,
         tiling_row=False,
-        safety_margin=_SAFETY_MARGIN,
-        fallback=_FALLBACK_TILE,
+        safety_margin=SAFETY_MARGIN,
+        fallback=FALLBACK_TILE,
         min_block=16,
-        max_block=min(_MAX_TILE, triton.next_power_of_2(size)),
+        max_block=min(MAX_TILE, triton.next_power_of_2(size)),
     )
 
 
-def _t_contig_arg(x: torch.Tensor, num_heads: int) -> tuple[torch.Tensor, bool]:
+def prepare_time_contiguous_input(x: torch.Tensor, num_heads: int) -> tuple[torch.Tensor, bool]:
     if num_heads == 1:
         return x, False
     return x.transpose(1, 2).contiguous(), True
@@ -397,8 +397,8 @@ def chunk_gdn2_bwd_wy_dqkg_fused_npu(
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = chunk_size
-    if BT % _BC != 0:
-        raise ValueError(f'GDN-2 Ascend bwd requires chunk_size % {_BC} == 0, got {BT}')
+    if BT % SUB_CHUNK_SIZE != 0:
+        raise ValueError(f'GDN-2 Ascend bwd requires chunk_size % {SUB_CHUNK_SIZE} == 0, got {BT}')
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
@@ -412,8 +412,8 @@ def chunk_gdn2_bwd_wy_dqkg_fused_npu(
     dA = torch.empty_like(A, dtype=torch.float)
     dA_acc = torch.zeros(B, T, H, BT, dtype=torch.float, device=A.device)
 
-    BK = _get_tile(K)
-    BV = _get_tile(V)
+    BK = get_bwd_tile(K)
+    BV = get_bwd_tile(V)
     NK = triton.cdiv(K, BK)
     is_varlen = cu_seqlens is not None
     chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT) if is_varlen else g.new_zeros(1, dtype=torch.int64)
@@ -421,10 +421,10 @@ def chunk_gdn2_bwd_wy_dqkg_fused_npu(
     task_num = NT * bh_total
     num_core = get_npu_properties()['num_vectorcore']
 
-    v_arg, t_contig = _t_contig_arg(v, H)
-    w_arg = _t_contig_arg(w_gate, H)[0]
-    A_arg = _t_contig_arg(A, H)[0]
-    dv_arg = _t_contig_arg(dv, H)[0]
+    v_arg, t_contig = prepare_time_contiguous_input(v, H)
+    w_arg = prepare_time_contiguous_input(w_gate, H)[0]
+    A_arg = prepare_time_contiguous_input(A, H)[0]
+    dv_arg = prepare_time_contiguous_input(dv, H)[0]
     chunk_gdn2_bwd_kernel_wy_v_part_npu[(num_core,)](
         v=v_arg,
         w_gate=w_arg,
@@ -472,7 +472,7 @@ def chunk_gdn2_bwd_wy_dqkg_fused_npu(
         K=K,
         V=V,
         BT=BT,
-        BC=32 if BT >= 32 else _BC,
+        BC=32 if BT >= 32 else SUB_CHUNK_SIZE,
         BK=BK,
         BV=BV,
         STATE_V_FIRST=state_v_first,
@@ -482,9 +482,9 @@ def chunk_gdn2_bwd_wy_dqkg_fused_npu(
         k_part_kwargs['K_OFFSET'] = k_off
         chunk_kda_bwd_kernel_wy_k_part_npu[(num_core,)](**k_part_kwargs, **ascend_compile_kwargs())
 
-    k_arg, k_t_contig = _t_contig_arg(k, H)
-    g_arg, g_t_contig = _t_contig_arg(g, H)
-    b_arg = _t_contig_arg(b, H)[0]
+    k_arg, k_t_contig = prepare_time_contiguous_input(k, H)
+    g_arg, g_t_contig = prepare_time_contiguous_input(g, H)
+    b_arg = prepare_time_contiguous_input(b, H)[0]
     gate_kwargs = dict(
         k=k_arg,
         g=g_arg,

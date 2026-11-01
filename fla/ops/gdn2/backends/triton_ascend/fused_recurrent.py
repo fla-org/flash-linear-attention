@@ -21,26 +21,26 @@ from fla.utils import ascend_compile_kwargs, get_multiprocessor_count, input_gua
 from fla.utils.ascend_ub_manager import compute_row_tile_block_size
 
 # includes compiler temporaries for the recurrent state tile, calibrated at BK=256.
-_RECUR_MEM_MULT = 4.1
-_SAFETY_MARGIN = 0.80
-_FALLBACK_BV = 32
-_MAX_BV = 256
+RECUR_MEM_MULT = 4.1
+SAFETY_MARGIN = 0.80
+FALLBACK_BV = 32
+MAX_BV = 256
 # smaller states favor K-first decay broadcasts over V-first reductions.
-_VFIRST_MIN_DIM = 256
+VFIRST_MIN_DIM = 256
 
 
-def _get_bv(K: int, V: int) -> int:
+def get_recurrent_bv(K: int, V: int) -> int:
     bk = triton.next_power_of_2(K)
     return compute_row_tile_block_size(
         bk,
         V,
-        _RECUR_MEM_MULT,
+        RECUR_MEM_MULT,
         tiling_row=False,
-        safety_margin=_SAFETY_MARGIN,
+        safety_margin=SAFETY_MARGIN,
         dtype_size=4,
-        fallback=_FALLBACK_BV,
+        fallback=FALLBACK_BV,
         min_block=1,
-        max_block=min(_MAX_BV, triton.next_power_of_2(V)),
+        max_block=min(MAX_BV, triton.next_power_of_2(V)),
     )
 
 
@@ -329,7 +329,7 @@ def fused_recurrent_gdn2_fwd_npu(
         if not user_out.is_contiguous():
             raise ValueError("`out` must be contiguous")
 
-    BV = _get_bv(K, V)
+    BV = get_recurrent_bv(K, V)
     h0 = initial_state
 
     # V-first speeds up large-state reductions; only transpose buffers allocated here.
@@ -339,8 +339,8 @@ def fused_recurrent_gdn2_fwd_npu(
         and not inplace_final_state
         and cu_seqlens is None
         and ssm_state_indices is None
-        and K >= _VFIRST_MIN_DIM
-        and V >= _VFIRST_MIN_DIM
+        and K >= VFIRST_MIN_DIM
+        and V >= VFIRST_MIN_DIM
     )
     kernel_v_first = state_v_first or internal_v_first
 
