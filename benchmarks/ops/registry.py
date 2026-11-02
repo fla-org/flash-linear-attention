@@ -598,6 +598,7 @@ register_op(OpConfig(
         'beta_atk': TensorSpec(shape_BTH, transform=sigmoid_transform),
         'log_atk_scale': TensorSpec(shape_H, dtype='float32'),
     },
+    func_name='chunk_precond_kda',
     extra_kwargs={'x': 1.5},
     category='gate_beta',
     test_file='tests/ops/test_precond_kda.py',

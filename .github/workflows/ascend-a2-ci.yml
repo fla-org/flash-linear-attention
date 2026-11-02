@@ -87,7 +87,7 @@ jobs:
 
     runs-on: ${{ matrix.os }}
 
-    timeout-minutes: 150
+    timeout-minutes: 180
 
     concurrency:
       group: ${{ github.workflow }}-${{ github.ref }}-${{ matrix.os }}-${{ matrix.python }}
@@ -167,7 +167,8 @@ jobs:
             tests/ops/test_solve_tril.py \
             tests/ops/test_delta.py \
             tests/ops/test_precond_gated_delta.py \
-            tests/ops/test_wall_attn.py
+            tests/ops/test_wall_attn.py \
+            tests/ops/test_precond_kda.py
 
           pytest -s -v --exitfirst \
             tests/ops/test_simple_gla.py::test_simple_gla_ascend_verifier \
