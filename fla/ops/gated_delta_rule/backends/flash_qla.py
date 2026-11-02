@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 import torch
 
 from fla.backends import BaseBackend, register
+from fla.ops.gated_delta_rule.chunk import chunk_gated_delta_rule
 from fla.utils import IS_NVIDIA_HOPPER, IS_NVIDIA_SM100, IS_NVIDIA_SM120
 
 if TYPE_CHECKING:
@@ -29,7 +30,7 @@ def _needs_backward(*tensors: torch.Tensor | None) -> bool:
     return any(isinstance(t, torch.Tensor) and t.requires_grad for t in tensors)
 
 
-@register('gated_delta_rule')
+@register(chunk_gated_delta_rule)
 class FlashQLABackend(BaseBackend):
     """Copyright (c) 2026 Qwen Team, Alibaba Cloud
 

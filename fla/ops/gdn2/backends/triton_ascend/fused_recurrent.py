@@ -13,32 +13,34 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.backends import TritonAscendBackend, register
+from fla.ops.gdn2.fused_recurrent import fused_recurrent_gdn2_fwd
 from fla.ops.utils.op import exp
 from fla.ops.utils.softplus import softplus
 from fla.utils import ascend_compile_kwargs, get_multiprocessor_count, input_guard
 from fla.utils.ascend_ub_manager import compute_row_tile_block_size
 
 # includes compiler temporaries for the recurrent state tile, calibrated at BK=256.
-_RECUR_MEM_MULT = 4.1
-_SAFETY_MARGIN = 0.80
-_FALLBACK_BV = 32
-_MAX_BV = 256
+RECUR_MEM_MULT = 4.1
+SAFETY_MARGIN = 0.80
+FALLBACK_BV = 32
+MAX_BV = 256
 # smaller states favor K-first decay broadcasts over V-first reductions.
-_VFIRST_MIN_DIM = 256
+VFIRST_MIN_DIM = 256
 
 
-def _get_bv(K: int, V: int) -> int:
+def get_recurrent_bv(K: int, V: int) -> int:
     bk = triton.next_power_of_2(K)
     return compute_row_tile_block_size(
         bk,
         V,
-        _RECUR_MEM_MULT,
+        RECUR_MEM_MULT,
         tiling_row=False,
-        safety_margin=_SAFETY_MARGIN,
+        safety_margin=SAFETY_MARGIN,
         dtype_size=4,
-        fallback=_FALLBACK_BV,
+        fallback=FALLBACK_BV,
         min_block=1,
-        max_block=min(_MAX_BV, triton.next_power_of_2(V)),
+        max_block=min(MAX_BV, triton.next_power_of_2(V)),
     )
 
 
@@ -240,6 +242,53 @@ def fused_recurrent_gdn2_fwd_kernel_npu(
                     tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
 
 
+def fused_recurrent_gdn2_fwd_verifier(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    b: torch.Tensor,
+    w: torch.Tensor,
+    A_log: torch.Tensor | None = None,
+    dt_bias: torch.Tensor | None = None,
+    initial_state: torch.Tensor | None = None,
+    scale: float | None = None,
+    output_final_state: bool = False,
+    inplace_final_state: bool = False,
+    state_v_first: bool = False,
+    cu_seqlens: torch.LongTensor | None = None,
+    ssm_state_indices: torch.Tensor | None = None,
+    num_accepted_tokens: torch.Tensor | None = None,
+    use_qk_l2norm_in_kernel: bool = False,
+    use_gate_in_kernel: bool = False,
+    lower_bound: float | None = None,
+    out: torch.Tensor | None = None,
+    **kwargs,
+) -> tuple[bool, str | None]:
+    del scale, output_final_state, inplace_final_state, state_v_first
+    del use_qk_l2norm_in_kernel, use_gate_in_kernel, lower_bound, kwargs
+    required = {'q': q, 'k': k, 'v': v, 'g': g, 'b': b, 'w': w}
+    if any(not isinstance(t, torch.Tensor) for t in required.values()):
+        return False, 'GDN-2 Ascend recurrent requires tensor inputs'
+    optional = (A_log, dt_bias, initial_state, cu_seqlens, ssm_state_indices, num_accepted_tokens, out)
+    bad_device = [name for name, t in required.items() if t.device.type != 'npu']
+    bad_device.extend(
+        f'optional[{i}]' for i, t in enumerate(optional)
+        if isinstance(t, torch.Tensor) and t.device.type != 'npu'
+    )
+    if bad_device:
+        return False, f'GDN-2 Ascend recurrent requires NPU tensors, got {bad_device}'
+    float_tensors = (
+        *required.values(),
+        *(t for t in (A_log, dt_bias, initial_state, out) if isinstance(t, torch.Tensor)),
+    )
+    supported = (torch.float16, torch.bfloat16, torch.float32)
+    if any(t.dtype not in supported for t in float_tensors):
+        return False, 'GDN-2 Ascend recurrent received an unsupported dtype'
+    return True, None
+
+
+@register(fused_recurrent_gdn2_fwd, backend=TritonAscendBackend, verifier=fused_recurrent_gdn2_fwd_verifier)
 @input_guard(no_guard_contiguous={'initial_state', 'out'})
 def fused_recurrent_gdn2_fwd_npu(
     q: torch.Tensor,
@@ -280,7 +329,7 @@ def fused_recurrent_gdn2_fwd_npu(
         if not user_out.is_contiguous():
             raise ValueError("`out` must be contiguous")
 
-    BV = _get_bv(K, V)
+    BV = get_recurrent_bv(K, V)
     h0 = initial_state
 
     # V-first speeds up large-state reductions; only transpose buffers allocated here.
@@ -290,8 +339,8 @@ def fused_recurrent_gdn2_fwd_npu(
         and not inplace_final_state
         and cu_seqlens is None
         and ssm_state_indices is None
-        and K >= _VFIRST_MIN_DIM
-        and V >= _VFIRST_MIN_DIM
+        and K >= VFIRST_MIN_DIM
+        and V >= VFIRST_MIN_DIM
     )
     kernel_v_first = state_v_first or internal_v_first
 

@@ -11,6 +11,8 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.backends import TritonAscendBackend, register
+from fla.ops.common.gate import fused_beta_sigmoid_bwd, fused_beta_sigmoid_fwd
 from fla.utils.ascend_ub_manager import ASCEND_MAX_GRID_DIM, compute_activation_block_size
 
 
@@ -41,6 +43,7 @@ def fused_beta_sigmoid_bwd_kernel(x, dy, dx, scale, n_elements, BLOCK_SIZE: tl.c
     tl.store(dx + offs, b_dx.to(dx.dtype.element_ty), mask=mask)
 
 
+@register(fused_beta_sigmoid_fwd, backend=TritonAscendBackend)
 @torch.compiler.disable
 def fused_beta_sigmoid_fwd_npu(x: torch.Tensor, scale: float = 1.0) -> torch.Tensor:
     x = x.contiguous()
@@ -51,6 +54,7 @@ def fused_beta_sigmoid_fwd_npu(x: torch.Tensor, scale: float = 1.0) -> torch.Ten
     return y
 
 
+@register(fused_beta_sigmoid_bwd, backend=TritonAscendBackend)
 @torch.compiler.disable
 def fused_beta_sigmoid_bwd_npu(x: torch.Tensor, dy: torch.Tensor, scale: float = 1.0) -> torch.Tensor:
     x = x.contiguous()
