@@ -25,7 +25,8 @@ from fla.ops.rwkv7.channel_mixing import (
 from fla.ops.rwkv7.fused_addcmul import fused_addcmul_rwkv7, torch_addcmul_rwkv7
 from fla.ops.rwkv7.fused_k_update import fused_k_rwkv7, k_update_ref
 from fla.ops.rwkv7.fused_recurrent import fused_mul_recurrent_rwkv7
-from fla.ops.rwkv7.gate_output_correction import gate_output_correction, gate_output_correction_ref
+from fla.ops.rwkv7.gate_output_correction import gate_output_correction
+from fla.ops.rwkv7.naive import naive_gate_output_correction
 from fla.utils import IS_NVIDIA_HOPPER, assert_close, device
 
 
@@ -351,43 +352,43 @@ def test_fused_k_update(
 
 
 @pytest.mark.parametrize(
-    ("B", "T", "H", "D", "dtype"),
+    ("B", "T", "H", "K", "V", "dtype"),
     [
-        pytest.param(4, 4096, 64, 64, torch.bfloat16, id="default"),
-        pytest.param(1, 65537, 8, 64, torch.bfloat16, id="long_ctx"),
+        pytest.param(4, 4096, 64, 64, 64, torch.bfloat16, id="default"),
+        pytest.param(1, 65537, 8, 64, 64, torch.bfloat16, id="long_ctx"),
+        pytest.param(2, 1024, 16, 64, 128, torch.bfloat16, id="expanded_value_bf16"),
+        pytest.param(1, 128, 4, 64, 128, torch.float32, id="expanded_value_fp32"),
+        pytest.param(2, 65, 3, 48, 80, torch.bfloat16, id="partial_tiles"),
     ],
 )
 def test_gate_output_correction(
     B: int,
     T: int,
     H: int,
-    D: int,
+    K: int,
+    V: int,
     dtype: torch.dtype,
 ):
-    value_dim = H * D
-    torch.manual_seed(0)
+    torch.manual_seed(42)
+    o = torch.randn(B, T, H * V, device=device, dtype=dtype, requires_grad=True)
+    r = torch.randn(B, T, H, K, device=device, dtype=dtype, requires_grad=True)
+    k = torch.randn(B, T, H, K, device=device, dtype=dtype, requires_grad=True)
+    r_k = torch.randn(H, K, device=device, dtype=dtype, requires_grad=True)
+    v = torch.randn(B, T, H, V, device=device, dtype=dtype, requires_grad=True)
+    g = torch.randn(B, T, H * V, device=device, dtype=dtype, requires_grad=True)
 
-    o_ref = torch.randn(B, T, value_dim, device=device, dtype=dtype, requires_grad=True)
-    r_ref = torch.randn(B, T, H, D, device=device, dtype=dtype, requires_grad=True)
-    k_ref = torch.randn(B, T, H, D, device=device, dtype=dtype, requires_grad=True)
-    r_k_ref = torch.randn(H, D, device=device, dtype=dtype, requires_grad=True)
-    v_ref = torch.randn(B, T, H, D, device=device, dtype=dtype, requires_grad=True)
-    g_ref = torch.randn(B, T, value_dim, device=device, dtype=dtype, requires_grad=True)
+    tri = gate_output_correction(o=o.clone(), r=r.clone(), k=k.clone(), r_k=r_k.clone(), v=v.clone(), g=g.clone())
+    tri.sum().backward()
+    tri_do, tri_dr, tri_dk, tri_dr_k, tri_dv, tri_dg = o.grad, r.grad, k.grad, r_k.grad, v.grad, g.grad
+    o.grad = r.grad = k.grad = r_k.grad = v.grad = g.grad = None
 
-    tensors_cus = [t.clone().detach().requires_grad_(True) for t in [o_ref, r_ref, k_ref, r_k_ref, v_ref, g_ref]]
-    o_cus, r_cus, k_cus, r_k_cus, v_cus, g_cus = tensors_cus
+    ref = naive_gate_output_correction(o=o.float(), r=r.float(), k=k.float(), r_k=r_k.float(), v=v.float(), g=g.float())
+    ref.sum().backward()
 
-    output_ref = gate_output_correction_ref(o_ref.float(), r_ref.float(), k_ref.float(),
-                                            r_k_ref.float(), v_ref.float(), g_ref.float())
-    output_ref.sum().backward()
-
-    output_cus = gate_output_correction(o_cus, r_cus, k_cus, r_k_cus, v_cus, g_cus)
-    output_cus.sum().backward()
-
-    assert_close(" o", output_ref, output_cus, 0.002)
-    assert_close("do", o_ref.grad, o_cus.grad, 0.002)
-    assert_close("dr", r_ref.grad, r_cus.grad, 0.002)
-    assert_close("dk", k_ref.grad, k_cus.grad, 0.002)
-    assert_close("drk", r_k_ref.grad, r_k_cus.grad, 0.002)
-    assert_close("dv", v_ref.grad, v_cus.grad, 0.002)
-    assert_close("dg", g_ref.grad, g_cus.grad, 0.002)
+    assert_close("o", ref, tri, 0.002)
+    assert_close("do", o.grad, tri_do, 0.002)
+    assert_close("dr", r.grad, tri_dr, 0.002)
+    assert_close("dk", k.grad, tri_dk, 0.002)
+    assert_close("drk", r_k.grad, tri_dr_k, 0.002)
+    assert_close("dv", v.grad, tri_dv, 0.002)
+    assert_close("dg", g.grad, tri_dg, 0.002)

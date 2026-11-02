@@ -28,6 +28,8 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.backends import TritonAscendBackend, register
+from fla.ops.attnres.fused import fused_attnres
 from fla.ops.utils.op import exp
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 from fla.utils.ascend_ub_manager import (
@@ -868,6 +870,27 @@ class FusedAttnresNpuFunction(torch.autograd.Function):
         return (dq, dw, dow, None, None, None, None, *flat_dvs)
 
 
+def fused_attnres_verifier(
+    query: torch.Tensor,
+    residuals: Sequence[torch.Tensor],
+    rms_weight: torch.Tensor,
+    output_rms_weight: torch.Tensor | None = None,
+    rms_eps: float = 1e-6,
+    scale: float = 1.0,
+    return_weights: bool = False,
+    checkpoint_level: int = 1,
+    **kwargs,
+) -> tuple[bool, str | None]:
+    del query, rms_weight, output_rms_weight, rms_eps, scale, return_weights, kwargs
+    if isinstance(residuals, torch.Tensor):
+        if residuals.ndim != 4 or residuals.shape[0] == 0:
+            return False, 'attnres requires at least one residual source'
+    elif not residuals:
+        return False, 'attnres requires at least one residual source'
+    return True, None
+
+
+@register(fused_attnres, backend=TritonAscendBackend, verifier=fused_attnres_verifier)
 def fused_attnres_npu(
     query: torch.Tensor,
     residuals: Sequence[torch.Tensor],

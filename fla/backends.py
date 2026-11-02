@@ -53,8 +53,8 @@ class BaseBackend:
     backend_type: ClassVar[str] = "base"
     package_name: ClassVar[str | None] = None
     env_var: str | None = None
-    default_enable: ClassVar[bool] = True
-    priority: ClassVar[int] = 5
+    default_enable: bool = True
+    priority: int = 5
     implementation: Callable | None = None
     verifier: Callable | None = None
 
@@ -226,8 +226,13 @@ def register(
     backend: type[BaseBackend] | None = None,
     verifier: Callable | None = None,
     env_var: str | None = None,
+    default_enable: bool | None = None,
+    priority: int | None = None,
 ) -> Callable[[F], F]:
-    """Register an implementation or adapter for a dispatched function or operation name."""
+    """Register an implementation or adapter, optionally overriding its selection policy.
+
+    Unspecified policy values inherit the backend's defaults.
+    """
     def decorator(implementation: F) -> F:
         if _DISPATCH_DISABLED and not isinstance(entry_point, str):
             return implementation
@@ -241,6 +246,10 @@ def register(
         registered_backend.verifier = verifier
         if env_var is not None:
             registered_backend.env_var = env_var
+        if default_enable is not None:
+            registered_backend.default_enable = default_enable
+        if priority is not None:
+            registered_backend.priority = priority
         if isinstance(entry_point, str):
             registry = _get_operation_registry(operation=entry_point)
         else:

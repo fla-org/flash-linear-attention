@@ -448,7 +448,7 @@ def fused_recurrent_gated_delta_rule(
     if scale is None:
         scale = k.shape[-1] ** -0.5
     if beta is None:
-        beta = torch.ones_like(q[..., 0])
+        beta = torch.ones_like(v[..., 0])
     if use_gate_in_kernel:
         if A_log is None:
             raise ValueError("`A_log` must be provided when `use_gate_in_kernel=True`.")

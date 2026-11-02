@@ -139,8 +139,8 @@ def repository_finder():
 @pytest.mark.parametrize(
     ('changed', 'expected', 'unrelated'),
     [
-        ('fla/ops/attn/backends/tilelang/parallel.py', 'fla/ops/attn/parallel.py', 'fla/ops/common/chunk_o.py'),
-        ('fla/ops/common/backends/tilelang/chunk_bwd.py', 'fla/ops/common/chunk_o.py', 'fla/ops/attn/parallel.py'),
+        ('fla/ops/attn/backends/tilelang.py', 'fla/ops/attn/parallel.py', 'fla/ops/common/chunk_o.py'),
+        ('fla/ops/common/backends/tilelang.py', 'fla/ops/common/chunk_o.py', 'fla/ops/attn/parallel.py'),
         ('fla/ops/kda/backends/triton_ascend/chunk_bwd.py', 'fla/ops/gdn2/chunk_bwd.py', 'fla/ops/attn/parallel.py'),
         ('fla/ops/kda/backends/flash_kda.py', 'fla/ops/kda/chunk.py', 'fla/ops/attn/parallel.py'),
     ],
@@ -169,7 +169,7 @@ def test_backend_changes_follow_repository_ownership(changed, expected, unrelate
             id='cuda-cp',
         ),
         ('fla/modules/fused_cross_entropy/ops.py', {'tests/modules/test_cross_entropy.py', 'tests/modules/test_l2warp.py'}),
-        ('fla/ops/attn/backends/tilelang/parallel.py', {'tests/ops/test_attn.py'}),
+        ('fla/ops/attn/backends/tilelang.py', {'tests/ops/test_attn.py'}),
         ('fla/ops/kda/backends/triton_ascend/chunk_bwd.py', {'tests/ops/test_kda.py', 'tests/ops/test_gdn2.py'}),
         pytest.param('fla/modules/activations/triton_ascend.py', {'tests/modules/test_activation.py'}, id='ascend-module'),
         (

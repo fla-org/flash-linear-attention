@@ -320,7 +320,7 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
     tl.store(p_db, b_db.to(p_db.dtype.element_ty), mask=m_t)
 
 
-@dispatch('kda')
+@dispatch
 def chunk_kda_bwd_dAv(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -379,7 +379,7 @@ def chunk_kda_bwd_dAv(
     return dA, dv
 
 
-@dispatch('kda')
+@dispatch
 def chunk_kda_bwd_wy_dqkg_fused(
     q: torch.Tensor,
     k: torch.Tensor,
