@@ -6,6 +6,22 @@ name: ascend-a2-benchmark-ci
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "fla/ops/kda/**/*.py"
+      - "benchmarks/ops/run.py"
+      - "benchmarks/ops/registry.py"
+      - "benchmarks/ops/graph_benchmark.py"
+      - "benchmarks/ops/graph_registry.py"
+      - "benchmarks/ops/benchmark_kda_recurrent.py"
+      - "pyproject.toml"
+      - ".github/workflows/ascend-a2-benchmark-ci.yml"
+  # Refresh the main cache before GitHub evicts entries left unused for seven days.
+  schedule:
+    # Monday, Wednesday and Friday at 00:00 Asia/Shanghai (UTC+8).
+    - cron: "0 16 * * 0,2,4"
   pull_request:
     branches:
       - main
@@ -61,6 +77,10 @@ jobs:
     if: |
       github.event_name == 'workflow_dispatch' ||
       (
+        github.ref == 'refs/heads/main' &&
+        (github.event_name == 'push' || github.event_name == 'schedule')
+      ) ||
+      (
         github.event_name == 'pull_request' &&
         (
           needs.changes.outputs.npu_related == 'true' ||
@@ -97,6 +117,7 @@ jobs:
     env:
       FLA_CI_ENV: 1
       ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3"
+      KDA_TRITON_CACHE_DIR: ${{ github.workspace }}/.triton-kda-cache
       # Triton perf_report always calls plt.savefig when save_path is set.
       MPLBACKEND: Agg
 
@@ -104,12 +125,24 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7.0.0
 
+      - name: Restore KDA Triton-Ascend kernel cache
+        id: triton-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.KDA_TRITON_CACHE_DIR }}
+          key: >-
+            triton-kda-${{ runner.os }}-${{ matrix.os }}-python-${{ matrix.python }}-cann-9.1.0-torch-2.10.0-torch-npu-2.10.0.post7-triton-ascend-3.6.0-${{ github.sha }}
+          restore-keys: |
+            triton-kda-${{ runner.os }}-${{ matrix.os }}-python-${{ matrix.python }}-cann-9.1.0-torch-2.10.0-torch-npu-2.10.0.post7-triton-ascend-3.6.0-
+
       - name: Check NPU and CANN info
+        if: github.event_name != 'schedule' || steps.triton-cache.outputs.cache-hit != 'true'
         run: |
           cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -m)"-linux/ascend_toolkit_install.info
           npu-smi info
 
       - name: Install dependencies
+        if: github.event_name != 'schedule' || steps.triton-cache.outputs.cache-hit != 'true'
         run: |
           python -m pip install -U pip setuptools wheel
           # triton-ascend runtime/build deps; install before resolving [npu] extra
@@ -122,6 +155,7 @@ jobs:
             --extra-index-url=https://triton-ascend.osinfra.cn/pypi/simple
 
       - name: Verify environment
+        if: github.event_name != 'schedule' || steps.triton-cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
           source /usr/local/Ascend/ascend-toolkit/set_env.sh
@@ -153,7 +187,38 @@ jobs:
           print("matplotlib savefig smoke test: ok")
           PY
 
+      - name: Prewarm chunk_kda, KDA graph, and recurrent KDA cache on main
+        id: kda-prewarm
+        if: |
+          github.ref == 'refs/heads/main' &&
+          (github.event_name == 'push' ||
+           (github.event_name == 'schedule' && steps.triton-cache.outputs.cache-hit != 'true'))
+        shell: bash
+        env:
+          ASCEND_RT_VISIBLE_DEVICES: "1"
+          TRITON_CACHE_DIR: ${{ env.KDA_TRITON_CACHE_DIR }}
+          FLA_BENCH_WARMUP_MS: "25"
+          FLA_BENCH_REP_MS: "100"
+          FLA_BENCH_OP_WARMUP_ITERS: "3"
+        run: |
+          source /usr/local/Ascend/ascend-toolkit/set_env.sh
+          # prewarm chunk KDA forward and backward kernels for the default shape matrix.
+          python -m benchmarks.ops.run --op chunk_kda --base '' --json benchmark_chunk_kda.json
+          # prewarm KDA graph forward and backward kernels for the smoke case.
+          graph_started=$SECONDS
+          python -m benchmarks.ops.run --graph \
+            --op chunk_kda --no-base --modes fwdbwd \
+            --custom-shapes '{"smoke": {"B": 1, "T": 128, "H": 2, "D": 64, "N": 2}}' \
+            --warmup 3 --iterations 10 --json benchmark_kda_graph.json
+          echo "Benchmark chunk_kda_graph prewarm: elapsed=$((SECONDS - graph_started))s"
+          # prewarm fused recurrent KDA kernels with both multibuffer settings on dense and packed inputs.
+          recurrent_started=$SECONDS
+          FLA_CI_ENV=0 python -m benchmarks.ops.benchmark_kda_recurrent --json benchmark_kda_recurrent.json
+          echo "Benchmark recurrent KDA prewarm: elapsed=$((SECONDS - recurrent_started))s"
+
       - name: Benchmark chunk_gdn, fused_recurrent_gdn2, chunk_gdn2, chunk_kda, KDA graph, fused_attnres, conv1d, chunk_precond_gdn, parallel_wall_attn, and fused_recurrent_oja
+        id: benchmark
+        if: github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
         shell: bash
         env:
           FLA_BENCH_WARMUP_MS: "25"
@@ -184,8 +249,14 @@ jobs:
             exit "$status"
           ) &
           pid_gdn=$!
-          run_benchmark chunk_kda 1 python -m benchmarks.ops.run \
-            --op chunk_kda --base '' --json benchmark_chunk_kda.json &
+          (
+            if run_benchmark chunk_kda 1 env TRITON_CACHE_DIR="$KDA_TRITON_CACHE_DIR" python -m benchmarks.ops.run \
+              --op chunk_kda --base '' --json benchmark_chunk_kda.json; then
+              echo "kda_benchmark_succeeded=true" >> "$GITHUB_OUTPUT"
+            else
+              exit 1
+            fi
+          ) &
           pid_kda=$!
           # fused_attnres finishes first in the four-card baseline; reuse its card for GDN2.
           (
@@ -242,11 +313,14 @@ jobs:
           # The runner exposes devices 0-3. Reuse device 0 only after the
           # parallel benchmarks finish so graph latency is not affected by
           # another workload sharing the same NPU.
-          ASCEND_RT_VISIBLE_DEVICES=0 python -m benchmarks.ops.run --graph \
+          if run_benchmark chunk_kda_graph 0 env TRITON_CACHE_DIR="$KDA_TRITON_CACHE_DIR" python -m benchmarks.ops.run --graph \
             --op chunk_kda --no-base --modes fwdbwd \
             --custom-shapes '{"smoke": {"B": 1, "T": 128, "H": 2, "D": 64, "N": 2}}' \
-            --warmup 3 --iterations 10 --json benchmark_kda_graph.json \
-            > chunk_kda_graph.log 2>&1 || status=1
+            --warmup 3 --iterations 10 --json benchmark_kda_graph.json; then
+            echo "kda_graph_benchmark_succeeded=true" >> "$GITHUB_OUTPUT"
+          else
+            status=1
+          fi
 
           echo "========== chunk_gdn =========="
           cat chunk_gdn.log
@@ -270,7 +344,75 @@ jobs:
           cat parallel_wall_attn.log
           exit "$status"
 
+      - name: Validate chunk_kda benchmark results
+        id: kda-validation
+        if: |
+          always() &&
+          (steps.benchmark.outputs.kda_benchmark_succeeded == 'true' ||
+           steps.kda-prewarm.outcome == 'success')
+        shell: bash
+        run: |
+          source /usr/local/Ascend/ascend-toolkit/set_env.sh
+          python - <<'PY'
+          import json
+          import math
+
+          from benchmarks.ops.registry import SHAPE_CONFIGS, get_op
+
+          with open("benchmark_chunk_kda.json") as f:
+              results = json.load(f)["results"]
+          rows = [row for row in results if row["op"] == "chunk_kda"]
+          config = get_op("chunk_kda")
+          shapes = config.default_shapes or SHAPE_CONFIGS
+          assert len(shapes) == 6, f"Expected 6 KDA shapes, got {len(shapes)}"
+          expected = {
+              (mode, shape["B"], shape["T"], shape["H"], shape["D"])
+              for shape in shapes.values()
+              for mode in ("fwd", "fwdbwd")
+          }
+          actual = {
+              (row["mode"], row["B"], row["T"], row["H"], row["D"])
+              for row in rows
+          }
+          assert len(rows) == 12 and actual == expected, {
+              "missing": sorted(expected - actual),
+              "unexpected": sorted(actual - expected),
+          }
+          for row in rows:
+              assert all(math.isfinite(row[key]) and row[key] > 0 for key in ("median_ms", "p20_ms", "p80_ms")), row
+          PY
+          du -sh "$KDA_TRITON_CACHE_DIR"
+
+      - name: Validate KDA graph benchmark results
+        id: kda-graph-validation
+        if: |
+          always() &&
+          (steps.benchmark.outputs.kda_graph_benchmark_succeeded == 'true' ||
+           steps.kda-prewarm.outcome == 'success')
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import math
+
+          with open("benchmark_kda_graph.json") as f:
+              rows = json.load(f)["current"]["results"]
+          assert len(rows) == 1, f"Expected one KDA graph smoke result, got {len(rows)}"
+          row = rows[0]
+          expected = {
+              "op": "chunk_kda", "shape": "smoke", "mode": "fwdbwd",
+              "B": 1, "T": 128, "H": 2, "D": 64, "N": 2, "dtype": "float16",
+              "validation": "passed",
+          }
+          assert all(row.get(key) == value for key, value in expected.items()), row
+          assert math.isfinite(row["capture_ms"]) and row["capture_ms"] > 0, row
+          for engine in ("eager", "graph"):
+              assert all(math.isfinite(row[engine][key]) and row[engine][key] > 0
+                         for key in ("p50_ms", "p95_ms", "mean_ms", "min_ms")), row
+          PY
+
       - name: Check fused-recurrent GDN2 benchmark results
+        if: github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
         shell: bash
         run: |
           source /usr/local/Ascend/ascend-toolkit/set_env.sh
@@ -293,7 +435,7 @@ jobs:
           PY
 
       - name: Upload benchmark results
-        if: always()
+        if: always() && (github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request')
         uses: actions/upload-artifact@v7.0.1
         with:
           name: ascend-a2-benchmark-results
@@ -312,21 +454,83 @@ jobs:
           retention-days: 10
 
       - name: Benchmark recurrent KDA compile options
+        id: kda-recurrent-benchmark
+        if: github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
         shell: bash
         env:
           ASCEND_RT_VISIBLE_DEVICES: "0"
+          TRITON_CACHE_DIR: ${{ env.KDA_TRITON_CACHE_DIR }}
           FLA_CI_ENV: "0"
           FLA_BENCH_WARMUP_MS: "25"
           FLA_BENCH_REP_MS: "100"
         run: |
           source /usr/local/Ascend/ascend-toolkit/set_env.sh
-          python -m benchmarks.ops.benchmark_kda_recurrent --json benchmark_kda_recurrent.json
+          started=$SECONDS
+          rc=0
+          python -m benchmarks.ops.benchmark_kda_recurrent --json benchmark_kda_recurrent.json || rc=$?
+          echo "Benchmark recurrent KDA: elapsed=$((SECONDS - started))s exit=$rc"
+          exit "$rc"
+
+      - name: Validate recurrent KDA benchmark results
+        id: kda-recurrent-validation
+        if: |
+          always() &&
+          (steps.kda-recurrent-benchmark.outcome == 'success' ||
+           steps.kda-prewarm.outcome == 'success')
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import math
+
+          with open("benchmark_kda_recurrent.json") as f:
+              report = json.load(f)
+          assert report["status"] == "passed" and report["dtype"] == "float32", report
+          assert report["rounds"] == 7, report["rounds"]
+          assert report["baseline_compile_kwargs"]["multibuffer"] is True
+          assert report["candidate_compile_kwargs"]["multibuffer"] is False
+          workloads = (
+              ("dense", (1,) * 8), ("dense", (4, 4)),
+              ("packed", (1,) * 8), ("packed", (2, 6)),
+          )
+          expected = {
+              (layout, lengths, 16, dimension, state_v_first)
+              for layout, lengths in workloads
+              for dimension in (64, 128)
+              for state_v_first in (False, True)
+          }
+          rows = report["results"]
+          actual = {
+              (row["layout"], tuple(row["lengths"]), row["H"], row["D"], row["state_v_first"])
+              for row in rows
+          }
+          assert len(rows) == 16 and actual == expected, {"missing": expected - actual, "unexpected": actual - expected}
+          for row in rows:
+              for option in ("true", "false"):
+                  assert row[f"multibuffer_{option}_correctness"] == "passed", row
+                  samples = row[f"multibuffer_{option}_batch_medians_ms"]
+                  assert len(samples) == report["rounds"], row
+                  assert all(math.isfinite(value) and value > 0 for value in samples), row
+              assert all(math.isfinite(row[key]) and row[key] > 0 for key in ("baseline_median_ms", "candidate_median_ms")), row
+          PY
 
       - name: Upload recurrent KDA benchmark
-        if: always()
+        if: always() && (github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request')
         uses: actions/upload-artifact@v7.0.1
         with:
           name: ascend-a2-recurrent-kda-benchmark
           path: benchmark_kda_recurrent.json
           if-no-files-found: ignore
           retention-days: 10
+
+      - name: Save KDA Triton-Ascend kernel cache
+        if: |
+          always() &&
+          steps.kda-validation.outcome == 'success' &&
+          steps.kda-graph-validation.outcome == 'success' &&
+          steps.kda-recurrent-validation.outcome == 'success' &&
+          steps.triton-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.KDA_TRITON_CACHE_DIR }}
+          key: ${{ steps.triton-cache.outputs.cache-primary-key }}

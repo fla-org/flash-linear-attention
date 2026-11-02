@@ -5,6 +5,9 @@ name: ascend-a2-ci
 
 on:
   workflow_dispatch:
+  schedule:
+    # Monday, Wednesday and Friday at 00:00 Asia/Shanghai (UTC+8).
+    - cron: "0 16 * * 0,2,4"
   pull_request:
     branches:
       - main
@@ -66,6 +69,7 @@ jobs:
     needs: changes
     if: |
       github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'schedule' && github.ref == 'refs/heads/main') ||
       (
         github.event_name == 'pull_request' &&
         (
@@ -103,17 +107,31 @@ jobs:
     env:
       FLA_CI_ENV: 1
       ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3,4,5,6,7"
+      TRITON_CACHE_DIR: ${{ github.workspace }}/.triton-a2-tests-cache
 
     steps:
       - name: Checkout
         uses: actions/checkout@v7.0.0
 
+      - name: Restore A2 pytest Triton-Ascend kernel cache
+        id: triton-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.TRITON_CACHE_DIR }}
+          key: >-
+            triton-a2-tests-${{ runner.os }}-${{ matrix.os }}-python-${{ matrix.python }}-cann-9.1.0-torch-2.10.0-torch-npu-2.10.0.post7-triton-ascend-3.6.0-${{ github.sha }}
+          restore-keys: |
+            triton-a2-tests-${{ runner.os }}-${{ matrix.os }}-python-${{ matrix.python }}-cann-9.1.0-torch-2.10.0-torch-npu-2.10.0.post7-triton-ascend-3.6.0-
+
       - name: Check NPU and CANN info
+        # scheduled runs rebuild only when no compatible main cache was restored.
+        if: github.event_name != 'schedule' || steps.triton-cache.outputs.cache-matched-key == ''
         run: |
           cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -m)"-linux/ascend_toolkit_install.info
           npu-smi info
 
       - name: Install dependencies
+        if: github.event_name != 'schedule' || steps.triton-cache.outputs.cache-matched-key == ''
         run: |
           python -m pip install -U pip setuptools wheel
           # triton-ascend runtime/build deps; install before resolving [npu] extra
@@ -124,6 +142,7 @@ jobs:
             --extra-index-url=https://triton-ascend.osinfra.cn/pypi/simple
 
       - name: Verify environment
+        if: github.event_name != 'schedule' || steps.triton-cache.outputs.cache-matched-key == ''
         shell: bash
         run: |
           source /usr/local/Ascend/ascend-toolkit/set_env.sh
@@ -144,6 +163,8 @@ jobs:
           PY
 
       - name: Run benchmark unit tests, modules, ops/utils, gdn, gdn2, kda, gla, attnres, solve_tril, delta, pgdn
+        id: pytest
+        if: github.event_name != 'schedule' || steps.triton-cache.outputs.cache-matched-key == ''
         shell: bash
         env:
           FLA_NPU_XDIST: "1"
@@ -174,6 +195,8 @@ jobs:
             tests/ops/test_simple_gla.py::test_retention_ascend_registration_import_order
 
       - name: Run NPU graph tests serially
+        id: pytest-graph
+        if: github.event_name != 'schedule' || steps.triton-cache.outputs.cache-matched-key == ''
         shell: bash
         env:
           ASCEND_RT_VISIBLE_DEVICES: "0"
@@ -181,3 +204,13 @@ jobs:
         run: |
           source /usr/local/Ascend/ascend-toolkit/set_env.sh
           pytest -s -v --exitfirst tests/ops/test_kda_graph.py
+
+      - name: Save A2 pytest Triton-Ascend kernel cache
+        if: |
+          steps.pytest.outcome == 'success' &&
+          steps.pytest-graph.outcome == 'success' &&
+          steps.triton-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.TRITON_CACHE_DIR }}
+          key: ${{ steps.triton-cache.outputs.cache-primary-key }}
