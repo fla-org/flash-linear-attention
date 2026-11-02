@@ -18,7 +18,7 @@ from fla.ops.common.chunk_o import chunk_bwd_dqkwg, chunk_bwd_dv, chunk_bwd_dv_l
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.op import exp2
-from fla.utils import ascend_compile_kwargs, autotune_cache_kwargs, input_guard
+from fla.utils import IS_NPU, ascend_compile_kwargs, autotune_cache_kwargs, get_device_arch, input_guard
 from fla.utils.ascend_ub_manager import (
     ASCEND_LAUNCH_BLOCK_BUDGET,
     ASCEND_MAX_GRID_DIM,
@@ -135,6 +135,11 @@ def _get_dqkwg_full_tiles(BT: int, K: int, V: int, use_dw: bool) -> tuple[int, i
             if _dqkwg_full_peak_bytes(BT=BT, BK=BK, BV=BV, use_dw=use_dw) <= ub_budget:
                 return BK, BV
     return None
+
+
+def _use_portable_lowering() -> bool:
+    """Whether the current target requires conservative dot lowering."""
+    return IS_NPU and get_device_arch().startswith(("Ascend950", "Ascend910_95"))
 
 
 _HDH_BK_CANDIDATES = (256, 128, 64, 32, 16)
@@ -1344,7 +1349,8 @@ def chunk_bwd_dqkwg_npu(
 
     use_dw = w is not None
     # ungated full-BT fails on a Cube-to-Cube tl.trans copy; gated paths flush ds through vector exp2.
-    full_tiles = _get_dqkwg_full_tiles(BT=BT, K=K, V=V, use_dw=use_dw)
+    use_portable_lowering = _use_portable_lowering()
+    full_tiles = None if use_portable_lowering else _get_dqkwg_full_tiles(BT=BT, K=K, V=V, use_dw=use_dw)
     use_full = full_tiles is not None and (g is not None or g_gamma is not None)
     if use_full:
         BK, BV = full_tiles
@@ -1353,9 +1359,13 @@ def chunk_bwd_dqkwg_npu(
         BC = _get_bc(BT=BT, K=K, V=V)
         BK = _get_bk(K=K, BC=BC)
         BV = _get_bv(V=V, BC=BC)
+        if use_portable_lowering:
+            BV = min(BV, 32)
         dqkwg_kernel = chunk_dqkwg_bwd_kernel
-        dq_f32 = torch.empty(B, T, HV, K, dtype=torch.float32, device=q.device)
-        dk_f32 = torch.empty(B, T, HV, K, dtype=torch.float32, device=q.device)
+        # some compiler modes may read the fused fp32 scratch before in-kernel initialization
+        scratch_init = torch.zeros if use_portable_lowering else torch.empty
+        dq_f32 = scratch_init(B, T, HV, K, dtype=torch.float32, device=q.device)
+        dk_f32 = scratch_init(B, T, HV, K, dtype=torch.float32, device=q.device)
     NK = triton.cdiv(K, BK)
     if g is not None:
         g_arg, g_t_contig = _g_npu_arg(g=g, HV=HV)
@@ -1363,7 +1373,7 @@ def chunk_bwd_dqkwg_npu(
         g_arg = q
         g_t_contig = False
     dq = q.new_empty(B, T, HV, K)
-    dk = k.new_empty(B, T, HV, K)
+    dk = k.new_zeros(B, T, HV, K) if use_portable_lowering else k.new_empty(B, T, HV, K)
     dg = torch.empty(NK, *g.shape, dtype=torch.float32, device=g.device) if g is not None else None
     dw = torch.empty_like(w) if use_dw else None
 
@@ -1494,7 +1504,7 @@ def chunk_bwd_dqkwg_npu(
     key=['H', 'HV', 'K', 'V', 'BT', 'BK', 'BV', 'USE_G', 'USE_G_GAMMA', 'STATE_V_FIRST'],
     **autotune_cache_kwargs,
 )
-@triton.jit(do_not_specialize=['T', 'PID_OFFSET', 'BH_OFFSET'])
+@triton.jit(do_not_specialize=['T', 'PID_OFFSET', 'BH_OFFSET', 'SCORE_STRIDE'])
 def chunk_bwd_kernel_dv_npu(
     q,
     k,
@@ -1503,6 +1513,7 @@ def chunk_bwd_kernel_dv_npu(
     do,
     dv,
     dh,
+    score_sink,
     cu_seqlens,
     chunk_indices,
     scale,
@@ -1518,8 +1529,10 @@ def chunk_bwd_kernel_dv_npu(
     USE_G_GAMMA: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     STATE_V_FIRST: tl.constexpr,
+    MATERIALIZE_SCORE: tl.constexpr,
     PID_OFFSET,
     BH_OFFSET,
+    SCORE_STRIDE,
 ):
     pid = tl.program_id(0).to(tl.int64) + PID_OFFSET
     NV = tl.cdiv(V, BV)
@@ -1567,6 +1580,13 @@ def chunk_bwd_kernel_dv_npu(
             b_dh = tl.load(p_dh, mask=m_k[:, None] & (o_v[None, :] < V), other=0.0)
         b_dv = tl.dot(b_k_c, b_dh.to(b_k_c.dtype), b_dv)
 
+    if MATERIALIZE_SCORE:
+        # preserve the first dot result until the second matrix multiply consumes it
+        tl.store(
+            score_sink + i_bh * SCORE_STRIDE + pid,
+            tl.sum(tl.sum(b_A, axis=1), axis=0),
+        )
+
     if USE_G:
         g += bos * HV + i_h
         p_g = g + o_t * HV
@@ -1583,6 +1603,11 @@ def chunk_bwd_kernel_dv_npu(
         b_dv *= tl.where(m_t, exp2(-b_g + b_g_last), 0)[:, None]
     else:
         b_A = tl.where(m_A, b_A * scale, 0).to(do.dtype.element_ty)
+    if MATERIALIZE_SCORE:
+        tl.store(
+            score_sink + i_bh * SCORE_STRIDE + pid,
+            tl.sum(tl.sum(b_A, axis=1), axis=0).to(tl.float32),
+        )
     p_do = do + o_t[:, None] * (HV*V) + o_v[None, :]
     p_dv = dv + o_t[:, None] * (HV*V) + o_v[None, :]
     b_do = tl.load(p_do, mask=m_t[:, None] & (o_v < V)[None, :], other=0.0)
@@ -1620,6 +1645,8 @@ def chunk_bwd_dv_npu(
 
     dv = torch.empty_like(do)
     grid = (NV * NT, B * HV)
+    materialize_score = _use_portable_lowering()
+    score_sink = torch.empty(B * HV * grid[0], dtype=torch.float32, device=do.device) if materialize_score else dv
     dv_kwargs = dict(
         q=q,
         k=k,
@@ -1628,6 +1655,7 @@ def chunk_bwd_dv_npu(
         do=do,
         dv=dv,
         dh=dh,
+        score_sink=score_sink,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         scale=scale,
@@ -1640,8 +1668,10 @@ def chunk_bwd_dv_npu(
         BK=BK,
         BV=BV,
         STATE_V_FIRST=state_v_first,
+        MATERIALIZE_SCORE=materialize_score,
         PID_OFFSET=0,
         BH_OFFSET=0,
+        SCORE_STRIDE=grid[0] if materialize_score else 0,
     )
     if grid[0] * grid[1] > ASCEND_LAUNCH_BLOCK_BUDGET:
         launch_grid_chunked(
