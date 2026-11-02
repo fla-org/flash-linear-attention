@@ -510,8 +510,7 @@ class LinearLossParallel(ParallelStyle):
 
         if not isinstance(weight, DTensor):
             weight = DTensor.from_local(weight, device_mesh, [Replicate()])
-        # FLCE needs a complete weight on every sequence rank. Its local backward,
-        # however, only produces that rank's contribution to the shared gradient.
+        # keep the redistribution autograd edge so partial gradients reduce to the original layout.
         weight = weight.redistribute(placements=[Replicate()], async_op=True)
 
         if bias is not None and not isinstance(bias, DTensor):
@@ -528,21 +527,13 @@ class LinearLossParallel(ParallelStyle):
 
     @staticmethod
     def _prepare_output_fn(use_local_output, device_mesh, mod, inputs, outputs):
-        target = inputs[1]
         if mod.reduction == "mean":
-            local_count = target.ne(mod.ignore_index).sum()
-            global_count = DTensor.from_local(
-                local_count,
-                device_mesh,
-                [Partial()],
-            ).redistribute(placements=[Replicate()])
-            outputs = (
-                outputs * local_count.to(outputs.dtype) / global_count.to_local().clamp_min(1).to(outputs.dtype)
-            )
+            count = inputs[1].ne(mod.ignore_index).sum().to(outputs.dtype)
+            outputs = torch.stack((outputs * count, count))
 
-        outputs = DTensor.from_local(outputs, device_mesh, [Partial()]).redistribute(
-            placements=[Replicate()]
-        )
+        outputs = DTensor.from_local(outputs, device_mesh, [Partial()]).redistribute(placements=[Replicate()])
+        if mod.reduction == "mean":
+            outputs = outputs[0] / outputs[1].clamp_min(1)
         return outputs.to_local(grad_placements=[Replicate()]) if use_local_output else outputs
 
     def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
