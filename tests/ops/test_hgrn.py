@@ -155,17 +155,22 @@ def test_chunk(
     x, g = (i.detach().clone().to(dtype).requires_grad_() for i in (x, g))
 
     do = torch.randn_like(x)
-    h0 = torch.randn_like(x[:, 0])
-    ref, _ = fused_recurrent_hgrn(x, g, h0, output_final_state=True)
-    ref.backward(do)
+    h0 = torch.randn_like(x[:, 0]).requires_grad_()
+    dht = torch.randn_like(h0)
+    ref, ref_ht = fused_recurrent_hgrn(x, g, h0, output_final_state=True)
+    ((ref * do).sum() + (ref_ht * dht).sum()).backward()
     ref_dx, x.grad = x.grad.clone(), None
     ref_dg, g.grad = g.grad.clone(), None
+    ref_dh0, h0.grad = h0.grad.clone(), None
 
-    tri, _ = chunk_hgrn(x, g, h0, output_final_state=True)
-    tri.backward(do)
+    tri, tri_ht = chunk_hgrn(x, g, h0, output_final_state=True)
+    ((tri * do).sum() + (tri_ht * dht).sum()).backward()
     tri_dx, x.grad = x.grad.clone(), None
     tri_dg, g.grad = g.grad.clone(), None
+    tri_dh0, h0.grad = h0.grad.clone(), None
 
     assert_close('o', ref, tri, 0.005)
+    assert_close('ht', ref_ht, tri_ht, 0.005)
     assert_close('dx', ref_dx, tri_dx, 0.005)
     assert_close('dg', ref_dg, tri_dg, 0.005)
+    assert_close('dh0', ref_dh0, tri_dh0, 0.005)
