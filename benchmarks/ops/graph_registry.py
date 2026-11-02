@@ -11,8 +11,11 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, fields
+from dataclasses import dataclass, field, fields
 from typing import Any
+
+_INTEGER_FIELDS = ('B', 'T', 'H', 'D', 'N', 'actual_T', 'HV', 'DV', 'chunk_size')
+_RESULT_FIELDS = {'op', 'shape', 'mode', 'eager', 'graph', 'graph_safe', 'memory', 'capture_ms', 'validation'}
 
 
 @dataclass(frozen=True)
@@ -36,7 +39,7 @@ class GraphBenchmarkMetadata:
     disable_recompute: bool = False
 
     def __post_init__(self):
-        for name in ('B', 'T', 'H', 'D', 'N', 'actual_T', 'HV', 'DV', 'chunk_size'):
+        for name in _INTEGER_FIELDS:
             if type(getattr(self, name)) is not int or getattr(self, name) <= 0:
                 raise ValueError(f'{name} must be a positive integer')
         if self.actual_T > self.T:
@@ -67,10 +70,16 @@ class GraphBenchmarkCase:
     run_once: Callable[[Callable, tuple[Any, ...], bool], dict[str, Any]]
     assert_close: Callable[[dict[str, Any], dict[str, Any]], None]
     metadata: GraphBenchmarkMetadata
+    annotations: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
         if not isinstance(self.metadata, GraphBenchmarkMetadata):
             raise TypeError('metadata must be GraphBenchmarkMetadata')
+        if not isinstance(self.annotations, dict):
+            raise TypeError('annotations must be a dictionary')
+        reserved = _RESULT_FIELDS | {field.name for field in fields(GraphBenchmarkMetadata)}
+        if reserved.intersection(self.annotations):
+            raise ValueError('annotations must not override reserved benchmark fields')
 
 
 @dataclass(frozen=True)
@@ -107,9 +116,6 @@ def _as_bool(shape: dict[str, Any], name: str, default: bool = False) -> bool:
 
 
 def _normalize_graph_shape(shape: dict[str, Any], default_dtype: str) -> dict[str, Any]:
-    unknown = set(shape) - {field.name for field in fields(GraphBenchmarkMetadata)}
-    if unknown:
-        raise ValueError(f'Unknown graph benchmark fields: {sorted(unknown)}')
     missing = [name for name in ("B", "T", "H", "D") if name not in shape]
     if missing:
         raise ValueError(f"Graph shape is missing required dimensions: {missing}")
@@ -128,7 +134,8 @@ def _normalize_graph_shape(shape: dict[str, Any], default_dtype: str) -> dict[st
     for name in ("fused_options", "safe_gate", "allow_neg_eigval", "disable_recompute"):
         normalized[name] = _as_bool(normalized, name)
 
-    return asdict(GraphBenchmarkMetadata(**normalized))
+    GraphBenchmarkMetadata(**{field.name: normalized[field.name] for field in fields(GraphBenchmarkMetadata)})
+    return normalized
 
 
 def normalize_kda_shape(shape: dict[str, Any], default_dtype: str = "float16") -> dict[str, Any]:
@@ -178,6 +185,8 @@ def _build_kda_case(shape: dict[str, Any], mode: str, device: str, seed: int) ->
     from fla.ops.kda import chunk_kda
 
     shape = normalize_kda_shape(shape)
+    metadata = {field.name: shape[field.name] for field in fields(GraphBenchmarkMetadata)}
+    annotations = {name: value for name, value in shape.items() if name not in metadata}
     if mode not in ("fwd", "fwdbwd"):
         raise ValueError(f"Unsupported KDA graph benchmark mode: {mode}")
 
@@ -314,7 +323,8 @@ def _build_kda_case(shape: dict[str, Any], mode: str, device: str, seed: int) ->
         graph_args=graph_inputs + (graph_cu,),
         run_once=run_once,
         assert_close=assert_close,
-        metadata=GraphBenchmarkMetadata(**shape),
+        metadata=GraphBenchmarkMetadata(**metadata),
+        annotations=annotations,
     )
 
 
@@ -350,6 +360,12 @@ register_graph_op(GraphOpConfig(
 
 def normalize_gdn_shape(shape: dict[str, Any], default_dtype: str = "float16") -> dict[str, Any]:
     """Normalize workload metadata; the operator validates graph capabilities when building the case."""
+    unknown = set(shape) - {field.name for field in fields(GraphBenchmarkMetadata)}
+    if unknown:
+        raise ValueError(f'Unknown graph benchmark fields: {sorted(unknown)}')
+    for name in _INTEGER_FIELDS:
+        if name in shape and type(shape[name]) is not int:
+            raise ValueError(f'{name} must be a positive integer')
     return _normalize_graph_shape(shape, default_dtype)
 
 

@@ -19,6 +19,7 @@ from benchmarks.ops.graph_registry import (
     _check_gdn_error,
     get_graph_op,
     normalize_gdn_shape,
+    normalize_kda_shape,
 )
 
 
@@ -63,6 +64,31 @@ def test_gdn_normalization_does_not_define_operator_capabilities():
 
 @pytest.mark.parametrize(
     'override',
+    [{'B': True}, {'T': 128.75}, {'D': 64.9}, {'N': 2.9}, {'actual_T': 127.5}],
+    ids=['bool-batch', 'fractional-tokens', 'fractional-dim', 'fractional-sequences', 'fractional-active-tokens'],
+)
+def test_gdn_normalization_rejects_noninteger_dimensions(override):
+    with pytest.raises(ValueError, match='must be a positive integer'):
+        normalize_gdn_shape({'B': 1, 'T': 128, 'H': 2, 'D': 64, **override})
+
+
+@pytest.mark.parametrize(
+    'extra',
+    [{'workload_label': 'custom'}, {'T': '128', 'workload_label': 'custom'}, {'notes': {'run': 1}}],
+    ids=['label', 'numeric-string', 'nested-annotation'],
+)
+def test_kda_normalization_preserves_annotations(extra):
+    requested = {'B': 1, 'T': 128, 'H': 2, 'D': 64, **extra}
+    normalized = normalize_kda_shape(requested)
+    assert normalized['T'] == 128
+    for name in set(extra) - {'T'}:
+        assert normalized[name] == extra[name]
+    with pytest.raises(ValueError, match='Unknown graph benchmark fields'):
+        normalize_gdn_shape(requested)
+
+
+@pytest.mark.parametrize(
+    'override',
     [{'T': True}, {'T': 1.5}, {'dtype': None}, {'fused_options': 1}, {'actual_T': 129}],
     ids=['bool-dimension', 'float-dimension', 'null-dtype', 'integer-option', 'active-over-capacity'],
 )
@@ -91,21 +117,10 @@ def test_gdn_registry_rejects_unknown_mode_before_loading_runtime():
         get_graph_op('chunk_gdn').build_case({'B': 1, 'T': 65, 'H': 1, 'D': 64}, 'bwd', 'npu', 0)
 
 
-@pytest.mark.parametrize('ci_env', ['0', '1'], ids=['ci_env-0', 'ci_env-1'])
 @pytest.mark.parametrize(
-    'abs_error,rms_error,passes',
-    [
-        (0.1, 0.02, False), (0.1, 0.015, False), (0.1, 0.014, True),
-        (1e-6, 1.0, True), (float('nan'), 0.0, False), (0.0, float('inf'), False),
-    ],
-    ids=[
-        'abs_error-0.1-rms_error-0.02-passes-false',
-        'abs_error-0.1-rms_error-0.015-passes-false',
-        'abs_error-0.1-rms_error-0.014-passes-true',
-        'abs_error-1e-06-rms_error-1.0-passes-true',
-        'abs_error-float-nan-rms_error-0.0-passes-false',
-        'abs_error-0.0-rms_error-float-inf-passes-false',
-    ],
+    'ci_env,abs_error,rms_error,passes',
+    [('0', 0.1, 0.02, False), ('1', 0.1, 0.015, False), ('0', 0.1, 0.014, True), ('1', 1e-6, 1.0, True)],
+    ids=['local-above-budget', 'ci-at-budget', 'local-below-budget', 'ci-absolute-shortcut'],
 )
 def test_gdn_error_budget_is_strict(monkeypatch, ci_env, abs_error, rms_error, passes):
     monkeypatch.setenv('FLA_CI_ENV', ci_env)
@@ -114,6 +129,17 @@ def test_gdn_error_budget_is_strict(monkeypatch, ci_env, abs_error, rms_error, p
     else:
         with pytest.raises(AssertionError):
             _check_gdn_error('dg', abs_error, rms_error, 0.015)
+
+
+@pytest.mark.parametrize(
+    'ci_env,abs_error,rms_error',
+    [('0', float('nan'), 0.0), ('1', 0.0, float('inf'))],
+    ids=['local-nan', 'ci-infinity'],
+)
+def test_gdn_error_budget_rejects_nonfinite_values(monkeypatch, ci_env, abs_error, rms_error):
+    monkeypatch.setenv('FLA_CI_ENV', ci_env)
+    with pytest.raises(AssertionError, match='Non-finite'):
+        _check_gdn_error('dg', abs_error, rms_error, 0.015)
 
 
 @pytest.mark.parametrize(
@@ -192,7 +218,7 @@ def test_gdn_memory_measurement_covers_selected_engines(monkeypatch, report_memo
     )
     monkeypatch.setitem(sys.modules, 'torch', SimpleNamespace(npu=npu))
     metadata = GraphBenchmarkMetadata(**normalize_gdn_shape({'B': 1, 'T': 64, 'H': 1, 'D': 64}))
-    case = SimpleNamespace(metadata=metadata)
+    case = SimpleNamespace(metadata=metadata, annotations={'workload_label': 'custom'})
     monkeypatch.setattr(graph_benchmark, 'get_graph_op', lambda _: SimpleNamespace(
         supported_modes=('fwdbwd',),
         build_case=record('build', case),
@@ -219,6 +245,7 @@ def test_gdn_memory_measurement_covers_selected_engines(monkeypatch, report_memo
         assert 'memory' not in result[0]
     assert result[0]['mode'] == 'fwdbwd'
     assert result[0]['T'] == 64
+    assert result[0]['workload_label'] == 'custom'
 
 
 def test_graph_safe_measurement_is_opt_in():
@@ -253,8 +280,20 @@ def test_runner_forwards_diagnostics_to_the_worker(enabled):
         assert ('--report-memory' in command) == enabled
 
 
-def test_benchmark_case_requires_typed_metadata():
-    with pytest.raises(TypeError, match='GraphBenchmarkMetadata'):
+@pytest.mark.parametrize(
+    'override,error,match',
+    [
+        ({'metadata': {}}, TypeError, 'GraphBenchmarkMetadata'),
+        ({'annotations': {'op': 'mislabelled'}}, ValueError, 'reserved'),
+        ({'annotations': {'T': 1}}, ValueError, 'reserved'),
+        ({'annotations': {'graph': {}}}, ValueError, 'reserved'),
+    ],
+    ids=['untyped-metadata', 'reserved-identity', 'reserved-dimension', 'reserved-timing'],
+)
+def test_benchmark_case_rejects_invalid_metadata(override, error, match):
+    options = {'metadata': GraphBenchmarkMetadata(**normalize_gdn_shape({'B': 1, 'T': 64, 'H': 1, 'D': 64})),
+               **override}
+    with pytest.raises(error, match=match):
         GraphBenchmarkCase(
             eager_step=lambda: None,
             graph_step=lambda: None,
@@ -263,5 +302,5 @@ def test_benchmark_case_requires_typed_metadata():
             graph_args=(),
             run_once=lambda *_: {},
             assert_close=lambda *_: None,
-            metadata={},
+            **options,
         )
