@@ -539,8 +539,6 @@ class LinearLossParallel(ParallelStyle):
     def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
         if getattr(module, "use_l2warp", False):
             raise NotImplementedError("LinearLossParallel does not support use_l2warp=True")
-        if getattr(module, "process_group", None) is not None:
-            raise NotImplementedError("LinearLossParallel does not support an additional vocabulary process group")
 
         module = distribute_module(
             module,
