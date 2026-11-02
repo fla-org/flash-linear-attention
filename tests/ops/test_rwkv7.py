@@ -66,19 +66,33 @@ def test_channel_mixing_gradients(B, T, n_embd, dim_ffn, dtype, inplace, xprevdi
     K_2 = K_.clone().detach().requires_grad_(True)
     V_2 = V_.clone().detach().requires_grad_(True)
 
+    x_ref = x.to(torch.float32)
     o1, last1 = channel_mixing_rwkv7_torch(
-        x.to(torch.float32),
+        x_ref,
         x_prev.to(torch.float32),
         x_k.to(torch.float32),
         K_.to(torch.float32),
         V_.to(torch.float32),
     )
-    loss1 = o1.mean() + last1.mean()
-    loss1.backward()
-
     o2, last2 = channel_mixing_rwkv7(x2, x_prev2, x_k2, K_2, V_2, inplace)
+
+    expected_last1 = x_ref[:, -1, :].detach().clone()
+    expected_last2 = x2[:, -1, :].detach().clone()
+    assert torch.equal(last1, expected_last1)
+    assert torch.equal(last2, expected_last2)
+    assert last1.untyped_storage().data_ptr() != x_ref.untyped_storage().data_ptr()
+    assert last2.untyped_storage().data_ptr() != x2.untyped_storage().data_ptr()
+
+    expected_state_grad = torch.zeros_like(x)
+    expected_state_grad[:, -1, :] = 1
+    assert torch.equal(torch.autograd.grad(last1.sum(), x, retain_graph=True)[0], expected_state_grad)
+    assert torch.equal(torch.autograd.grad(last2.sum(), x2, retain_graph=True)[0], expected_state_grad)
+
+    loss1 = o1.mean() + last1.mean()
     loss2 = o2.mean() + last2.mean()
+    loss1.backward()
     loss2.backward()
+    assert torch.equal(last2, expected_last2)
 
     assert_close(" dx", x.grad, x2.grad, ratio=5e-3)
     assert_close(" dxprev", x_prev.grad, x_prev2.grad, ratio=5e-3)
