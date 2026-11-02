@@ -278,6 +278,7 @@ def benchmark_graph_op(
                 "op": op_name,
                 "shape": shape_name,
                 "mode": mode,
+                **case.annotations,
                 **asdict(case.metadata),
                 **measured,
             })
