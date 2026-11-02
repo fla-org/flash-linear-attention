@@ -127,7 +127,7 @@ def chunk_kda_fwd_kernel_intra_token_parallel(
         tl.store(Akk + i_t * HV * BC + o_hv * BC + j - i_ts, b_Akk.to(Akk.dtype.element_ty), mask=m_hv)
 
 
-@dispatch('kda')
+@dispatch
 def chunk_kda_fwd_intra_token_parallel(
     q: torch.Tensor,
     k: torch.Tensor,

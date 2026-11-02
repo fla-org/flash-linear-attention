@@ -12,69 +12,81 @@ from __future__ import annotations
 import torch
 
 from fla.backends import TileLangBackend, register
+from fla.ops.kda.chunk_bwd import chunk_kda_bwd_wy_dqkg_fused
 
 
-@register('kda')
-class KDATileLangBackend(TileLangBackend):
-
-    def chunk_kda_bwd_wy_dqkg_fused_verifier(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        v_new: torch.Tensor,
-        g: torch.Tensor,
-        beta: torch.Tensor,
-        A: torch.Tensor,
-        h: torch.Tensor,
-        do: torch.Tensor,
-        dh: torch.Tensor,
-        dv: torch.Tensor,
-        scale: float | None = None,
-        state_v_first: bool = False,
-        cu_seqlens: torch.LongTensor | None = None,
-        chunk_size: int = 64,
-        chunk_indices: torch.LongTensor | None = None,
-        chunk_offsets: torch.LongTensor | None = None,
-        use_graph: bool = False,
-    ) -> tuple[bool, str | None]:
-        if v.shape[2] != k.shape[2]:
-            return False, (
-                "TileLang backend does not support GQA (v has more heads than k); "
-                "use repeat_interleave on k/q to match v's head count, or fall back to Triton"
-            )
-        if use_graph:
-            return False, "TileLang backend does not support graph capture (use_graph=True); fall back to Triton"
-        return True, None
-
-    def chunk_kda_bwd_wy_dqkg_fused(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        v_new: torch.Tensor,
-        g: torch.Tensor,
-        beta: torch.Tensor,
-        A: torch.Tensor,
-        h: torch.Tensor,
-        do: torch.Tensor,
-        dh: torch.Tensor,
-        dv: torch.Tensor,
-        scale: float | None = None,
-        state_v_first: bool = False,
-        cu_seqlens: torch.LongTensor | None = None,
-        chunk_size: int = 64,
-        chunk_indices: torch.LongTensor | None = None,
-        chunk_offsets: torch.LongTensor | None = None,
-        use_graph: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        from fla.ops.kda.backends.tilelang.chunk_bwd_dqkg import (
-            chunk_kda_bwd_wy_dqkg_fused_tilelang,
+def chunk_kda_bwd_wy_dqkg_fused_verifier(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    v_new: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    A: torch.Tensor,
+    h: torch.Tensor,
+    do: torch.Tensor,
+    dh: torch.Tensor,
+    dv: torch.Tensor,
+    scale: float | None = None,
+    state_v_first: bool = False,
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_size: int = 64,
+    chunk_indices: torch.LongTensor | None = None,
+    chunk_offsets: torch.LongTensor | None = None,
+    use_graph: bool = False,
+) -> tuple[bool, str | None]:
+    if v.shape[2] != k.shape[2]:
+        return False, (
+            "TileLang backend does not support GQA (v has more heads than k); "
+            "use repeat_interleave on k/q to match v's head count, or fall back to Triton"
         )
-        return chunk_kda_bwd_wy_dqkg_fused_tilelang(
-            q=q, k=k, v=v, v_new=v_new, g=g, beta=beta, A=A,
-            h=h, do=do, dh=dh, dv=dv,
-            scale=scale, cu_seqlens=cu_seqlens,
-            chunk_size=chunk_size, chunk_indices=chunk_indices,
-            state_v_first=state_v_first,
-        )
+    if use_graph:
+        return False, "TileLang backend does not support graph capture (use_graph=True); fall back to Triton"
+    return True, None
+
+
+@register(
+    chunk_kda_bwd_wy_dqkg_fused,
+    backend=TileLangBackend,
+    verifier=chunk_kda_bwd_wy_dqkg_fused_verifier,
+)
+def chunk_kda_bwd_wy_dqkg_fused_tilelang(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    v_new: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    A: torch.Tensor,
+    h: torch.Tensor,
+    do: torch.Tensor,
+    dh: torch.Tensor,
+    dv: torch.Tensor,
+    scale: float | None = None,
+    state_v_first: bool = False,
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_size: int = 64,
+    chunk_indices: torch.LongTensor | None = None,
+    chunk_offsets: torch.LongTensor | None = None,
+    use_graph: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    from fla.ops.kda.backends.tilelang import chunk_bwd_dqkg
+
+    return chunk_bwd_dqkg.chunk_kda_bwd_wy_dqkg_fused_tilelang(
+        q=q,
+        k=k,
+        v=v,
+        v_new=v_new,
+        g=g,
+        beta=beta,
+        A=A,
+        h=h,
+        do=do,
+        dh=dh,
+        dv=dv,
+        scale=scale,
+        cu_seqlens=cu_seqlens,
+        chunk_size=chunk_size,
+        chunk_indices=chunk_indices,
+        state_v_first=state_v_first,
+    )

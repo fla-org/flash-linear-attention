@@ -18,6 +18,8 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.backends import TritonAscendBackend, register
+from fla.ops.common.chunk_h import chunk_bwd_dh, chunk_fwd_h
 from fla.ops.utils import prepare_chunk_offsets
 from fla.ops.utils.op import exp2
 from fla.utils import input_guard
@@ -288,6 +290,14 @@ def _slice_seq(x: torch.Tensor | None, bos: int, eos: int) -> torch.Tensor | Non
     return None if x is None else x[:, bos:eos]
 
 
+def chunk_fwd_h_verifier(k, v, *args, **kwargs):
+    K, V = k.shape[-1], v.shape[-1]
+    if K > 512 or V > 512:
+        return False, f'NPU chunk_fwd_h supports K,V<=512, got K={K}, V={V}'
+    return True, None
+
+
+@register(chunk_fwd_h, backend=TritonAscendBackend, verifier=chunk_fwd_h_verifier)
 @input_guard
 def chunk_fwd_h_npu(
     k: torch.Tensor,
@@ -392,6 +402,14 @@ def chunk_fwd_h_npu(
     return h, ht
 
 
+def chunk_bwd_dh_verifier(q, k, v, *args, **kwargs):
+    K, V = k.shape[-1], v.shape[-1]
+    if K > 512 or V > 512:
+        return False, f'NPU chunk_bwd_dh supports K,V<=512, got K={K}, V={V}'
+    return True, None
+
+
+@register(chunk_bwd_dh, backend=TritonAscendBackend, verifier=chunk_bwd_dh_verifier)
 @input_guard
 def chunk_bwd_dh_npu(
     q: torch.Tensor,
