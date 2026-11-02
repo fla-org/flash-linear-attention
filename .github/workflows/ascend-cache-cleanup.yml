@@ -1,0 +1,44 @@
+name: ascend-cache-cleanup
+
+on:
+  pull_request_target:
+    branches:
+      - main
+    types: [closed]
+
+permissions: {}
+
+jobs:
+  cleanup:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Delete merged PR Ascend caches
+        uses: actions/github-script@v9.0.0
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const ref = `refs/pull/${context.payload.pull_request.number}/merge`;
+            const prefixes = ['triton-kda-', 'triton-a2-tests-'];
+            const caches = await github.paginate(github.rest.actions.getActionsCacheList, {
+              owner, repo, ref, per_page: 100,
+            });
+            for (const cache of caches) {
+              if (cache.ref !== ref || !prefixes.some(prefix => cache.key.startsWith(prefix))) {
+                continue;
+              }
+              try {
+                await github.rest.actions.deleteActionsCacheById({
+                  owner, repo, cache_id: cache.id,
+                });
+                core.info(`Deleted ${cache.key} (${cache.id}) from ${ref}`);
+              } catch (error) {
+                if (error.status !== 404) {
+                  throw error;
+                }
+                core.info(`Cache ${cache.id} was already removed`);
+              }
+            }
