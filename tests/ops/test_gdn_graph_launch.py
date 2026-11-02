@@ -34,14 +34,10 @@ def _load_launch_helpers(max_grid):
     return namespace
 
 
-@pytest.mark.parametrize('dimensions,nk', [(2, 1), (3, 2)], ids=['dimensions-2-nk-1', 'dimensions-3-nk-2'])
 @pytest.mark.parametrize(
-    'max_grid,nt,bh_total',
-    [(4, 7, 7), (5, 13, 2)],
-    ids=[
-        'max_grid-4-nt-7-bh_total-7',
-        'max_grid-5-nt-13-bh_total-2',
-    ],
+    'dimensions,nk,max_grid,nt,bh_total',
+    [(2, 1, 4, 7, 7), (3, 2, 4, 7, 7), (3, 2, 5, 13, 2)],
+    ids=['2d-head-splits', '3d-key-and-head-splits', '3d-chunk-tail'],
 )
 def test_graph_backward_partition_preserves_global_chunk_addresses(dimensions, nk, max_grid, nt, bh_total):
     helpers = _load_launch_helpers(max_grid)

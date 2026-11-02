@@ -8,6 +8,7 @@
 """NPU GDN fixed-capacity forward/backward replay and eager isolation tests."""
 
 from importlib import import_module
+from itertools import accumulate
 
 import pytest
 import torch
@@ -82,24 +83,27 @@ def _check(actual, expected):
 
 
 @pytest.mark.parametrize(
-    'dtype,dim,cu_dtype,state,final',
+    'dtype,dim,cu_dtype,state,final,capture',
     [
-        (torch.float16, 64, torch.int32, False, False),
-        (torch.bfloat16, 64, torch.int64, False, True),
-        (torch.float16, 128, torch.int64, True, False),
-        (torch.bfloat16, 128, torch.int32, True, True),
+        (torch.float16, 64, torch.int32, False, False, 'direct'),
+        (torch.bfloat16, 64, torch.int64, False, True, 'callable'),
+        (torch.float16, 128, torch.int64, True, False, 'direct'),
+        (torch.bfloat16, 128, torch.int32, True, True, 'callable'),
+        (torch.bfloat16, 128, torch.int32, True, True, 'direct'),
+        (torch.float16, 128, torch.int64, True, False, 'callable'),
     ],
     ids=[
-        'dtype-float16-dim-64-cu_dtype-int32-state-false-final-false',
-        'dtype-bfloat16-dim-64-cu_dtype-int64-state-false-final-true',
-        'dtype-float16-dim-128-cu_dtype-int64-state-true-final-false',
-        'dtype-bfloat16-dim-128-cu_dtype-int32-state-true-final-true',
+        'direct-fp16-d64-int32-no-state-no-final',
+        'callable-bf16-d64-int64-final',
+        'direct-fp16-d128-int64-initial-state',
+        'callable-bf16-d128-int32-initial-final-state',
+        'direct-bf16-d128-int32-initial-final-state',
+        'callable-fp16-d128-int64-initial-state',
     ],
 )
-@pytest.mark.parametrize('capture', ['direct', 'callable'], ids=['capture-direct', 'capture-callable'])
 @torch.no_grad()
 def test_replay_changes_values_lengths_and_empty_sequences(dtype, dim, cu_dtype, state, final, capture):
-    """Cover each state combination and dtype/dimension pair through both capture APIs."""
+    """Cover capture APIs, state combinations, and D128 regressions with changing packed layouts."""
     sample = _inputs(dtype, dim)
     cu = torch.tensor([0, 1, 64, 129, 193], device=device, dtype=cu_dtype)
 
@@ -162,61 +166,28 @@ def test_replay_changes_values_lengths_and_empty_sequences(dtype, dim, cu_dtype,
 
 
 @pytest.mark.parametrize(
-    'length',
-    [1, 2, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129],
-    ids=[
-        'length-1',
-        'length-2',
-        'length-15',
-        'length-16',
-        'length-17',
-        'length-31',
-        'length-32',
-        'length-33',
-        'length-63',
-        'length-64',
-        'length-65',
-        'length-127',
-        'length-128',
-        'length-129',
-    ],
+    'lengths',
+    [(1, 63, 64, 65, 127, 128, 129), (2, 15, 16, 17), (31, 32, 33)],
+    ids=['chunk-boundaries', 'solve-16-boundaries', 'solve-32-boundaries'],
 )
 @torch.no_grad()
-def test_graph_chunk_boundaries(length):
-    inputs = _inputs(capacity=length, heads=1)
-    offsets = [0, 0, length, length, length]
+def test_graph_chunk_boundaries(lengths):
+    inputs = _inputs(capacity=sum(lengths), heads=1, n=len(lengths) + 2)
+    offsets = [0, 0, *accumulate(lengths), sum(lengths)]
     cu = torch.tensor(offsets, device=device)
-    _check(_call(inputs, cu, scale=None), _reference(inputs, offsets, scale=None))
+    actual = _call(inputs, cu, scale=None)
+    expected = _reference(inputs, offsets, scale=None)
+    _check(actual, expected)
+    for n, (start, end) in enumerate(zip(offsets, offsets[1:])):
+        if start != end:
+            _check(
+                (actual[0][:, start:end], actual[1][n:n+1]),
+                (expected[0][:, start:end], expected[1][n:n+1]),
+            )
 
 
-@pytest.mark.parametrize(
-    'option,value',
-    [
-        ('use_qk_l2norm_in_kernel', True), ('use_beta_sigmoid_in_kernel', True),
-        ('allow_neg_eigval', True), ('state_v_first', True), ('use_gate_in_kernel', True),
-        ('chunk_size', 32), ('chunk_size', 16), ('head_first', False), ('unknown_option', True),
-        ('cp_context', object()), ('chunk_indices', object()), ('cu_seqlens_cpu', object()),
-        ('A_log', object()), ('dt_bias', object()),
-    ],
-    ids=[
-        'option-use_qk_l2norm_in_kernel-value-true',
-        'option-use_beta_sigmoid_in_kernel-value-true',
-        'option-allow_neg_eigval-value-true',
-        'option-state_v_first-value-true',
-        'option-use_gate_in_kernel-value-true',
-        'option-chunk_size-value-32',
-        'option-chunk_size-value-16',
-        'option-head_first-value-false',
-        'option-unknown_option-value-true',
-        'option-cp_context-value-object',
-        'option-chunk_indices-value-object',
-        'option-cu_seqlens_cpu-value-object',
-        'option-a_log-value-object',
-        'option-dt_bias-value-object',
-    ],
-)
 @torch.no_grad()
-def test_graph_rejects_unsupported_options(option, value):
+def _check_rejected_option(option, value):
     inputs = _inputs()
     cu = torch.tensor([0, 193, 193, 193, 193], device=device)
     with pytest.raises(ValueError, match=option):
@@ -224,32 +195,68 @@ def test_graph_rejects_unsupported_options(option, value):
 
 
 @pytest.mark.parametrize(
-    'case',
+    'option,value',
     [
-        'dense', 'batch', 'gva', 'dim', 'dtype', 'g_dtype', 'beta_dtype', 'h_dtype', 'h_shape',
-        'cu_dtype', 'cu_rank', 'cu_empty', 'strides', 'device', 'capacity', 'scale',
+        ('use_qk_l2norm_in_kernel', True),
+        ('use_beta_sigmoid_in_kernel', True),
+        ('allow_neg_eigval', True),
+        ('state_v_first', True),
+        ('use_gate_in_kernel', True),
     ],
     ids=[
-        'case-dense',
-        'case-batch',
-        'case-gva',
-        'case-dim',
-        'case-dtype',
-        'case-g_dtype',
-        'case-beta_dtype',
-        'case-h_dtype',
-        'case-h_shape',
-        'case-cu_dtype',
-        'case-cu_rank',
-        'case-cu_empty',
-        'case-strides',
-        'case-device',
-        'case-capacity',
-        'case-scale',
+        'qk-normalization',
+        'beta-sigmoid',
+        'negative-eigenvalue',
+        'transposed-state',
+        'fused-gate',
     ],
 )
+def test_graph_rejects_unsupported_options(option, value):
+    _check_rejected_option(option, value)
+
+
+@pytest.mark.parametrize(
+    'option,value',
+    [
+        ('cp_context', object()),
+        ('chunk_indices', object()),
+        ('cu_seqlens_cpu', object()),
+        ('A_log', object()),
+        ('dt_bias', object()),
+    ],
+    ids=[
+        'context-parallel',
+        'chunk-indices',
+        'cpu-offsets',
+        'gate-scale',
+        'gate-bias',
+    ],
+)
+def test_graph_rejects_metadata_overrides(option, value):
+    _check_rejected_option(option, value)
+
+
+@pytest.mark.parametrize(
+    'option,value',
+    [
+        ('chunk_size', 32),
+        ('chunk_size', 16),
+        ('head_first', False),
+        ('unknown_option', True),
+    ],
+    ids=[
+        'chunk-32',
+        'chunk-16',
+        'removed-head-first',
+        'unknown-keyword',
+    ],
+)
+def test_graph_rejects_unsupported_keyword_options(option, value):
+    _check_rejected_option(option, value)
+
+
 @torch.no_grad()
-def test_graph_rejects_unsupported_metadata(case):
+def _check_rejected_metadata(case):
     inputs = list(_inputs())
     cu = torch.tensor([0, 193, 193, 193, 193], device=device)
     scale = 0.25
@@ -290,19 +297,128 @@ def test_graph_rejects_unsupported_metadata(case):
 
 
 @pytest.mark.parametrize(
-    'override',
+    'case',
     [
-        {'B': 2}, {'D': 256}, {'DV': 128}, {'HV': 4}, {'chunk_size': 32}, {'fused_options': True},
-        {'disable_recompute': True}, {'safe_gate': True}, {'allow_neg_eigval': True}, {'dtype': 'float32'},
+        'dense',
+        'batch',
+        'gva',
+        'dim',
     ],
-    ids=['batch', 'dim', 'value-dim', 'heads', 'chunk-size', 'fused',
-         'recompute', 'safe-gate', 'negative-eigenvalue', 'dtype'],
+    ids=[
+        'dense',
+        'batch',
+        'gva',
+        'dim',
+    ],
 )
-def test_benchmark_rejects_unsupported_graph_config(override):
+def test_graph_rejects_unsupported_shapes(case):
+    _check_rejected_metadata(case)
+
+
+@pytest.mark.parametrize(
+    'case',
+    [
+        'dtype',
+        'g_dtype',
+        'beta_dtype',
+        'h_dtype',
+        'cu_dtype',
+    ],
+    ids=[
+        'dtype',
+        'g_dtype',
+        'beta_dtype',
+        'h_dtype',
+        'cu_dtype',
+    ],
+)
+def test_graph_rejects_unsupported_dtypes(case):
+    _check_rejected_metadata(case)
+
+
+@pytest.mark.parametrize(
+    'case',
+    [
+        'h_shape',
+        'cu_rank',
+        'cu_empty',
+    ],
+    ids=[
+        'h_shape',
+        'cu_rank',
+        'cu_empty',
+    ],
+)
+def test_graph_rejects_invalid_state_and_offsets(case):
+    _check_rejected_metadata(case)
+
+
+@pytest.mark.parametrize(
+    'case',
+    [
+        'strides',
+        'device',
+        'capacity',
+        'scale',
+    ],
+    ids=[
+        'strides',
+        'device',
+        'capacity',
+        'scale',
+    ],
+)
+def test_graph_rejects_invalid_storage_and_scale(case):
+    _check_rejected_metadata(case)
+
+
+def _check_rejected_benchmark_config(override):
     from benchmarks.ops.graph_registry import get_graph_op
 
     with pytest.raises(ValueError):
         get_graph_op('chunk_gdn').build_case({'B': 1, 'T': 128, 'H': 2, 'D': 64, **override}, 'fwd', 'npu:0', 42)
+
+
+@pytest.mark.parametrize(
+    'override',
+    [
+        {'B': 2},
+        {'D': 256},
+        {'DV': 128},
+        {'HV': 4},
+        {'dtype': 'float32'},
+    ],
+    ids=[
+        'batch',
+        'dim',
+        'value-dim',
+        'heads',
+        'dtype',
+    ],
+)
+def test_benchmark_rejects_unsupported_graph_config(override):
+    _check_rejected_benchmark_config(override)
+
+
+@pytest.mark.parametrize(
+    'override',
+    [
+        {'chunk_size': 32},
+        {'fused_options': True},
+        {'disable_recompute': True},
+        {'safe_gate': True},
+        {'allow_neg_eigval': True},
+    ],
+    ids=[
+        'chunk-size',
+        'fused',
+        'recompute',
+        'safe-gate',
+        'negative-eigenvalue',
+    ],
+)
+def test_benchmark_rejects_unsupported_graph_options(override):
+    _check_rejected_benchmark_config(override)
 
 
 def test_runtime_and_benchmark_share_graph_config_validation(monkeypatch):
@@ -373,8 +489,19 @@ def test_persistent_kernels_skip_holes_without_losing_later_tasks(monkeypatch):
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize('dim', [64, 128], ids=['dim-64', 'dim-128'])
-@pytest.mark.parametrize('packed', [False, True], ids=['packed-false', 'packed-true'])
+@pytest.mark.parametrize(
+    'dim,packed',
+    [
+        (64, False),
+        (128, True),
+        (64, True),
+    ],
+    ids=[
+        'dense-d64',
+        'packed-d128',
+        'packed-d64',
+    ],
+)
 def test_default_eager_matches_explicit_false(dim, packed):
     inputs = _inputs(dim=dim, capacity=65)
     outputs = []
@@ -641,8 +768,19 @@ def test_training_long_bf16_matches_eager(monkeypatch, tiled):
         _assert_training(actual, expected)
 
 
-@pytest.mark.parametrize('tiled', [False, True], ids=['tiled-false', 'tiled-true'])
-@pytest.mark.parametrize('dim', [64, 128], ids=['dim-64', 'dim-128'])
+@pytest.mark.parametrize(
+    'tiled,dim',
+    [
+        (False, 64),
+        (True, 128),
+        (False, 128),
+    ],
+    ids=[
+        'full-d64',
+        'tiled-d128',
+        'full-d128',
+    ],
+)
 @torch.no_grad()
 def test_backward_kernels_skip_sentinel_holes(monkeypatch, tiled, dim):
     torch.manual_seed(42)

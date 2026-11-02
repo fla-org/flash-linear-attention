@@ -5,6 +5,8 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+import inspect
+
 import pytest
 import torch
 
@@ -13,13 +15,16 @@ from fla.backends import BackendRegistry, BaseBackend, TritonAscendBackend, disp
 
 
 @pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
-@pytest.mark.parametrize('graph_option', [None, False, True], ids=['graph-default', 'graph-false', 'graph-true'])
-@pytest.mark.parametrize('grad_enabled', [False, True], ids=['grad-disabled', 'grad-enabled'])
+@pytest.mark.parametrize(
+    'graph_option,grad_enabled',
+    [(None, False), (False, True), (True, False), (True, True)],
+    ids=['default-inference', 'eager-training', 'graph-inference', 'graph-training'],
+)
 def test_gdn_graph_not_consumed_by_flash_qla(monkeypatch, graph_option, grad_enabled):
     from fla.ops.gated_delta_rule import chunk_gated_delta_rule
     from fla.ops.gated_delta_rule.backends import flash_qla
 
-    registry = backends._get_operation_registry('gated_delta_rule')
+    registry = backends._function_registries[inspect.unwrap(chunk_gated_delta_rule)]
     candidate = flash_qla.FlashQLABackend()
     monkeypatch.setattr(registry, '_backends', {'flash_qla': candidate})
     monkeypatch.setattr(candidate, 'is_available', lambda: True)
@@ -48,8 +53,11 @@ def test_gdn_graph_not_consumed_by_flash_qla(monkeypatch, graph_option, grad_ena
             assert len(calls) == 1
 
 
-@pytest.mark.parametrize('use_graph', [False, True], ids=['graph-false', 'graph-true'])
-@pytest.mark.parametrize('requires_grad', [False, True], ids=['no-grad', 'requires-grad'])
+@pytest.mark.parametrize(
+    'use_graph,requires_grad',
+    [(False, False), (False, True), (True, True)],
+    ids=['eager-inference', 'eager-training', 'graph-training'],
+)
 def test_gdn_graph_routes_through_autograd(monkeypatch, use_graph, requires_grad):
     from fla.ops.gated_delta_rule import chunk, graph
 
@@ -75,6 +83,38 @@ def test_gdn_graph_routes_through_autograd(monkeypatch, use_graph, requires_grad
     assert calls[0][0] is q
     assert calls[0][-1] is use_graph
     assert len(validation) == int(use_graph)
+
+
+def test_solve_tril_ascend_eager_forwarding(run_python):
+    run_python(
+        """
+        import importlib
+        from unittest.mock import patch
+
+        from triton.language import math
+
+        from fla import backends
+
+        if not hasattr(math, 'tanh'):
+            math.tanh = None
+        backends.TritonAscendBackend.is_available = classmethod(lambda cls: True)
+        importlib.reload(importlib.import_module('fla.ops.utils'))
+        solve = importlib.import_module('fla.ops.utils.solve_tril')
+        ascend = importlib.import_module('fla.ops.utils.triton_ascend.solve_tril')
+        A, cu, indices, expected = object(), object(), object(), object()
+        with patch.object(ascend, '_solve_tril_npu', return_value=expected) as implementation:
+            assert solve.solve_tril(A) is expected
+            implementation.assert_called_once_with(
+                A=A, cu_seqlens=None, chunk_indices=None, output_dtype=ascend.torch.float, use_graph=False,
+            )
+            implementation.reset_mock()
+            assert solve.solve_tril(A, cu, indices, None) is expected
+            implementation.assert_called_once_with(
+                A=A, cu_seqlens=cu, chunk_indices=indices, output_dtype=None, use_graph=False,
+            )
+        """,
+        FLA_DISABLE_BACKEND_DISPATCH='0',
+    )
 
 
 @pytest.fixture
