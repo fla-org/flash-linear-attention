@@ -31,7 +31,7 @@ from fla.utils import (
         for num_warps in [4, 8, 16]
         for num_stages in [2, 3]
     ],
-    key=['L2', 'D', 'HAS_ONORM', 'SAVE_OPRE'],
+    key=['L2', 'D', 'HAS_RMS_WEIGHT', 'HAS_ONORM', 'SAVE_OPRE'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['L'])
@@ -53,6 +53,7 @@ def attnres_fwd_kernel(
     scale: tl.constexpr,
     BL: tl.constexpr,
     BD: tl.constexpr,
+    HAS_RMS_WEIGHT: tl.constexpr,
     HAS_ONORM: tl.constexpr,
     SAVE_OPRE: tl.constexpr,
 ):
@@ -61,8 +62,10 @@ def attnres_fwd_kernel(
     # [BD]
     o_d = tl.max_contiguous(tl.multiple_of(tl.arange(0, BD), BD), BD)
     m_d = o_d < D
-    # [BD] q * w, reused across all residual-source tiles
-    b_qw = tl.load(q + o_d, mask=m_d, other=0.).to(tl.float32) * tl.load(w + o_d, mask=m_d, other=0.).to(tl.float32)
+    # [BD] q * w (or q without w), reused across all residual-source tiles
+    b_qw = tl.load(q + o_d, mask=m_d, other=0.).to(tl.float32)
+    if HAS_RMS_WEIGHT:
+        b_qw *= tl.load(w + o_d, mask=m_d, other=0.).to(tl.float32)
 
     # online softmax over L; b_o accumulates in registers so each v tile is read once (logit + weighted sum)
     b_m = tl.full([], float('-inf'), dtype=tl.float32)
@@ -128,7 +131,7 @@ def attnres_fwd_kernel(
         for num_warps in [4, 8, 16]
         for num_stages in [2, 3]
     ],
-    key=['L2', 'D', 'HAS_ONORM', 'SAVE_OPRE'],
+    key=['L2', 'D', 'HAS_RMS_WEIGHT', 'HAS_ONORM', 'SAVE_OPRE'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['L'])
@@ -153,6 +156,7 @@ def attnres_bwd_kernel_dv(
     scale: tl.constexpr,
     BL: tl.constexpr,
     BD: tl.constexpr,
+    HAS_RMS_WEIGHT: tl.constexpr,
     HAS_ONORM: tl.constexpr,
     SAVE_OPRE: tl.constexpr,
 ):
@@ -161,7 +165,9 @@ def attnres_bwd_kernel_dv(
     # [BD]
     o_d = tl.max_contiguous(tl.multiple_of(tl.arange(0, BD), BD), BD)
     m_d = o_d < D
-    b_qw = tl.load(q + o_d, mask=m_d, other=0.).to(tl.float32) * tl.load(w + o_d, mask=m_d, other=0.).to(tl.float32)
+    b_qw = tl.load(q + o_d, mask=m_d, other=0.).to(tl.float32)
+    if HAS_RMS_WEIGHT:
+        b_qw *= tl.load(w + o_d, mask=m_d, other=0.).to(tl.float32)
     b_lse = tl.load(lse + i_n).to(tl.float32)
     p_do = do + i_n * D + o_d
     b_do = tl.load(p_do, mask=m_d, other=0.0).to(tl.float32)
@@ -253,7 +259,7 @@ def attnres_bwd_kernel_dv(
         for BN, BD, num_warps in [(1024, 16, 4), (2048, 32, 4), (2048, 32, 8), (4096, 32, 8), (4096, 64, 8)]
         for num_stages in [3, 4]
     ],
-    key=['N', 'D', 'HAS_ONORM'],
+    key=['N', 'D', 'HAS_RMS_WEIGHT', 'HAS_ONORM'],
     **autotune_cache_kwargs,
 )
 @triton.jit
@@ -269,6 +275,7 @@ def attnres_bwd_kernel_dqdw(
     D: tl.constexpr,
     BN: tl.constexpr,
     BD: tl.constexpr,
+    HAS_RMS_WEIGHT: tl.constexpr,
     HAS_ONORM: tl.constexpr,
 ):
     i_d = tl.program_id(0).to(tl.int64)
@@ -290,12 +297,15 @@ def attnres_bwd_kernel_dqdw(
             p_dow = dow_partial + o_n[:, None] * D + o_d[None, :]
             b_dow += tl.sum(tl.load(p_dow, mask=m_nd, other=0.0).to(tl.float32), axis=0)
 
-    # the logit uses the q * w product, so dq = (sum_n dqw) * w and dw = (sum_n dqw) * q
+    # the logit uses q * w when w is provided; otherwise dqw is the query gradient.
     # [BD]
-    b_q = tl.load(q + o_d, mask=m_d, other=0.).to(tl.float32)
-    b_w = tl.load(w + o_d, mask=m_d, other=0.).to(tl.float32)
-    tl.store(dq + o_d, b_dqw * b_w, mask=m_d)
-    tl.store(dw + o_d, b_dqw * b_q, mask=m_d)
+    if HAS_RMS_WEIGHT:
+        b_q = tl.load(q + o_d, mask=m_d, other=0.).to(tl.float32)
+        b_w = tl.load(w + o_d, mask=m_d, other=0.).to(tl.float32)
+        tl.store(dq + o_d, b_dqw * b_w, mask=m_d)
+        tl.store(dw + o_d, b_dqw * b_q, mask=m_d)
+    else:
+        tl.store(dq + o_d, b_dqw, mask=m_d)
     if HAS_ONORM:
         tl.store(dow + o_d, b_dow, mask=m_d)
 
@@ -314,7 +324,7 @@ def fused_attnres_fwd(
     q: torch.Tensor,
     residuals: Sequence[torch.Tensor],
     res: tuple[torch.Tensor, ...],
-    w: torch.Tensor,
+    w: torch.Tensor | None,
     ow: torch.Tensor | None,
     eps: float,
     scale: float,
@@ -329,6 +339,7 @@ def fused_attnres_fwd(
     dtype = residuals[0].dtype
     stats_shape = (L, *output_shape[:-1])
 
+    has_rms_weight = w is not None
     has_onorm = ow is not None
     save_opre = checkpoint_level == 0
     o = torch.empty(output_shape, device=residuals[0].device, dtype=dtype)
@@ -355,6 +366,7 @@ def fused_attnres_fwd(
         eps=eps,
         scale=scale,
         BD=triton.next_power_of_2(D),
+        HAS_RMS_WEIGHT=has_rms_weight,
         HAS_ONORM=has_onorm,
         SAVE_OPRE=save_opre,
     )
@@ -367,7 +379,7 @@ def fused_attnres_bwd(
     q: torch.Tensor,
     residuals: Sequence[torch.Tensor],
     res: tuple[torch.Tensor, ...],
-    w: torch.Tensor,
+    w: torch.Tensor | None,
     ow: torch.Tensor | None,
     o_pre: torch.Tensor | None,
     rstd: torch.Tensor,
@@ -376,11 +388,12 @@ def fused_attnres_bwd(
     eps: float,
     scale: float,
     checkpoint_level: int,
-) -> tuple[list[torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor | None]:
+) -> tuple[list[torch.Tensor], torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
     L, N, D = len(residuals), do.numel() // do.shape[-1], do.shape[-1]
 
     # bwd_dv produces dvs + dqw (and dow_partial when fusing output RMSNorm); bwd_dqdw reduces dqw / dow_partial over N
     # into dq / dw / dow.
+    has_rms_weight = w is not None
     has_onorm = ow is not None
     if has_onorm:
         dow_partial = torch.empty_like(do, dtype=torch.float32)
@@ -392,7 +405,7 @@ def fused_attnres_bwd(
     dres = _build_ptr_table(dvs)
     dqw = torch.empty_like(do, dtype=torch.float32)
     dq = torch.empty_like(q)
-    dw = torch.empty_like(w)
+    dw = torch.empty_like(w) if has_rms_weight else None
 
     L2 = max(8, triton.next_power_of_2(L))
     attnres_bwd_kernel_dv[(N,)](
@@ -415,6 +428,7 @@ def fused_attnres_bwd(
         eps=eps,
         scale=scale,
         BD=triton.next_power_of_2(D),
+        HAS_RMS_WEIGHT=has_rms_weight,
         HAS_ONORM=has_onorm,
         SAVE_OPRE=checkpoint_level == 0,
     )
@@ -430,6 +444,7 @@ def fused_attnres_bwd(
         dow=dow,
         N=N,
         D=D,
+        HAS_RMS_WEIGHT=has_rms_weight,
         HAS_ONORM=has_onorm,
     )
 
@@ -444,7 +459,7 @@ class FusedAttnresFunction(torch.autograd.Function):
     def forward(
         ctx,
         query: torch.Tensor,
-        rms_weight: torch.Tensor,
+        rms_weight: torch.Tensor | None,
         output_rms_weight: torch.Tensor | None,
         rms_eps: float,
         scale: float,
@@ -507,7 +522,7 @@ class FusedAttnresFunction(torch.autograd.Function):
 def fused_attnres(
     query: torch.Tensor,
     residuals: Sequence[torch.Tensor],
-    rms_weight: torch.Tensor,
+    rms_weight: torch.Tensor | None = None,
     output_rms_weight: torch.Tensor | None = None,
     rms_eps: float = 1e-6,
     scale: float = 1.0,
@@ -526,8 +541,8 @@ def fused_attnres(
             Per-layer pseudo-query of shape `[D]` or `[D, 1]`, where `D` is the hidden size.
         residuals (Sequence[torch.Tensor]):
             Non-empty sequence of same-dtype, same-`D` residual sources, each of shape `[..., D]`.
-        rms_weight (torch.Tensor):
-            RMSNorm scale for key normalization of shape `[D]`.
+        rms_weight (torch.Tensor, Optional):
+            RMSNorm scale for key normalization of shape `[D]`. If `None`, no scale is applied. Default: `None`.
         output_rms_weight (torch.Tensor, optional):
             If set, an extra RMSNorm with this weight is applied to the mixed residual before returning, fusing the
             prenorm that would otherwise follow the AttnRes call (e.g. `attn_norm` / `mlp_norm`). Default: `None`.
