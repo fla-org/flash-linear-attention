@@ -56,124 +56,64 @@ def test_token_shift(B, T, H, cu_seqlens_val, dtype):
     assert_close('dx', ref_dx, tri_dx, 1e-3)
 
 
-def _split_for_passing(
-    x: torch.Tensor,
-    cu_seqlens,
-    split_at: int = 1,
-):
-    assert x.size(0) == 1
-    assert 0 < split_at < len(cu_seqlens) - 1
-
-    cu0 = [t - cu_seqlens[0] for t in cu_seqlens[: split_at + 1]]
-    cu1 = [t - cu_seqlens[split_at] for t in cu_seqlens[split_at:]]
-    T0, T1 = cu0[-1], cu1[-1]
-
-    x0 = x[:, :T0].contiguous()
-    x1 = x[:, T0: T0 + T1].contiguous()
-    cache1 = x[:, T0 - 1: T0].contiguous()
-    return x0, x1, \
-        torch.tensor(cu0, dtype=torch.int32, device=x.device), \
-        torch.tensor(cu1, dtype=torch.int32, device=x.device), \
-        cache1
-
-
-def _check_passing_vs_whole(
-    B: int,
-    T: int,
-    H: int,
-    cu_seqlens: list[int] | None,
-    dtype: torch.dtype,
-    split_at: int = 1,
-):
-    torch.manual_seed(42)
-
-    if cu_seqlens is None:
-        x = torch.randn(B, T, H, device=device, dtype=dtype, requires_grad=True)
-        cu_seqlens_tensor = None
-    else:
-        B = 1
-        T = cu_seqlens[-1]
-        x = torch.randn(1, T, H, device=device, dtype=dtype, requires_grad=True)
-        cu_seqlens_tensor = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
-
-    dy = torch.randn_like(x)
-    ref_out = token_shift(x, cu_seqlens_tensor)
-    ref_out.backward(dy)
-    ref_dx = x.grad.clone()
-    x.grad.zero_()
-
-    if cu_seqlens is None:
-        T0 = T // 2
-        x0 = x[:, :T0].contiguous()
-        x1 = x[:, T0:].contiguous()
-        cu0, cu1 = None, None
-    else:
-        if split_at >= len(cu_seqlens) - 1:
-            pytest.skip("invalid split_at")
-        x0, x1, cu0, cu1, cache1 = _split_for_passing(x, cu_seqlens, split_at)
-
-    out0, cache_out0 = token_shift(x0, cu0, output_cache=True)
-    out1, cache_out1 = token_shift(x1, cu1, cache=cache_out0, output_cache=True)
-
-    cat_out = torch.cat([out0, out1], dim=1)
-    cat_out.backward(dy)
-
-    cat_dx = x.grad.clone()
-
-    assert_close("do", ref_out, cat_out, 1e-3)
-    assert_close("dx", ref_dx, cat_dx, 1e-3)
-
-
 @pytest.mark.parametrize(
-    ("B", "T", "H", "cu_seqlens", "split_at"),
+    ('B', 'T', 'D'),
     [
-        pytest.param(*test, id="B{}-T{}-H{}-cu{}-split{}".format(*test))
+        pytest.param(*test, id="B{}-T{}-D{}".format(*test))
         for test in [
-            (2, 512, 1024, None, 1),
-            (1, 8192, 1024, None, 2),
+            (2, 2, 64),
+            (2, 512, 1024),
+            (1, 8192, 1024),
         ]
     ],
 )
-def test_all_with_and_without_varlen(B, T, H, cu_seqlens, split_at):
-    dtype = torch.float
-    assert cu_seqlens is None, "This test is for cu_seqlens=None case"
-    _check_passing_vs_whole(B, T, H, cu_seqlens, dtype, split_at)
-
-
-def test_token_shift_varlen_cache_mixed_lengths():
-    x = torch.tensor([[[1.], [2.], [3.]]], device=device)
-    cu_seqlens = torch.tensor([0, 2, 3], dtype=torch.int32, device=device)
-    cache = torch.tensor([[10.], [20.]], device=device)
-
-    output, cache_out = token_shift(x, cu_seqlens, cache=cache, output_cache=True)
-
-    assert_close("output", output, torch.tensor([[[9.], [-1.], [17.]]], device=device), 1e-3)
-    assert_close("cache", cache_out, torch.tensor([[2.], [3.]], device=device), 1e-3)
-
-
-def test_token_shift_cache_written_on_first_single_token_call():
-    # the first call for a cache slot may process exactly one token with no prior cache (e.g. BOS-seeded decoding);
-    # cache_out must still be written.
+def test_token_shift_cache(B, T, D):
     torch.manual_seed(42)
-    x1 = torch.randn(2, 1, 64, device=device)
-    y1, cache_out1 = token_shift(x1, cache=None, output_cache=True)
 
-    assert_close(" y1", y1, -x1, 1e-3)
-    assert_close("cache", cache_out1, x1[:, 0], 1e-3)
+    x = torch.randn(B, T, D, device=device, dtype=torch.float, requires_grad=True)
+    dy = torch.randn_like(x)
 
-    x2 = torch.randn(2, 1, 64, device=device)
-    y2, _ = token_shift(x2, cache=cache_out1, output_cache=True)
-    assert_close(" y2", y2, x1 - x2, 1e-3)
+    ref = token_shift_ref(x=x)
+    ref.backward(dy)
+    ref_dx, x.grad = x.grad.clone(), None
+
+    split = T // 2
+    tri0, cache0 = token_shift(x=x[:, :split].contiguous(), output_cache=True)
+    assert_close('cache0', x[:, split - 1], cache0, 1e-3)
+
+    tri1, cache1 = token_shift(x=x[:, split:].contiguous(), cache=cache0, output_cache=True)
+    assert_close('cache1', x[:, -1], cache1, 1e-3)
+
+    tri = torch.cat((tri0, tri1), dim=1)
+    tri.backward(dy)
+    tri_dx, x.grad = x.grad.clone(), None
+
+    assert_close('o', ref, tri, 1e-3)
+    assert_close('dx', ref_dx, tri_dx, 1e-3)
 
 
-def test_token_shift_varlen_cache_first_call_all_singletons():
+@pytest.mark.parametrize(
+    ('cu_seqlens', 'cache'),
+    [
+        pytest.param([0, 2, 3], [10., 20.], id='mixed-with-cache'),
+        pytest.param([0, 1, 2, 3], None, id='singletons-without-cache'),
+    ],
+)
+def test_token_shift_cache_varlen(cu_seqlens, cache):
     x = torch.tensor([[[1.], [2.], [3.]]], device=device)
-    cu_seqlens = torch.tensor([0, 1, 2, 3], dtype=torch.int32, device=device)
+    cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
+    if cache is not None:
+        cache = torch.tensor(cache, device=device).unsqueeze(-1)
 
-    output, cache_out = token_shift(x, cu_seqlens, output_cache=True)
+    ref = token_shift_ref(x=x, cu_seqlens=cu_seqlens)
+    if cache is not None:
+        ref[0, cu_seqlens[:-1]] += cache
+    ref_cache = x[0, cu_seqlens[1:] - 1]
 
-    assert_close("output", output, torch.tensor([[[-1.], [-2.], [-3.]]], device=device), 1e-3)
-    assert_close("cache", cache_out, torch.tensor([[1.], [2.], [3.]], device=device), 1e-3)
+    tri, tri_cache = token_shift(x=x, cu_seqlens=cu_seqlens, cache=cache, output_cache=True)
+
+    assert_close('o', ref, tri, 1e-3)
+    assert_close('cache', ref_cache, tri_cache, 1e-3)
 
 
 def _packed_cu_seqlens(total_tokens: int, doc_len: int) -> torch.Tensor:
