@@ -11,7 +11,7 @@ import triton.language as tl
 
 from fla.backends import dispatch
 from fla.ops.utils.op import exp, unflatten_program_id
-from fla.utils import input_guard
+from fla.utils import IS_NVIDIA_HOPPER, input_guard
 
 
 @triton.heuristics({
@@ -233,7 +233,13 @@ def fused_recurrent_precond_gated_delta_rule_fwd(
     HV = v.shape[2]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
     BK = triton.next_power_of_2(K)
-    BV = min(8, triton.next_power_of_2(V)) if gv is None else triton.next_power_of_2(V)
+    # BV = 16 on H100/H200 for the default [K, V] layout: see fla-org/flash-linear-attention#1609.
+    if gv is not None:
+        BV = triton.next_power_of_2(V)
+    elif IS_NVIDIA_HOPPER and not transpose_state_layout:
+        BV = min(16, triton.next_power_of_2(V))
+    else:
+        BV = min(8, triton.next_power_of_2(V))
     NV = triton.cdiv(V, BV)
 
     if log_atk_scale is None:
