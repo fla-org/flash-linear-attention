@@ -197,18 +197,29 @@ def test_chunk_initial_state_grad_count():
     assert q2.grad is not None
 
 
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'K', 'V', 'chunk_size'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-K{}-V{}-CS{}".format(*test))
+        for test in [
+            (2, 33, 2, 8, 6, 16),
+            (2, 33, 2, 128, 128, 16),
+            (2, 33, 2, 320, 128, 16),
+            (2, 200, 2, 128, 128, 64),
+        ]
+    ],
+)
 @pytest.mark.skipif(device_platform == 'intel', reason='Intel Triton Failure')
-def test_full_momentum_chunk_recurrent_backward_parity():
+def test_full_momentum_chunk_recurrent_backward_parity(B: int, T: int, H: int, K: int, V: int, chunk_size: int):
     torch.manual_seed(3)
-    B, T, H, K, V = 2, 33, 2, 8, 6
     dtype = torch.bfloat16
     values = [
         torch.randn(B, T, H, K, dtype=dtype, device=device),
-        torch.randn(B, T, H, K, dtype=dtype, device=device),
+        F.normalize(torch.randn(B, T, H, K, dtype=dtype, device=device), dim=-1),
         torch.randn(B, T, H, V, dtype=dtype, device=device),
-        torch.randn(B, T, H, K, dtype=dtype, device=device),
-        torch.randn(B, T, H, dtype=torch.float32, device=device),
-        torch.randn(B, T, H, dtype=torch.float32, device=device),
+        F.normalize(torch.randn(B, T, H, K, dtype=dtype, device=device), dim=-1),
+        -0.1 * F.softplus(torch.randn(B, T, H, dtype=torch.float32, device=device)),
+        -0.1 * F.softplus(torch.randn(B, T, H, dtype=torch.float32, device=device)),
         torch.rand(B, T, H, dtype=dtype, device=device),
         torch.rand(B, T, H, dtype=dtype, device=device) + 0.5,
         torch.randn(B, H, K, V, dtype=torch.float32, device=device),
@@ -228,7 +239,7 @@ def test_full_momentum_chunk_recurrent_backward_parity():
                              initial_state=torch.stack(xs[8:10]), output_final_state=True,
                              use_qk_l2norm_in_kernel=False, use_p_times_alpha=False)
             if op is chunk_momentum_delta_rule:
-                op_kwargs['chunk_size'] = 16
+                op_kwargs['chunk_size'] = chunk_size
             o, state = op(**op_kwargs)
         loss = (o * do).sum() + (state[0] * dst).sum() + (state[1] * dmt).sum()
         loss.backward()
