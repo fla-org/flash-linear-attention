@@ -9,6 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.backends import dispatch
 from fla.modules.layernorm import group_norm
 from fla.utils import IS_NVIDIA_HOPPER, autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, input_guard
 
@@ -506,6 +507,7 @@ def fused_chunk_ttt_linear_bwd_h(
     return dq, h, v2, x, y, r
 
 
+@dispatch('ttt')
 def fused_chunk_ttt_linear_bwd_dh(
     q: torch.Tensor,
     k: torch.Tensor,
