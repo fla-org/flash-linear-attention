@@ -449,6 +449,7 @@ def fused_chunk_ttt_linear_bwd_kernel_dh(
         tl.store(p_dhb0, b_dhb.to(p_dhb0.dtype.element_ty), mask=o_v < V)
 
 
+@dispatch('ttt')
 def fused_chunk_ttt_linear_bwd_h(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -581,6 +582,7 @@ def fused_chunk_ttt_linear_bwd_dh(
     return dk, dv, de, dw, db, dh0, dhb0
 
 
+@dispatch('ttt')
 def fused_chunk_ttt_linear_fwd(
     q: torch.Tensor,
     k: torch.Tensor,

@@ -26,6 +26,14 @@ class TritonAscendTTTBackend(BaseBackend):
         from fla.utils import IS_NPU
         return IS_NPU
 
+    def fused_chunk_ttt_linear_fwd(self, *args, **kwargs):
+        from fla.ops.ttt.backends.triton_ascend.fused_chunk import fused_chunk_ttt_linear_fwd_npu
+        return fused_chunk_ttt_linear_fwd_npu(*args, **kwargs)
+
+    def fused_chunk_ttt_linear_bwd_h(self, *args, **kwargs):
+        from fla.ops.ttt.backends.triton_ascend.fused_chunk import fused_chunk_ttt_linear_bwd_h_npu
+        return fused_chunk_ttt_linear_bwd_h_npu(*args, **kwargs)
+
     def fused_chunk_ttt_linear_bwd_dh(self, *args, **kwargs):
         from fla.ops.ttt.backends.triton_ascend.fused_chunk import fused_chunk_ttt_linear_bwd_dh_npu
         return fused_chunk_ttt_linear_bwd_dh_npu(*args, **kwargs)
