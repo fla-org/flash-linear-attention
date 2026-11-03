@@ -5,36 +5,60 @@ on:
     branches:
       - main
     types: [closed]
+  workflow_run:
+    workflows: [ascend-a2-ci, ascend-a2-benchmark-ci]
+    types: [completed]
 
 permissions: {}
 
 jobs:
   cleanup:
-    if: github.event.pull_request.merged == true
+    if: |
+      github.event_name == 'pull_request_target' ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       actions: write
+      pull-requests: read
     steps:
-      - name: Delete merged PR Ascend caches
+      - name: Delete Ascend caches for PRs targeting main that were merged or manually closed
         uses: actions/github-script@v9.0.0
         with:
           script: |
             const { owner, repo } = context.repo;
-            const ref = `refs/pull/${context.payload.pull_request.number}/merge`;
+            const pr = context.eventName === 'pull_request_target'
+              ? context.payload.pull_request
+              : null;
             const prefixes = ['triton-kda-', 'triton-a2-tests-'];
-            const caches = await github.paginate(github.rest.actions.getActionsCacheList, {
-              owner, repo, ref, per_page: 100,
-            });
+            const params = { owner, repo, per_page: 100 };
+            if (pr) {
+              params.ref = `refs/pull/${pr.number}/merge`;
+            }
+            // Fork workflow runs can omit their associated PRs; resolve them from cache refs.
+            const caches = await github.paginate(github.rest.actions.getActionsCacheList, params);
+            const closedPRs = new Map(pr ? [[pr.number, pr.state === 'closed' && pr.base.ref === 'main']] : []);
             for (const cache of caches) {
-              if (cache.ref !== ref || !prefixes.some(prefix => cache.key.startsWith(prefix))) {
+              const match = /^refs\/pull\/(\d+)\/merge$/.exec(cache.ref);
+              if (!match || !prefixes.some(prefix => cache.key.startsWith(prefix))) {
+                continue;
+              }
+              const number = Number(match[1]);
+              if (pr && number !== pr.number) {
+                continue;
+              }
+              if (!closedPRs.has(number)) {
+                const { data } = await github.rest.pulls.get({ owner, repo, pull_number: number });
+                closedPRs.set(number, data.state === 'closed' && data.base.ref === 'main');
+              }
+              if (!closedPRs.get(number)) {
                 continue;
               }
               try {
                 await github.rest.actions.deleteActionsCacheById({
                   owner, repo, cache_id: cache.id,
                 });
-                core.info(`Deleted ${cache.key} (${cache.id}) from ${ref}`);
+                core.info(`Deleted ${cache.key} (${cache.id}) from ${cache.ref}`);
               } catch (error) {
                 if (error.status !== 404) {
                   throw error;
