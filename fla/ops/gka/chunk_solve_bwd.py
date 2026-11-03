@@ -9,13 +9,15 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.gka.utils import gka_dot
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.op import exp2
-from fla.utils import autotune_cache_kwargs
+from fla.utils import IS_NVIDIA, autotune_cache_kwargs, check_shared_mem
 
 
 @triton.heuristics({
+    'SMALL_SMEM': lambda args: IS_NVIDIA and args['K'] > 64 and not check_shared_mem('ampere', args['k'].device.index),
     'USE_GK': lambda args: args['gk'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
@@ -28,7 +30,7 @@ from fla.utils import autotune_cache_kwargs
         for num_warps in [2, 4, 8]
         for num_stages in [1, 2]
     ],
-    key=['H', 'K', 'BT', 'PART'],
+    key=['SMALL_SMEM', 'H', 'K', 'BT', 'PART'],
     restore_value=['dk', 'dg'],
 )
 @triton.jit(do_not_specialize=['T'])
@@ -52,6 +54,7 @@ def chunk_gka_bwd_kernel_dk_intra(
     BT: tl.constexpr,
     BK: tl.constexpr,
     PART: tl.constexpr,
+    SMALL_SMEM: tl.constexpr,
     USE_GK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
@@ -112,12 +115,12 @@ def chunk_gka_bwd_kernel_dk_intra(
 
     # direct path through H_t
     if PART != 2:
-        b_s = tl.dot(b_k, tl.trans(b_x)) * b_m
-        b_ds = tl.dot(b_k, tl.trans(b_dq))
+        b_s = gka_dot(SMALL_SMEM, b_k, tl.trans(b_x)) * b_m
+        b_ds = gka_dot(SMALL_SMEM, b_k, tl.trans(b_dq))
         b_k2 = (b_k * b_gl[:, None]).to(b_k.dtype)
-        b_dk = tl.dot(b_k2, (b_dh + tl.trans(b_dh)).to(b_k.dtype))
-        b_dk += tl.dot(b_s.to(b_dq.dtype), b_dq)
-        b_dk += tl.dot((b_ds * b_m).to(b_x.dtype), b_x)
+        b_dk = gka_dot(SMALL_SMEM, b_k2, (b_dh + tl.trans(b_dh)).to(b_k.dtype))
+        b_dk += gka_dot(SMALL_SMEM, b_s.to(b_dq.dtype), b_dq)
+        b_dk += gka_dot(SMALL_SMEM, (b_ds * b_m).to(b_x.dtype), b_x)
     else:
         b_dk = tl.zeros([BT, BK], dtype=tl.float32)
 
@@ -127,10 +130,10 @@ def chunk_gka_bwd_kernel_dk_intra(
             b_dm = tl.where(m_s, b_s * b_ds, 0)
             b_dg = tl.sum(b_dm, axis=0) - tl.sum(b_dm, axis=1)
         if PART != 1:
-            b_dg += tl.sum(tl.dot(b_dq, b_h) * b_gh[:, None] * b_x, axis=1)
+            b_dg += tl.sum(gka_dot(SMALL_SMEM, b_dq, b_h) * b_gh[:, None] * b_x, axis=1)
         b_dg_last = 0.
         if PART != 2:
-            b_dgl = tl.sum(tl.dot(b_k2, b_dh.to(b_k.dtype)) * b_k, axis=1)
+            b_dgl = tl.sum(gka_dot(SMALL_SMEM, b_k2, b_dh.to(b_k.dtype)) * b_k, axis=1)
             b_dg -= b_dgl
             b_dg_last = tl.sum(b_dgl)
         if PART != 1:
@@ -145,16 +148,16 @@ def chunk_gka_bwd_kernel_dk_intra(
             b_dg += b_tmp * b_fro
         b_w = tl.where(m_t, 2 * b_tmp / b_fro, 0.)
         b_w1 = tl.sum(b_m * (b_gh * b_w)[None, :], axis=1)
-        b_w2 = tl.dot(b_m * b_w[None, :], tl.trans(b_m))
-        b_t = tl.dot((tl.dot(b_k, tl.trans(b_k)) * b_w2).to(b_k.dtype), b_k).to(tl.float32)
-        b_t += tl.dot((b_w1[:, None] * b_k).to(b_k.dtype), b_h.to(b_k.dtype))
+        b_w2 = gka_dot(SMALL_SMEM, b_m * b_w[None, :], tl.trans(b_m))
+        b_t = gka_dot(SMALL_SMEM, (gka_dot(SMALL_SMEM, b_k, tl.trans(b_k)) * b_w2).to(b_k.dtype), b_k).to(tl.float32)
+        b_t += gka_dot(SMALL_SMEM, (b_w1[:, None] * b_k).to(b_k.dtype), b_h.to(b_k.dtype))
         b_dk += b_t
         if USE_GK:
             b_dg -= tl.sum(b_t * b_k, axis=1) * 0.5
 
         # this chunk's contribution to the lamb-path gradient w.r.t. its chunk-start state
         b_hs = tl.sum(b_gh * b_gh * b_w) * b_h
-        b_hs += tl.dot(tl.trans((b_w1[:, None] * b_k).to(b_k.dtype)), b_k)
+        b_hs += gka_dot(SMALL_SMEM, tl.trans((b_w1[:, None] * b_k).to(b_k.dtype)), b_k)
         tl.store(hs + o_k[:, None] * K + o_k[None, :], b_hs.to(hs.dtype.element_ty), mask=m_kk)
 
     p_dk = dk + o_t[:, None] * (H*K) + o_k[None, :]
@@ -170,6 +173,7 @@ def chunk_gka_bwd_kernel_dk_intra(
 
 
 @triton.heuristics({
+    'SMALL_SMEM': lambda args: IS_NVIDIA and args['K'] > 64 and not check_shared_mem('ampere', args['k'].device.index),
     'USE_GK': lambda args: args['gk'] is not None,
     'STORE_INITIAL_STATE_GRADIENT': lambda args: args['dh0'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
@@ -181,7 +185,7 @@ def chunk_gka_bwd_kernel_dk_intra(
         for num_warps in [2, 4, 8]
         for num_stages in [1, 2, 3]
     ],
-    key=['H', 'K', 'BT'],
+    key=['SMALL_SMEM', 'H', 'K', 'BT'],
     restore_value=['dk', 'dg'],
     **autotune_cache_kwargs,
 )
@@ -201,6 +205,7 @@ def chunk_gka_bwd_kernel_dk_inter(
     K: tl.constexpr,
     BT: tl.constexpr,
     BK: tl.constexpr,
+    SMALL_SMEM: tl.constexpr,
     USE_GK: tl.constexpr,
     STORE_INITIAL_STATE_GRADIENT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
@@ -244,7 +249,7 @@ def chunk_gka_bwd_kernel_dk_inter(
             b_gl = tl.full([BT], 1., dtype=tl.float32)
 
         # negated here, since it is added to the true-sign `dk` stored by the intra kernel
-        b_dk = -tl.dot((b_k * b_gl[:, None]).to(b_k.dtype), b_hs.to(b_k.dtype))
+        b_dk = -gka_dot(SMALL_SMEM, (b_k * b_gl[:, None]).to(b_k.dtype), b_hs.to(b_k.dtype))
         if USE_GK:
             b_dg = tl.sum(b_dk.to(tl.float32) * b_k, axis=1) * 0.5
             b_hs *= exp2(b_g_last)

@@ -9,12 +9,17 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.gka.utils import gka_dot
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp2
-from fla.utils import autotune_cache_kwargs
+from fla.utils import IS_NVIDIA, autotune_cache_kwargs, check_shared_mem
 
 
 @triton.heuristics({
+    'SMALL_SMEM': lambda args: (
+        IS_NVIDIA and args['q'].dtype == torch.float32 and args['K'] > 64
+        and not check_shared_mem('ampere', args['q'].device.index)
+    ),
     'USE_GK': lambda args: args['gk'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
@@ -24,7 +29,7 @@ from fla.utils import autotune_cache_kwargs
         triton.Config({}, num_warps=4, num_stages=num_stages)
         for num_stages in [1, 2, 3]
     ],
-    key=['H', 'K', 'BT', 'NUM_ITER', 'LOAD_FRO'],
+    key=['SMALL_SMEM', 'H', 'K', 'BT', 'NUM_ITER', 'LOAD_FRO'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -45,6 +50,7 @@ def chunk_gka_solve_fwd_kernel(
     BK: tl.constexpr,
     NUM_ITER: tl.constexpr,
     LOAD_FRO: tl.constexpr,
+    SMALL_SMEM: tl.constexpr,
     USE_GK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
@@ -93,10 +99,10 @@ def chunk_gka_solve_fwd_kernel(
         b_fro = tl.load(fro + o_t * H, mask=m_t, other=1.)
     else:
         # ||H_t||_F^2 = ||sum_j m_tj k_j k_j^T||^2 + gh_t^2 ||h||^2 + 2 gh_t sum_j m_tj k_j^T h k_j
-        b_kk = tl.dot(b_k, tl.trans(b_k))
-        b_fro = tl.sum(tl.dot(b_m, (b_kk * b_kk).to(b_q.dtype)) * b_m, axis=1)
+        b_kk = gka_dot(SMALL_SMEM, b_k, tl.trans(b_k))
+        b_fro = tl.sum(gka_dot(SMALL_SMEM, b_m, (b_kk * b_kk).to(b_q.dtype)) * b_m, axis=1)
         b_fro += b_gh * (b_gh * tl.sum(b_h * b_h))
-        b_khk = tl.sum(b_k * tl.dot(b_k.to(b_h.dtype), b_h), axis=1)
+        b_khk = tl.sum(b_k * gka_dot(SMALL_SMEM, b_k.to(b_h.dtype), b_h), axis=1)
         b_fro = tl.sqrt(b_fro + 2 * b_gh * tl.sum(b_m * b_khk[None, :], axis=1))
         # rows past the end of the sequence are never stored; keep their step size finite
         b_fro = tl.where(m_t, b_fro, 1.)
@@ -113,8 +119,8 @@ def chunk_gka_solve_fwd_kernel(
     for _ in range(NUM_ITER):
         b_w = 1. / (1. - b_rho * b_w)
         b_r = (
-            tl.dot((b_x * b_gh[:, None]).to(b_h.dtype), b_h)
-            + tl.dot((tl.dot(b_x.to(b_k.dtype), tl.trans(b_k)) * b_m).to(b_k.dtype), b_k)
+            gka_dot(SMALL_SMEM, (b_x * b_gh[:, None]).to(b_h.dtype), b_h)
+            + gka_dot(SMALL_SMEM, (gka_dot(SMALL_SMEM, b_x.to(b_k.dtype), tl.trans(b_k)) * b_m).to(b_k.dtype), b_k)
             + b_lamb * b_x
             - b_q
         )

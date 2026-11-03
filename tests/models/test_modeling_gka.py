@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from fla.models import GKAConfig, GKAForCausalLM
+from fla.utils import assert_close, device
 
 from .utils import check_forward, check_generation
 
@@ -97,3 +98,29 @@ def test_init_from_meta_device(use_forgetting_gate: bool):
         assert ((A > 0) & (A <= 16)).all()
         assert ((dt >= 1e-4 * (1 - 1e-3)) & (dt <= 0.1 * (1 + 1e-3))).all()
         assert attn.A_log._no_weight_decay and attn.dt_bias._no_weight_decay
+
+
+def test_fp32_large_head_training_and_cache():
+    torch.manual_seed(42)
+    config = GKAConfig(hidden_size=128, num_hidden_layers=2, num_heads=2, head_dim=128, vocab_size=128)
+    model = GKAForCausalLM(config).to(device=device, dtype=torch.float32)
+    input_ids = torch.randint(0, config.vocab_size, (2, 129), device=device)
+    optimizer = torch.optim.SGD(model.parameters(), lr=1e-4)
+    loss = model(input_ids, labels=input_ids, use_cache=False).loss
+    assert torch.isfinite(loss)
+    loss.backward()
+    for name, parameter in model.named_parameters():
+        assert parameter.grad is not None and torch.isfinite(parameter.grad).all(), name
+    optimizer.step()
+    optimizer.zero_grad(set_to_none=True)
+
+    model.eval()
+    with torch.no_grad():
+        full = model(input_ids, use_cache=False).logits
+        prefill = model(input_ids[:, :65], use_cache=True)
+        outputs, cache = [prefill.logits], prefill.past_key_values
+        for t in range(65, input_ids.shape[1]):
+            step = model(input_ids[:, t:t + 1], past_key_values=cache, use_cache=True)
+            outputs.append(step.logits)
+            cache = step.past_key_values
+    assert_close('logits', full, torch.cat(outputs, dim=1), 0.03)

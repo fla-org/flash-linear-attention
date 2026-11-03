@@ -51,6 +51,8 @@ def make_inputs(B, T, H, K, V, gates, use_alpha, use_initial_state, dtype, N=Non
             (2, 256, 4, 64, 64, 'separate', True, True, torch.float),
             (2, 1024, 4, 128, 128, 'tied', True, True, torch.bfloat16),
             (2, 500, 4, 64, 64, 'separate', True, True, torch.bfloat16),
+            (1, 65, 2, 65, 32, 'separate', True, True, torch.float),
+            (2, 127, 2, 127, 64, 'none', False, False, torch.float),
         ]
     ],
 )
@@ -91,6 +93,7 @@ def test_chunk_fwd(
             (3, 50, 'tied', [0, 15], torch.float),
             (4, 64, 'tied', [0, 14, 121, 421, 500], torch.float),
             (4, 100, 'g_only', [0, 256, 500, 1000], torch.float),
+            (4, 128, 'tied', [0, 15, 100, 300], torch.float),
             (4, 128, 'none', [0, 15, 100, 300, 1200, 2000], torch.float16),
             (4, 64, 'separate', [0, 14, 121, 421, 500], torch.float),
             (4, 128, 'tied', [0, 15, 100, 300, 1200, 2000], torch.bfloat16),
@@ -181,6 +184,8 @@ def _random_dht(N, H, K, V):
             (2, 256, 4, 64, 64, 'separate', True, True, torch.float),
             (2, 256, 4, 128, 128, 'tied', True, True, torch.bfloat16),
             (2, 256, 4, 64, 64, 'separate', True, True, torch.bfloat16),
+            (1, 65, 2, 65, 32, 'separate', True, True, torch.float),
+            (2, 127, 2, 127, 64, 'none', False, False, torch.float),
         ]
     ],
 )
@@ -219,6 +224,7 @@ def test_chunk_bwd(
             (3, 50, 'tied', [0, 15], torch.float),
             (4, 64, 'tied', [0, 14, 121, 300, 400], torch.float),
             (4, 100, 'g_only', [0, 200, 256, 500], torch.float),
+            (4, 128, 'tied', [0, 15, 100, 300], torch.float),
             (4, 128, 'tied', [0, 15, 100, 300], torch.float16),
             (4, 64, 'separate', [0, 14, 121, 300, 400], torch.float),
             (4, 128, 'tied', [0, 15, 100, 300], torch.bfloat16),
