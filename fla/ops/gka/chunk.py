@@ -83,7 +83,7 @@ class ChunkGKASolveFunction(torch.autograd.Function):
     def backward(ctx, dx, dht):
         k, x, fro, gk_cs, initial_state, chunk_indices = ctx.saved_tensors
         chunk_size, cu_seqlens = ctx.chunk_size, ctx.cu_seqlens
-        # recompute the chunk-start states `H_{[c]}` instead of saving them, since they are K/64 times the size of `k`
+        # recompute the chunk-start states `H_{[c]}` instead of saving them, since they are K/chunk_size times the size of `k`
         h, _ = chunk_fwd_h(
             k=k,
             v=k,
@@ -241,6 +241,7 @@ def chunk_gka(
     The states are `H_t = exp(gk_t) H_{t-1} + k_t k_t^T` and `U_t = exp(g_t) U_{t-1} + k_t v_t^T`,
     stored as `h_kk` and `h_kv`.
     The ridge system is solved with `num_iter` Chebyshev iterations. The sequence is processed in chunks of 64 tokens,
+    or 16 for float32 with `K > 64` on GPUs with less shared memory than A100,
     with the states materialized only at chunk boundaries and the tokens within each chunk solved in parallel.
 
     Args:
