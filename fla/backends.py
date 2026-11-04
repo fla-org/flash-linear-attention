@@ -19,7 +19,7 @@ from typing import Any, ClassVar, TypeVar
 
 import torch
 
-from fla.utils import find_spec_cached, has_usable_nvcc
+from fla.utils import TRITON_ABOVE_3_5_0, find_spec_cached, has_usable_nvcc
 
 logger = logging.getLogger(__name__)
 F = TypeVar('F', bound=Callable)
@@ -135,7 +135,7 @@ class GluonBackend(BaseBackend):
     def is_available(cls) -> bool:
         # Triton 3.4 ships an older Gluon without `gluon.language.extra` and
         # `gluon.language.nvidia.ampere`, which the Gluon kernels import at load time.
-        from fla.utils import IS_NVIDIA, TRITON_ABOVE_3_5_0
+        from fla.utils import IS_NVIDIA
         return IS_NVIDIA and TRITON_ABOVE_3_5_0 and super().is_available()
 
 
