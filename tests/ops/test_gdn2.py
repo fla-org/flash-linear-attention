@@ -8,6 +8,7 @@
 import inspect
 import math
 from functools import partial
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -373,6 +374,7 @@ def test_chunk_invalid_chunk_size(chunk_size):
                 reason='32K GDN-2 output/gradient reference check requires Ascend NPU',
             ),
         ),
+        # small asymmetric cases do not cover the larger independent K/V tile widths and slab counts.
         pytest.param(
             1, 100, 2, 128, 64, 1.0, True, False, False, torch.bfloat16,
             id='npu-asymmetric-K128-V64-bfloat16',
@@ -509,6 +511,7 @@ def test_chunk_state_v_first():
             [0, 15, 80, 145], 2, 48, 32, False, torch.float16, True, True,
             id='ragged-state-v-first-disable-recompute',
         ),
+        # the existing saved-state case fits in one slab; these span multiple K/V slabs with V-first states.
         pytest.param(
             [0, 15, 80, 145], 2, 128, 256, True, torch.bfloat16, True, True,
             id='npu-saved-state-v-first-K128-V256',
@@ -660,6 +663,146 @@ def test_chunk_npu_verifier(name, case, dtype, lower_bound, reason):
         assert actual_reason == reason
     else:
         assert reason in actual_reason
+
+
+def _wy_verifier_inputs():
+    npu = SimpleNamespace(type='npu', index=0)
+    shapes = dict.fromkeys(('q', 'k', 'b', 'gk'), (1, 65, 2, 256))
+    shapes.update(v=(1, 65, 2, 512), w_gate=(1, 65, 2, 512), A=(1, 65, 2, 64))
+    inputs = {
+        name: Mock(spec=torch.Tensor, shape=shape, ndim=4, device=npu, dtype=torch.float32 if name == 'gk' else torch.bfloat16)
+        for name, shape in shapes.items()
+    }
+    inputs['cu_seqlens'] = Mock(spec=torch.Tensor, shape=(3,), ndim=1, device=npu, dtype=torch.int32)
+    inputs['chunk_indices'] = Mock(spec=torch.Tensor, shape=(2, 2), ndim=2, device=npu, dtype=torch.int32)
+    return inputs
+
+
+@pytest.mark.parametrize(
+    ('case', 'reason'),
+    [
+        pytest.param('accept', None, id='accept-k256-packed-int32'),
+        pytest.param('oversized_k', 'K=257', id='reject-k257'),
+        pytest.param('chunk_size', 'chunk_size=64', id='reject-chunk32'),
+        pytest.param('q_shape', 'shapes to match k', id='reject-q-shape'),
+        pytest.param('chunk_indices', 'shape [NT, 2]', id='reject-index-shape'),
+    ],
+)
+def test_recompute_w_u_fwd_gdn2_npu_verifier_shapes(case, reason):
+    """Check WY shape boundaries without allocating accelerator tensors."""
+    from fla.ops.gdn2.backends.triton_ascend.wy_fast import recompute_w_u_fwd_gdn2_verifier
+
+    # the numerical leaf cases exercise accepted calls, not the verifier's rejection boundaries.
+    inputs = _wy_verifier_inputs()
+    if case == 'oversized_k':
+        for name in ('q', 'k', 'b', 'gk'):
+            inputs[name].shape = (1, 65, 2, 257)
+    elif case == 'chunk_size':
+        inputs['A'].shape = (1, 65, 2, 32)
+    elif case == 'q_shape':
+        inputs['q'].shape = (1, 65, 2, 128)
+    elif case == 'chunk_indices':
+        inputs['chunk_indices'].shape = (2, 3)
+    accepted, actual_reason = recompute_w_u_fwd_gdn2_verifier(**inputs)
+    assert accepted == (reason is None)
+    if reason is None:
+        assert actual_reason is None
+    else:
+        assert reason in actual_reason
+
+
+@pytest.mark.parametrize(
+    ('case', 'reason'),
+    [
+        pytest.param('cpu', 'same NPU device', id='reject-cpu'),
+        pytest.param('mixed_device', 'same NPU device', id='reject-mixed-npu'),
+        pytest.param('dtype', 'unsupported dtype', id='reject-integer-gate'),
+        pytest.param('index_dtype', 'int32 or int64', id='reject-floating-indices'),
+        pytest.param('missing_gk', 'requires gk', id='reject-missing-gk'),
+    ],
+)
+def test_recompute_w_u_fwd_gdn2_npu_verifier_metadata(case, reason):
+    """Reject unsupported WY metadata on both GPU and NPU test hosts."""
+    from fla.ops.gdn2.backends.triton_ascend.wy_fast import recompute_w_u_fwd_gdn2_verifier
+
+    inputs = _wy_verifier_inputs()
+    if case == 'cpu':
+        for tensor in inputs.values():
+            tensor.device = torch.device('cpu')
+    elif case == 'mixed_device':
+        inputs['q'].device = SimpleNamespace(type='npu', index=1)
+    elif case == 'dtype':
+        inputs['b'].dtype = torch.int32
+    elif case == 'index_dtype':
+        inputs['cu_seqlens'].dtype = torch.float32
+    elif case == 'missing_gk':
+        inputs['gk'] = None
+    accepted, actual_reason = recompute_w_u_fwd_gdn2_verifier(**inputs)
+    assert not accepted
+    assert reason in actual_reason
+
+
+@pytest.mark.parametrize('mode', ['accepted', 'rejected', 'disabled'])
+def test_recompute_w_u_fwd_gdn2_npu_routing(mode, run_python):
+    """Check public WY selection and fallback without launching accelerator kernels."""
+    # the global disable flag is read at import; an in-process patch would miss that contract.
+    run_python(
+        f"""
+        import inspect
+        from types import SimpleNamespace
+        from unittest.mock import Mock, patch
+
+        import torch
+
+        from fla import backends
+        from fla.ops.gdn2 import wy_fast
+        from fla.ops.gdn2.backends.triton_ascend import wy_fast as ascend_wy_fast
+
+        mode = {mode!r}
+        entry = wy_fast.recompute_w_u_fwd_gdn2
+        implementation = Mock(return_value=object())
+        verifier = Mock(wraps=ascend_wy_fast.recompute_w_u_fwd_gdn2_verifier)
+        if mode == 'disabled':
+            assert inspect.unwrap(entry) not in backends._function_registries
+            ascend_wy_fast.recompute_w_u_fwd_gdn2_npu = implementation
+        else:
+            registry = backends._function_registries[inspect.unwrap(entry)]
+            candidate = registry._backends['triton_ascend']
+            candidate.implementation = implementation
+            candidate.verifier = verifier
+            registry._backends = {{'triton_ascend': candidate}}
+
+        inputs = {{name: torch.zeros(1, 2, 1, 32) for name in ('k', 'v', 'b', 'w_gate', 'gk')}}
+        inputs['A'] = torch.zeros(1, 2, 1, 64)
+        if mode == 'accepted':
+            npu = SimpleNamespace(type='npu', index=0)
+            inputs = {{name: Mock(spec=torch.Tensor, shape=tensor.shape, ndim=4, dtype=tensor.dtype, device=npu)
+                       for name, tensor in inputs.items()}}
+
+        launcher = Mock()
+        with (
+            patch.object(backends.TritonAscendBackend, 'is_available', return_value=True),
+            patch.object(wy_fast, 'recompute_w_u_fwd_gdn2_kernel', new={{(1, 1): launcher}}),
+        ):
+            result = entry(**inputs)
+        if mode == 'accepted':
+            verifier.assert_called_once()
+            implementation.assert_called_once_with(**inputs)
+            assert result is implementation.return_value
+            launcher.assert_not_called()
+        else:
+            implementation.assert_not_called()
+            launcher.assert_called_once()
+            assert result[0].shape == result[1].shape == result[3].shape == inputs['k'].shape
+            assert result[2] is None
+            if mode == 'rejected':
+                verifier.assert_called_once()
+            else:
+                verifier.assert_not_called()
+        """,
+        FLA_DISABLE_BACKEND_DISPATCH='1' if mode == 'disabled' else '0',
+        FLA_TRITON_ASCEND='1',
+    )
 
 
 @pytest.mark.parametrize(
@@ -1103,6 +1246,7 @@ def _wy_reference(
     gk: torch.Tensor,
     spans: list[tuple[int, int, int]],
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor]:
+    """Isolate WY auxiliaries from the intra-chunk solver and state recurrence."""
     w = torch.empty_like(k)
     u = torch.empty_like(v)
     kg = torch.empty_like(k)
@@ -1146,6 +1290,7 @@ def _wy_reference(
 )
 def test_recompute_w_u_fwd_gdn2_npu(layout, dtype, K, V, has_q, monkeypatch):
     """The Ascend WY leaf must match its channel-wise Torch definition."""
+    # public output/gradient comparisons do not isolate each WY auxiliary or prove this leaf was dispatched.
     candidate = backends._function_registries[inspect.unwrap(recompute_w_u_fwd_gdn2)]._backends['triton_ascend']
     spy = Mock(wraps=candidate.implementation)
     monkeypatch.setattr(candidate, 'implementation', spy)
@@ -1193,6 +1338,7 @@ def test_recompute_w_u_fwd_gdn2_npu(layout, dtype, K, V, has_q, monkeypatch):
 @pytest.mark.skipif(not IS_NPU, reason='Ascend compiler options')
 def test_chunk_npu_compile_options():
     """Only pass launch controls that the installed compiler applies."""
+    # output comparisons do not prove that the installed compiler applied each requested option.
     from triton.backends.ascend.compiler import AscendBackend
     from triton.runtime import driver
 
@@ -1218,6 +1364,7 @@ def test_chunk_npu_compile_options():
 )
 def test_chunk_fwd_intra_grouped_npu(K, dtype, varlen):
     """Check causal score rows and structural zeros across ragged chunk tails."""
+    # causal consumers can mask missing upper-triangle stores, so inspect the score buffers directly.
     from fla.ops.gdn2.backends.triton_ascend.chunk_intra import (
         chunk_gdn2_fwd_kernel_intra_grouped_npu,
         launch_diag_kernel,
@@ -1296,6 +1443,7 @@ def test_chunk_fwd_intra_grouped_npu(K, dtype, varlen):
 @pytest.mark.skipif(not IS_NPU, reason="Ascend WY tile planning")
 def test_recompute_w_u_fwd_gdn2_ub_budget(monkeypatch):
     """A smaller UB budget must not reuse a larger cached WY plan."""
+    # numerical cases use the detected capacity; this checks cache isolation, not small-UB compilation.
     from fla.ops.gdn2.backends.triton_ascend.wy_fast import _get_fwd_tiles
     from fla.utils import ascend_ub_manager
 
