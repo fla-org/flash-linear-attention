@@ -9,7 +9,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from fla.ops.gka import chunk_gka, fused_recurrent_gka, naive_recurrent_gka, naive_recurrent_gka_chebyshev
+from fla.ops.gka import chunk, chunk_gka, fused_recurrent_gka, naive_recurrent_gka, naive_recurrent_gka_chebyshev
 from fla.utils import assert_close, device
 
 
@@ -314,6 +314,46 @@ def test_chunk_state_chaining(
     assert_close('h_kv_final', full_hkv, h_kv, 0.005)
     for name in tri:
         assert_close(name, ref[name], tri[name], 0.01)
+
+
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'K', 'V', 'gates'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-K{}-V{}-{}".format(*test))
+        for test in [
+            (2, 300, 4, 100, 64, 'g_only'),
+            (2, 256, 4, 128, 128, 'tied'),
+        ]
+    ],
+)
+def test_chunk_small_shared_memory(
+    monkeypatch: pytest.MonkeyPatch,
+    B: int,
+    T: int,
+    H: int,
+    K: int,
+    V: int,
+    gates: str,
+):
+    """Below A100 shared memory, float32 with K > 64 runs at chunk size 16 and must still match both references."""
+    monkeypatch.setattr(chunk, 'check_shared_mem', lambda arch, tensor_idx: False)
+    torch.manual_seed(42)
+    inputs = make_inputs(B, T, H, K, V, gates, True, True, torch.float)
+    do = torch.randn(B, T, H, V, device=device)
+    dht = _random_dht(B, H, K, V)
+
+    tri, (tri_hkk, tri_hkv), tri_grads = _grads(chunk_gka, *inputs, do, dht)
+    _, (ref_hkk, ref_hkv), ref_grads = _grads(naive_recurrent_gka, *inputs, do, dht)
+    q, k, v, g, gk, alpha, initial_state = inputs
+    with torch.no_grad():
+        ref, _ = naive_recurrent_gka_chebyshev(q=q, k=k, v=v, g=g, gk=gk, alpha=alpha, initial_state=initial_state)
+
+    assert_close('o', ref, tri, 0.01)
+    assert_close('h_kk_final', ref_hkk, tri_hkk, 0.005)
+    assert_close('h_kv_final', ref_hkv, tri_hkv, 0.005)
+    assert ref_grads.keys() == tri_grads.keys()
+    for name in ref_grads:
+        assert_close(name, ref_grads[name], tri_grads[name], 0.02 if name in ('dg', 'dgk', 'dh0_kk') else 0.01)
 
 
 @pytest.mark.parametrize(

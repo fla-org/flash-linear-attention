@@ -13,7 +13,7 @@ from fla.ops.gka.chunk_solve_fwd import chunk_gka_solve_fwd
 from fla.ops.simple_gla import chunk_simple_gla
 from fla.ops.utils import chunk_local_cumsum, prepare_chunk_indices
 from fla.ops.utils.constant import RCP_LN2
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, check_shared_mem, input_guard
 
 
 class ChunkGKASolveFunction(torch.autograd.Function):
@@ -34,6 +34,9 @@ class ChunkGKASolveFunction(torch.autograd.Function):
         cu_seqlens_cpu: torch.LongTensor | None,
     ):
         chunk_size = 64
+        # float32 with K > 64 does not fit in shared memory at chunk size 64 or 32 on GPUs below A100 (e.g. 99 KB per block)
+        if k.dtype == torch.float32 and k.shape[-1] > 64 and not check_shared_mem(arch='ampere', tensor_idx=k.device.index):
+            chunk_size = 16
         chunk_indices = None
         if cu_seqlens is not None:
             chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size, cu_seqlens_cpu=cu_seqlens_cpu)
