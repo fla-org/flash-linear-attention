@@ -101,6 +101,16 @@ def test_ascend_available(monkeypatch):
     assert TritonAscendBackend.is_available() is False
 
 
+def test_gluon_requires_triton_3_5(monkeypatch):
+    from fla.backends import GluonBackend
+
+    monkeypatch.setattr(utils, 'IS_NVIDIA', True)
+    monkeypatch.setattr(utils, 'TRITON_ABOVE_3_5_0', False)
+    assert GluonBackend.is_available() is False
+    monkeypatch.setattr(utils, 'TRITON_ABOVE_3_5_0', True)
+    assert GluonBackend.is_available() is (utils.find_spec_cached('triton.experimental.gluon') is not None)
+
+
 def test_registry_priority(enable_dispatch):
     class Backend(BaseBackend):
         def __init__(self, name, priority, value):
