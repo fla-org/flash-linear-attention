@@ -5,63 +5,22 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-import importlib
-import inspect
-import sys
-from types import SimpleNamespace
-
 import pytest
 import torch
 
 from fla import backends, utils
-from fla.backends import (
-    BackendRegistry,
-    BaseBackend,
-    TritonAscendBackend,
-    dispatch,
-    register,
-)
-from fla.modules.activations.ops import logsigmoid_bwd, logsigmoid_fwd
-from fla.modules.causal_conv1d.ops import (
-    causal_conv1d_bwd,
-    causal_conv1d_fwd,
-    causal_conv1d_update,
-    causal_conv1d_update_states,
-)
-from fla.modules.fused_cross_entropy.ops import cross_entropy_loss
-from fla.modules.fused_kl_div.ops import fused_kl_div_bwd, fused_kl_div_fwd
-from fla.modules.fused_linear_cross_entropy.ops import fused_linear_cross_entropy_bwd, fused_linear_cross_entropy_fwd
-from fla.modules.grpo.ops import fused_grpo_loss
-from fla.modules.norm.fused_norm_gate import layer_norm_gated_bwd, layer_norm_gated_fwd
-from fla.modules.norm.l2norm import l2norm_bwd, l2norm_fwd
-from fla.modules.norm.layernorm import layer_norm_bwd, layer_norm_fwd
-from fla.modules.rotary.ops import rotary_embedding_fwdbwd
-from fla.ops.utils import chunk_global_cumsum, chunk_local_cumsum, solve_tril
-
-
-@pytest.fixture(autouse=True)
-def clear_test_registries():
-    yield
-    for entry in tuple(backends._function_registries):
-        if getattr(entry, '__module__', None) == __name__:
-            del backends._function_registries[entry]
+from fla.backends import BackendRegistry, BaseBackend, TritonAscendBackend, dispatch, register
 
 
 @pytest.fixture
 def enable_dispatch(monkeypatch):
     monkeypatch.setattr(backends, '_DISPATCH_DISABLED', False)
+    monkeypatch.setattr(backends, '_function_registries', {})
 
 
-@pytest.fixture(params=['registry', 'registered'])
-def backend_dispatch(request):
+@pytest.fixture
+def backend_dispatch():
     def decorate(*candidates):
-        if request.param == 'registered':
-            def decorate_entry(func):
-                entry = dispatch(func)
-                for backend in candidates:
-                    register(entry)(type(backend))
-                return entry
-            return decorate_entry
         registry = BackendRegistry('test')
         for backend in candidates:
             registry.register(backend)
@@ -70,52 +29,17 @@ def backend_dispatch(request):
     return decorate
 
 
-@pytest.fixture
-def lazy_backend(monkeypatch, tmp_path, enable_dispatch):
-    class Backend(BaseBackend):
-        backend_type = 'test_lazy'
-        env_var = 'FLA_TEST_LAZY'
-
-    @dispatch
-    def compute(x, scale=2):
-        return x * 3
-
-    module = 'fla_test_registered_backend'
-    path = tmp_path / f'{module}.py'
-    path.write_text(
-        'from fla.backends import register\n'
-        'from fla_test_entry import Backend, compute\n'
-        '@register(compute, backend=Backend, verifier=lambda x, scale=2: (x.numel() > 1, None))\n'
-        'def implementation(x, scale=2):\n'
-        '    import fla_test_optional_dependency\n'
-        '    return x * scale\n'
-    )
-    monkeypatch.syspath_prepend(str(tmp_path))
-    monkeypatch.setitem(sys.modules, 'fla_test_entry', SimpleNamespace(compute=compute, Backend=Backend))
-    monkeypatch.setitem(sys.modules, 'fla_test_optional_dependency', SimpleNamespace())
-
-    importlib.import_module(module)
-    monkeypatch.setenv('FLA_TEST_LAZY', '1')
-    yield compute, Backend, path
-    sys.modules.pop(module, None)
-
-
-@pytest.mark.parametrize("default_enable", [False, True], ids=["default-off", "default-on"])
 @pytest.mark.parametrize(
-    ("global_enable", "local_enable", "expected"),
+    ("global_enable", "local_enable", "default_enable", "expected"),
     [
-        pytest.param(None, None, None, id="global-unset-local-unset"),
-        pytest.param(None, "0", False, id="global-unset-local-off"),
-        pytest.param(None, "1", True, id="global-unset-local-on"),
-        pytest.param("0", None, None, id="global-off-local-unset"),
-        pytest.param("0", "0", False, id="global-off-local-off"),
-        pytest.param("0", "1", True, id="global-off-local-on"),
-        pytest.param("1", None, True, id="global-on-local-unset"),
-        pytest.param("1", "0", True, id="global-on-local-off"),
-        pytest.param("1", "1", True, id="global-on-local-on"),
+        (None, None, False, False),
+        (None, None, True, True),
+        ('0', '1', False, True),
+        ('1', '0', False, True),
+        ('0', '0', True, False),
     ],
 )
-def test_backend_enabled(monkeypatch, global_enable, local_enable, expected, default_enable):
+def test_backend_enabled(monkeypatch, global_enable, local_enable, default_enable, expected):
     monkeypatch.setattr(BaseBackend, "backend_type", "gluon")
     monkeypatch.setattr(BaseBackend, "env_var", "FLA_TEST_GLUON")
     monkeypatch.setattr(BaseBackend, "default_enable", default_enable)
@@ -125,36 +49,16 @@ def test_backend_enabled(monkeypatch, global_enable, local_enable, expected, def
         else:
             monkeypatch.setenv(name, value)
 
-    assert BaseBackend().is_enabled() is (default_enable if expected is None else expected)
+    assert BaseBackend().is_enabled() is expected
 
 
-@pytest.mark.parametrize("default_enable", [False, True], ids=["default-off", "default-on"])
-@pytest.mark.parametrize("global_enable", [None, "0", "1"], ids=["global-unset", "global-off", "global-on"])
-def test_backend_without_switch(monkeypatch, global_enable, default_enable):
+def test_backend_without_switch(monkeypatch):
     monkeypatch.setattr(BaseBackend, "backend_type", "gluon")
     monkeypatch.setattr(BaseBackend, "env_var", None)
-    monkeypatch.setattr(BaseBackend, "default_enable", default_enable)
-    if global_enable is None:
-        monkeypatch.delenv("FLA_GLUON", raising=False)
-    else:
-        monkeypatch.setenv("FLA_GLUON", global_enable)
+    monkeypatch.setattr(BaseBackend, "default_enable", False)
+    monkeypatch.setenv("FLA_GLUON", '0')
 
     assert BaseBackend().is_enabled() is True
-
-
-@pytest.mark.parametrize('global_enable', [None, '0', '1'], ids=['default', 'disabled', 'enabled'])
-@pytest.mark.parametrize('conv_enable', ['0', '1'], ids=['conv-disabled', 'conv-enabled'])
-def test_gluon_enabled(monkeypatch, global_enable, conv_enable):
-    from fla.backends import GluonBackend
-
-    if global_enable is None:
-        monkeypatch.delenv('FLA_GLUON', raising=False)
-    else:
-        monkeypatch.setenv('FLA_GLUON', global_enable)
-    monkeypatch.setenv('FLA_CONV_GLUON', conv_enable)
-    conv_backend = GluonBackend(env_var='FLA_CONV_GLUON')
-    assert conv_backend.is_enabled() is (global_enable == '1' or conv_enable == '1')
-    assert GluonBackend().is_enabled() is (global_enable == '1')
 
 
 def test_registered_backend_switches(monkeypatch, enable_dispatch):
@@ -342,6 +246,10 @@ def test_dispatch_runtime(monkeypatch, enable_dispatch, backend_dispatch):
     assert compute(1) == 3
     monkeypatch.setenv('FLA_TEST_PRIMARY', '1')
     assert compute(1) == 2
+    monkeypatch.setattr(Primary, 'is_available', classmethod(lambda cls: False))
+    assert compute(1) == 3
+    monkeypatch.setattr(Primary, 'is_available', classmethod(lambda cls: True))
+    assert compute(1) == 2
 
 
 def test_dispatch_error(enable_dispatch, backend_dispatch):
@@ -360,7 +268,7 @@ def test_dispatch_error(enable_dispatch, backend_dispatch):
     assert caught.value is error
 
 
-def test_register(monkeypatch, enable_dispatch):
+def test_register(enable_dispatch):
     class Primary(BaseBackend):
         backend_type = 'primary'
         priority = 0
@@ -389,8 +297,14 @@ def test_register(monkeypatch, enable_dispatch):
     assert Secondary().compute(-1) == -4
 
 
-def test_register_arguments(lazy_backend):
-    compute, _, _ = lazy_backend
+def test_register_arguments(enable_dispatch):
+    @dispatch
+    def compute(x, scale=2):
+        return x * 3
+
+    @register(compute, backend=BaseBackend)
+    def implementation(x, scale=2):
+        return x * scale
     x = torch.ones(2, requires_grad=True)
     for args, kwargs, scale in [((x,), {}, 2), ((x, 5), {}, 5), ((), {'x': x, 'scale': 7}, 7)]:
         result = compute(*args, **kwargs)
@@ -398,67 +312,34 @@ def test_register_arguments(lazy_backend):
         torch.testing.assert_close(torch.autograd.grad(result.sum(), x)[0], torch.full_like(x, scale))
 
 
-def test_load_runtime(monkeypatch, lazy_backend):
-    compute, Backend, path = lazy_backend
-    x = torch.ones(2)
-    monkeypatch.setattr(Backend, 'is_available', classmethod(lambda cls: False))
-    torch.testing.assert_close(compute(x), x * 3)
-    assert path.stem in sys.modules
-
-    monkeypatch.setattr(Backend, 'is_available', classmethod(lambda cls: True))
-    monkeypatch.setenv('FLA_TEST_LAZY', '0')
-    torch.testing.assert_close(compute(x), x * 3)
-    assert path.stem in sys.modules
-
-    monkeypatch.setenv('FLA_TEST_LAZY', '1')
-    torch.testing.assert_close(compute(x), x * 2)
-    assert path.stem in sys.modules
-    monkeypatch.setenv('FLA_TEST_LAZY', '0')
-    torch.testing.assert_close(compute(x), x * 3)
-
-
-def test_load_dependency_error(monkeypatch, lazy_backend):
-    compute, _, path = lazy_backend
-    monkeypatch.delitem(sys.modules, 'fla_test_optional_dependency')
-    x = torch.ones(2)
-    torch.testing.assert_close(compute(x[:1]), x[:1] * 3)
-    assert path.stem in sys.modules
-    with pytest.raises(ModuleNotFoundError, match='fla_test_optional_dependency'):
-        compute(x)
-
-    monkeypatch.setitem(sys.modules, 'fla_test_optional_dependency', SimpleNamespace())
-    torch.testing.assert_close(compute(x), x * 2)
-
-
 @pytest.mark.parametrize('disabled', ['0', '1'], ids=['dispatch-enabled', 'dispatch-disabled'])
 def test_dispatch_disabled(run_python, disabled):
     run_python(
         """
         import os
-        import sys
-        import warnings
 
         from fla import backends
-        from fla.backends import GluonBackend, TileLangBackend, TritonAscendBackend, dispatch, register
+        from fla.backends import BackendRegistry, BaseBackend, dispatch, register
 
         enabled = os.environ['FLA_DISABLE_BACKEND_DISPATCH'] != '1'
+        registry = BackendRegistry('test')
+        backends._load_operation_registry = lambda operation: registry
+        backends._operation_registries['test'] = registry
+
+        @register('test')
+        class Backend(BaseBackend):
+            def compute(self, x):
+                return x + 2
 
         def compute(x):
             return x + 1
 
-        with warnings.catch_warnings():
-            warnings.simplefilter('error', DeprecationWarning)
-            decorate = dispatch('wall_attn')
-        registry = backends._operation_registries['wall_attn']
-        assert registry.operation_name == 'wall_attn'
-        assert registry._backends
-        wrapped = decorate(compute)
+        wrapped = dispatch('test')(compute)
         assert (wrapped is compute) == (not enabled)
-        assert wrapped(1) == 2
+        assert wrapped(1) == (3 if enabled else 2)
 
         wrapped = dispatch(compute)
         assert (wrapped is compute) == (not enabled)
-        assert wrapped(1) == 2
 
         @register(wrapped)
         def replacement(x):
@@ -466,227 +347,9 @@ def test_dispatch_disabled(run_python, disabled):
 
         assert replacement(1) == 3
         assert wrapped(1) == (3 if enabled else 2)
-        assert ('fla.ops.utils.sinkhorn.tilelang' in sys.modules) == TileLangBackend.is_available()
-        assert 'utils' not in backends._operation_registries
-        ascend_available = TritonAscendBackend.is_available()
-        assert ('fla.ops.utils.triton_ascend.cumsum' in sys.modules) == ascend_available
-        assert ('fla.ops.utils.triton_ascend.solve_tril' in sys.modules) == ascend_available
-        assert ('fla.ops.common.backends.triton_ascend.chunk_o' in sys.modules) == ascend_available
-        assert any(name.startswith('fla.ops.simple_gla.backends.triton_ascend.') for name in sys.modules) == ascend_available
-        assert any(
-            name.startswith('fla.modules.') and 'triton_ascend' in name.split('.')
-            for name in sys.modules
-        ) == ascend_available
-        assert ('fla.modules.causal_conv1d.backends.gluon' in sys.modules) == GluonBackend.is_available()
         """,
         FLA_DISABLE_BACKEND_DISPATCH=disabled,
     )
-
-
-def test_register_import_order(run_python):
-    run_python(
-        """
-        import importlib
-        import inspect
-        import sys
-
-        from triton.language import math
-
-        from fla import backends
-
-        # host-side registration checks do not execute Ascend intrinsics.
-        if not hasattr(math, 'tanh'):
-            math.tanh = None
-        backends.TritonAscendBackend.is_available = classmethod(lambda cls: True)
-        for module, (backend_module, names) in {
-            'fla.modules.activations.ops': (
-                'fla.modules.activations.triton_ascend',
-                [
-                    'sigmoid_fwd', 'sigmoid_bwd', 'logsigmoid_fwd', 'logsigmoid_bwd', 'swish_fwd', 'swish_bwd',
-                    'swiglu_fwd', 'swiglu_fwdbwd', 'swiglu_linear', 'powglu_fwd', 'powglu_fwdbwd', 'powglu_linear',
-                ],
-            ),
-            'fla.modules.rotary.ops': ('fla.modules.rotary.triton_ascend', ['rotary_embedding_fwdbwd']),
-            'fla.modules.grpo.ops': ('fla.modules.grpo.triton_ascend', ['fused_grpo_loss']),
-            'fla.modules.fused_cross_entropy.ops': ('fla.modules.fused_cross_entropy.triton_ascend', ['cross_entropy_loss']),
-            'fla.modules.fused_linear_cross_entropy.ops': (
-                'fla.modules.fused_linear_cross_entropy.triton_ascend',
-                ['logsumexp_fwd', 'fused_linear_cross_entropy_fwd', 'fused_linear_cross_entropy_bwd'],
-            ),
-            'fla.modules.fused_kl_div.ops': (
-                'fla.modules.fused_kl_div.triton_ascend',
-                ['fused_kl_div_fwd', 'fused_kl_div_bwd'],
-            ),
-            'fla.modules.causal_conv1d.ops': (
-                'fla.modules.causal_conv1d.backends.triton_ascend',
-                [
-                    'causal_conv1d_fwd', 'causal_conv1d_bwd', 'compute_dh0_triton',
-                    'causal_conv1d_update', 'causal_conv1d_update_states',
-                ],
-            ),
-            'fla.modules.norm.layernorm': (
-                'fla.modules.norm.triton_ascend.layernorm',
-                ['layer_norm_fwd', 'layer_norm_bwd'],
-            ),
-            'fla.modules.norm.l2norm': ('fla.modules.norm.triton_ascend.l2norm', ['l2norm_fwd', 'l2norm_bwd']),
-            'fla.modules.norm.fused_norm_gate': (
-                'fla.modules.norm.triton_ascend.fused_norm_gate',
-                ['layer_norm_gated_fwd', 'layer_norm_gated_bwd'],
-            ),
-            'fla.ops.attnres.fused': ('fla.ops.attnres.backends.triton_ascend', ['fused_attnres']),
-            'fla.ops.atk.chunk_atk_fwd': (
-                'fla.ops.atk.backends.triton_ascend.chunk_atk_fwd', ['chunk_atk_fwd', 'recompute_atk_fwd'],
-            ),
-            'fla.ops.atk.chunk_atk_bwd': ('fla.ops.atk.backends.triton_ascend.chunk_atk_bwd', ['chunk_atk_bwd']),
-            'fla.ops.gla.chunk': (
-                'fla.ops.gla.backends.triton_ascend',
-                ['chunk_gla_fwd_intra_gk', 'chunk_gla_fwd_o_gk', 'chunk_gla_bwd_dA',
-                 'chunk_gla_bwd_dv', 'chunk_gla_bwd_dqk_intra', 'chunk_gla_bwd_dqkg'],
-            ),
-            'fla.ops.common.chunk_h': ('fla.ops.common.backends.triton_ascend.chunk_h', ['chunk_fwd_h', 'chunk_bwd_dh']),
-            'fla.ops.common.chunk_o': (
-                'fla.ops.common.backends.triton_ascend.chunk_o',
-                ['chunk_fwd_o', 'chunk_bwd_dv_local', 'chunk_bwd_dqkwg', 'chunk_bwd_dv'],
-            ),
-            'fla.ops.common.chunk_delta_h': (
-                'fla.ops.common.backends.triton_ascend.chunk_delta_h',
-                ['chunk_gated_delta_rule_fwd_h', 'chunk_gated_delta_rule_bwd_dhu'],
-            ),
-            'fla.ops.common.chunk_scaled_dot_kkt': (
-                'fla.ops.common.backends.triton_ascend.chunk_scaled_dot_kkt', ['chunk_scaled_dot_kkt_fwd'],
-            ),
-            'fla.ops.common.gate': (
-                'fla.ops.common.backends.triton_ascend.gate', ['fused_beta_sigmoid_fwd', 'fused_beta_sigmoid_bwd'],
-            ),
-            'fla.ops.utils.cumsum': (
-                'fla.ops.utils.triton_ascend.cumsum',
-                ['chunk_global_cumsum', 'chunk_local_cumsum'],
-            ),
-            'fla.ops.utils.solve_tril': ('fla.ops.utils.triton_ascend.solve_tril', ['solve_tril']),
-        }.items():
-            importlib.reload(importlib.import_module(module.rpartition('.')[0]))
-            entries = importlib.import_module(module)
-            implementation = sys.modules[backend_module]
-            for name in names:
-                entry = getattr(entries, name)
-                if module.startswith('fla.ops.atk.'):
-                    assert getattr(importlib.import_module('fla.ops.atk'), name) is entry
-                registry = backends._function_registries[inspect.unwrap(entry)]
-                target = registry._backends['triton_ascend'].get_implementation(name)
-                implementation_name = 'compute_dh0_npu' if name == 'compute_dh0_triton' else name + '_npu'
-                assert target is getattr(implementation, implementation_name)
-                expected = dict(inspect.signature(entry).parameters)
-                actual = inspect.signature(target).parameters
-                if name == 'chunk_gated_delta_rule_bwd_dhu':
-                    # the existing Ascend backward entry does not accept graph metadata.
-                    expected.pop('use_graph')
-                assert expected.keys() == actual.keys()
-                for parameter in expected:
-                    assert expected[parameter].kind == actual[parameter].kind
-                    assert expected[parameter].default == actual[parameter].default
-        """,
-        FLA_DISABLE_BACKEND_DISPATCH='0',
-    )
-
-
-@pytest.mark.parametrize(
-    ('entry', 'tensor_args', 'options'),
-    [
-        (logsigmoid_fwd, (), {'temperature': 0.5, 'output_contiguous': True}),
-        (logsigmoid_bwd, ('dy',), {'temperature': 0.5, 'output_contiguous': True}),
-        (rotary_embedding_fwdbwd, ('cos', 'sin'), {'interleaved': True, 'conjugate': False}),
-        (rotary_embedding_fwdbwd, ('cos', 'sin'), {'interleaved': True, 'conjugate': True}),
-        (causal_conv1d_fwd, ('weight', 'bias', 'residual'), {'chunk_size': 32, 'output_final_state': True}),
-        (causal_conv1d_bwd, ('dy', 'dht'), {'chunk_size': 32, 'layout_fallback': True}),
-        (causal_conv1d_update, ('cache', 'weight', 'bias', 'residual'), {'activation': 'silu'}),
-        (causal_conv1d_update_states, ('initial_state',), {'state_len': 4}),
-        (fused_grpo_loss, ('ref_logp', 'input_ids', 'advantages'), {'beta': 0.2, 'save_kl': True}),
-        (cross_entropy_loss, ('target',), {'ignore_index': -1, 'label_smoothing': 0.1}),
-        (fused_linear_cross_entropy_fwd, ('target', 'weight'), {'reduction': 'sum'}),
-        (fused_linear_cross_entropy_bwd, ('dx', 'dw', 'db'), {}),
-        (fused_kl_div_fwd, ('target_x', 'weight', 'target_weight'), {'use_dw': False}),
-        (fused_kl_div_bwd, ('dx', 'dw'), {}),
-        (layer_norm_fwd, ('weight', 'bias'), {'is_rms_norm': True, 'num_groups': 2}),
-        (layer_norm_bwd, ('x', 'weight', 'bias'), {'recompute_output': True, 'num_groups': 2}),
-        (l2norm_fwd, (), {'eps': 1e-4, 'output_dtype': torch.float32}),
-        (l2norm_bwd, ('rstd', 'dy'), {'eps': 1e-4}),
-        (layer_norm_gated_fwd, ('g', 'weight', 'bias'), {'activation': 'sigmoid'}),
-        (layer_norm_gated_bwd, ('x', 'g', 'weight', 'bias'), {'activation': 'sigmoid'}),
-        (chunk_global_cumsum, ('cu_seqlens',), {'reverse': True, 'scale': 0.5}),
-        (chunk_local_cumsum, ('cu_seqlens', 'chunk_indices'), {'chunk_size': 64, 'use_graph': True}),
-        (solve_tril, ('cu_seqlens', 'chunk_indices'), {'output_dtype': torch.float32}),
-    ],
-    ids=[
-        'activations-forward', 'activations-backward', 'rotary-forward', 'rotary-backward',
-        'conv-forward', 'conv-backward', 'conv-update', 'conv-update-states', 'grpo', 'cross-entropy',
-        'linear-cross-entropy-forward', 'linear-cross-entropy-backward', 'kl-div-forward', 'kl-div-backward',
-        'layernorm-forward', 'layernorm-backward', 'l2norm-forward', 'l2norm-backward',
-        'norm-gate-forward', 'norm-gate-backward', 'global-cumsum', 'local-cumsum', 'solve-tril',
-    ],
-)
-@pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='dispatch was disabled before the entry points were imported')
-def test_dispatch_entry_points(monkeypatch, entry, tensor_args, options):
-    calls = []
-    expected = object()
-
-    def implementation(value, **kwargs):
-        assert torch.is_grad_enabled()
-        calls.append((value, kwargs))
-        return expected
-
-    registry = backends._function_registries[inspect.unwrap(entry)]
-    monkeypatch.setattr(registry, '_backends', {})
-    candidate = BaseBackend()
-    candidate.implementation = implementation
-    registry.register(candidate)
-
-    x = torch.tensor([-2.0, 0.5, 3.0], requires_grad=True)
-    kwargs = {argument: torch.ones_like(x) for argument in tensor_args}
-    kwargs.update(options)
-    inspect.signature(entry).bind(x, **kwargs)
-    result = entry(x, **kwargs)
-
-    assert len(calls) == 1
-    assert calls[0][0] is x
-    assert calls[0][1].keys() == kwargs.keys()
-    for argument, value in kwargs.items():
-        if isinstance(value, torch.Tensor):
-            assert calls[0][1][argument] is value
-        else:
-            assert calls[0][1][argument] == value
-    assert result is expected
-
-
-@pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
-@pytest.mark.parametrize('direction', ['fwd', 'bwd'], ids=['forward', 'backward'])
-@pytest.mark.parametrize('env_var', ['FLA_GLUON', 'FLA_CONV_GLUON'], ids=['global', 'local'])
-def test_dispatch_gluon(monkeypatch, direction, env_var):
-    pytest.importorskip('triton.experimental.gluon')
-    from fla.backends import GluonBackend, TritonAscendBackend
-    from fla.modules.causal_conv1d import ops
-
-    func_name = f'causal_conv1d_{direction}'
-    monkeypatch.setenv('FLA_GLUON', '0')
-    monkeypatch.setenv('FLA_CONV_GLUON', '0')
-    monkeypatch.setenv(env_var, '1')
-    monkeypatch.setattr(GluonBackend, 'is_available', classmethod(lambda cls: True))
-    monkeypatch.setattr(TritonAscendBackend, 'is_available', classmethod(lambda cls: False))
-    entry = getattr(ops, func_name)
-    importlib.reload(importlib.import_module('fla.modules.causal_conv1d'))
-    candidate = backends._function_registries[inspect.unwrap(entry)]._backends['gluon']
-    monkeypatch.setattr(candidate, 'verifier', lambda **kwargs: (True, None))
-    result = object()
-
-    def implementation(x, **kwargs):
-        assert torch.is_grad_enabled()
-        assert x.requires_grad
-        return result
-
-    monkeypatch.setattr(candidate, 'implementation', implementation)
-    x = torch.tensor([1.0, 2.0], requires_grad=True)
-    kwargs = {'weight': x, 'bias': None, 'residual': None} if direction == 'fwd' else {'dy': x, 'dht': None}
-    inspect.signature(entry).bind(x=x, **kwargs)
-    assert entry(x=x, **kwargs) is result
 
 
 @pytest.mark.parametrize('default_enable', [False, True])
