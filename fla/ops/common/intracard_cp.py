@@ -53,7 +53,7 @@ class _CacheEntry(NamedTuple):
     cu_seqlens_subseq_values: list[int]
     split_info: SplitSeqInfo
     total_subseqs: int
-    cu_seqlens_split_values: list[int]
+    cu_seqlens_split_values: list[tuple[int, int]]
     num_split_subseqs: int
     non_first_indices: list[int]
     first_subseq_indices: list[int]
@@ -324,12 +324,12 @@ def _precompute_intracard_indices(
     split_info: SplitSeqInfo,
     cu_seqlens_subseq_values: list[int],
     num_seqs: int,
-) -> tuple[list[int], int, list[int], list[int], list[int], int, list[int], list[int]]:
+) -> tuple[list[tuple[int, int]], int, list[int], list[int], list[int], int, list[int], list[int]]:
     """Prepare sequence indices for pre-scan, state merging, and final-state gathering.
 
     Returns:
-        cu_seqlens_split_values (list[int]):
-            Flattened boundaries of split sequences for pre-scan.
+        cu_seqlens_split_values (list[tuple[int, int]]):
+            Start/end pairs of split subsequences for pre-scan.
         num_split_subseqs (int):
             Total subsequences belonging to split sequences.
         non_first_indices (list[int]):
@@ -349,11 +349,12 @@ def _precompute_intracard_indices(
     subseq_counts = split_info.num_subseqs
     split_seq_ids = split_info.split_seq_ids
 
-    # cu_seqlens_split_values: for each split seq, extract [start:start+n+1] boundaries
-    cu_seqlens_split_values: list[int] = []
+    # unsplit sequences can separate the ranges selected for pre-scan
+    cu_seqlens_split_values: list[tuple[int, int]] = []
     num_split_subseqs = 0
     for subseq_start, num_subseqs in zip(subseq_starts, subseq_counts):
-        cu_seqlens_split_values.extend(cu_seqlens_subseq_values[subseq_start:subseq_start+num_subseqs+1])
+        boundaries = cu_seqlens_subseq_values[subseq_start:subseq_start+num_subseqs+1]
+        cu_seqlens_split_values.extend(zip(boundaries, boundaries[1:]))
         num_split_subseqs += num_subseqs
 
     # num_subseqs_per_seq: [num_seqs], default 1 for unsplit sequences
