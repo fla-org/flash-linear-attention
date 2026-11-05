@@ -11,46 +11,35 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field
 from typing import Any
 
 _INTEGER_FIELDS = ('B', 'T', 'H', 'D', 'N', 'actual_T', 'HV', 'DV', 'chunk_size')
 _RESULT_FIELDS = {'op', 'shape', 'mode', 'eager', 'graph', 'graph_safe', 'memory', 'capture_ms', 'validation'}
 
 
-@dataclass(frozen=True)
-class GraphBenchmarkMetadata:
-    """Normalized workload fields serialized into graph benchmark results."""
+_BOOLEAN_FIELDS = ('fused_options', 'safe_gate', 'allow_neg_eigval', 'disable_recompute')
+_METADATA_FIELDS = set(_INTEGER_FIELDS) | set(_BOOLEAN_FIELDS) | {'dtype', 'sequence_profile'}
 
-    B: int
-    T: int
-    H: int
-    D: int
-    N: int
-    actual_T: int
-    HV: int
-    DV: int
-    chunk_size: int
-    dtype: str
-    sequence_profile: str
-    fused_options: bool = False
-    safe_gate: bool = False
-    allow_neg_eigval: bool = False
-    disable_recompute: bool = False
 
-    def __post_init__(self):
-        for name in _INTEGER_FIELDS:
-            if type(getattr(self, name)) is not int or getattr(self, name) <= 0:
-                raise ValueError(f'{name} must be a positive integer')
-        if self.actual_T > self.T:
-            raise ValueError('actual_T must satisfy 0 < actual_T <= T')
-        if not isinstance(self.dtype, str) or not self.dtype:
-            raise ValueError('dtype must be a nonempty string')
-        if self.sequence_profile not in ('balanced', 'ragged', 'empty_tail'):
-            raise ValueError('sequence_profile must be balanced, ragged, or empty_tail')
-        for name in ('fused_options', 'safe_gate', 'allow_neg_eigval', 'disable_recompute'):
-            if type(getattr(self, name)) is not bool:
-                raise ValueError(f'{name} must be a boolean')
+def validate_graph_metadata(metadata: dict[str, Any]) -> None:
+    """Validate supplied workload fields and protect runner-owned result fields."""
+    if not isinstance(metadata, dict):
+        raise TypeError('metadata must be a dictionary')
+    if _RESULT_FIELDS.intersection(metadata):
+        raise ValueError('metadata must not override reserved benchmark fields')
+    for name in _INTEGER_FIELDS:
+        if name in metadata and (type(metadata[name]) is not int or metadata[name] <= 0):
+            raise ValueError(f'{name} must be a positive integer')
+    if 'actual_T' in metadata and 'T' in metadata and metadata['actual_T'] > metadata['T']:
+        raise ValueError('actual_T must satisfy 0 < actual_T <= T')
+    if 'dtype' in metadata and (not isinstance(metadata['dtype'], str) or not metadata['dtype']):
+        raise ValueError('dtype must be a nonempty string')
+    if 'sequence_profile' in metadata and metadata['sequence_profile'] not in ('balanced', 'ragged', 'empty_tail'):
+        raise ValueError('sequence_profile must be balanced, ragged, or empty_tail')
+    for name in _BOOLEAN_FIELDS:
+        if name in metadata and type(metadata[name]) is not bool:
+            raise ValueError(f'{name} must be a boolean')
 
 
 @dataclass
@@ -69,17 +58,10 @@ class GraphBenchmarkCase:
     graph_args: tuple[Any, ...]
     run_once: Callable[[Callable, tuple[Any, ...], bool], dict[str, Any]]
     assert_close: Callable[[dict[str, Any], dict[str, Any]], None]
-    metadata: GraphBenchmarkMetadata
-    annotations: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
-        if not isinstance(self.metadata, GraphBenchmarkMetadata):
-            raise TypeError('metadata must be GraphBenchmarkMetadata')
-        if not isinstance(self.annotations, dict):
-            raise TypeError('annotations must be a dictionary')
-        reserved = _RESULT_FIELDS | {field.name for field in fields(GraphBenchmarkMetadata)}
-        if reserved.intersection(self.annotations):
-            raise ValueError('annotations must not override reserved benchmark fields')
+        validate_graph_metadata(self.metadata)
 
 
 @dataclass(frozen=True)
@@ -134,7 +116,7 @@ def _normalize_graph_shape(shape: dict[str, Any], default_dtype: str) -> dict[st
     for name in ("fused_options", "safe_gate", "allow_neg_eigval", "disable_recompute"):
         normalized[name] = _as_bool(normalized, name)
 
-    GraphBenchmarkMetadata(**{field.name: normalized[field.name] for field in fields(GraphBenchmarkMetadata)})
+    validate_graph_metadata(normalized)
     return normalized
 
 
@@ -185,8 +167,6 @@ def _build_kda_case(shape: dict[str, Any], mode: str, device: str, seed: int) ->
     from fla.ops.kda import chunk_kda
 
     shape = normalize_kda_shape(shape)
-    metadata = {field.name: shape[field.name] for field in fields(GraphBenchmarkMetadata)}
-    annotations = {name: value for name, value in shape.items() if name not in metadata}
     if mode not in ("fwd", "fwdbwd"):
         raise ValueError(f"Unsupported KDA graph benchmark mode: {mode}")
 
@@ -323,8 +303,7 @@ def _build_kda_case(shape: dict[str, Any], mode: str, device: str, seed: int) ->
         graph_args=graph_inputs + (graph_cu,),
         run_once=run_once,
         assert_close=assert_close,
-        metadata=GraphBenchmarkMetadata(**metadata),
-        annotations=annotations,
+        metadata=shape,
     )
 
 
@@ -360,7 +339,7 @@ register_graph_op(GraphOpConfig(
 
 def normalize_gdn_shape(shape: dict[str, Any], default_dtype: str = "float16") -> dict[str, Any]:
     """Normalize workload metadata; the operator validates graph capabilities when building the case."""
-    unknown = set(shape) - {field.name for field in fields(GraphBenchmarkMetadata)}
+    unknown = set(shape) - _METADATA_FIELDS
     if unknown:
         raise ValueError(f'Unknown graph benchmark fields: {sorted(unknown)}')
     for name in _INTEGER_FIELDS:
@@ -509,7 +488,7 @@ def _build_gdn_case(shape: dict[str, Any], mode: str, device: str, seed: int) ->
         graph_args=graph_args,
         run_once=run_once,
         assert_close=compare,
-        metadata=GraphBenchmarkMetadata(**shape),
+        metadata=shape,
     )
 
 

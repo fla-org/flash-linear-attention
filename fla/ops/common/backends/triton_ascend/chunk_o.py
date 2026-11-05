@@ -1622,33 +1622,6 @@ def chunk_bwd_dv_local_npu(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
-) -> torch.Tensor:
-    return _chunk_bwd_dv_local_npu(
-        q=q,
-        k=k,
-        do=do,
-        g=g,
-        g_gamma=g_gamma,
-        A=A,
-        scale=scale,
-        cu_seqlens=cu_seqlens,
-        chunk_size=chunk_size,
-        chunk_indices=chunk_indices,
-    )
-
-
-@input_guard
-def _chunk_bwd_dv_local_npu(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    do: torch.Tensor,
-    g: torch.Tensor | None = None,
-    g_gamma: torch.Tensor | None = None,
-    A: torch.Tensor | None = None,
-    scale: float | None = None,
-    cu_seqlens: torch.LongTensor | None = None,
-    chunk_size: int = 64,
-    chunk_indices: torch.LongTensor | None = None,
     use_graph: bool = False,
 ) -> torch.Tensor:
     B, T, H, K, V, HV = *k.shape, do.shape[-1], do.shape[2]
@@ -1774,43 +1747,6 @@ def _chunk_bwd_dv_local_npu(
 @register(chunk_bwd_dqkwg, backend=TritonAscendBackend)
 @input_guard
 def chunk_bwd_dqkwg_npu(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    do: torch.Tensor,
-    h: torch.Tensor,
-    dh: torch.Tensor,
-    w: torch.Tensor | None = None,
-    g: torch.Tensor | None = None,
-    g_gamma: torch.Tensor | None = None,
-    dv: torch.Tensor | None = None,
-    scale: float | None = None,
-    state_v_first: bool = False,
-    cu_seqlens: torch.LongTensor | None = None,
-    chunk_size: int = 64,
-    chunk_indices: torch.LongTensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
-    return _chunk_bwd_dqkwg_npu(
-        q=q,
-        k=k,
-        v=v,
-        do=do,
-        h=h,
-        dh=dh,
-        w=w,
-        g=g,
-        g_gamma=g_gamma,
-        dv=dv,
-        scale=scale,
-        state_v_first=state_v_first,
-        cu_seqlens=cu_seqlens,
-        chunk_size=chunk_size,
-        chunk_indices=chunk_indices,
-    )
-
-
-@input_guard
-def _chunk_bwd_dqkwg_npu(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,

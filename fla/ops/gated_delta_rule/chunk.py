@@ -156,12 +156,12 @@ def chunk_gated_delta_rule_bwd(
     reverse_cumsum = chunk_local_cumsum
     if use_graph:
         from fla.ops.common.backends.triton_ascend.chunk_delta_h import (
-            _chunk_gated_delta_rule_bwd_dhu_npu,
+            chunk_gated_delta_rule_bwd_dhu_npu,
             chunk_gated_delta_rule_fwd_h_npu,
         )
-        from fla.ops.common.backends.triton_ascend.chunk_o import _chunk_bwd_dqkwg_npu, _chunk_bwd_dv_local_npu
+        from fla.ops.common.backends.triton_ascend.chunk_o import chunk_bwd_dqkwg_npu, chunk_bwd_dv_local_npu
         from fla.ops.gated_delta_rule.backends.triton_ascend.wy_fast import (
-            _prepare_wy_repr_bwd_npu,
+            prepare_wy_repr_bwd_npu,
             recompute_w_u_fwd_npu,
         )
         from fla.ops.utils.triton_ascend.cumsum import chunk_local_cumsum_npu
@@ -170,17 +170,13 @@ def chunk_gated_delta_rule_bwd(
             raise ValueError("graph backward requires saved fixed-capacity indices and offsets")
         recompute_w_u = partial(recompute_w_u_fwd_npu, use_graph=True)
         recompute_h = partial(chunk_gated_delta_rule_fwd_h_npu, chunk_offsets=chunk_offsets, use_graph=True)
-        bwd_dv = partial(_chunk_bwd_dv_local_npu, use_graph=True)
-        bwd_dhu = partial(_chunk_gated_delta_rule_bwd_dhu_npu, chunk_offsets=chunk_offsets, use_graph=True)
-        bwd_dqkwg = partial(_chunk_bwd_dqkwg_npu, use_graph=True)
-        bwd_wy = partial(_prepare_wy_repr_bwd_npu, use_graph=True)
+        bwd_dv = partial(chunk_bwd_dv_local_npu, use_graph=True)
+        bwd_dhu = partial(chunk_gated_delta_rule_bwd_dhu_npu, chunk_offsets=chunk_offsets, use_graph=True)
+        bwd_dqkwg = partial(chunk_bwd_dqkwg_npu, use_graph=True)
+        bwd_wy = partial(prepare_wy_repr_bwd_npu, use_graph=True)
         reverse_cumsum = partial(chunk_local_cumsum_npu, use_graph=True)
-        # upstream gradients outside active capacity must not enter state reductions.
         if do is None:
             do = torch.zeros_like(v)
-        else:
-            active = torch.arange(q.shape[1], device=q.device) < cu_seqlens[-1]
-            do = torch.where(active[None, :, None, None], do, 0)
 
     w, u = recompute_w_u(
         k=k,
@@ -328,7 +324,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
 
         chunk_offsets = None
         if use_graph:
-            from fla.ops.gated_delta_rule.graph import chunk_gated_delta_rule_graph_fwd
+            from fla.ops.gated_delta_rule.backends.triton_ascend.graph import chunk_gated_delta_rule_graph_fwd
 
             nt_max = (q.shape[1] + chunk_size - 1) // chunk_size + cu_seqlens.numel() - 2
             chunk_indices, chunk_offsets = prepare_chunk_indices_static(cu_seqlens, chunk_size, nt_max)

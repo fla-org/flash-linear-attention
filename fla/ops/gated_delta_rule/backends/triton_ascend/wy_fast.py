@@ -994,30 +994,6 @@ def prepare_wy_repr_bwd_npu(
     g: torch.Tensor = None,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
-    return _prepare_wy_repr_bwd_npu(
-        k=k,
-        v=v,
-        beta=beta,
-        A=A,
-        dw=dw,
-        du=du,
-        g=g,
-        cu_seqlens=cu_seqlens,
-        chunk_indices=chunk_indices,
-    )
-
-
-def _prepare_wy_repr_bwd_npu(
-    k: torch.Tensor,
-    v: torch.Tensor,
-    beta: torch.Tensor,
-    A: torch.Tensor,
-    dw: torch.Tensor,
-    du: torch.Tensor,
-    g: torch.Tensor = None,
-    cu_seqlens: torch.LongTensor | None = None,
-    chunk_indices: torch.LongTensor | None = None,
     use_graph: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
     B, T, H, K = k.shape

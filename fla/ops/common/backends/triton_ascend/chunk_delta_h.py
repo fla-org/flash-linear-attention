@@ -1967,45 +1967,6 @@ def chunk_gated_delta_rule_bwd_dhu_npu(
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
     chunk_offsets: torch.LongTensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    return _chunk_gated_delta_rule_bwd_dhu_npu(
-        q=q,
-        k=k,
-        w=w,
-        do=do,
-        dv=dv,
-        g=g,
-        gk=gk,
-        h0=h0,
-        dht=dht,
-        scale=scale,
-        state_v_first=state_v_first,
-        cu_seqlens=cu_seqlens,
-        cu_seqlens_cpu=cu_seqlens_cpu,
-        chunk_size=chunk_size,
-        chunk_indices=chunk_indices,
-        chunk_offsets=chunk_offsets,
-    )
-
-
-@input_guard
-def _chunk_gated_delta_rule_bwd_dhu_npu(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    w: torch.Tensor,
-    do: torch.Tensor,
-    dv: torch.Tensor,
-    g: torch.Tensor | None = None,
-    gk: torch.Tensor | None = None,
-    h0: torch.Tensor | None = None,
-    dht: torch.Tensor | None = None,
-    scale: float | None = None,
-    state_v_first: bool = False,
-    cu_seqlens: torch.LongTensor | None = None,
-    cu_seqlens_cpu: torch.LongTensor | None = None,
-    chunk_size: int = 64,
-    chunk_indices: torch.LongTensor | None = None,
-    chunk_offsets: torch.LongTensor | None = None,
     use_graph: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     B, T, H, K, V, HV = *q.shape, do.shape[-1], do.shape[2]

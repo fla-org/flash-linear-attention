@@ -464,7 +464,7 @@ def test_benchmark_input_geometry_matches_metadata(monkeypatch):
 def test_persistent_kernels_skip_holes_without_losing_later_tasks(monkeypatch):
     from fla.ops.utils.index import prepare_chunk_indices_static
     from fla.ops.utils.triton_ascend.cumsum import chunk_local_cumsum_npu
-    from fla.ops.utils.triton_ascend.solve_tril import _solve_tril_npu
+    from fla.ops.utils.triton_ascend.solve_tril import solve_tril_npu
 
     kkt = import_module('fla.ops.common.backends.triton_ascend.chunk_scaled_dot_kkt')
     wy = import_module('fla.ops.gated_delta_rule.backends.triton_ascend.wy_fast')
@@ -481,7 +481,7 @@ def test_persistent_kernels_skip_holes_without_losing_later_tasks(monkeypatch):
         common = dict(cu_seqlens=cu, chunk_indices=index, use_graph=True)
         cg = chunk_local_cumsum_npu(g, chunk_size=64, **common)
         a = kkt.chunk_scaled_dot_kkt_fwd_npu(k, cg, beta, **common)
-        inv = _solve_tril_npu(a, output_dtype=k.dtype, **common)
+        inv = solve_tril_npu(a, output_dtype=k.dtype, **common)
         w, u = wy.recompute_w_u_fwd_npu(k, v, beta, inv, cg, **common)
         return cg, a, inv, w, u
 
@@ -808,9 +808,9 @@ def test_backward_kernels_skip_sentinel_holes(monkeypatch, tiled, dim):
 
     def run(index, states, state_grads):
         common = dict(cu_seqlens=cu, chunk_indices=index, use_graph=True)
-        dv_local = output._chunk_bwd_dv_local_npu(q=q, k=k, do=do, g=g, **common)
-        grads = output._chunk_bwd_dqkwg_npu(q=q, k=k, v=v, do=do, h=states, dh=state_grads, w=k, g=g, dv=du, **common)
-        wy_grads = wy._prepare_wy_repr_bwd_npu(k=k, v=v, beta=beta, A=a, dw=dw, du=du, g=g, **common)
+        dv_local = output.chunk_bwd_dv_local_npu(q=q, k=k, do=do, g=g, **common)
+        grads = output.chunk_bwd_dqkwg_npu(q=q, k=k, v=v, do=do, h=states, dh=state_grads, w=k, g=g, dv=du, **common)
+        wy_grads = wy.prepare_wy_repr_bwd_npu(k=k, v=v, beta=beta, A=a, dw=dw, du=du, g=g, **common)
         return (dv_local,) + grads + wy_grads
 
     padded = []
