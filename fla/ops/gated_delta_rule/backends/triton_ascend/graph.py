@@ -7,6 +7,7 @@
 
 """Ascend GDN graph forward orchestration."""
 
+
 def chunk_gated_delta_rule_graph_fwd(
     q, k, v, g, beta, scale, initial_state, output_final_state, cu_seqlens, chunk_indices, chunk_offsets,
 ):
