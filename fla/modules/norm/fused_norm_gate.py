@@ -480,8 +480,8 @@ def layer_norm_gated_fwd(
     if D > BD:
         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
     if D <= 512:
-        # bucket token counts to limit autotuning across sequence lengths.
-        NB = triton.cdiv(T, 2048 * 32)
+        # share tuning across power-of-two row-count buckets.
+        NB = triton.next_power_of_2(triton.cdiv(T, 2048 * 32))
 
         def grid(meta):
             return (triton.cdiv(T, meta["BT"]),)
@@ -569,8 +569,8 @@ def layer_norm_gated_bwd(
     grid = (NS,)
 
     if D <= 512:
-        # bucket token counts to limit autotuning across sequence lengths.
-        NB = triton.cdiv(T, 2048 * 32)
+        # share tuning across power-of-two row-count buckets.
+        NB = triton.next_power_of_2(triton.cdiv(T, 2048 * 32))
 
         layer_norm_gated_bwd_kernel[grid](
             x=x,
