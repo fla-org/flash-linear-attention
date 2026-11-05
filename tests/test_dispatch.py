@@ -101,17 +101,27 @@ def test_solve_tril_ascend_eager_forwarding(run_python):
         importlib.reload(importlib.import_module('fla.ops.utils'))
         solve = importlib.import_module('fla.ops.utils.solve_tril')
         ascend = importlib.import_module('fla.ops.utils.triton_ascend.solve_tril')
+        import inspect
+
+        registry = backends._function_registries[inspect.unwrap(solve.solve_tril)]
+        candidate = registry._backends[backends.TritonAscendBackend.backend_type]
+        assert candidate.implementation is ascend.solve_tril_npu
+        signature = inspect.signature(candidate.implementation)
+        assert signature.parameters['use_graph'].default is False
         A, cu, indices, expected = object(), object(), object(), object()
-        with patch.object(ascend, '_solve_tril_npu', return_value=expected) as implementation:
+
+        def implementation(*args, **kwargs):
+            bound = signature.bind(*args, **kwargs)
+            bound.apply_defaults()
+            calls.append(bound.arguments)
+            return expected
+
+        calls = []
+        with patch.object(candidate, 'implementation', implementation), patch.object(candidate, 'is_enabled', return_value=True):
             assert solve.solve_tril(A) is expected
-            implementation.assert_called_once_with(
-                A=A, cu_seqlens=None, chunk_indices=None, output_dtype=ascend.torch.float, use_graph=False,
-            )
-            implementation.reset_mock()
+            assert calls[-1] == dict(A=A, cu_seqlens=None, chunk_indices=None, output_dtype=ascend.torch.float, use_graph=False)
             assert solve.solve_tril(A, cu, indices, None) is expected
-            implementation.assert_called_once_with(
-                A=A, cu_seqlens=cu, chunk_indices=indices, output_dtype=None, use_graph=False,
-            )
+            assert calls[-1] == dict(A=A, cu_seqlens=cu, chunk_indices=indices, output_dtype=None, use_graph=False)
         """,
         FLA_DISABLE_BACKEND_DISPATCH='0',
     )
