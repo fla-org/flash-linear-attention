@@ -27,9 +27,10 @@ import triton
 import triton.language as tl
 
 from fla.utils import ascend_compile_kwargs
+from fla.utils.ascend_ub_manager import ASCEND_LAUNCH_BLOCK_BUDGET, launch_grid_chunked
 
 
-@triton.jit(do_not_specialize=['T'])
+@triton.jit(do_not_specialize=['T', 'PID_OFFSET'])
 def fused_chunk_ttt_linear_bwd_kernel_dh_part1(
     q,
     k,
@@ -41,6 +42,7 @@ def fused_chunk_ttt_linear_bwd_kernel_dh_part1(
     de_loc,
     scale,
     T,
+    PID_OFFSET,
     H: tl.constexpr,
     K: tl.constexpr,
     V: tl.constexpr,
@@ -48,7 +50,7 @@ def fused_chunk_ttt_linear_bwd_kernel_dh_part1(
     BK: tl.constexpr,
     BV: tl.constexpr,
 ):
-    i_pid = tl.program_id(0).to(tl.int64)
+    i_pid = tl.program_id(0).to(tl.int64) + PID_OFFSET
     NT = tl.cdiv(T, BT)
     i_t = i_pid % NT
     i_nh = i_pid // NT
@@ -79,7 +81,8 @@ def fused_chunk_ttt_linear_bwd_kernel_dh_part1(
     b_do = tl.load(p_do, mask=m_v, other=0.0)
     b_v2 = tl.load(p_v2, mask=m_v, other=0.0)
 
-    b_A = tl.dot(b_k, b_q)
+    b_k_lhs = b_k + 0.0
+    b_A = tl.dot(b_k_lhs, b_q)
     b_A = - tl.where(m_A_t, b_A * scale * b_e[None, :], 0).to(do.dtype.element_ty)
     b_Ae = - tl.where(m_A_t, b_e[None, :], 0).to(do.dtype.element_ty)
     b_dvnl = tl.dot(b_A.to(b_do.dtype), b_do) + tl.dot(b_Ae.to(b_do.dtype), b_do)
@@ -89,9 +92,10 @@ def fused_chunk_ttt_linear_bwd_kernel_dh_part1(
     b_ds = tl.where(m_A, b_ds, 0)
     b_ds = b_ds.to(b_k.dtype)
     b_qs = (b_q * scale).to(b_q.dtype)
-    b_dkdsp = tl.dot(tl.trans(b_ds), tl.trans(b_qs) * b_e[:, None])
+    b_ds_lhs = b_ds + 0.0
+    b_dkdsp = tl.dot(tl.trans(b_ds_lhs), tl.trans(b_qs) * b_e[:, None])
     tl.store(p_dkdsp, b_dkdsp.to(p_dkdsp.dtype.element_ty), mask=m_k)
-    b_de_loc = tl.sum(tl.dot(b_ds, b_k) * tl.trans(b_qs).to(b_k.dtype), axis=1) + tl.sum(b_ds, axis=1)
+    b_de_loc = tl.sum(tl.dot(b_ds_lhs, b_k) * tl.trans(b_qs).to(b_k.dtype), axis=1) + tl.sum(b_ds, axis=1)
     tl.store(p_de_loc, b_de_loc.to(p_de_loc.dtype.element_ty), mask=m_t)
 
 
@@ -187,9 +191,7 @@ def fused_chunk_ttt_linear_bwd_kernel_dh_part2(
         p_dkdsp = dkdsp+(bos*H+i_h)*K + o_t[:, None] * (H*K) + o_k[None, :]
         p_de_loc = de_loc+(bos*H+i_h) + o_t * H
         p_e_last = eta+bos*H+i_h + (T-1)*H if i_t == NT-1 else eta+bos*H+i_h + (i_t*BT+BT-1)*H
-        b_q = tl.load(p_q, mask=m_q, other=0.0)
         b_k = tl.load(p_k, mask=m_k, other=0.0)
-        b_do = tl.load(p_do, mask=m_v, other=0.0)
         b_e_last = tl.load(p_e_last)
         # dh-independent terms (b_A, b_Ae, b_ds and their dh-free consumers)
         # are precomputed by fused_chunk_ttt_linear_bwd_kernel_dh_part1.
@@ -199,10 +201,10 @@ def fused_chunk_ttt_linear_bwd_kernel_dh_part2(
 
         b_v2 = tl.load(p_v2, mask=m_v, other=0.0).to(b_k.dtype)
         b_x = tl.load(p_x, mask=m_v, other=0.0).to(b_k.dtype)
-        b_y = tl.load(p_y, mask=m_v, other=0.0).to(b_k.dtype)
         b_rstd = tl.load(p_r, mask=m_t[:, None], other=0.0).to(tl.float32)
         b_dy = b_rstd * (b_dv_new * V - tl.sum(b_dv_new, axis=1, keep_dims=True) -
                          b_x * tl.sum(b_dv_new * b_x, axis=1, keep_dims=True)) / V
+        b_y = tl.load(p_y, mask=m_v, other=0.0).to(b_k.dtype)
         b_dx = -b_rstd * (b_dv_new * tl.sum(b_x * b_y, axis=1, keep_dims=True) +
                           b_y * tl.sum(b_dv_new * b_x, axis=1, keep_dims=True)) / V
         b_drstd = tl.sum(b_dv_new.to(b_rstd.dtype) * b_v2.to(b_rstd.dtype) / b_rstd, axis=1, keep_dims=True)
@@ -218,6 +220,7 @@ def fused_chunk_ttt_linear_bwd_kernel_dh_part2(
         b_dx = b_dx.to(b_k.dtype) + b_w * b_w * b_dy.to(b_k.dtype)
 
         b_h = tl.load(p_h, mask=m_hv, other=0.0)
+        b_q = tl.load(p_q, mask=m_q, other=0.0)
         b_q = (b_q * scale).to(b_q.dtype)
         b_dkh = b_rstd * (V * b_dx - tl.sum(b_dx, axis=1, keep_dims=True) -
                           b_x * tl.sum(b_x * b_dx, axis=1, keep_dims=True)) / V
@@ -234,6 +237,7 @@ def fused_chunk_ttt_linear_bwd_kernel_dh_part2(
         b_de = tl.where(mask, tl.sum(- b_dh * tl.trans(tl.dot(tl.trans(b_v2), b_k))), 0.0)
         b_de -= tl.where(mask, tl.sum(b_dhb * tl.sum(b_v2, axis=0)), 0.0)
         b_de -= b_de_loc
+        b_do = tl.load(p_do, mask=m_v, other=0.0)
         b_dh += tl.dot(b_q, b_do.to(b_q.dtype)) + tl.dot(tl.trans(b_k).to(b_dkh.dtype), b_dkh)
         b_dhb += tl.sum(b_do + b_dkh, axis=0)
         b_dh = tl.where((v_i < V)[None, :], b_dh, 0.)
@@ -289,12 +293,11 @@ def fused_chunk_ttt_linear_bwd_dh_npu(
     de = torch.empty_like(eta)
     dw = w.new_empty(B, H, V)
     db = b.new_empty(B, H, V)
-    # dh-independent pre-pass outputs (see the module docstring).
-    dvnl = torch.empty(B, T, H, V, dtype=do.dtype, device=do.device)
-    dkdsp = torch.empty(B, T, H, K, dtype=do.dtype, device=do.device)
-    de_loc = torch.empty(B, T, H, dtype=do.dtype, device=do.device)
+    dvnl = torch.empty(B, T, H, V, dtype=torch.float32, device=do.device)
+    dkdsp = torch.empty(B, T, H, K, dtype=torch.float32, device=do.device)
+    de_loc = torch.empty(B, T, H, dtype=torch.float32, device=do.device)
 
-    fused_chunk_ttt_linear_bwd_kernel_dh_part1[(NT * N * H,)](
+    part1_kwargs = dict(
         q=q,
         k=k,
         do=do,
@@ -305,6 +308,7 @@ def fused_chunk_ttt_linear_bwd_dh_npu(
         de_loc=de_loc,
         scale=scale,
         T=T,
+        PID_OFFSET=0,
         H=H,
         K=K,
         V=V,
@@ -313,6 +317,16 @@ def fused_chunk_ttt_linear_bwd_dh_npu(
         BV=BV,
         **ascend_compile_kwargs(),
     )
+    part1_grid = (NT * N * H,)
+    if part1_grid[0] > ASCEND_LAUNCH_BLOCK_BUDGET:
+        launch_grid_chunked(
+            kernel=fused_chunk_ttt_linear_bwd_kernel_dh_part1,
+            grid=part1_grid,
+            offset_keys=('PID_OFFSET',),
+            kernel_kwargs=part1_kwargs,
+        )
+    else:
+        fused_chunk_ttt_linear_bwd_kernel_dh_part1[part1_grid](**part1_kwargs)
     fused_chunk_ttt_linear_bwd_kernel_dh_part2[(N * H,)](
         q=q,
         k=k,
