@@ -1441,8 +1441,15 @@ def test_chunk_fwd_intra_grouped_npu(K, dtype, varlen):
 
 
 @pytest.mark.skipif(not IS_NPU, reason="Ascend WY tile planning")
-def test_recompute_w_u_fwd_gdn2_ub_budget(monkeypatch):
-    """A smaller UB budget must not reuse a larger cached WY plan."""
+@pytest.mark.parametrize(
+    ('store_qg', 'expected'),
+    [
+        pytest.param(True, [(64, 128), (16, 32), (64, 128)], id='q-enabled'),
+        pytest.param(False, [(128, 128), (32, 32), (128, 128)], id='q-absent'),
+    ],
+)
+def test_recompute_w_u_fwd_gdn2_ub_budget(store_qg, expected, monkeypatch):
+    """Keep q-enabled W tiles conservative and cache plans separately by UB capacity."""
     # numerical cases use the detected capacity; this checks cache isolation, not small-UB compilation.
     from fla.ops.gdn2.backends.triton_ascend.wy_fast import _get_fwd_tiles
     from fla.utils import ascend_ub_manager
@@ -1450,6 +1457,7 @@ def test_recompute_w_u_fwd_gdn2_ub_budget(monkeypatch):
     plans = []
     for capacity in (192 * 1024 * 8, 64 * 1024 * 8, 192 * 1024 * 8):
         monkeypatch.setattr(ascend_ub_manager, '_ub_manager', ascend_ub_manager.UBManager(capacity))
-        plans.append(_get_fwd_tiles(64, 256, 512, store_qg=True, ub_capacity_bits=capacity))
+        plans.append(_get_fwd_tiles(64, 256, 512, store_qg=store_qg, ub_capacity_bits=capacity))
+    assert plans == expected
     assert plans[0] == plans[2]
     assert all(small < large for small, large in zip(plans[1], plans[0]))

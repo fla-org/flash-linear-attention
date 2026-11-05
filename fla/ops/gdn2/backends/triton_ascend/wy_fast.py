@@ -26,7 +26,7 @@ from fla.utils.ascend_ub_manager import compute_row_tile_block_size, get_ub_mana
 # slabs independent. The multipliers conservatively include the extra gate tile.
 _RECOMPUTE_FWD_U_MEM_MULT = 4.5
 _RECOMPUTE_FWD_W_MEM_MULT = 4.5
-_RECOMPUTE_FWD_W_MEM_MULT_QG = 4.5
+_RECOMPUTE_FWD_W_MEM_MULT_QG = 6.5
 _SAFETY_MARGIN = 0.75
 _FALLBACK_TILE = 16
 _MAX_TILE_FWD = 128
