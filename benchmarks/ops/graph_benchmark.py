@@ -37,7 +37,6 @@ import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import asdict
 from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -278,8 +277,7 @@ def benchmark_graph_op(
                 "op": op_name,
                 "shape": shape_name,
                 "mode": mode,
-                **case.annotations,
-                **asdict(case.metadata),
+                **case.metadata,
                 **measured,
             })
             del case

@@ -121,7 +121,7 @@ jobs:
         HF_ENDPOINT: https://hf-mirror.com
 
     env:
-      FLA_CI_ENV: 0
+      FLA_CI_ENV: 1
       ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3"
       KDA_TRITON_CACHE_DIR: ${{ github.workspace }}/.triton-kda-cache
       PRECOND_KDA_SHAPES: >-

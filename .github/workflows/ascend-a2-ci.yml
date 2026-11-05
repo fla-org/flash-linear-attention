@@ -57,9 +57,9 @@ jobs:
               'tests/ops/test_gdn_graph_launch.py',
               'fla/ops/gated_delta_rule/chunk.py',
               'fla/ops/gated_delta_rule/graph.py',
+              'fla/ops/gated_delta_rule/backends/triton_ascend/graph.py',
               'fla/ops/utils/triton_ascend/solve_tril.py',
               'tests/benchmarks/test_graph_benchmark.py',
-              'tests/benchmarks/test_gdn_graph_registry.py',
               'benchmarks/ops/run.py',
               'benchmarks/ops/graph_benchmark.py',
               'benchmarks/ops/graph_registry.py',
@@ -111,7 +111,7 @@ jobs:
         HF_ENDPOINT: https://hf-mirror.com
 
     env:
-      FLA_CI_ENV: 0
+      FLA_CI_ENV: 1
       ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3,4,5,6,7"
       TRITON_CACHE_DIR: ${{ github.workspace }}/.triton-a2-tests-cache
 
