@@ -9,7 +9,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from fla.modules.token_shift import token_shift, token_shift_ref
+from fla.ops.token_shift.ops import token_shift, token_shift_ref
 from fla.utils import assert_close, device
 
 test_b_list = [4]

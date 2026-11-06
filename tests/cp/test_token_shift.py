@@ -11,9 +11,9 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from fla.modules.token_shift import token_shift_ref
-from fla.modules.token_shift_cp import token_shift_cp
 from fla.ops.cp import build_cp_context
+from fla.ops.token_shift.cp import token_shift_cp
+from fla.ops.token_shift.ops import token_shift_ref
 from fla.utils import assert_close, device
 from tests.cp.utils import gather_global, shard_tensor
 

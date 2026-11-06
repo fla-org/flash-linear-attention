@@ -116,7 +116,11 @@ def test_split_wheels_match_release_contract(tmp_path: Path) -> None:
     assert "fla/ops/__init__.py" in core_names
     assert "fla/modules/__init__.py" in core_names
     assert "fla/backends.py" in core_names
-    expected_sources = {path.relative_to(ROOT).as_posix() for path in (ROOT / "fla/modules").rglob("*.py")}
+    expected_sources = {
+        path.relative_to(ROOT).as_posix()
+        for package in ("fla/modules", "fla/ops")
+        for path in (ROOT / package).rglob("*.py")
+    }
     assert expected_sources <= core_names
     assert "fla/utils/__init__.py" in core_names
     for module in ("env", "hardware", "decorators", "testing", "ascend_ub_manager"):

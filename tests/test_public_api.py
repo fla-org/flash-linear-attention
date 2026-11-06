@@ -5,9 +5,11 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+import ast
 import importlib
 import inspect
 import pickle
+from pathlib import Path
 
 import pytest
 import torch
@@ -15,6 +17,24 @@ import torch
 import fla
 from fla import layers, models, modules
 from fla.modules import activations, l2norm
+
+
+def test_operator_dependency_direction():
+    root = Path(fla.__file__).parent
+    for path in (root / 'ops').rglob('*.py'):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if isinstance(node, ast.ImportFrom):
+                assert not (node.module or '').startswith('fla.modules'), path
+            elif isinstance(node, ast.Import):
+                assert all(not alias.name.startswith('fla.modules') for alias in node.names), path
+    for path in (root / 'modules').rglob('*.py'):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if isinstance(node, ast.ClassDef):
+                assert all(not ast.unparse(base).endswith('autograd.Function') for base in node.bases), path
+            elif isinstance(node, ast.FunctionDef):
+                decorators = [decorator.func if isinstance(decorator, ast.Call)
+                              else decorator for decorator in node.decorator_list]
+                assert all(ast.unparse(decorator) not in {'triton.jit', 'gluon.jit'} for decorator in decorators), path
 
 
 def test_top_level_exports_layers_and_non_config_models():
@@ -138,6 +158,7 @@ def test_public_function_aliases():
         ('fused_kl_div', ('fused_kl_div_loss',)),
         ('grpo', ('fused_grpo_loss', 'grpo_loss_with_old_logps')),
         ('causal_conv1d', ('causal_conv1d', 'causal_conv1d_fwd', 'causal_conv1d_bwd', 'causal_conv1d_update')),
+        ('token_shift', ('token_shift', 'token_shift_ref')),
     ],
 )
 def test_module_operator_entries(owner, names):

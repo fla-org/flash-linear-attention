@@ -119,6 +119,8 @@ FLA_CI_ENV=0 pytest tests/
 
 Organize code by responsibility. Use one file for a self-contained component and a package when it needs multiple cohesive implementation files. Keep each backend with its owning operation; add shared code only for behavior that is actually shared. Avoid wrapper-only layers and directories reserved for hypothetical extensions.
 
+`fla.ops` owns functional operators, including kernels, launchers, custom autograd, and backend registration. `fla.modules` owns parameterized modules, buffers, initialization, and module composition, and calls these operators. Operator implementations must not import module wrappers. Preserve existing public imports from `fla.modules` through compatibility exports when moving an implementation.
+
 ```
 fla/
 ├── layers/          # PyTorch attention layer implementations

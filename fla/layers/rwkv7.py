@@ -18,12 +18,12 @@ from torch.nn import functional as F
 from fla.layers.rwkv6 import LoRA
 from fla.layers.utils import get_layer_cache, update_layer_cache
 from fla.modules import GroupNorm
-from fla.modules.token_shift import token_shift
 from fla.ops.norm.l2norm import l2_norm
 from fla.ops.rwkv7 import chunk_rwkv7, fused_mul_recurrent_rwkv7
 from fla.ops.rwkv7.fused_addcmul import fused_addcmul_rwkv7
 from fla.ops.rwkv7.fused_k_update import fused_k_rwkv7
 from fla.ops.rwkv7.gate_output_correction import gate_output_correction
+from fla.ops.token_shift.ops import token_shift
 
 if TYPE_CHECKING:
     from fla.models.cache_utils import Cache

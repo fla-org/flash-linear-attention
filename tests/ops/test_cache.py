@@ -10,9 +10,9 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.modules.token_shift import token_shift_bwd_kernel_long, token_shift_fwd_kernel_long
 from fla.ops.causal_conv1d.ops import causal_conv1d_bwd_kernel, causal_conv1d_fwd_kernel
 from fla.ops.gla.chunk import chunk_gla_bwd_kernel_inter
+from fla.ops.token_shift.ops import token_shift_bwd_kernel_long, token_shift_fwd_kernel_long
 from fla.ops.utils.cache import AutotuneKey, fla_cache_autotune
 from fla.utils import device
 

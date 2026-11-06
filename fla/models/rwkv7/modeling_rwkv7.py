@@ -24,8 +24,8 @@ from fla.models.generation_utils import FLAUnsupportedCacheGenerationMixin
 from fla.models.modeling_utils import FLAForCausalLM, FLAPreTrainedModel, get_attention
 from fla.models.rwkv7.configuration_rwkv7 import RWKV7Config
 from fla.modules import LayerNorm
-from fla.modules.token_shift import token_shift
 from fla.ops.activations import ACT2FN
+from fla.ops.token_shift.ops import token_shift
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack

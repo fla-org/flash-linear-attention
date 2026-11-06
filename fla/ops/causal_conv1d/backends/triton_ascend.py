@@ -493,7 +493,7 @@ def causal_conv1d_bwd_coregrid_kernel(
             tl.store(p_dx, tl.cast(b_dx, dtype=p_dx.dtype.element_ty, fp_downcast_rounding='rtne'), boundary_check=(0, 1))
 
 
-# Ascend Triton rejects grids whose product exceeds 65535 (see fla/modules/token_shift.py).
+# Ascend Triton rejects grids whose product exceeds 65535 (see fla/ops/token_shift/ops.py).
 _NPU_MAX_TRITON_GRID = 65535
 _ELEM_BLOCK = 2048
 

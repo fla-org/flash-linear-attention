@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 import triton
 
-from fla.modules.token_shift import token_shift
+from fla.ops.token_shift.ops import token_shift
 
 
 def token_shift_ref(x):

@@ -33,7 +33,7 @@ from fla.modules.norm import (
     RMSNormLinear,
 )
 from fla.modules.rotary import RotaryEmbedding
-from fla.modules.token_shift import TokenShift
+from fla.ops.token_shift.ops import TokenShift
 
 _MODULE_ALIASES = {
     'causal_conv1d.ops': ('causal_conv1d',),
