@@ -36,6 +36,7 @@ from fla.modules.rotary import RotaryEmbedding
 from fla.modules.token_shift import TokenShift
 
 _MODULE_ALIASES = {
+    'activations.ops': ('activations',),
     'fused_norm_gate': ('norm.fused_norm_gate',),
     'l2norm': ('norm.l2norm',),
     'norm.layernorm_quant': ('fla.ops.norm.layernorm_quant',),
@@ -76,7 +77,7 @@ for _old, _targets in _MODULE_ALIASES.items():
         setattr(sys.modules[_parent], _child, _module)
 
 # defer GRPO's compile policy until it is explicitly imported
-for _name in ('activations', 'rotary', 'fused_cross_entropy', 'fused_kl_div', 'fused_linear_cross_entropy'):
+for _name in ('rotary', 'fused_cross_entropy', 'fused_kl_div', 'fused_linear_cross_entropy'):
     _module = import_module(f'{__name__}.{_name}')
     for _symbol, _value in vars(import_module(f'{__name__}.{_name}.ops')).items():
         if not _symbol.startswith('_'):

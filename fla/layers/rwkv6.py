@@ -19,8 +19,8 @@ from einops import rearrange
 
 from fla.layers.utils import get_layer_cache, update_layer_cache
 from fla.modules import GroupNorm
-from fla.modules.activations import ACT2FN
 from fla.modules.token_shift import token_shift
+from fla.ops.activations import ACT2FN
 from fla.ops.rwkv6 import chunk_rwkv6, fused_recurrent_rwkv6
 
 if TYPE_CHECKING:

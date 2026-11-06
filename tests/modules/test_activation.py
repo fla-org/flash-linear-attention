@@ -11,7 +11,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from fla.modules.activations import (
+from fla.ops.activations import (
     elu_p1,
     fast_gelu_impl,
     logsigmoid,
@@ -25,7 +25,7 @@ from fla.modules.activations import (
     swiglu_linear,
     swish,
 )
-from fla.modules.activations.ops import alloc_output, prepare_input
+from fla.ops.activations.ops import alloc_output, prepare_input
 from fla.utils import assert_close, device
 
 
@@ -540,12 +540,12 @@ def test_activation_ascend_registration(run_python):
         import sys
 
         from fla import backends
-        from fla.modules import activations
-        from fla.modules.activations import ops
+        from fla.ops import activations
+        from fla.ops.activations import ops
 
         backends.TritonAscendBackend.is_available = classmethod(lambda cls: True)
         importlib.reload(activations)
-        implementation = sys.modules['fla.modules.activations.triton_ascend']
+        implementation = sys.modules['fla.ops.activations.triton_ascend']
         for name in ('sigmoid_fwd', 'sigmoid_bwd', 'swiglu_fwdbwd', 'swiglu_linear'):
             entry = getattr(ops, name)
             registry = backends._function_registries[inspect.unwrap(entry)]

@@ -17,7 +17,7 @@ from torch.nn import functional as F
 
 from fla.layers.utils import get_layer_cache, update_layer_cache
 from fla.modules import FusedRMSNormGated, RMSNorm, ShortConvolution
-from fla.modules.activations import elu_p1
+from fla.ops.activations import elu_p1
 from fla.ops.momentum_delta_rule import chunk_momentum_delta_rule, fused_recurrent_momentum_delta_rule
 
 

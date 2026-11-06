@@ -21,8 +21,8 @@ from einops import rearrange, repeat
 
 from fla.layers.utils import get_layer_cache, repad_hidden_states, unpad_hidden_states, update_layer_cache
 from fla.modules import FusedRMSNormGated, RMSNorm, RotaryEmbedding
-from fla.modules.activations import ACT2FN
 from fla.modules.feature_map import ReLUFeatureMap, SwishFeatureMap, T2RFeatureMap
+from fla.ops.activations import ACT2FN
 from fla.ops.gsa import chunk_gsa, fused_recurrent_gsa
 from fla.ops.norm.layernorm import rms_norm_linear
 from fla.ops.utils.index import prepare_lens_from_mask

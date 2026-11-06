@@ -20,7 +20,7 @@ import torch
 import triton
 from triton.runtime import driver
 
-# Ascend Triton launch limits (see fla/modules/activations/triton_ascend.py).
+# Ascend Triton launch limits (see fla/ops/activations/triton_ascend.py).
 ASCEND_MAX_GRID_DIM = 65535
 # per-launch block-count budget for host-chunked grid launches.
 ASCEND_LAUNCH_BLOCK_BUDGET = 4096

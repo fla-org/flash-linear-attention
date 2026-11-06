@@ -24,8 +24,8 @@ from fla.models.cache_utils import Cache
 from fla.models.generation_utils import FLAGenerationMixin
 from fla.models.modeling_utils import FLAForCausalLM, FLAPreTrainedModel
 from fla.modules import RMSNorm
-from fla.modules.activations import swiglu
 from fla.modules.fused_bitlinear import FusedBitLinear
+from fla.ops.activations import swiglu
 from fla.ops.attnres import fused_attnres
 
 if TYPE_CHECKING:

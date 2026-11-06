@@ -8,8 +8,8 @@
 import torch
 import triton
 
-from fla.modules.activations import elu_p1, logsigmoid, powglu, sigmoid, sqrelu, swiglu, swish
-from fla.modules.activations import fast_gelu_impl as gelu
+from fla.ops.activations import elu_p1, logsigmoid, powglu, sigmoid, sqrelu, swiglu, swish
+from fla.ops.activations import fast_gelu_impl as gelu
 from fla.utils import device
 
 DTYPE = torch.bfloat16

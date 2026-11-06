@@ -24,8 +24,8 @@ from fla.layers.utils import (
     update_layer_cache,
 )
 from fla.modules import FusedRMSNormGated, RMSNorm, RotaryEmbedding
-from fla.modules.activations import swiglu
 from fla.modules.rotary import rotary_embedding
+from fla.ops.activations import swiglu
 from fla.ops.attn.decoding import attn_decoding_one_step
 from fla.ops.attn.parallel import parallel_attn
 from fla.ops.simple_gla import chunk_simple_gla, fused_recurrent_simple_gla

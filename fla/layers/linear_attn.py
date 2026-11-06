@@ -16,8 +16,8 @@ from einops import rearrange, repeat
 
 from fla.layers.utils import get_layer_cache, repad_hidden_states, unpad_hidden_states, update_layer_cache
 from fla.modules import RMSNorm
-from fla.modules.activations import elu_p1
 from fla.modules.feature_map import DPFPFeatureMap, HadamardFeatureMap, HedgehogFeatureMap, T2RFeatureMap
+from fla.ops.activations import elu_p1
 from fla.ops.linear_attn import chunk_linear_attn, fused_chunk_linear_attn, fused_recurrent_linear_attn
 
 if TYPE_CHECKING:

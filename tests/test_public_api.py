@@ -111,6 +111,9 @@ def test_legacy_imports_preserve_symbol_identity(legacy, current, names):
 
 
 def test_public_function_aliases():
+    activation_ops = importlib.import_module('fla.ops.activations')
+    for name in activation_ops.__all__:
+        assert getattr(activations, name) is getattr(activation_ops, name)
     for name in ('sigmoid', 'logsigmoid', 'swish', 'sqrelu'):
         assert activations.ACT2FN[name] is getattr(activations, name)
     assert activations.ACT2FN['silu'] is activations.swish

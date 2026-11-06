@@ -14,7 +14,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from fla.modules.activations import fast_gelu_impl, sigmoid, sqrelu, swish
+from fla.ops.activations import fast_gelu_impl, sigmoid, sqrelu, swish
 from fla.ops.norm.layernorm import layer_norm
 from fla.utils import checkpoint
 

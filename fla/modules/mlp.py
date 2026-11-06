@@ -16,7 +16,7 @@ from torch.distributed import DeviceMesh
 from torch.distributed.tensor import Placement, Replicate, Shard, distribute_module
 from torch.distributed.tensor.parallel import ParallelStyle
 
-from fla.modules.activations import powglu, powglu_linear, swiglu, swiglu_linear
+from fla.ops.activations import powglu, powglu_linear, swiglu, swiglu_linear
 
 try:
     from torch.distributed.tensor import DTensor

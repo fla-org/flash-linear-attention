@@ -18,7 +18,7 @@ from torch.nn import functional as F
 
 from fla.layers.utils import get_layer_cache, repad_hidden_states, unpad_hidden_states, update_layer_cache
 from fla.modules import FusedRMSNormGated, RMSNorm, ShortConvolution
-from fla.modules.activations import elu_p1
+from fla.ops.activations import elu_p1
 from fla.ops.delta_rule import chunk_delta_rule, fused_recurrent_delta_rule
 
 if TYPE_CHECKING:

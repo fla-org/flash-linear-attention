@@ -17,7 +17,7 @@ from einops import rearrange, repeat
 
 from fla.layers.utils import get_layer_cache, update_layer_cache
 from fla.modules import FusedRMSNormGated, RMSNorm, ShortConvolution
-from fla.modules.activations import ACT2FN
+from fla.ops.activations import ACT2FN
 from fla.ops.simple_gla import chunk_simple_gla, fused_recurrent_simple_gla
 
 if TYPE_CHECKING:

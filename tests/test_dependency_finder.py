@@ -176,7 +176,7 @@ def test_backend_changes_follow_repository_ownership(changed, expected, unrelate
         ('fla/modules/fused_cross_entropy/ops.py', {'tests/modules/test_cross_entropy.py', 'tests/modules/test_l2warp.py'}),
         ('fla/ops/attn/backends/tilelang.py', {'tests/ops/test_attn.py'}),
         ('fla/ops/kda/backends/triton_ascend/chunk_bwd.py', {'tests/ops/test_kda.py', 'tests/ops/test_gdn2.py'}),
-        pytest.param('fla/modules/activations/triton_ascend.py', {'tests/modules/test_activation.py'}, id='ascend-module'),
+        pytest.param('fla/ops/activations/triton_ascend.py', {'tests/modules/test_activation.py'}, id='ascend-module'),
         (
             'fla/ops/simple_gla/backends/triton_ascend/fused_chunk.py',
             {'tests/ops/test_simple_gla.py', 'tests/ops/test_retention.py'},

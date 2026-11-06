@@ -5,8 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from fla.backends import TritonAscendBackend
-from fla.modules.activations.ops import (
+from fla.ops.activations import (
     ACT2FN,
     elu_p1,
     fast_gelu_impl,
@@ -37,7 +36,3 @@ __all__ = [
     'swiglu_linear',
     'swish',
 ]
-
-
-if TritonAscendBackend.is_available():
-    from fla.modules.activations import triton_ascend  # noqa: F401

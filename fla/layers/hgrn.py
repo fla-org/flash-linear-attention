@@ -17,7 +17,7 @@ import torch.nn.functional as F
 
 from fla.layers.utils import get_layer_cache, update_layer_cache
 from fla.modules import FusedRMSNormGated, ShortConvolution
-from fla.modules.activations import swiglu
+from fla.ops.activations import swiglu
 from fla.ops.hgrn import chunk_hgrn, fused_recurrent_hgrn
 
 if TYPE_CHECKING:

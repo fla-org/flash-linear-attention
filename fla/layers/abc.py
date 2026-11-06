@@ -17,8 +17,8 @@ from einops import rearrange
 
 from fla.layers.utils import get_layer_cache, update_layer_cache
 from fla.modules import FusedRMSNormGated, RMSNorm, RotaryEmbedding, ShortConvolution
-from fla.modules.activations import swiglu, swish
 from fla.ops.abc.chunk import chunk_abc
+from fla.ops.activations import swiglu, swish
 
 if TYPE_CHECKING:
     from fla.models.cache_utils import Cache

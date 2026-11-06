@@ -13,7 +13,7 @@ import triton
 import triton.language as tl
 
 from fla.backends import TritonAscendBackend, register
-from fla.modules.activations.ops import (
+from fla.ops.activations.ops import (
     alloc_output,
     logsigmoid_bwd,
     logsigmoid_fwd,
