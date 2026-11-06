@@ -10,7 +10,7 @@ import triton
 import triton.language as tl
 
 from fla.modules.norm.l2norm import l2norm_bwd, l2norm_fwd
-from fla.utils import input_guard
+from fla.utils import IS_NVIDIA_HOPPER, input_guard
 
 
 @triton.heuristics({
@@ -269,7 +269,9 @@ def fused_recurrent_delta_rule_fwd(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
-    BK, BV = triton.next_power_of_2(K), min(triton.next_power_of_2(V), 8)
+    BK = triton.next_power_of_2(K)
+    # BV = 16 on H100/H200: see fla-org/flash-linear-attention#1609.
+    BV = min(triton.next_power_of_2(V), 16 if IS_NVIDIA_HOPPER else 8)
     NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
     assert NK == 1, "NK > 1 is not supported yet"
     num_stages = 1

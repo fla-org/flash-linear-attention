@@ -140,7 +140,7 @@ def repository_finder():
     ('changed', 'expected', 'unrelated'),
     [
         ('fla/ops/attn/backends/tilelang.py', 'fla/ops/attn/parallel.py', 'fla/ops/common/chunk_o.py'),
-        ('fla/ops/common/backends/tilelang/chunk_bwd.py', 'fla/ops/common/chunk_o.py', 'fla/ops/attn/parallel.py'),
+        ('fla/ops/common/backends/tilelang.py', 'fla/ops/common/chunk_o.py', 'fla/ops/attn/parallel.py'),
         ('fla/ops/kda/backends/triton_ascend/chunk_bwd.py', 'fla/ops/gdn2/chunk_bwd.py', 'fla/ops/attn/parallel.py'),
         ('fla/ops/kda/backends/flash_kda.py', 'fla/ops/kda/chunk.py', 'fla/ops/attn/parallel.py'),
     ],
