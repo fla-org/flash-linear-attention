@@ -69,9 +69,8 @@ def _dynamic_conv1d_load_x(
 def dynamic_conv1d_fwd_kernel(
     x,
     z,
-    kernel_basis,
-    weight,
-    bias,
+    out_proj_weight,
+    out_proj_bias,
     residual,
     initial_state,
     y,
@@ -106,13 +105,13 @@ def dynamic_conv1d_fwd_kernel(
                 other=0,
             ).to(tl.float32)
             up = tl.load(
-                pointer=kernel_basis + (r[:, None] * W + j) * D + d[None, :],
+                pointer=out_proj_weight + (r[:, None] * W + j) * D + d[None, :],
                 mask=(r[:, None] < R) & (d[None, :] < D),
                 other=0,
             ).to(tl.float32)
             kernel += tl.dot(latent, up, input_precision='ieee')
-        if weight is not None:
-            kernel += tl.load(weight + j.to(tl.int64) * D + d, d < D, other=0)[None, :].to(tl.float32)
+        if out_proj_bias is not None:
+            kernel += tl.load(out_proj_bias + j.to(tl.int64) * D + d, d < D, other=0)[None, :].to(tl.float32)
         values = _dynamic_conv1d_load_x(
             x=x,
             initial_state=initial_state,
@@ -125,8 +124,6 @@ def dynamic_conv1d_fwd_kernel(
             W=W,
         )
         out += kernel * values
-    if bias is not None:
-        out += tl.load(bias + d, d < D, other=0)[None, :].to(tl.float32)
     if pre_activation is not None:
         tl.store(pre_activation + (bos + t[:, None]) * D + d[None, :], out, (t[:, None] < length) & (d[None, :] < D))
         out *= tl.sigmoid(out)
@@ -142,8 +139,8 @@ def dynamic_conv1d_fwd_kernel(
 @triton.jit(do_not_specialize=['T'])
 def dynamic_conv1d_bwd_kernel_dx(
     z,
-    kernel_basis,
-    weight,
+    out_proj_weight,
+    out_proj_bias,
     dy,
     dht,
     dx,
@@ -191,13 +188,13 @@ def dynamic_conv1d_bwd_kernel_dx(
                 other=0,
             ).to(tl.float32)
             up = tl.load(
-                pointer=kernel_basis + (r[:, None] * W + j) * D + d[None, :],
+                pointer=out_proj_weight + (r[:, None] * W + j) * D + d[None, :],
                 mask=(r[:, None] < R) & (d[None, :] < D),
                 other=0,
             ).to(tl.float32)
             kernel += tl.dot(latent, up, input_precision='ieee')
-        if weight is not None:
-            kernel += tl.load(weight + j.to(tl.int64) * D + d, d < D, other=0)[None, :].to(tl.float32)
+        if out_proj_bias is not None:
+            kernel += tl.load(out_proj_bias + j.to(tl.int64) * D + d, d < D, other=0)[None, :].to(tl.float32)
         dout = tl.load(
             pointer=dy + (bos + future[:, None]) * D + d[None, :],
             mask=(future[:, None] >= 0) & (future[:, None] < length) & (d[None, :] < D),
@@ -221,7 +218,7 @@ def dynamic_conv1d_bwd_kernel_dx(
 @triton.jit(do_not_specialize=['T'])
 def dynamic_conv1d_bwd_kernel_dz(
     x,
-    kernel_basis,
+    out_proj_weight,
     initial_state,
     dy,
     dz,
@@ -265,7 +262,7 @@ def dynamic_conv1d_bwd_kernel_dz(
                 W=W,
             )
             up = tl.load(
-                pointer=kernel_basis + (r[None, :] * W + j) * D + d[:, None],
+                pointer=out_proj_weight + (r[None, :] * W + j) * D + d[:, None],
                 mask=(r[None, :] < R) & (d[:, None] < D),
                 other=0,
             ).to(tl.float32)
@@ -274,13 +271,13 @@ def dynamic_conv1d_bwd_kernel_dz(
 
 
 @triton.jit(do_not_specialize=['T'])
-def dynamic_conv1d_bwd_kernel_dw(
+def dynamic_conv1d_bwd_kernel_dproj(
     x,
     z,
     initial_state,
     dy,
-    dkernel_basis,
-    dw,
+    dout_proj_weight,
+    dout_proj_bias,
     cu_seqlens,
     chunk_indices,
     T,
@@ -307,7 +304,7 @@ def dynamic_conv1d_bwd_kernel_dw(
     r = i_r * BR + tl.arange(0, BR)
     for j in range(W):
         grad = tl.full((BR, BD), 0, tl.float32)
-        grad_weight = tl.full((BD,), 0, tl.float32)
+        grad_bias = tl.full((BD,), 0, tl.float32)
         for offset in range(0, BS, BT):
             t = start + offset + tl.arange(0, BT).to(tl.int64)
             latent = tl.load(
@@ -333,10 +330,14 @@ def dynamic_conv1d_bwd_kernel_dw(
             )
             dkernel = dout * values
             grad += tl.dot(latent, dkernel, input_precision='ieee')
-            grad_weight += tl.sum(dkernel, axis=0)
-        tl.store(dkernel_basis + ((part * R + r[:, None]) * W + j) * D + d[None, :], grad, (r[:, None] < R) & (d[None, :] < D))
-        if dw is not None:
-            tl.store(dw + (part * W + j) * D + d, grad_weight, (i_r == 0) & (d < D))
+            grad_bias += tl.sum(dkernel, axis=0)
+        tl.store(
+            pointer=dout_proj_weight + ((part * R + r[:, None]) * W + j) * D + d[None, :],
+            value=grad,
+            mask=(r[:, None] < R) & (d[None, :] < D),
+        )
+        if dout_proj_bias is not None:
+            tl.store(dout_proj_bias + (part * W + j) * D + d, grad_bias, (i_r == 0) & (d < D))
 
 
 class DynamicConv1dFunction(torch.autograd.Function):
@@ -348,9 +349,8 @@ class DynamicConv1dFunction(torch.autograd.Function):
         ctx,
         x,
         z,
-        kernel_basis,
-        weight,
-        bias,
+        out_proj_weight,
+        out_proj_bias,
         residual,
         initial_state,
         output_final_state,
@@ -359,7 +359,7 @@ class DynamicConv1dFunction(torch.autograd.Function):
         chunk_indices,
     ):
         B, T, D = x.shape
-        R, W, _ = kernel_basis.shape
+        R, W, _ = out_proj_weight.shape
         BT, BD, BR = 16, 32, min(128, max(16, triton.next_power_of_2(R)))
         if cu_seqlens is not None and chunk_indices is None:
             chunk_indices = prepare_chunk_indices(cu_seqlens=cu_seqlens, chunk_size=BT)
@@ -370,9 +370,8 @@ class DynamicConv1dFunction(torch.autograd.Function):
             dynamic_conv1d_fwd_kernel[(triton.cdiv(D, BD) * NT, B)](
                 x=x,
                 z=z,
-                kernel_basis=kernel_basis,
-                weight=weight,
-                bias=bias,
+                out_proj_weight=out_proj_weight,
+                out_proj_bias=out_proj_bias,
                 residual=residual,
                 initial_state=initial_state,
                 y=y,
@@ -393,9 +392,8 @@ class DynamicConv1dFunction(torch.autograd.Function):
         ctx.save_for_backward(
             x,
             z,
-            kernel_basis,
-            weight,
-            bias,
+            out_proj_weight,
+            out_proj_bias,
             residual,
             initial_state,
             pre_activation,
@@ -408,9 +406,9 @@ class DynamicConv1dFunction(torch.autograd.Function):
     @input_guard
     @autocast_custom_bwd
     def backward(ctx, dy, dht):
-        x, z, kernel_basis, weight, bias, residual, initial_state, pre_activation, cu_seqlens, chunk_indices = ctx.saved_tensors
+        x, z, out_proj_weight, out_proj_bias, residual, initial_state, pre_activation, cu_seqlens, chunk_indices = ctx.saved_tensors
         B, T, D = x.shape
-        R, W, _ = kernel_basis.shape
+        R, W, _ = out_proj_weight.shape
         BT, BD, BR = 16, 32, min(128, max(16, triton.next_power_of_2(R)))
         NT = len(chunk_indices) if chunk_indices is not None else triton.cdiv(T, BT)
         dr = dy.to(residual) if residual is not None else None
@@ -421,8 +419,8 @@ class DynamicConv1dFunction(torch.autograd.Function):
         if NT:
             dynamic_conv1d_bwd_kernel_dx[(triton.cdiv(D, BD) * NT, B)](
                 z=z,
-                kernel_basis=kernel_basis,
-                weight=weight,
+                out_proj_weight=out_proj_weight,
+                out_proj_bias=out_proj_bias,
                 dy=dy,
                 dht=dht,
                 dx=dx,
@@ -439,7 +437,7 @@ class DynamicConv1dFunction(torch.autograd.Function):
             )
             dynamic_conv1d_bwd_kernel_dz[(triton.cdiv(R, BR) * NT, B)](
                 x=x,
-                kernel_basis=kernel_basis,
+                out_proj_weight=out_proj_weight,
                 initial_state=initial_state,
                 dy=dy,
                 dz=dz,
@@ -456,8 +454,8 @@ class DynamicConv1dFunction(torch.autograd.Function):
         if dh0 is not None:
             dynamic_conv1d_bwd_kernel_dx[(triton.cdiv(D, BD) * triton.cdiv(W, BT), len(dh0))](
                 z=z,
-                kernel_basis=kernel_basis,
-                weight=weight,
+                out_proj_weight=out_proj_weight,
+                out_proj_bias=out_proj_bias,
                 dy=dy,
                 dht=dht,
                 dx=dh0,
@@ -475,16 +473,16 @@ class DynamicConv1dFunction(torch.autograd.Function):
         BS = 256
         splits = prepare_chunk_indices(cu_seqlens=cu_seqlens, chunk_size=BS) if cu_seqlens is not None else None
         NS = len(splits) if splits is not None else triton.cdiv(T, BS)
-        dkernel_basis = kernel_basis.new_empty((B * NS, R, W, D), dtype=torch.float32)
-        dw = weight.new_empty((B * NS, W, D), dtype=torch.float32) if weight is not None else None
+        dout_proj_weight = out_proj_weight.new_empty((B * NS, R, W, D), dtype=torch.float32)
+        dout_proj_bias = out_proj_bias.new_empty((B * NS, W, D), dtype=torch.float32) if out_proj_bias is not None else None
         if NS:
-            dynamic_conv1d_bwd_kernel_dw[(triton.cdiv(D, BD) * triton.cdiv(R, BR) * NS, B)](
+            dynamic_conv1d_bwd_kernel_dproj[(triton.cdiv(D, BD) * triton.cdiv(R, BR) * NS, B)](
                 x=x,
                 z=z,
                 initial_state=initial_state,
                 dy=dy,
-                dkernel_basis=dkernel_basis,
-                dw=dw,
+                dout_proj_weight=dout_proj_weight,
+                dout_proj_bias=dout_proj_bias,
                 cu_seqlens=cu_seqlens,
                 chunk_indices=splits,
                 T=T,
@@ -497,18 +495,16 @@ class DynamicConv1dFunction(torch.autograd.Function):
                 BR=BR,
                 BS=BS,
             )
-        dkernel_basis = dkernel_basis.sum(0).to(kernel_basis)
-        dw = dw.sum(0).to(weight) if dw is not None else None
-        db = dy.sum(dim=(0, 1), dtype=torch.float32).to(bias) if bias is not None else None
-        return dx, dz, dkernel_basis, dw, db, dr, dh0, None, None, None, None
+        dout_proj_weight = dout_proj_weight.sum(0).to(out_proj_weight)
+        dout_proj_bias = dout_proj_bias.sum(0).to(out_proj_bias) if dout_proj_bias is not None else None
+        return dx, dz, dout_proj_weight, dout_proj_bias, dr, dh0, None, None, None, None
 
 
 def dynamic_conv1d(
     x: torch.Tensor,
     z: torch.Tensor,
-    kernel_basis: torch.Tensor,
-    weight: torch.Tensor | None = None,
-    bias: torch.Tensor | None = None,
+    out_proj_weight: torch.Tensor,
+    out_proj_bias: torch.Tensor | None = None,
     residual: torch.Tensor | None = None,
     initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
@@ -523,12 +519,10 @@ def dynamic_conv1d(
             Convolution inputs of shape [B, T, D].
         z (torch.Tensor):
             Per-token latent coefficients of shape [B, T, R].
-        kernel_basis (torch.Tensor):
-            Kernel basis of shape [R, W, D]. Tap zero multiplies the current token.
-        weight (torch.Tensor, Optional):
-            Static kernel of shape [W, D], added to the generated weights. Default: `None`.
-        bias (torch.Tensor, Optional):
-            Channel bias of shape [D]. Default: `None`.
+        out_proj_weight (torch.Tensor):
+            Generator output projection weight [R, W, D]. Tap zero multiplies the current token.
+        out_proj_bias (torch.Tensor, Optional):
+            Generator output projection bias [W, D]. Default: `None`.
         residual (torch.Tensor, Optional):
             Residual tensor [B, T, D], added after the output activation. Default: `None`.
         initial_state (torch.Tensor, Optional):
@@ -546,16 +540,16 @@ def dynamic_conv1d(
         tuple[torch.Tensor, torch.Tensor | None]:
             Output [B, T, D] and optional final history [N, D, W].
     """
-    if x.ndim != 3 or z.ndim != 3 or kernel_basis.ndim != 3:
-        raise ValueError('x, z, and kernel_basis must be three-dimensional')
+    if x.ndim != 3 or z.ndim != 3 or out_proj_weight.ndim != 3:
+        raise ValueError('x, z, and out_proj_weight must be three-dimensional')
     if activation not in (None, 'silu', 'swish'):
         raise ValueError('activation must be None, silu, or swish')
     B, T, D = x.shape
-    R, W, WD = kernel_basis.shape
+    R, W, WD = out_proj_weight.shape
     if min(B, D, R, W) < 1:
         raise ValueError('batch size, channel size, rank, and kernel size must be positive')
     if z.shape != (B, T, R) or WD != D:
-        raise ValueError('expected matching x [B, T, D], z [B, T, R], and kernel_basis [R, W, D] shapes')
+        raise ValueError('expected matching x [B, T, D], z [B, T, R], and out_proj_weight [R, W, D] shapes')
     if x.device.type != 'cuda' or x.dtype not in (torch.float16, torch.bfloat16, torch.float32):
         raise ValueError('dynamic_conv1d requires CUDA/HIP tensors in float16, bfloat16, or float32')
     N = B
@@ -565,10 +559,8 @@ def dynamic_conv1d(
         if cu_seqlens.device != x.device or cu_seqlens.dtype not in (torch.int32, torch.int64):
             raise ValueError('cu_seqlens must be an int32/int64 tensor on the input device')
         N = cu_seqlens.numel() - 1
-    if weight is not None and weight.shape != (W, D):
-        raise ValueError('weight must have shape [W,D]')
-    if bias is not None and bias.shape != (D,):
-        raise ValueError('bias must have shape [D]')
+    if out_proj_bias is not None and out_proj_bias.shape != (W, D):
+        raise ValueError('out_proj_bias must have shape [W,D]')
     if residual is not None and residual.shape != x.shape:
         raise ValueError('residual must have the same shape as x')
     if chunk_indices is not None:
@@ -578,7 +570,7 @@ def dynamic_conv1d(
             raise ValueError('chunk_indices must be int32/int64 on the input device')
     if initial_state is not None and initial_state.shape != (N, D, W):
         raise ValueError('initial_state must have shape [N,D,W]')
-    for tensor in (z, kernel_basis, weight, bias, residual, initial_state):
+    for tensor in (z, out_proj_weight, out_proj_bias, residual, initial_state):
         if tensor is None:
             continue
         if tensor.device != x.device or tensor.dtype not in (torch.float16, torch.bfloat16, torch.float32):
@@ -586,9 +578,8 @@ def dynamic_conv1d(
     return DynamicConv1dFunction.apply(
         x,
         z,
-        kernel_basis,
-        weight,
-        bias,
+        out_proj_weight,
+        out_proj_bias,
         residual,
         initial_state,
         output_final_state,
@@ -607,9 +598,9 @@ class DynamicShortConvolution(nn.Module):
         kernel_size (int):
             Width of the causal convolution kernel.
         bias (bool, Optional):
-            Whether to use a channel bias. Default: `False`.
+            Whether to use a bias in the kernel generator. Default: `True`.
         activation (str, Optional):
-            Output activation: `None`, `"silu"`, or `"swish"`. Default: `"silu"`.
+            Output activation: `None`, `"silu"`, or `"swish"`. Default: `None`.
         backend (str, Optional):
             Convolution backend. Only `"triton"` is supported. Default: `"triton"`.
         device (torch.device, Optional):
@@ -628,8 +619,8 @@ class DynamicShortConvolution(nn.Module):
         self,
         hidden_size: int,
         kernel_size: int,
-        bias: bool = False,
-        activation: str | None = 'silu',
+        bias: bool = True,
+        activation: str | None = None,
         backend: str = 'triton',
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
@@ -652,14 +643,12 @@ class DynamicShortConvolution(nn.Module):
         self.backend = backend
         self.generator_activation = generator_activation
         self.in_proj = nn.Linear(in_features=generator_input_size, out_features=rank, bias=False, device=device, dtype=dtype)
-        self.kernel_basis = nn.Parameter(torch.zeros(rank, kernel_size, hidden_size, device=device, dtype=dtype))
-        self.weight = nn.Parameter(torch.empty(kernel_size, hidden_size, device=device, dtype=dtype))
-        self.bias = nn.Parameter(torch.empty(hidden_size, device=device, dtype=dtype)) if bias else None
+        self.out_proj_weight = nn.Parameter(torch.zeros(rank, kernel_size, hidden_size, device=device, dtype=dtype))
+        self.out_proj_bias = nn.Parameter(torch.empty(kernel_size, hidden_size, device=device, dtype=dtype)) if bias else None
         nn.init.normal_(self.in_proj.weight, std=0.02)
         bound = 1 / math.sqrt(kernel_size)
-        nn.init.uniform_(self.weight, -bound, bound)
-        if self.bias is not None:
-            nn.init.uniform_(self.bias, -bound, bound)
+        if self.out_proj_bias is not None:
+            nn.init.uniform_(self.out_proj_bias, -bound, bound)
 
     def forward(
         self,
@@ -696,9 +685,8 @@ class DynamicShortConvolution(nn.Module):
         y, final_state = dynamic_conv1d(
             x=x,
             z=z,
-            kernel_basis=self.kernel_basis,
-            weight=self.weight,
-            bias=self.bias,
+            out_proj_weight=self.out_proj_weight,
+            out_proj_bias=self.out_proj_bias,
             residual=residual,
             initial_state=cache,
             output_final_state=output_final_state or update_cache,

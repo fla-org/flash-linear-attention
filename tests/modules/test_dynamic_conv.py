@@ -52,9 +52,8 @@ def test_dynamic_conv(B, T, D, R, W, lengths, state_dtype, bias, residual, strid
     stride = 2 if strided else 1
     x = torch.randn(B, T, D * stride, device=device, dtype=dtype)[..., ::stride].requires_grad_()
     z = (torch.randn(B, T, R, device=device, dtype=dtype) / R**0.5).requires_grad_()
-    kernel_basis = torch.randn(R, W, D, device=device, dtype=dtype).requires_grad_()
-    static = torch.randn(W, D, device=device, dtype=dtype).requires_grad_() if bias else None
-    channel_bias = torch.randn(D, device=device, dtype=dtype).requires_grad_() if bias else None
+    out_proj_weight = torch.randn(R, W, D, device=device, dtype=dtype).requires_grad_()
+    out_proj_bias = torch.randn(W, D, device=device, dtype=dtype).requires_grad_() if bias else None
     skip = torch.randn_like(x).requires_grad_() if residual else None
     cu = F.pad(torch.tensor(lengths, device=device, dtype=torch.int32).cumsum(0), (1, 0)) if lengths is not None else None
     N = len(lengths) if lengths is not None else B
@@ -62,9 +61,8 @@ def test_dynamic_conv(B, T, D, R, W, lengths, state_dtype, bias, residual, strid
     args = dict(
         x=x,
         z=z,
-        kernel_basis=kernel_basis,
-        weight=static,
-        bias=channel_bias,
+        out_proj_weight=out_proj_weight,
+        out_proj_bias=out_proj_bias,
         residual=skip,
         initial_state=h0,
         output_final_state=True,
@@ -75,7 +73,7 @@ def test_dynamic_conv(B, T, D, R, W, lengths, state_dtype, bias, residual, strid
     indices = prepare_chunk_indices(cu_seqlens=cu, chunk_size=16) if cu is not None and strided else None
     out, ht = dynamic_conv1d(**args, chunk_indices=indices)
     dy, dht = torch.randn_like(ref), torch.randn_like(ref_ht)
-    tensors = [tensor for tensor in (x, z, kernel_basis, static, channel_bias, skip, h0) if tensor is not None]
+    tensors = [tensor for tensor in (x, z, out_proj_weight, out_proj_bias, skip, h0) if tensor is not None]
     ref_grads = torch.autograd.grad((ref, ref_ht), tensors, (dy, dht))
     grads = torch.autograd.grad((out, ht), tensors, (dy, dht))
     for name, expected, actual in [('output', ref, out), ('state', ref_ht, ht),
@@ -86,23 +84,23 @@ def test_dynamic_conv(B, T, D, R, W, lengths, state_dtype, bias, residual, strid
 
 
 @pytest.mark.parametrize(
-    ('activation', 'rank', 'kernel_size', 'generator_activation', 'dtype', 'autocast'),
+    ('kernel_size', 'bias', 'activation', 'dtype', 'rank', 'generator_activation', 'autocast'),
     [
-        (None, 7, 4, None, torch.float32, False),
-        ('swish', 7, 4, None, torch.float32, False),
-        (None, 7, 4, 'silu', torch.bfloat16, False),
-        ('swish', 129, 17, 'silu', torch.bfloat16, False),
-        (None, 7, 4, None, torch.bfloat16, True),
-        ('swish', 7, 4, None, torch.bfloat16, True),
+        (4, True, None, torch.float32, 7, None, False),
+        (4, True, 'swish', torch.float32, 7, None, False),
+        (4, False, None, torch.bfloat16, 7, 'silu', False),
+        (17, True, 'swish', torch.bfloat16, 129, 'silu', False),
+        (4, True, None, torch.bfloat16, 7, None, True),
+        (4, True, 'swish', torch.bfloat16, 7, None, True),
     ],
 )
-def test_dynamic_conv_module(activation, rank, kernel_size, generator_activation, dtype, autocast):
+def test_dynamic_conv_module(kernel_size, bias, activation, dtype, rank, generator_activation, autocast):
     torch.manual_seed(42)
     self_conditioned = generator_activation is None and not autocast
     module = DynamicShortConvolution(
         hidden_size=48,
         kernel_size=kernel_size,
-        bias=True,
+        bias=bias,
         activation=activation,
         device=device,
         dtype=torch.float32 if autocast else dtype,
@@ -121,10 +119,10 @@ def test_dynamic_conv_module(activation, rank, kernel_size, generator_activation
     with torch.autocast(device_type="cuda", dtype=dtype, enabled=autocast):
         initial, _ = module(x=x, residual=residual, mask=mask, generator_input=None if self_conditioned else generator)
         with torch.autocast(device_type="cuda", enabled=False):
+            weight = module.out_proj_bias.float() if bias else values.new_zeros(kernel_size, 48, dtype=torch.float32)
             static = F.conv1d(
                 values.float().transpose(1, 2),
-                module.weight.float().T.flip(-1).unsqueeze(1),
-                bias=module.bias.float(),
+                weight.T.flip(-1).unsqueeze(1),
                 padding=kernel_size - 1,
                 groups=48,
             )[..., :19].transpose(1, 2)
@@ -133,7 +131,7 @@ def test_dynamic_conv_module(activation, rank, kernel_size, generator_activation
             static = static + residual.float()
         assert_close('static initialization', static.to(dtype), initial, 1e-3)
         with torch.no_grad():
-            module.kernel_basis.normal_(std=0.1)
+            module.out_proj_weight.normal_(std=0.1)
         reference = copy.deepcopy(module)
         ref_x = x.detach().clone().requires_grad_()
         ref_generator = ref_x if self_conditioned else generator.detach().clone().requires_grad_()
@@ -146,9 +144,8 @@ def test_dynamic_conv_module(activation, rank, kernel_size, generator_activation
         ref, _ = naive_dynamic_conv1d(
             x=ref_values,
             z=z,
-            kernel_basis=reference.kernel_basis,
-            weight=reference.weight,
-            bias=reference.bias,
+            out_proj_weight=reference.out_proj_weight,
+            out_proj_bias=reference.out_proj_bias,
             residual=ref_residual,
             activation=activation,
         )
@@ -198,22 +195,20 @@ def test_dynamic_conv_packed_step():
     torch.testing.assert_close(cache, state, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize('invalid', ['rank', 'width', 'weight', 'bias', 'residual', 'state', 'packed_batch', 'activation'])
+@pytest.mark.parametrize('invalid', ['rank', 'width', 'out_proj_bias', 'residual', 'state', 'packed_batch', 'activation'])
 def test_dynamic_conv_invalid(invalid):
     torch.manual_seed(42)
     x = torch.randn(2, 5, 16, device=device)
     z = torch.randn(2, 5, 4, device=device)
-    kernel_basis = torch.randn(4, 3, 16, device=device)
+    out_proj_weight = torch.randn(4, 3, 16, device=device)
     kwargs = {}
     if invalid == 'rank':
         z = torch.randn(2, 5, 0, device=device)
-        kernel_basis = torch.randn(0, 3, 16, device=device)
+        out_proj_weight = torch.randn(0, 3, 16, device=device)
     elif invalid == 'width':
-        kernel_basis = torch.randn(4, 0, 16, device=device)
-    elif invalid == 'weight':
-        kwargs['weight'] = torch.randn(16, device=device)
-    elif invalid == 'bias':
-        kwargs['bias'] = torch.randn(3, 16, device=device)
+        out_proj_weight = torch.randn(4, 0, 16, device=device)
+    elif invalid == 'out_proj_bias':
+        kwargs['out_proj_bias'] = torch.randn(16, device=device)
     elif invalid == 'residual':
         kwargs['residual'] = torch.randn(2, 4, 16, device=device)
     elif invalid == 'state':
@@ -223,4 +218,4 @@ def test_dynamic_conv_invalid(invalid):
     elif invalid == 'activation':
         kwargs['activation'] = 'relu'
     with pytest.raises(ValueError):
-        dynamic_conv1d(x=x, z=z, kernel_basis=kernel_basis, **kwargs)
+        dynamic_conv1d(x=x, z=z, out_proj_weight=out_proj_weight, **kwargs)

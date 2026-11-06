@@ -13,9 +13,8 @@ import torch.nn.functional as F
 def naive_dynamic_conv1d(
     x: torch.Tensor,
     z: torch.Tensor,
-    kernel_basis: torch.Tensor,
-    weight: torch.Tensor | None = None,
-    bias: torch.Tensor | None = None,
+    out_proj_weight: torch.Tensor,
+    out_proj_bias: torch.Tensor | None = None,
     residual: torch.Tensor | None = None,
     initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
@@ -24,27 +23,24 @@ def naive_dynamic_conv1d(
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Materialized FP32 reference, including differentiable raw-input history."""
     B, T, D = x.shape
-    R, W, _ = kernel_basis.shape
+    R, W, _ = out_proj_weight.shape
     if cu_seqlens is not None:
         boundaries = cu_seqlens.tolist()
         segments = [(0, start, end) for start, end in zip(boundaries[:-1], boundaries[1:])]
     else:
         segments = [(b, 0, T) for b in range(B)]
-    basis = kernel_basis.float().reshape(R, W * D)
-    static = weight.float() if weight is not None else None
-    channel_bias = bias.float() if bias is not None else None
+    proj_weight = out_proj_weight.float().reshape(R, W * D)
+    proj_bias = out_proj_bias.float() if out_proj_bias is not None else None
     outputs, states = [], []
     for n, (b, start, end) in enumerate(segments):
         values = x[b, start:end].float()
         history = values.new_zeros(W, D) if initial_state is None else initial_state[n].T.float()
         padded = torch.cat((history, values), dim=0)
-        kernels = (z[b, start:end].float() @ basis).reshape(-1, W, D)
-        if static is not None:
-            kernels = kernels + static
+        kernels = (z[b, start:end].float() @ proj_weight).reshape(-1, W, D)
+        if proj_bias is not None:
+            kernels = kernels + proj_bias
         windows = padded.unfold(0, W, 1)[1:].flip(-1).transpose(-1, -2)
         output = (kernels * windows).sum(1)
-        if channel_bias is not None:
-            output = output + channel_bias
         if activation is not None:
             output = F.silu(output)
         if residual is not None:

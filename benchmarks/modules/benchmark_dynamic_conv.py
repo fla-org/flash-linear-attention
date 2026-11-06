@@ -33,8 +33,8 @@ def benchmark(B, T, D, R, packed, activation, provider):
     W = 4
     x = torch.randn(B, T, D, device=device, dtype=torch.bfloat16).requires_grad_()
     z = (torch.randn(B, T, R, device=device, dtype=torch.bfloat16) / R**0.5).requires_grad_()
-    kernel_basis = torch.randn(R, W, D, device=device, dtype=torch.bfloat16).requires_grad_()
-    weight = torch.randn(W, D, device=device, dtype=torch.bfloat16).requires_grad_()
+    out_proj_weight = torch.randn(R, W, D, device=device, dtype=torch.bfloat16).requires_grad_()
+    out_proj_bias = torch.randn(W, D, device=device, dtype=torch.bfloat16).requires_grad_()
     cu = torch.tensor([0, 1, 2047, T], device=device, dtype=torch.int32) if packed else None
     # the reference reads packed metadata on the host; exclude that synchronization from timing.
     ref_cu = cu.cpu() if cu is not None else None
@@ -46,8 +46,8 @@ def benchmark(B, T, D, R, packed, activation, provider):
         y, _ = fn(
             x=x,
             z=z,
-            kernel_basis=kernel_basis,
-            weight=weight,
+            out_proj_weight=out_proj_weight,
+            out_proj_bias=out_proj_bias,
             residual=x,
             initial_state=state,
             output_final_state=T == 1,
@@ -55,7 +55,7 @@ def benchmark(B, T, D, R, packed, activation, provider):
             cu_seqlens=cu if provider.startswith('triton') else ref_cu,
         )
         if provider.endswith('fwdbwd'):
-            torch.autograd.grad(y, (x, z, kernel_basis, weight), dy)
+            torch.autograd.grad(y, (x, z, out_proj_weight, out_proj_bias), dy)
 
     return triton.testing.do_bench(run, quantiles=[0.5, 0.2, 0.8])
 
