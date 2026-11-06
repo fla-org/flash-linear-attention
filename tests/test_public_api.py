@@ -129,6 +129,16 @@ def test_public_function_aliases():
     assert bitlinear.layer_norm_linear_quant_fn is bitlinear.layer_norm_linear_quant
 
 
+@pytest.mark.parametrize(('owner', 'names'), [('rotary', ('rotary_embedding',))])
+def test_module_operator_entries(owner, names):
+    module = importlib.import_module(f'fla.modules.{owner}')
+    operator = importlib.import_module(f'fla.ops.{owner}')
+    for name in names:
+        entry = getattr(operator, name)
+        assert getattr(module, name) is entry
+        assert inspect.unwrap(entry).__module__ == f'fla.ops.{owner}.ops'
+
+
 @pytest.mark.parametrize(
     ('legacy', 'name', 'kwargs', 'state_keys'),
     [
@@ -139,6 +149,7 @@ def test_public_function_aliases():
         ('fused_norm_gate', 'FusedLayerNormGated', {'hidden_size': 4, 'bias': True}, ('weight', 'bias')),
         ('fused_norm_gate', 'FusedRMSNormGated', {'hidden_size': 4}, ('weight',)),
         ('l2norm', 'L2Norm', {}, ()),
+        ('rotary', 'RotaryEmbedding', {'dim': 8, 'scale_base': 512}, ()),
         ('convolution', 'ShortConvolution', {'hidden_size': 4, 'kernel_size': 3, 'bias': True}, ('weight', 'bias')),
         ('convolution', 'LongConvolution', {'hidden_size': 4, 'max_len': 8}, ('filter',)),
         ('fused_bitlinear', 'BitLinear', {'in_features': 4, 'out_features': 4}, ('weight', 'norm.weight')),
@@ -152,6 +163,7 @@ def test_public_function_aliases():
         'fused-layernorm-gated',
         'fused-rmsnorm-gated',
         'l2norm',
+        'rotary',
         'convolution',
         'long-convolution',
         'bitlinear',
@@ -170,6 +182,8 @@ def test_legacy_module_pickle_and_state_dict(monkeypatch, legacy, name, kwargs, 
     paths = [f'fla.modules.{legacy}']
     if legacy in {'fused_norm_gate', 'l2norm', 'layernorm', 'layernorm_gated'}:
         paths.append(f'fla.modules.norm.{legacy}')
+    if legacy == 'rotary':
+        paths.append(f'fla.modules.{legacy}.ops')
     for path in paths:
         with monkeypatch.context() as patch:
             patch.setattr(module_class, '__module__', path)
@@ -181,6 +195,8 @@ def test_legacy_module_pickle_and_state_dict(monkeypatch, legacy, name, kwargs, 
         assert set(restored.state_dict()) == set(state_keys)
         for key in state:
             torch.testing.assert_close(restored.state_dict()[key], state[key])
+        for key, buffer in module.named_buffers():
+            torch.testing.assert_close(dict(restored.named_buffers())[key], buffer)
     module_class(**kwargs).load_state_dict(state, strict=True)
 
 

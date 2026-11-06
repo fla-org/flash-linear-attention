@@ -12,7 +12,7 @@ import triton
 import triton.language as tl
 
 from fla.backends import TritonAscendBackend, register
-from fla.modules.rotary.ops import rotary_embedding_fwdbwd
+from fla.ops.rotary.ops import rotary_embedding_fwdbwd
 from fla.ops.utils import prepare_chunk_indices
 from fla.utils import autotune_cache_kwargs, get_multiprocessor_count
 from fla.utils.ascend_ub_manager import (

@@ -28,7 +28,7 @@ from fla.models.generation_utils import FLAGenerationMixin
 from fla.models.modeling_utils import FLAForCausalLM, FLAPreTrainedModel
 from fla.modules import GatedMLP as CATMLP
 from fla.modules import RMSNorm, RotaryEmbedding
-from fla.modules.rotary import rotary_embedding
+from fla.ops.rotary import rotary_embedding
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack

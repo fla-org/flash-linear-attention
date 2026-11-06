@@ -11,7 +11,7 @@ import pytest
 import torch
 
 from fla.modules.rotary import RotaryEmbedding
-from fla.modules.rotary.ops import rotary_embedding_ref
+from fla.ops.rotary.ops import rotary_embedding_ref
 from fla.utils import assert_close, device, device_torch_lib
 
 
