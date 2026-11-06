@@ -426,3 +426,81 @@ class LayerNormLinearQuantFunction(torch.autograd.Function):
             None,
             None,
         )
+
+
+def activation_quant(x: torch.Tensor) -> torch.Tensor:
+    """Quantize activations to 8 bits per token and return dequantized values."""
+    scale = 127.0 / x.abs().max(dim=-1, keepdim=True).values.clamp_(min=1e-5)
+    y = (x * scale).round().clamp_(min=-128, max=127) / scale
+    return y
+
+
+def layer_norm_linear_quant(
+    x: torch.Tensor,
+    norm_weight: torch.Tensor | None,
+    norm_bias: torch.Tensor | None,
+    linear_weight: torch.Tensor,
+    linear_bias: torch.Tensor | None,
+    residual: torch.Tensor | None = None,
+    eps: float = 1e-6,
+    prenorm: bool = False,
+    residual_in_fp32: bool = False,
+    is_rms_norm: bool = False,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    return LayerNormLinearQuantFunction.apply(
+        x,
+        norm_weight,
+        norm_bias,
+        linear_weight,
+        linear_bias,
+        residual,
+        eps,
+        prenorm,
+        residual_in_fp32,
+        is_rms_norm,
+    )
+
+
+def rms_norm_linear_quant(
+    x: torch.Tensor,
+    norm_weight: torch.Tensor | None,
+    norm_bias: torch.Tensor | None,
+    linear_weight: torch.Tensor,
+    linear_bias: torch.Tensor | None,
+    residual: torch.Tensor | None = None,
+    eps: float = 1e-5,
+    prenorm: bool = False,
+    residual_in_fp32: bool = False,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    return layer_norm_linear_quant(
+        x=x,
+        norm_weight=norm_weight,
+        norm_bias=norm_bias,
+        linear_weight=linear_weight,
+        linear_bias=linear_bias,
+        residual=residual,
+        eps=eps,
+        prenorm=prenorm,
+        residual_in_fp32=residual_in_fp32,
+        is_rms_norm=True,
+    )
+
+
+def bit_linear(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    norm_weight: torch.Tensor | None = None,
+    norm_bias: torch.Tensor | None = None,
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    """Apply RMS normalization and a linear projection with quantized activations and weights."""
+    return layer_norm_linear_quant(
+        x=x,
+        norm_weight=norm_weight,
+        norm_bias=norm_bias,
+        linear_weight=weight,
+        linear_bias=bias,
+        eps=eps,
+        is_rms_norm=True,
+    )

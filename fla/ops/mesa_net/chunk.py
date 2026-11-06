@@ -7,13 +7,13 @@
 
 import torch
 
-from fla.modules.norm.l2norm import l2norm_bwd, l2norm_fwd
 from fla.ops.common.chunk_h import chunk_bwd_dh
 from fla.ops.mesa_net.chunk_cg_solver_bwd import chunk_mesa_cg_bwd
 from fla.ops.mesa_net.chunk_cg_solver_fwd import chunk_mesa_cg_fwd
 from fla.ops.mesa_net.chunk_h_fwd import chunk_mesa_fwd_h
 from fla.ops.mesa_net.chunk_h_kk_intra_bwd import chunk_mesa_net_h_kk_bwd_intra_fn
 from fla.ops.mesa_net.chunk_h_kv_intra_bwd import chunk_mesa_net_h_kv_bwd_intra_fn
+from fla.ops.norm.l2norm import l2norm_bwd, l2norm_fwd
 from fla.ops.utils import chunk_local_cumsum, prepare_chunk_indices
 from fla.ops.utils.constant import RCP_LN2
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard

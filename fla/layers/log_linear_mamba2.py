@@ -18,8 +18,9 @@ from transformers.utils import logging
 
 from fla.layers.mamba2 import apply_mask_to_padding_states, causal_conv1d_fn, causal_conv1d_update, is_fast_path_available
 from fla.layers.utils import get_layer_cache, update_layer_cache
-from fla.modules.layernorm_gated import RMSNormGated, rmsnorm_fn
+from fla.modules.layernorm_gated import RMSNormGated
 from fla.ops.log_linear_attn.chunk import LogLinearAttentionState, chunk_log_linear_attn
+from fla.ops.norm.layernorm_gated import rmsnorm_fn
 
 if TYPE_CHECKING:
     from fla.models.cache_utils import Cache

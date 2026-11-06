@@ -12,7 +12,7 @@ import triton
 import triton.language as tl
 
 from fla.backends import TritonAscendBackend, register
-from fla.modules.norm.layernorm import layer_norm_bwd, layer_norm_fwd
+from fla.ops.norm.layernorm import layer_norm_bwd, layer_norm_fwd
 from fla.utils import get_multiprocessor_count
 from fla.utils.ascend_ub_manager import ASCEND_MAX_GRID_DIM, compute_ub_block_size, iter_axis_launch_chunks
 

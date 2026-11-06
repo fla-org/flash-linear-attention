@@ -9,7 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.modules.norm.l2norm import l2norm_bwd, l2norm_fwd
+from fla.ops.norm.l2norm import l2norm_bwd, l2norm_fwd
 from fla.utils import IS_NVIDIA_HOPPER, input_guard
 
 

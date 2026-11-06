@@ -10,13 +10,13 @@
 import torch
 
 from fla.backends import dispatch
-from fla.modules.norm.l2norm import l2norm_bwd, l2norm_fwd
 from fla.ops.atk.chunk_atk_bwd import chunk_atk_bwd
 from fla.ops.atk.chunk_atk_fwd import chunk_atk_fwd, recompute_atk_fwd
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu, chunk_gated_delta_rule_fwd_h
 from fla.ops.cp import FLACPContext
 from fla.ops.gla.chunk import chunk_gla_fwd_o_gk
 from fla.ops.kda.gate import kda_gate_bwd, kda_gate_chunk_cumsum
+from fla.ops.norm.l2norm import l2norm_bwd, l2norm_fwd
 from fla.ops.precond_kda.chunk_bwd import chunk_precond_kda_bwd_dAv, chunk_precond_kda_bwd_wy_dqkg
 from fla.ops.precond_kda.chunk_intra import chunk_precond_kda_bwd_intra, chunk_precond_kda_fwd_intra
 from fla.ops.precond_kda.wy_fast import recompute_w_u_fwd

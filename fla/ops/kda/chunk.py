@@ -12,11 +12,11 @@ import warnings
 import torch
 
 from fla.backends import dispatch
-from fla.modules.norm.l2norm import l2norm_bwd, l2norm_fwd
 from fla.ops.common.gate import fused_beta_sigmoid, fused_beta_sigmoid_bwd
 from fla.ops.cp import FLACPContext
 from fla.ops.kda.chunk_bwd import chunk_kda_bwd
 from fla.ops.kda.chunk_fwd import chunk_kda_fwd
+from fla.ops.norm.l2norm import l2norm_bwd, l2norm_fwd
 from fla.ops.utils.index import prepare_chunk_indices, prepare_chunk_indices_static
 from fla.utils import IS_NPU, autocast_custom_bwd, autocast_custom_fwd, input_guard
 

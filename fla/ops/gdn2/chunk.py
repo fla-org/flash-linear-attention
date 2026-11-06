@@ -30,9 +30,9 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
 from fla.ops.gdn2.chunk_bwd import chunk_gdn2_bwd
 from fla.ops.gdn2.chunk_fwd import chunk_gdn2_fwd
+from fla.ops.norm.l2norm import l2norm_bwd, l2norm_fwd
 from fla.ops.utils import prepare_chunk_indices
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 

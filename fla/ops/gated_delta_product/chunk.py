@@ -8,7 +8,6 @@
 import torch
 from einops import rearrange
 
-from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
 from fla.ops.common.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
 from fla.ops.cp import FLACPContext
 from fla.ops.cp.chunk_delta_h import chunk_gated_delta_rule_fwd_h_pre_process, compress_h0
@@ -18,6 +17,7 @@ from fla.ops.gated_delta_product.chunk_deltaproduct_h import chunk_gated_delta_p
 from fla.ops.gated_delta_product.chunk_deltaproduct_o import chunk_gated_delta_product_fwd_o
 from fla.ops.gated_delta_rule.chunk import chunk_gated_delta_rule_bwd
 from fla.ops.gated_delta_rule.wy_fast import recompute_w_u_fwd as gdn_recompute_w_u_fwd
+from fla.ops.norm.l2norm import l2norm_bwd, l2norm_fwd
 from fla.ops.utils import chunk_local_cumsum, solve_tril
 from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.index import prepare_chunk_indices

@@ -12,7 +12,7 @@ import triton
 import triton.language as tl
 
 from fla.backends import TritonAscendBackend, register
-from fla.modules.norm.l2norm import l2norm_bwd, l2norm_fwd
+from fla.ops.norm.l2norm import l2norm_bwd, l2norm_fwd
 from fla.utils.ascend_ub_manager import (
     ASCEND_MAX_GRID_DIM,
     compute_row_tile_block_size,

@@ -16,7 +16,7 @@ import triton
 import triton.language as tl
 
 from fla.backends import TritonAscendBackend, register
-from fla.modules.norm.fused_norm_gate import layer_norm_gated_bwd, layer_norm_gated_fwd
+from fla.ops.norm.fused_norm_gate import layer_norm_gated_bwd, layer_norm_gated_fwd
 from fla.utils import get_multiprocessor_count
 from fla.utils.ascend_ub_manager import ASCEND_MAX_GRID_DIM, compute_row_tile_block_size, compute_ub_block_size
 

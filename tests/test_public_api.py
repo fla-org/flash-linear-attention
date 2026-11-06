@@ -118,6 +118,7 @@ def test_public_function_aliases():
     assert l2norm.l2_norm is l2norm.l2norm
     bitlinear = importlib.import_module('fla.modules.fused_bitlinear')
     layernorm_quant = importlib.import_module('fla.modules.norm.layernorm_quant')
+    assert layernorm_quant is importlib.import_module('fla.ops.norm.layernorm_quant')
     assert bitlinear.layer_norm_fwd_quant is layernorm_quant.layer_norm_quant_fwd
     assert bitlinear.layer_norm_bwd is layernorm_quant.layer_norm_quant_bwd
     assert bitlinear.LayerNormLinearQuantFunction is layernorm_quant.LayerNormLinearQuantFunction
@@ -185,6 +186,7 @@ def test_normalization_imports_preserve_public_exports(run_python, disabled):
     run_python(
         """
         import importlib
+        import inspect
 
         expected_symbols = {
             'layernorm': (
@@ -233,6 +235,11 @@ def test_normalization_imports_preserve_public_exports(run_python, disabled):
             assert set(legacy.__all__) == set(canonical.__all__) == set(expected_symbols[name])
             for symbol in expected_symbols[name]:
                 assert getattr(legacy, symbol) is getattr(canonical, symbol), (name, symbol)
+                value = getattr(canonical, symbol)
+                if not inspect.isclass(value):
+                    operator = importlib.import_module('fla.ops.norm.' + name)
+                    assert value is getattr(operator, symbol), (name, symbol)
+                    assert inspect.unwrap(value).__module__ == operator.__name__
 
         from fla.modules.causal_conv1d import causal_conv1d
         importlib.import_module('fla.modules.causal_conv1d.ops')

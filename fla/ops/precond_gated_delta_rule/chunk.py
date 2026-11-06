@@ -7,13 +7,13 @@
 
 import torch
 
-from fla.modules.norm.l2norm import l2norm_bwd, l2norm_fwd
 from fla.ops.atk.chunk_atk_bwd import chunk_atk_bwd
 from fla.ops.atk.chunk_atk_fwd import chunk_atk_fwd, recompute_atk_fwd
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu, chunk_gated_delta_rule_fwd_h
 from fla.ops.common.chunk_o import chunk_bwd_dqkwg, chunk_bwd_dv_local, chunk_fwd_o
 from fla.ops.cp import FLACPContext
 from fla.ops.gated_delta_rule.wy_fast import recompute_w_u_fwd
+from fla.ops.norm.l2norm import l2norm_bwd, l2norm_fwd
 from fla.ops.precond_gated_delta_rule.chunk_precond_kkt_fwd import chunk_precond_kkt_fwd
 from fla.ops.precond_gated_delta_rule.chunk_precond_wy_bwd import prepare_precond_wy_repr_bwd
 from fla.ops.utils import chunk_local_cumsum, solve_tril

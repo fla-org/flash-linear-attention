@@ -38,6 +38,7 @@ from fla.modules.token_shift import TokenShift
 _MODULE_ALIASES = {
     'fused_norm_gate': ('norm.fused_norm_gate',),
     'l2norm': ('norm.l2norm',),
+    'norm.layernorm_quant': ('fla.ops.norm.layernorm_quant',),
     'layernorm': ('norm.layernorm',),
     'layernorm_gated': ('norm.layernorm_gated',),
     'convolution': ('causal_conv1d', 'long_conv', 'causal_conv1d.cp', 'causal_conv1d.backends.cuda'),
@@ -57,7 +58,7 @@ _MODULE_ALIASES = {
 for _old, _targets in _MODULE_ALIASES.items():
     _fullname = f'{__name__}.{_old}'
     if len(_targets) == 1:
-        _module = import_module(f'{__name__}.{_targets[0]}')
+        _module = import_module(_targets[0] if _targets[0].startswith('fla.') else f'{__name__}.{_targets[0]}')
     else:
         _module = ModuleType(_fullname)
         _module.__spec__ = ModuleSpec(_fullname, loader=None, is_package=True)

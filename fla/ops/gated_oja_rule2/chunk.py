@@ -7,9 +7,9 @@
 
 import torch
 
-from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
 from fla.ops.gated_oja_rule2.chunk_bwd import chunk_oja2_bwd
 from fla.ops.gated_oja_rule2.chunk_fwd import chunk_oja2_fwd
+from fla.ops.norm.l2norm import l2norm_bwd, l2norm_fwd
 from fla.ops.utils import prepare_chunk_indices
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 

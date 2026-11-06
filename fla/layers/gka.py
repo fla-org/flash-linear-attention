@@ -17,8 +17,8 @@ from torch.nn import functional as F
 
 from fla.layers.utils import get_layer_cache, repad_hidden_states, unpad_hidden_states, update_layer_cache
 from fla.modules import FusedRMSNormGated, RMSNorm, ShortConvolution
-from fla.modules.l2norm import l2_norm
 from fla.ops.gka import chunk_gka, fused_recurrent_gka
+from fla.ops.norm.l2norm import l2_norm
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack

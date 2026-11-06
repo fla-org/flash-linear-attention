@@ -16,7 +16,7 @@ from fla.modules import (
     FusedRMSNormGated,
     FusedRMSNormSwishGateLinear,
 )
-from fla.modules.layernorm_gated import layernorm_fn
+from fla.ops.norm.layernorm_gated import layernorm_fn
 from fla.utils import IS_NVIDIA_BLACKWELL, assert_close, device
 
 
