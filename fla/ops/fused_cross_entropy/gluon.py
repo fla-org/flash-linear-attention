@@ -17,7 +17,7 @@ from triton.experimental.gluon import language as gl
 from triton.experimental.gluon.language import extra
 
 from fla.backends import GluonBackend, register
-from fla.modules.fused_cross_entropy.ops import cross_entropy_bwd, cross_entropy_fwd
+from fla.ops.fused_cross_entropy.ops import cross_entropy_bwd, cross_entropy_fwd
 
 if TYPE_CHECKING:
     from torch.distributed import ProcessGroup

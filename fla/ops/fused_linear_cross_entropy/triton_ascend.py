@@ -15,7 +15,7 @@ from torch.distributed import ProcessGroup
 from triton.language.math import tanh
 
 from fla.backends import TritonAscendBackend, register
-from fla.modules.fused_linear_cross_entropy.ops import (
+from fla.ops.fused_linear_cross_entropy.ops import (
     fused_linear_cross_entropy_bwd,
     fused_linear_cross_entropy_fwd,
     logsumexp_fwd,

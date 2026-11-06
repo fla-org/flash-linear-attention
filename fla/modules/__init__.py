@@ -36,6 +36,9 @@ from fla.modules.rotary import RotaryEmbedding
 from fla.modules.token_shift import TokenShift
 
 _MODULE_ALIASES = {
+    'fused_kl_div.ops': ('fused_kl_div',),
+    'fused_linear_cross_entropy.ops': ('fused_linear_cross_entropy',),
+    'fused_cross_entropy.ops': ('fused_cross_entropy',),
     'rotary.ops': ('rotary',),
     'activations.ops': ('activations',),
     'fused_norm_gate': ('norm.fused_norm_gate',),
@@ -77,13 +80,6 @@ for _old, _targets in _MODULE_ALIASES.items():
         _parent, _, _child = _fullname.rpartition('.')
         setattr(sys.modules[_parent], _child, _module)
 
-# defer GRPO's compile policy until it is explicitly imported
-for _name in ('fused_cross_entropy', 'fused_kl_div', 'fused_linear_cross_entropy'):
-    _module = import_module(f'{__name__}.{_name}')
-    for _symbol, _value in vars(import_module(f'{__name__}.{_name}.ops')).items():
-        if not _symbol.startswith('_'):
-            vars(_module).setdefault(_symbol, _value)
-
 _SYMBOL_ALIASES = {
     'fused_bitlinear': {
         'layer_norm_fwd_quant': 'norm.layernorm_quant.layer_norm_quant_fwd',
@@ -92,20 +88,23 @@ _SYMBOL_ALIASES = {
         'layer_norm_linear_quant_fn': 'layer_norm_linear_quant',
     },
     'fused_cross_entropy': {
-        'fused_cross_entropy_forward': 'cross_entropy_fwd',
-        'CrossEntropyLossFunction': 'FusedCrossEntropyFunction',
+        'fused_cross_entropy_forward': 'fla.ops.fused_cross_entropy.ops.cross_entropy_fwd',
+        'CrossEntropyLossFunction': 'fla.ops.fused_cross_entropy.ops.FusedCrossEntropyFunction',
     },
-    'fused_kl_div': {'fused_kl_div_forward': 'fused_kl_div_fwd', 'fused_kl_div_backward': 'fused_kl_div_bwd'},
+    'fused_kl_div': {
+        'fused_kl_div_forward': 'fla.ops.fused_kl_div.ops.fused_kl_div_fwd',
+        'fused_kl_div_backward': 'fla.ops.fused_kl_div.ops.fused_kl_div_bwd',
+    },
     'fused_linear_cross_entropy': {
-        'fused_linear_cross_entropy_forward': 'fused_linear_cross_entropy_fwd',
-        'fused_linear_cross_entropy_backward': 'fused_linear_cross_entropy_bwd',
+        'fused_linear_cross_entropy_forward': 'fla.ops.fused_linear_cross_entropy.ops.fused_linear_cross_entropy_fwd',
+        'fused_linear_cross_entropy_backward': 'fla.ops.fused_linear_cross_entropy.ops.fused_linear_cross_entropy_bwd',
     },
 }
 for _name, _aliases in _SYMBOL_ALIASES.items():
     _module = sys.modules[f'{__name__}.{_name}']
     for _old, _new in _aliases.items():
         _target, _, _symbol = _new.rpartition('.')
-        _source = import_module(f'{__name__}.{_target}') if _target else _module
+        _source = import_module(_target if _target.startswith('fla.') else f'{__name__}.{_target}') if _target else _module
         setattr(_module, _old, getattr(_source, _symbol))
 
 __all__ = [

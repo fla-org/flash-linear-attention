@@ -173,7 +173,7 @@ def test_backend_changes_follow_repository_ownership(changed, expected, unrelate
             {'tests/cp/test_conv.py'},
             id='cuda-cp',
         ),
-        ('fla/modules/fused_cross_entropy/ops.py', {'tests/modules/test_cross_entropy.py', 'tests/modules/test_l2warp.py'}),
+        ('fla/ops/fused_cross_entropy/ops.py', {'tests/modules/test_cross_entropy.py', 'tests/modules/test_l2warp.py'}),
         ('fla/ops/attn/backends/tilelang.py', {'tests/ops/test_attn.py'}),
         ('fla/ops/kda/backends/triton_ascend/chunk_bwd.py', {'tests/ops/test_kda.py', 'tests/ops/test_gdn2.py'}),
         pytest.param('fla/ops/activations/triton_ascend.py', {'tests/modules/test_activation.py'}, id='ascend-module'),

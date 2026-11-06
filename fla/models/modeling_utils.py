@@ -23,8 +23,8 @@ from fla.layers.attn import Attention
 from fla.models.cache_utils import Cache
 from fla.models.configuration_utils import get_attention_spec
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
-from fla.modules.l2warp import l2_warp
 from fla.ops.attnres import fused_attnres
+from fla.ops.l2warp import l2_warp
 
 
 def get_attention(config: PretrainedConfig, layer_idx: int) -> Attention | None:

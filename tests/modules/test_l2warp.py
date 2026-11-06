@@ -11,7 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from fla.modules import FusedLinearCrossEntropyLoss
-from fla.modules.l2warp import l2_warp as standalone_l2_warp
+from fla.ops.l2warp import l2_warp as standalone_l2_warp
 from fla.utils import IS_INTEL_ALCHEMIST, assert_close, device
 
 

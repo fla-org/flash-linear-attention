@@ -5,11 +5,6 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from fla.backends import TritonAscendBackend
-from fla.modules.grpo.ops import fused_grpo_loss, grpo_loss_with_old_logps
+from fla.ops.grpo import fused_grpo_loss, grpo_loss_with_old_logps
 
 __all__ = ['fused_grpo_loss', 'grpo_loss_with_old_logps']
-
-
-if TritonAscendBackend.is_available():
-    from fla.modules.grpo import triton_ascend  # noqa: F401

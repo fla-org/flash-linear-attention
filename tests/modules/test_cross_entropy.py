@@ -19,8 +19,8 @@ import torch.nn.functional as F
 
 from fla import backends
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
-from fla.modules.fused_linear_cross_entropy.ops import logsumexp_fwd as fused_linear_logsumexp_fwd
-from fla.modules.l2warp import l2_warp
+from fla.ops.fused_linear_cross_entropy.ops import logsumexp_fwd as fused_linear_logsumexp_fwd
+from fla.ops.l2warp import l2_warp
 from fla.ops.utils.logsumexp import logsumexp_fwd
 from fla.utils import IS_INTEL, IS_NPU, IS_NVIDIA, assert_close, device, device_torch_lib
 
@@ -179,7 +179,7 @@ def test_fused_cross_entropy(
     if 'gluon' in (backend, backward_backend):
         if not GluonBackend.is_available() or _DISPATCH_DISABLED:
             pytest.skip("Gluon dispatch is unavailable")
-        from fla.modules.fused_cross_entropy import ops
+        from fla.ops.fused_cross_entropy import ops
 
         for entry in (ops.cross_entropy_fwd, ops.cross_entropy_bwd):
             candidate = backends._function_registries[inspect.unwrap(entry)]._backends['gluon']
@@ -535,7 +535,7 @@ def test_fused_linear_cross_entropy_parallel_ascend_rejection(monkeypatch):
     # rejection happens before any Ascend kernel is executed.
     if not hasattr(triton_math, 'tanh'):
         monkeypatch.setattr(triton_math, 'tanh', None, raising=False)
-    from fla.modules.fused_linear_cross_entropy.triton_ascend import fused_linear_cross_entropy_fwd_npu
+    from fla.ops.fused_linear_cross_entropy.triton_ascend import fused_linear_cross_entropy_fwd_npu
 
     monkeypatch.setattr(dist, 'get_world_size', lambda group: 2)
     with pytest.raises(NotImplementedError, match="Vocabulary-parallel"):
@@ -550,7 +550,7 @@ def test_fused_linear_cross_entropy_parallel_ascend_rejection(monkeypatch):
 @pytest.mark.skipif(not IS_NVIDIA, reason="Gluon requires NVIDIA GPUs")
 def test_cross_entropy_gluon_dispatch(route: str, defaults: bool, direction: str, monkeypatch):
     from fla.backends import _DISPATCH_DISABLED, GluonBackend
-    from fla.modules.fused_cross_entropy import ops
+    from fla.ops.fused_cross_entropy import ops
 
     if not GluonBackend.is_available() or _DISPATCH_DISABLED:
         pytest.skip("Gluon dispatch is unavailable")
@@ -589,7 +589,7 @@ def test_cross_entropy_gluon_dispatch(route: str, defaults: bool, direction: str
 
 
 def run_parallel_cross_entropy_worker(rank: int, world_size: int, init_file: str, backend: str):
-    from fla.modules.fused_cross_entropy import ops
+    from fla.ops.fused_cross_entropy import ops
 
     calls = []
     if backend == 'gluon':

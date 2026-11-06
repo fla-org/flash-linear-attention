@@ -8,8 +8,8 @@
 import pytest
 import torch
 
-from fla.modules.grpo import fused_grpo_loss, grpo_loss_with_old_logps
-from fla.modules.grpo.ops import grpo_loss_torch
+from fla.ops.grpo import fused_grpo_loss, grpo_loss_with_old_logps
+from fla.ops.grpo.ops import grpo_loss_torch
 from fla.utils import IS_NVIDIA_HOPPER, assert_close, device, device_torch_lib
 
 
@@ -22,7 +22,7 @@ def test_grpo_compile_policy_is_local_to_its_function(run_python, is_npu):
         import torch
         from fla import utils
 
-        assert 'fla.modules.grpo.ops' not in sys.modules
+        assert 'fla.ops.grpo.ops' not in sys.modules
         original_compile = torch.compile
         utils.IS_NPU = os.environ['TEST_IS_NPU'] == '1'
         from fla.modules import grpo

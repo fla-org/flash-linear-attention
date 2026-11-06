@@ -13,7 +13,7 @@ import triton
 import triton.language as tl
 
 from fla.backends import TritonAscendBackend, register
-from fla.modules.fused_kl_div.ops import fused_kl_div_bwd, fused_kl_div_fwd
+from fla.ops.fused_kl_div.ops import fused_kl_div_bwd, fused_kl_div_fwd
 from fla.ops.utils.op import exp, log
 from fla.utils.ascend_ub_manager import ASCEND_MAX_GRID_DIM, compute_elementwise_block_size, compute_vocab_block_size
 

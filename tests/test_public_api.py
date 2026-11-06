@@ -129,7 +129,16 @@ def test_public_function_aliases():
     assert bitlinear.layer_norm_linear_quant_fn is bitlinear.layer_norm_linear_quant
 
 
-@pytest.mark.parametrize(('owner', 'names'), [('rotary', ('rotary_embedding',))])
+@pytest.mark.parametrize(
+    ('owner', 'names'),
+    [
+        ('rotary', ('rotary_embedding',)),
+        ('fused_cross_entropy', ('cross_entropy_loss',)),
+        ('fused_linear_cross_entropy', ('fused_linear_cross_entropy_loss',)),
+        ('fused_kl_div', ('fused_kl_div_loss',)),
+        ('grpo', ('fused_grpo_loss', 'grpo_loss_with_old_logps')),
+    ],
+)
 def test_module_operator_entries(owner, names):
     module = importlib.import_module(f'fla.modules.{owner}')
     operator = importlib.import_module(f'fla.ops.{owner}')
@@ -150,6 +159,9 @@ def test_module_operator_entries(owner, names):
         ('fused_norm_gate', 'FusedRMSNormGated', {'hidden_size': 4}, ('weight',)),
         ('l2norm', 'L2Norm', {}, ()),
         ('rotary', 'RotaryEmbedding', {'dim': 8, 'scale_base': 512}, ()),
+        ('fused_cross_entropy', 'FusedCrossEntropyLoss', {}, ()),
+        ('fused_linear_cross_entropy', 'FusedLinearCrossEntropyLoss', {}, ()),
+        ('fused_kl_div', 'FusedKLDivLoss', {}, ()),
         ('convolution', 'ShortConvolution', {'hidden_size': 4, 'kernel_size': 3, 'bias': True}, ('weight', 'bias')),
         ('convolution', 'LongConvolution', {'hidden_size': 4, 'max_len': 8}, ('filter',)),
         ('fused_bitlinear', 'BitLinear', {'in_features': 4, 'out_features': 4}, ('weight', 'norm.weight')),
@@ -164,6 +176,9 @@ def test_module_operator_entries(owner, names):
         'fused-rmsnorm-gated',
         'l2norm',
         'rotary',
+        'cross-entropy',
+        'linear-cross-entropy',
+        'kl-div',
         'convolution',
         'long-convolution',
         'bitlinear',
@@ -182,7 +197,7 @@ def test_legacy_module_pickle_and_state_dict(monkeypatch, legacy, name, kwargs, 
     paths = [f'fla.modules.{legacy}']
     if legacy in {'fused_norm_gate', 'l2norm', 'layernorm', 'layernorm_gated'}:
         paths.append(f'fla.modules.norm.{legacy}')
-    if legacy == 'rotary':
+    if legacy in {'rotary', 'fused_cross_entropy', 'fused_linear_cross_entropy', 'fused_kl_div'}:
         paths.append(f'fla.modules.{legacy}.ops')
     for path in paths:
         with monkeypatch.context() as patch:

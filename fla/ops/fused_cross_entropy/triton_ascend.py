@@ -13,7 +13,7 @@ import triton.language as tl
 from triton.language.math import tanh
 
 from fla.backends import TritonAscendBackend, register
-from fla.modules.fused_cross_entropy.ops import cross_entropy_loss
+from fla.ops.fused_cross_entropy.ops import cross_entropy_loss
 from fla.ops.utils.op import exp, log
 from fla.utils import input_guard
 from fla.utils.ascend_ub_manager import ASCEND_MAX_GRID_DIM, compute_vocab_block_size, iter_axis_launch_chunks
