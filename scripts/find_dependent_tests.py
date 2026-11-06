@@ -106,7 +106,7 @@ def get_module_aliases_from_tree(tree, package: str) -> dict[str, tuple[str, ...
             if not isinstance(value, ast.Tuple | ast.List):
                 continue
             targets = [
-                f'{package}.{item.value}'
+                item.value if item.value.startswith('fla.') else f'{package}.{item.value}'
                 for item in value.elts
                 if isinstance(item, ast.Constant) and isinstance(item.value, str)
             ]

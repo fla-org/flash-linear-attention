@@ -75,6 +75,9 @@ def test_backend_changes_follow_shared_kernel_imports(backend_project, backend_f
 
 def test_dependencies_follow_reexports_and_aliases(tmp_path):
     sources = {
+        'fla/modules/__init__.py': "_MODULE_ALIASES = {'old_norm': ('fla.ops.norm',)}\n",
+        'fla/ops/norm.py': 'def normalized(x): return x\n',
+        'tests/test_old_norm.py': 'from fla.modules.old_norm import normalized\n',
         'fla/modules/norm/ops.py': 'def l2norm(x): return x\nl2_norm = l2norm\n',
         'fla/modules/norm/unrelated.py': 'def unrelated(x): return x\n',
         'fla/modules/norm/__init__.py': 'from .ops import l2_norm as normalized\nfrom .unrelated import unrelated\n',
@@ -90,6 +93,8 @@ def test_dependencies_follow_reexports_and_aliases(tmp_path):
     finder = DependencyFinder(search_dirs=[tmp_path / 'fla'], test_dir=tmp_path / 'tests', project_root=tmp_path)
     tests = finder.find_dependent_tests([tmp_path / 'fla/modules/norm/ops.py'])
     assert tests == {str(tmp_path / 'tests/test_norm.py')}
+    tests = finder.find_dependent_tests([tmp_path / 'fla/ops/norm.py'])
+    assert tests == {str(tmp_path / 'tests/test_old_norm.py')}
 
 
 @pytest.mark.parametrize('backend_file', ['triton_ascend.py', 'triton_ascend/ops.py', 'triton_ascend/__init__.py'])
@@ -155,10 +160,10 @@ def test_backend_changes_follow_repository_ownership(changed, expected, unrelate
 @pytest.mark.parametrize(
     ('changed', 'expected'),
     [
-        ('fla/modules/norm/triton_ascend/layernorm.py', {'tests/modules/test_layernorm.py'}),
-        ('fla/modules/norm/triton_ascend/__init__.py', {'tests/modules/test_l2norm.py'}),
-        ('fla/modules/norm/triton_ascend/l2norm.py', {'tests/modules/test_l2norm.py'}),
-        ('fla/modules/norm/triton_ascend/fused_norm_gate.py', {'tests/modules/test_layernorm_gated.py'}),
+        ('fla/ops/norm/triton_ascend/layernorm.py', {'tests/modules/test_layernorm.py'}),
+        ('fla/ops/norm/triton_ascend/__init__.py', {'tests/modules/test_l2norm.py'}),
+        ('fla/ops/norm/triton_ascend/l2norm.py', {'tests/modules/test_l2norm.py'}),
+        ('fla/ops/norm/triton_ascend/fused_norm_gate.py', {'tests/modules/test_layernorm_gated.py'}),
         ('fla/modules/causal_conv1d/backends/__init__.py', {'tests/modules/test_conv.py'}),
         ('fla/modules/causal_conv1d/backends/gluon.py', {'tests/modules/test_conv.py'}),
         pytest.param('fla/modules/causal_conv1d/backends/cuda/__init__.py', {'tests/modules/test_conv.py'}, id='cuda-package'),
