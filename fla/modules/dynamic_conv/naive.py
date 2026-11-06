@@ -31,7 +31,7 @@ def naive_dynamic_conv1d(
               + \mathrm{residual}_t.
 
     Phi is dynamic_activation and psi is activation; `None` selects the identity.
-    Projections and convolution use FP32. Outputs and final states use the input dtype.
+    Outputs and final states use the input dtype.
     Negative positions read initial_state or zero padding; packed sequences have separate histories.
 
     Args:
@@ -66,14 +66,11 @@ def naive_dynamic_conv1d(
     B, T, D = x.shape
     W = dynamic_proj_w2.shape[0] // D
     h = x if h is None else h
-    x, h, dynamic_proj_w1, dynamic_proj_w2, dynamic_proj_bias = (
-        t.float() for t in (x, h, dynamic_proj_w1, dynamic_proj_w2, dynamic_proj_bias)
-    )
-
     z = F.linear(input=h, weight=dynamic_proj_w1)
     if dynamic_activation in ('silu', 'swish'):
         z = F.silu(z)
     w = F.linear(input=z, weight=dynamic_proj_w2, bias=dynamic_proj_bias).reshape(B * T, D, W)
+    x, w = x.float(), w.float()
 
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
     if cu_seqlens is not None:
@@ -86,7 +83,7 @@ def naive_dynamic_conv1d(
             bos, eos = i_n * T, (i_n + 1) * T
         else:
             bos, eos = cu_seqlens[i_n:i_n+2]
-        b_h0 = x.new_zeros(W, D) if initial_state is None else initial_state[i_n].T.float()
+        b_h0 = x.new_zeros(W, D) if initial_state is None else initial_state[i_n].T
         b_x = torch.cat((b_h0, x[bos:eos]), dim=0)
         b_w = w[bos:eos]
         y[bos:eos] = (b_w * b_x.unfold(dimension=0, size=W, step=1)[1:]).sum(-1)
@@ -97,5 +94,5 @@ def naive_dynamic_conv1d(
     if activation in ('silu', 'swish'):
         y = F.silu(y)
     if residual is not None:
-        y = y + residual.float()
+        y = y + residual
     return y.to(dtype), ht.to(dtype) if ht is not None else None
