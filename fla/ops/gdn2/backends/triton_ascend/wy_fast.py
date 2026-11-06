@@ -155,7 +155,7 @@ def recompute_w_u_fwd_gdn2_kernel_npu(
         p_A = A + head_A + local_t64[:, None] * (H * BT) + o_A64[None, :]
 
         for i_v in range(tl.cdiv(V, BV)):
-            o_v64 = tl.cast(i_v * BV + tl.arange(0, BV), tl.int64)
+            o_v64 = tl.cast(i_v, tl.int64) * BV + tl.cast(tl.arange(0, BV), tl.int64)
             m_v = m_t[:, None] & (o_v64[None, :] < V)
             head_v = (bos * H + i_h64) * V
             p_v = v + head_v + local_t64[:, None] * (H * V) + o_v64[None, :]
@@ -170,7 +170,7 @@ def recompute_w_u_fwd_gdn2_kernel_npu(
             tl.store(p_u, b_u.to(p_u.dtype.element_ty), mask=m_v)
 
         for i_k in range(tl.cdiv(K, BK)):
-            o_k64 = tl.cast(i_k * BK + tl.arange(0, BK), tl.int64)
+            o_k64 = tl.cast(i_k, tl.int64) * BK + tl.cast(tl.arange(0, BK), tl.int64)
             m_k = m_t[:, None] & (o_k64[None, :] < K)
             head_k = (bos * H + i_h64) * K
             p_k = k + head_k + local_t64[:, None] * (H * K) + o_k64[None, :]

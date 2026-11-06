@@ -7,6 +7,7 @@
 
 import inspect
 import math
+import re
 from functools import partial
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -1333,6 +1334,58 @@ def test_recompute_w_u_fwd_gdn2_npu(layout, dtype, K, V, has_q, monkeypatch):
         else:
             assert tri is not None
             assert_close(name, ref, tri, 0.005)
+
+
+@pytest.mark.skipif(not IS_NPU, reason='Ascend WY address lowering')
+@pytest.mark.parametrize(
+    ('dtype', 'has_q'),
+    [
+        pytest.param(torch.bfloat16, True, id='bf16-q'),
+        pytest.param(torch.float32, False, id='fp32-no-q'),
+    ],
+)
+def test_recompute_w_u_fwd_gdn2_npu_large_offsets(dtype, has_q):
+    """Compile value offsets beyond int32 without allocating or launching a huge tensor."""
+    from triton.runtime.jit import MockTensor
+
+    from fla.ops.gdn2.backends.triton_ascend.wy_fast import recompute_w_u_fwd_gdn2_kernel_npu
+    from fla.utils import ascend_compile_kwargs
+
+    pointer = MockTensor(dtype)
+    compiled = recompute_w_u_fwd_gdn2_kernel_npu.fn.warmup(
+        q=pointer if has_q else None,
+        k=pointer,
+        qg=pointer if has_q else None,
+        kg=pointer,
+        v=pointer,
+        b=pointer,
+        w_gate=pointer,
+        w=pointer,
+        u=pointer,
+        A=pointer,
+        gk=MockTensor(torch.float32),
+        cu_seqlens=None,
+        chunk_indices=None,
+        T=65,
+        B=1,
+        task_num=2,
+        num_core=1,
+        H=1,
+        K=256,
+        V=2**31 + 1,
+        BT=64,
+        BK=64 if has_q else 128,
+        BV=128,
+        STORE_QG=has_q,
+        IS_VARLEN=False,
+        IS_ALIGNED=False,
+        grid=(1,),
+        **ascend_compile_kwargs(),
+    )
+    # H=1 leaves only address products; a late int64 cast would preserve an overflowing int32 multiply.
+    ttir = compiled.asm['ttir']
+    assert re.search(r'arith\.muli\b[^\n]*: i64\b', ttir)
+    assert not re.search(r'arith\.muli\b[^\n]*: (?:i32\b|tensor<[^>]*xi32>)', ttir)
 
 
 @pytest.mark.skipif(not IS_NPU, reason='Ascend compiler options')
