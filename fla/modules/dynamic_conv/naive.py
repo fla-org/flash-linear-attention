@@ -44,7 +44,7 @@ def naive_dynamic_conv1d(
         dynamic_proj_bias (torch.Tensor):
             Second projection bias b with shape [D * W].
         dynamic_activation (str, Optional):
-            Activation φ between projections: `None`, `"silu"`, or `"swish"`. Default: `None`.
+            Activation phi between projections: `None`, `"silu"`, or `"swish"`. Default: `None`.
         residual (torch.Tensor, Optional):
             Tensor [B, T, D] added after the output activation. Default: `None`.
         initial_state (torch.Tensor, Optional):
@@ -52,7 +52,7 @@ def naive_dynamic_conv1d(
         output_final_state (bool, Optional):
             Whether to return the final input history. Default: `False`.
         activation (str, Optional):
-            Output activation ψ: `None`, `"silu"`, or `"swish"`. Default: `None`.
+            Output activation psi: `None`, `"silu"`, or `"swish"`. Default: `None`.
         cu_seqlens (torch.LongTensor, Optional):
             Packed sequence boundaries [N+1]. Default: `None`.
 
