@@ -301,7 +301,7 @@ class DynamicConv1dFunction(torch.autograd.Function):
         W = w2.shape[0] // D
         BT, BD, BR = 16, 32, max(16, triton.next_power_of_2(R))
         NT = len(chunk_indices) if chunk_indices is not None else triton.cdiv(T, BT)
-        dresidual = dy.to(residual) if residual is not None else None
+        dr = dy if residual is not None else None
         if ctx.activation is not None and x.numel():
             y = torch.empty_like(x, dtype=torch.float32)
             dynamic_conv1d_fwd_kernel[(triton.cdiv(D, BD) * NT, B)](
@@ -395,7 +395,7 @@ class DynamicConv1dFunction(torch.autograd.Function):
             BS=BS,
         )
         dw2, db = dw2.sum(0).to(w2), db.sum(0).to(b)
-        return dx, dz, dw2, db, dresidual, dh0, None, None, None
+        return dx, dz, dw2, db, dr, dh0, None, None, None
 
 
 def dynamic_conv1d(
