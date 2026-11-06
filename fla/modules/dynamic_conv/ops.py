@@ -9,6 +9,7 @@ import os
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import triton
 import triton.language as tl
 
@@ -429,6 +430,85 @@ class DynamicConv1dFunction(torch.autograd.Function):
         return dx, dz, dw2, db, dresidual, dh0, None, None, None, None
 
 
+def dynamic_conv1d(
+    x: torch.Tensor,
+    h: torch.Tensor | None,
+    dynamic_proj_w1: torch.Tensor,
+    dynamic_proj_w2: torch.Tensor,
+    dynamic_proj_bias: torch.Tensor,
+    dynamic_activation: str | None = None,
+    residual: torch.Tensor | None = None,
+    initial_state: torch.Tensor | None = None,
+    output_final_state: bool = False,
+    activation: str | None = None,
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    r"""Apply dynamic depthwise causal convolution with a low-rank kernel generator.
+
+    .. math::
+        z_t = \phi(W_1 h_t), \qquad w_t = \operatorname{reshape}(W_2 z_t + b, [D, W]),
+
+        y_t = \psi\!\left(\sum_{j=0}^{W-1} w_t[:, j] \odot x_{t-W+1+j}\right)
+              + \mathrm{residual}_t.
+
+    Phi is dynamic_activation and psi is activation; `None` selects the identity.
+    Outputs and final states use the input dtype.
+    Negative positions read initial_state or zero padding; packed sequences have separate histories.
+
+    Args:
+        x (torch.Tensor):
+            Convolution input [B, T, D]. Packed inputs require B=1.
+        h (torch.Tensor | None):
+            Conditioning input [B, T, D]. `None` uses x.
+        dynamic_proj_w1 (torch.Tensor):
+            First projection W_1 with shape [R, D].
+        dynamic_proj_w2 (torch.Tensor):
+            Second projection W_2 with shape [D * W, R].
+        dynamic_proj_bias (torch.Tensor):
+            Second projection bias b with shape [D * W].
+        dynamic_activation (str, Optional):
+            Activation between projections: `None`, `"silu"`, or `"swish"`. Default: `None`.
+        residual (torch.Tensor, Optional):
+            Tensor [B, T, D] added after the output activation. Default: `None`.
+        initial_state (torch.Tensor, Optional):
+            Input history [N, D, W], ordered oldest to newest. Default: `None`.
+        output_final_state (bool, Optional):
+            Whether to return the final input history. Default: `False`.
+        activation (str, Optional):
+            Convolution output activation: `None`, `"silu"`, or `"swish"`. Default: `None`.
+        cu_seqlens (torch.LongTensor, Optional):
+            Packed sequence boundaries [N+1]. Default: `None`.
+
+        chunk_indices (torch.LongTensor, Optional):
+            Packed chunk indices for 16-token chunks. Default: `None`.
+
+    Returns:
+        tuple[torch.Tensor, torch.Tensor | None]:
+            Output [B, T, D] and final history [N, D, W] when requested, otherwise `None`.
+    """
+    if not 1 <= dynamic_proj_w1.shape[0] <= 128:
+        raise ValueError('dynamic_rank_dim must be in [1, 128]')
+    if dynamic_activation not in (None, 'silu', 'swish') or activation not in (None, 'silu', 'swish'):
+        raise ValueError('dynamic_activation and activation must be None, silu, or swish')
+    h = x if h is None else h
+    z = F.linear(input=h, weight=dynamic_proj_w1)
+    if dynamic_activation in ('silu', 'swish'):
+        z = F.silu(z)
+    return DynamicConv1dFunction.apply(
+        x,
+        z,
+        dynamic_proj_w2,
+        dynamic_proj_bias,
+        residual,
+        initial_state,
+        output_final_state,
+        activation,
+        cu_seqlens,
+        chunk_indices,
+    )
+
+
 class DynamicShortConvolution(nn.Module):
     r"""Depthwise causal convolution with input-dependent weights.
 
@@ -580,18 +660,19 @@ class DynamicShortConvolution(nn.Module):
         update_cache = not torch.is_grad_enabled() and B * T == N
         if update_cache and cu_seqlens is not None:
             update_cache = bool((cu_seqlens.diff() == 1).all())
-        z = self.proj[1](self.proj[0](h))
-        y, ht = DynamicConv1dFunction.apply(
-            x,
-            z,
-            self.proj[2].weight,
-            self.proj[2].bias,
-            residual,
-            cache,
-            output_final_state or update_cache,
-            self.activation,
-            cu_seqlens,
-            chunk_indices,
+        y, ht = dynamic_conv1d(
+            x=x,
+            h=h,
+            dynamic_proj_w1=self.proj[0].weight,
+            dynamic_proj_w2=self.proj[2].weight,
+            dynamic_proj_bias=self.proj[2].bias,
+            dynamic_activation=self.dynamic_activation,
+            residual=residual,
+            initial_state=cache,
+            output_final_state=output_final_state or update_cache,
+            activation=self.activation,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
         )
         if update_cache and cache is not None:
             cache.copy_(ht)

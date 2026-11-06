@@ -5,6 +5,6 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from fla.modules.dynamic_conv.ops import DynamicShortConvolution
+from fla.modules.dynamic_conv.ops import DynamicShortConvolution, dynamic_conv1d
 
-__all__ = ['DynamicShortConvolution']
+__all__ = ['DynamicShortConvolution', 'dynamic_conv1d']
