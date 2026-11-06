@@ -5,6 +5,8 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+import inspect
+
 import pytest
 import torch
 import triton
@@ -13,6 +15,7 @@ import triton.language as tl
 from fla.modules.causal_conv1d.ops import causal_conv1d_bwd_kernel, causal_conv1d_fwd_kernel
 from fla.modules.token_shift import token_shift_bwd_kernel_long, token_shift_fwd_kernel_long
 from fla.ops.gla.chunk import chunk_gla_bwd_kernel_inter
+from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.cache import AutotuneKey, fla_cache_autotune
 from fla.utils import device
 
@@ -76,6 +79,78 @@ def test_kernels_do_not_take_unused_nb(kernel):
     autotuner = kernel.fn
     assert 'NB' not in autotuner.keys
     assert 'NB' not in autotuner.arg_names
+
+
+@pytest.fixture
+def conv_forward_launch(monkeypatch):
+    from fla.modules.causal_conv1d import ops
+
+    torch.manual_seed(42)
+    autotuner = ops.causal_conv1d_fwd_kernel.fn
+    calls = []
+
+    class KernelSpy:
+        def __getitem__(self, grid):
+            def launch(**kwargs):
+                key = AutotuneKey.build(
+                    arg_names=autotuner.arg_names,
+                    key_names=autotuner.keys,
+                    positional_args=(),
+                    runtime_kwargs=kwargs,
+                )
+                calls.append({'key': key.autotune_key, 'grid': grid({'BD': 16}), 'BT': kwargs['BT']})
+            return launch
+
+    monkeypatch.setattr(ops, 'causal_conv1d_fwd_kernel', KernelSpy())
+
+    def launch(B, T, cu_seqlens=None):
+        indices = prepare_chunk_indices(cu_seqlens, 64) if cu_seqlens is not None else None
+        # unwrap dispatch/device guards while executing the real Python launcher on CPU tensors.
+        inspect.unwrap(ops.causal_conv1d_fwd)(
+            x=torch.zeros(B, T, 16, device='cpu'),
+            weight=torch.ones(16, 4, device='cpu'),
+            bias=None,
+            residual=None,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=indices,
+        )
+        return calls[-1]
+
+    return launch
+
+
+def test_conv_forward_cache_keys_for_dense_lengths(conv_forward_launch):
+    lengths = range(1, 131)
+    keys = {conv_forward_launch(B=1, T=length)['key'] for length in lengths}
+    # changing every token count must not create a fresh tuning problem.
+    assert len(keys) <= len(lengths).bit_length() + 1
+
+
+def test_conv_forward_cache_keys_for_equal_workloads(conv_forward_launch):
+    calls = [conv_forward_launch(B=B, T=T) for B, T in [(8, 65), (8, 127), (16, 33), (16, 64)]]
+    assert len({call['BT'] for call in calls}) == 1
+    assert [call['grid'] for call in calls] == [(1, 2, 8), (1, 2, 8), (1, 1, 16), (1, 1, 16)]
+    assert len({call['key'] for call in calls}) == 1
+
+
+def test_conv_forward_cache_keys_for_packed_lengths(conv_forward_launch):
+    keys = set()
+    for length, chunks in [(128, 3), (257, 5), (1024, 17), (2049, 33)]:
+        cu_seqlens = torch.tensor([0, length // 3, length], dtype=torch.int64, device='cpu')
+        call = conv_forward_launch(B=1, T=length, cu_seqlens=cu_seqlens)
+        assert call['BT'] == 64
+        assert call['grid'] == (1, chunks, 1)
+        keys.add(call['key'])
+    assert len(keys) == 1
+
+
+def test_conv_forward_workload_keys_are_runtime_only():
+    autotuner = causal_conv1d_fwd_kernel.fn
+    kernel = autotuner.fn
+    for name in set(autotuner.keys) - {'D', 'W', 'BT'}:
+        parameter = kernel.params[autotuner.arg_names.index(name)]
+        assert not parameter.is_constexpr
+        assert parameter.do_not_specialize
 
 
 @pytest.mark.parametrize(

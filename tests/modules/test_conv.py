@@ -14,7 +14,7 @@ from einops import rearrange
 
 from fla import backends
 from fla.modules.convolution import ShortConvolution, causal_conv1d, causal_conv1d_update
-from fla.utils import IS_NVIDIA, assert_close, device
+from fla.utils import IS_NVIDIA, assert_close, device, device_torch_lib
 
 try:
     from causal_conv1d import causal_conv1d_fn
@@ -121,22 +121,26 @@ def conv_backend_calls(monkeypatch: pytest.MonkeyPatch) -> list[str] | None:
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'D', 'W', 'activation', 'has_bias', 'has_residual', 'dtype', 'backend'),
+    ('B', 'T', 'D', 'W', 'activation', 'has_bias', 'has_residual', 'dtype', 'backend', 'has_initial_state', 'output_final_state'),
     [
-        pytest.param(*test, id="B{0}_T{1}_D{2}_W{3}_activation{4}_has_bias{5}_has_residual{6}_{7}_{8}".format(*test))
+        pytest.param(*test, id="B{}_T{}_D{}_W{}_activation{}_has_bias{}_has_residual{}_{}_{}_h0{}_ht{}".format(*test))
         for test in [
-            (2, 64, 128, 3, "swish", True, True, torch.float32, 'triton'),
-            (2, 128, 128, 4, "swish", False, True, torch.float32, 'triton'),
-            (2, 64, 128, 3, "swish", True, False, torch.float32, 'triton'),
-            (2, 128, 128, 4, "swish", False, False, torch.float32, 'triton'),
-            (2, 500, 1024, 3, None, True, True, torch.float32, 'cuda'),
-            (2, 1024, 1024, 4, None, False, True, torch.float32, 'triton'),
-            (2, 64, 128, 3, None, True, False, torch.float16, 'triton'),
-            (2, 128, 128, 4, None, False, False, torch.float16, 'triton'),
-            (2, 64, 128, 3, "swish", True, True, torch.float32, 'cuda'),
-            (2, 128, 128, 4, "swish", False, True, torch.float32, 'cuda'),
-            (2, 64, 128, 3, "swish", True, False, torch.float32, 'cuda'),
-            (2, 128, 128, 4, "swish", False, False, torch.float32, 'cuda'),
+            (2, 64, 128, 3, "swish", True, True, torch.float32, 'triton', False, False),
+            (2, 128, 128, 4, "swish", False, True, torch.float32, 'triton', False, False),
+            (2, 64, 128, 3, "swish", True, False, torch.float32, 'triton', False, False),
+            (2, 128, 128, 4, "swish", False, False, torch.float32, 'triton', False, False),
+            (2, 500, 1024, 3, None, True, True, torch.float32, 'cuda', False, False),
+            (2, 1024, 1024, 4, None, False, True, torch.float32, 'triton', False, False),
+            (2, 64, 128, 3, None, True, False, torch.float16, 'triton', False, False),
+            (2, 128, 128, 4, None, False, False, torch.float16, 'triton', False, False),
+            (2, 64, 128, 3, "swish", True, True, torch.float32, 'cuda', False, False),
+            (2, 128, 128, 4, "swish", False, True, torch.float32, 'cuda', False, False),
+            (2, 64, 128, 3, "swish", True, False, torch.float32, 'cuda', False, False),
+            (2, 128, 128, 4, "swish", False, False, torch.float32, 'cuda', False, False),
+            (2, 2, 65, 5, "silu", True, True, torch.float32, 'triton', True, True),
+            (2, 3, 65, 4, None, False, False, torch.bfloat16, 'triton', True, False),
+            (2, 4, 128, 3, "swish", True, False, torch.float32, 'triton', False, True),
+            (2, 6, 65, 4, None, True, False, torch.bfloat16, 'triton', False, False),
         ]
     ],
 )
@@ -150,6 +154,8 @@ def test_conv(
     has_residual: bool,
     dtype: torch.dtype,
     backend: str,
+    has_initial_state: bool,
+    output_final_state: bool,
 ):
     if backend == 'cuda':
         if causal_conv1d_fn is None:
@@ -162,24 +168,54 @@ def test_conv(
     weight = torch.randn(D, W).to(device, dtype).requires_grad_(True)
     bias = torch.randn(D).to(device, dtype).requires_grad_(True) if has_bias else None
     residual = x.detach().clone().requires_grad_(True) if has_residual else None
+    h0 = torch.randn(B, D, W, device=device, dtype=dtype, requires_grad=True) if has_initial_state else None
     dy = torch.randn(B, T, D).to(device, dtype)
+    dht = torch.randn(B, D, W - 1, device=device, dtype=dtype) if output_final_state else None
 
-    ref = causal_conv1d_ref(x=rearrange(x, "b t d -> b d t"), weight=weight, bias=bias, activation=activation)
+    ref = causal_conv1d_ref(
+        x=rearrange(x, "b t d -> b d t"),
+        weight=weight,
+        bias=bias,
+        initial_state=h0[..., 1:] if has_initial_state else None,
+        output_final_state=output_final_state,
+        activation=activation,
+    )
+    if output_final_state:
+        ref, ref_ht = ref
     ref = rearrange(ref, "b d t -> b t d")
     if has_residual:
         ref += residual
-    ref.backward(dy)
+    ref_loss = (ref * dy).sum()
+    if output_final_state:
+        ref_loss = ref_loss + (ref_ht * dht).sum()
+    ref_loss.backward()
     ref_dx, x.grad = x.grad, None
     ref_dw, weight.grad = weight.grad, None
+    if has_initial_state:
+        ref_dh0, h0.grad = h0.grad, None
     if has_bias:
         ref_db, bias.grad = bias.grad, None
     if has_residual:
         ref_dr, residual.grad = residual.grad, None
 
-    tri, _ = causal_conv1d(x=x, weight=weight, bias=bias, residual=residual, activation=activation, backend=backend)
-    tri.backward(dy)
+    tri, tri_ht = causal_conv1d(
+        x=x,
+        weight=weight,
+        bias=bias,
+        residual=residual,
+        initial_state=h0,
+        output_final_state=output_final_state,
+        activation=activation,
+        backend=backend,
+    )
+    tri_loss = (tri * dy).sum()
+    if output_final_state:
+        tri_loss = tri_loss + (tri_ht[..., 1:] * dht).sum()
+    tri_loss.backward()
     tri_dx, x.grad = x.grad, None
     tri_dw, weight.grad = weight.grad, None
+    if has_initial_state:
+        tri_dh0, h0.grad = h0.grad, None
     if has_bias:
         tri_db, bias.grad = bias.grad, None
     if has_residual:
@@ -192,6 +228,62 @@ def test_conv(
         assert_close("db", ref_db, tri_db, 1e-3)
     if has_residual:
         assert_close("dr", ref_dr, tri_dr, 1e-3)
+
+    if has_initial_state:
+        assert_close("dh0", ref_dh0, tri_dh0, 1e-3)
+    if output_final_state:
+        assert_close("ht", ref_ht, tri_ht[..., 1:], 1e-3)
+
+
+@pytest.mark.skipif(not IS_NVIDIA, reason='CUDA Graph replay requires NVIDIA')
+@pytest.mark.parametrize(
+    ('T', 'D', 'W', 'activation', 'dtype'),
+    [
+        pytest.param(31, 65, 4, None, torch.bfloat16, id='T31-bf16'),
+        pytest.param(32, 65, 5, 'silu', torch.float32, id='T32-fp32'),
+        pytest.param(33, 65, 4, None, torch.float16, id='T33-fp16'),
+        pytest.param(63, 65, 4, 'silu', torch.float32, id='T63-fp32'),
+        pytest.param(65, 65, 4, None, torch.bfloat16, id='T65-bf16'),
+    ],
+)
+@torch.no_grad()
+def test_conv_graph(T: int, D: int, W: int, activation: str | None, dtype: torch.dtype):
+    torch.manual_seed(42)
+    qkv = torch.randn(2, T, 3 * D, device=device, dtype=dtype)
+    x = qkv[..., D:2 * D]
+    weight = torch.randn(D, W, device=device, dtype=dtype)
+    h0 = torch.randn(2, D, W, device=device, dtype=dtype)
+
+    stream = device_torch_lib.Stream()
+    stream.wait_stream(device_torch_lib.current_stream())
+    with device_torch_lib.stream(stream):
+        for _ in range(3):
+            causal_conv1d(x=x, weight=weight, initial_state=h0, output_final_state=True, activation=activation)
+    device_torch_lib.current_stream().wait_stream(stream)
+    graph = device_torch_lib.CUDAGraph()
+    with device_torch_lib.graph(graph):
+        tri, tri_ht = causal_conv1d(
+            x=x,
+            weight=weight,
+            initial_state=h0,
+            output_final_state=True,
+            activation=activation,
+        )
+
+    for _ in range(2):
+        x.copy_(torch.randn_like(x))
+        weight.copy_(torch.randn_like(weight))
+        h0.copy_(torch.randn_like(h0))
+        ref = causal_conv1d_ref(
+            x=x.transpose(1, 2),
+            weight=weight,
+            initial_state=h0[..., 1:],
+            activation=activation,
+        ).transpose(1, 2)
+        ref_ht = torch.cat([h0, x.transpose(1, 2)], dim=-1)[..., -W:]
+        graph.replay()
+        assert_close('y', ref, tri, 1e-3)
+        assert_close('ht', ref_ht, tri_ht, 1e-3)
 
 
 @pytest.mark.parametrize(
