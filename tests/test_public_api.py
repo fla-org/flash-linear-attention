@@ -53,7 +53,7 @@ def test_public_imports_preserve_callables(run_python, disabled):
         ('activations', 'powglu', {'power': 3.0}),
         ('rotary', 'rotary_embedding', {'seqlen_offsets': 0, 'interleaved': False, 'inplace': False}),
         ('causal_conv1d', 'causal_conv1d_fwd', {'chunk_size': 64, 'layout_fallback': False, 'output_final_state': False}),
-        ('causal_conv1d.backends.cuda', 'causal_conv1d_cuda', {'activation': None, 'output_final_state': False}),
+        ('fla.ops.causal_conv1d.backends.cuda', 'causal_conv1d_cuda', {'activation': None, 'output_final_state': False}),
         ('grpo', 'fused_grpo_loss', {'beta': 0.1, 'save_kl': False, 'inplace': False}),
         ('fused_cross_entropy', 'cross_entropy_loss', {'ignore_index': -100, 'process_group': None}),
         ('fused_linear_cross_entropy', 'fused_linear_cross_entropy_loss', {'num_chunks': 8, 'reduction': 'mean'}),
@@ -68,7 +68,7 @@ def test_public_imports_preserve_callables(run_python, disabled):
     ],
 )
 def test_public_call_defaults(owner, name, defaults):
-    function = getattr(importlib.import_module(f'fla.modules.{owner}'), name)
+    function = getattr(importlib.import_module(owner if owner.startswith('fla.') else f'fla.modules.{owner}'), name)
     signature = inspect.signature(function)
     for parameter, expected in defaults.items():
         assert signature.parameters[parameter].default == expected
@@ -85,17 +85,17 @@ def test_public_call_defaults(owner, name, defaults):
         ),
         (
             'fla.modules.convolution',
-            'fla.modules.causal_conv1d.backends.cuda',
+            'fla.ops.causal_conv1d.backends.cuda',
             ('FastCausalConv1dFn', 'causal_conv1d_cuda', 'fast_causal_conv1d_fn'),
         ),
         (
             'fla.modules.conv.cuda',
-            'fla.modules.causal_conv1d.backends.cuda.ops',
+            'fla.ops.causal_conv1d.backends.cuda.ops',
             ('FastCausalConv1dFn', 'causal_conv1d_cuda', 'fast_causal_conv1d_fn'),
         ),
         (
             'fla.modules.conv.cuda.ops',
-            'fla.modules.causal_conv1d.backends.cuda.ops',
+            'fla.ops.causal_conv1d.backends.cuda.ops',
             ('FastCausalConv1dFn', 'causal_conv1d_cuda', 'fast_causal_conv1d_fn'),
         ),
         ('fla.models.utils', 'fla.models.cache_utils', ('Cache', 'FLACache', 'FLALayer', 'LegacyFLACache')),
@@ -137,6 +137,7 @@ def test_public_function_aliases():
         ('fused_linear_cross_entropy', ('fused_linear_cross_entropy_loss',)),
         ('fused_kl_div', ('fused_kl_div_loss',)),
         ('grpo', ('fused_grpo_loss', 'grpo_loss_with_old_logps')),
+        ('causal_conv1d', ('causal_conv1d', 'causal_conv1d_fwd', 'causal_conv1d_bwd', 'causal_conv1d_update')),
     ],
 )
 def test_module_operator_entries(owner, names):
@@ -199,6 +200,8 @@ def test_legacy_module_pickle_and_state_dict(monkeypatch, legacy, name, kwargs, 
         paths.append(f'fla.modules.norm.{legacy}')
     if legacy in {'rotary', 'fused_cross_entropy', 'fused_linear_cross_entropy', 'fused_kl_div'}:
         paths.append(f'fla.modules.{legacy}.ops')
+    if name == 'ShortConvolution':
+        paths.append('fla.modules.causal_conv1d.ops')
     for path in paths:
         with monkeypatch.context() as patch:
             patch.setattr(module_class, '__module__', path)

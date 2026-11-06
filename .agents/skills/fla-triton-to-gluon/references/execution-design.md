@@ -24,7 +24,7 @@ Classify important `gl.convert_layout` operations by actual movement: equivalent
 Two FLA examples make the trade-offs concrete:
 
 - [Sinkhorn](../../../../fla/ops/utils/sinkhorn/gluon.py): for `[BT, BN, BN]`, `warps_per_cta=[4, 1, 1]` places warps along independent matrices so both matrix reduction axes stay within a warp. Lanes split across matrix axes and, for small matrices, across multiple matrices. Check whether repeated row/column reductions avoid shared exchanges without sacrificing global coalescing.
-- [Causal convolution](../../../../fla/modules/causal_conv1d/backends/gluon.py): a register window for `BC` adjacent outputs with filter width `W` holds `BC + W - 1` inputs per channel. Compare saved loads with the larger live register set as `BC` grows. Measure transactions and spills; source-level reuse alone does not prove a speedup.
+- [Causal convolution](../../../../fla/ops/causal_conv1d/backends/gluon.py): a register window for `BC` adjacent outputs with filter width `W` holds `BC + W - 1` inputs per channel. Compare saved loads with the larger live register set as `BC` grows. Measure transactions and spills; source-level reuse alone does not prove a speedup.
 
 Treat these as reasoning examples, not portable block-size prescriptions. Estimate values per thread including replication when the layout tile exceeds the tensor, dtype packing, fp32 accumulators, addresses, and temporaries. Confirm compiled register use, actual load/store widths, and shuffle/shared instructions. Wider access or less communication can still lose through register pressure or poor coalescing.
 

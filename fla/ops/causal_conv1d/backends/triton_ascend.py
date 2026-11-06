@@ -15,7 +15,7 @@ import triton.language as tl
 from einops import rearrange
 
 from fla.backends import TritonAscendBackend, register
-from fla.modules.causal_conv1d.ops import (
+from fla.ops.causal_conv1d.ops import (
     causal_conv1d_bwd,
     causal_conv1d_fwd,
     causal_conv1d_update,

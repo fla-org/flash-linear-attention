@@ -36,6 +36,7 @@ from fla.modules.rotary import RotaryEmbedding
 from fla.modules.token_shift import TokenShift
 
 _MODULE_ALIASES = {
+    'causal_conv1d.ops': ('causal_conv1d',),
     'fused_kl_div.ops': ('fused_kl_div',),
     'fused_linear_cross_entropy.ops': ('fused_linear_cross_entropy',),
     'fused_cross_entropy.ops': ('fused_cross_entropy',),
@@ -46,18 +47,18 @@ _MODULE_ALIASES = {
     'norm.layernorm_quant': ('fla.ops.norm.layernorm_quant',),
     'layernorm': ('norm.layernorm',),
     'layernorm_gated': ('norm.layernorm_gated',),
-    'convolution': ('causal_conv1d', 'long_conv', 'causal_conv1d.cp', 'causal_conv1d.backends.cuda'),
+    'convolution': ('causal_conv1d', 'long_conv', 'fla.ops.causal_conv1d.cp', 'fla.ops.causal_conv1d.backends.cuda'),
     'conv': ('causal_conv1d', 'long_conv'),
-    'conv.causal_conv1d': ('causal_conv1d.ops',),
-    'conv.short_conv': ('causal_conv1d.ops',),
+    'conv.causal_conv1d': ('fla.ops.causal_conv1d.ops',),
+    'conv.short_conv': ('causal_conv1d',),
     'conv.long_conv': ('long_conv',),
-    'conv.cp': ('causal_conv1d.cp',),
-    'conv.cp.ops': ('causal_conv1d.cp',),
-    'conv.cuda': ('causal_conv1d.backends.cuda',),
-    'conv.cuda.ops': ('causal_conv1d.backends.cuda.ops',),
-    'conv.triton': ('causal_conv1d.ops',),
-    'conv.triton.ops': ('causal_conv1d.ops',),
-    'conv.triton.kernels': ('causal_conv1d.ops',),
+    'conv.cp': ('fla.ops.causal_conv1d.cp',),
+    'conv.cp.ops': ('fla.ops.causal_conv1d.cp',),
+    'conv.cuda': ('fla.ops.causal_conv1d.backends.cuda',),
+    'conv.cuda.ops': ('fla.ops.causal_conv1d.backends.cuda.ops',),
+    'conv.triton': ('fla.ops.causal_conv1d.ops',),
+    'conv.triton.ops': ('fla.ops.causal_conv1d.ops',),
+    'conv.triton.kernels': ('fla.ops.causal_conv1d.ops',),
 }
 
 for _old, _targets in _MODULE_ALIASES.items():
@@ -69,7 +70,7 @@ for _old, _targets in _MODULE_ALIASES.items():
         _module.__spec__ = ModuleSpec(_fullname, loader=None, is_package=True)
         _module.__path__ = []
         for _target in _targets:
-            _source = import_module(f'{__name__}.{_target}')
+            _source = import_module(_target if _target.startswith('fla.') else f'{__name__}.{_target}')
             for _symbol in getattr(_source, '__all__', vars(_source)):
                 if not _symbol.startswith('_'):
                     vars(_module).setdefault(_symbol, getattr(_source, _symbol))

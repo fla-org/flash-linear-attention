@@ -13,7 +13,7 @@ from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
 
 from fla.backends import GluonBackend, register
-from fla.modules.causal_conv1d import causal_conv1d_bwd, causal_conv1d_fwd
+from fla.ops.causal_conv1d import causal_conv1d_bwd, causal_conv1d_fwd
 from fla.ops.utils import prepare_chunk_indices
 from fla.utils import input_guard
 
@@ -318,7 +318,7 @@ def causal_conv1d_fwd_gluon(
     )
     final_state = None
     if output_final_state:
-        from fla.modules.causal_conv1d import causal_conv1d_update_states
+        from fla.ops.causal_conv1d import causal_conv1d_update_states
 
         final_state = causal_conv1d_update_states(
             x=x,

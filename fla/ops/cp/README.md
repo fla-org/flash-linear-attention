@@ -29,7 +29,7 @@ cp_context = build_cp_context(
 ### Causal Conv1d
 
 ```python
-from fla.modules.convolution import causal_conv1d
+from fla.ops.causal_conv1d import causal_conv1d
 
 # x_local is the rank-local chunk: [1, T_local, D]
 y_local, _ = causal_conv1d(

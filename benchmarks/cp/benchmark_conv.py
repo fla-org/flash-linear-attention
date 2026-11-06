@@ -18,7 +18,7 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 
-from fla.modules.causal_conv1d import causal_conv1d
+from fla.ops.causal_conv1d import causal_conv1d
 from fla.ops.cp import build_cp_context
 from fla.utils import assert_close, get_abs_err, get_err_ratio
 

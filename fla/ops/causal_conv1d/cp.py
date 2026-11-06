@@ -183,7 +183,7 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # import here to avoid circular dependency
-        from fla.modules.causal_conv1d import causal_conv1d_fwd
+        from fla.ops.causal_conv1d import causal_conv1d_fwd
 
         if cp_context is None:
             raise ValueError("cp_context must be provided for CausalConv1dFunctionCP")
@@ -232,7 +232,7 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
     @staticmethod
     def backward(ctx, dy: torch.Tensor) -> tuple[torch.Tensor | None, ...]:
         # import here to avoid circular dependency
-        from fla.modules.causal_conv1d import causal_conv1d_bwd
+        from fla.ops.causal_conv1d import causal_conv1d_bwd
 
         x, weight, bias, residual, initial_state = ctx.saved_tensors
         group = ctx.group
@@ -308,7 +308,7 @@ def causal_conv1d_cp(
     if backend not in ('triton', 'cuda'):
         raise ValueError(f"Unsupported CP convolution backend: {backend!r}; expected 'triton', 'cuda', or 'mix'")
     if backend == 'cuda':
-        from fla.modules.causal_conv1d.backends.cuda.cp import causal_conv1d_cuda_cp
+        from fla.ops.causal_conv1d.backends.cuda.cp import causal_conv1d_cuda_cp
 
         return causal_conv1d_cuda_cp(
             x=x,

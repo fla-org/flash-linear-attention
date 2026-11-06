@@ -13,8 +13,8 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from fla.modules.causal_conv1d import causal_conv1d
-from fla.modules.causal_conv1d.backends.cuda import ops
+from fla.ops.causal_conv1d import causal_conv1d
+from fla.ops.causal_conv1d.backends.cuda import ops
 from fla.ops.cp import FLACPContext, build_cp_context
 from fla.utils import IS_NVIDIA, assert_close, device, device_torch_lib
 from tests.cp.utils import gather_global, shard_tensor

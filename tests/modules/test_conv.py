@@ -13,7 +13,8 @@ import torch.nn.functional as F
 from einops import rearrange
 
 from fla import backends
-from fla.modules.convolution import ShortConvolution, causal_conv1d, causal_conv1d_update
+from fla.modules import ShortConvolution
+from fla.ops.causal_conv1d import causal_conv1d, causal_conv1d_update
 from fla.utils import IS_NVIDIA, assert_close, device
 
 try:
@@ -98,8 +99,8 @@ def conv_backend_calls(monkeypatch: pytest.MonkeyPatch) -> list[str] | None:
 
     if not GluonBackend.is_available():
         return None
-    from fla.modules.causal_conv1d import ops
-    from fla.modules.causal_conv1d.backends.gluon import causal_conv1d_bwd_gluon, causal_conv1d_fwd_gluon
+    from fla.ops.causal_conv1d import ops
+    from fla.ops.causal_conv1d.backends.gluon import causal_conv1d_bwd_gluon, causal_conv1d_fwd_gluon
 
     calls = []
     fwd, bwd = causal_conv1d_fwd_gluon, causal_conv1d_bwd_gluon
@@ -303,7 +304,7 @@ def test_fast_conv_varlen(N: int, T: int, D: int, W: int, activation: str | None
         pytest.skip("causal_conv1d is not installed for CUDA backend")
     if not IS_NVIDIA:
         pytest.skip("fast_causal_conv1d requires an NVIDIA GPU")
-    from fla.modules.convolution import fast_causal_conv1d_fn
+    from fla.ops.causal_conv1d.backends.cuda import fast_causal_conv1d_fn
 
     cu_seqlens = torch.cat([
         torch.tensor([0], dtype=torch.long),
@@ -702,7 +703,7 @@ def test_conv_backend_parity(
     dtype: torch.dtype,
     weight_dtype: torch.dtype,
 ):
-    pytest.importorskip('fla.modules.causal_conv1d.backends.gluon')
+    pytest.importorskip('fla.ops.causal_conv1d.backends.gluon')
     torch.manual_seed(42)
     x = torch.randn(B, T, D * (3 if non_contiguous else 1), device=device, dtype=dtype)
     x = x[..., D:2 * D] if non_contiguous else x
@@ -1220,7 +1221,7 @@ def test_conv_varlen_empty_sequence():
 
 
 def test_conv_backend_override(monkeypatch: pytest.MonkeyPatch):
-    from fla.modules.causal_conv1d import ops
+    from fla.modules import causal_conv1d
 
     torch.manual_seed(42)
     monkeypatch.setenv('FLA_CONV_BACKEND', 'bogus')
@@ -1228,7 +1229,7 @@ def test_conv_backend_override(monkeypatch: pytest.MonkeyPatch):
         ShortConvolution(hidden_size=8, kernel_size=3)
 
     monkeypatch.setenv('FLA_CONV_BACKEND', 'cuda')
-    monkeypatch.setattr(ops, 'causal_conv1d_fn_cuda', None)
+    monkeypatch.setattr(causal_conv1d, 'causal_conv1d_fn_cuda', None)
     with pytest.warns(UserWarning, match='Switching to the Triton implementation'):
         conv = ShortConvolution(hidden_size=8, kernel_size=3, backend='triton')
     assert conv.backend == 'triton'
@@ -1240,7 +1241,7 @@ def test_conv_backend_override(monkeypatch: pytest.MonkeyPatch):
 )
 def test_conv_backend_verifier(monkeypatch: pytest.MonkeyPatch, case: str):
     pytest.importorskip('triton.experimental.gluon')
-    from fla.modules.causal_conv1d.backends.gluon import causal_conv1d_bwd_verifier, causal_conv1d_fwd_verifier
+    from fla.ops.causal_conv1d.backends.gluon import causal_conv1d_bwd_verifier, causal_conv1d_fwd_verifier
 
     x = torch.empty(2, 64, 32)
     weight = torch.empty(32, 4)
