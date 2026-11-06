@@ -278,14 +278,12 @@ class DynamicConv1dFunction(torch.autograd.Function):
         output_final_state,
         activation,
         cu_seqlens,
-        chunk_indices,
     ):
         B, T, D = x.shape
         R = z.shape[-1]
         W = w2.shape[0] // D
         BT, BD, BR = 16, 32, max(16, triton.next_power_of_2(R))
-        if cu_seqlens is not None and chunk_indices is None:
-            chunk_indices = prepare_chunk_indices(cu_seqlens=cu_seqlens, chunk_size=BT)
+        chunk_indices = prepare_chunk_indices(cu_seqlens=cu_seqlens, chunk_size=BT) if cu_seqlens is not None else None
         NT = len(chunk_indices) if chunk_indices is not None else triton.cdiv(T, BT)
         y = torch.empty_like(x)
         dynamic_conv1d_fwd_kernel[(triton.cdiv(D, BD) * NT, B)](
@@ -427,7 +425,7 @@ class DynamicConv1dFunction(torch.autograd.Function):
             BS=BS,
         )
         dw2, db = dw2.sum(0).to(w2), db.sum(0).to(b)
-        return dx, dz, dw2, db, dresidual, dh0, None, None, None, None
+        return dx, dz, dw2, db, dresidual, dh0, None, None, None
 
 
 def dynamic_conv1d(
@@ -442,7 +440,6 @@ def dynamic_conv1d(
     output_final_state: bool = False,
     activation: str | None = None,
     cu_seqlens: torch.LongTensor | None = None,
-    chunk_indices: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     r"""Apply dynamic depthwise causal convolution with a low-rank kernel generator.
 
@@ -481,8 +478,6 @@ def dynamic_conv1d(
             Convolution output activation: `None`, `"silu"`, or `"swish"`. Default: `None`.
         cu_seqlens (torch.LongTensor, Optional):
             Packed sequence boundaries [N+1]. Default: `None`.
-        chunk_indices (torch.LongTensor, Optional):
-            Packed chunk indices for 16-token chunks. Default: `None`.
 
     Returns:
         tuple[torch.Tensor, torch.Tensor | None]:
@@ -506,7 +501,6 @@ def dynamic_conv1d(
         output_final_state,
         activation,
         cu_seqlens,
-        chunk_indices,
     )
 
 
@@ -605,7 +599,6 @@ class DynamicShortConvolution(nn.Module):
         cache: torch.Tensor | None = None,
         output_final_state: bool = False,
         cu_seqlens: torch.LongTensor | None = None,
-        chunk_indices: torch.LongTensor | None = None,
         *,
         h: torch.Tensor | None = None,
         **kwargs,
@@ -626,8 +619,6 @@ class DynamicShortConvolution(nn.Module):
                 Whether to return the final input history. Default: `False`.
             cu_seqlens (torch.LongTensor, Optional):
                 Packed sequence boundaries [N+1]. Default: `None`.
-            chunk_indices (torch.Tensor, Optional):
-                Packed chunk indices for 16-token chunks. Default: `None`.
             h (torch.Tensor, Optional):
                 Conditioning input [B, T, D]. Default: `x`.
 
@@ -673,7 +664,6 @@ class DynamicShortConvolution(nn.Module):
             output_final_state=output_final_state or update_cache,
             activation=self.activation,
             cu_seqlens=cu_seqlens,
-            chunk_indices=chunk_indices,
         )
         if update_cache and cache is not None:
             cache.copy_(ht)
