@@ -141,16 +141,16 @@ def test_dynamic_conv_module(kernel_size, bias, activation, dtype, rank, generat
         z = reference.in_proj(gen_values)
         if generator_activation is not None:
             z = F.silu(z)
-        ref, _ = naive_dynamic_conv1d(
-            x=ref_values,
-            z=z,
-            out_proj_weight=reference.out_proj_weight,
-            out_proj_bias=reference.out_proj_bias,
-            residual=ref_residual,
-            activation=activation,
-        )
         out, _ = module(x=x, residual=residual, mask=mask, generator_input=None if self_conditioned else generator)
         dy = torch.randn_like(out)
+    ref, _ = naive_dynamic_conv1d(
+        x=ref_values,
+        z=z,
+        out_proj_weight=reference.out_proj_weight,
+        out_proj_bias=reference.out_proj_bias,
+        residual=ref_residual,
+        activation=activation,
+    )
     out.backward(dy)
     ref.backward(dy)
     assert_close('module', ref, out, 1e-3)
