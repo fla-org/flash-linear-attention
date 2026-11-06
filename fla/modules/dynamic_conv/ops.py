@@ -495,7 +495,6 @@ class DynamicShortConvolution(nn.Module):
     The second projection is fused with convolution.
     Only the second generator projection has a bias, which is always enabled.
     The convolution has no additional bias; an absent residual is zero.
-    The second projection weight starts at zero, so its bias initializes a static filter shared across tokens.
 
     Args:
         hidden_size (int):
@@ -557,9 +556,8 @@ class DynamicShortConvolution(nn.Module):
 
     def reset_parameters(self) -> None:
         nn.init.normal_(tensor=self.proj[0].weight, std=0.02)
-        nn.init.zeros_(tensor=self.proj[2].weight)
-        bound = self.kernel_size[0] ** -0.5
-        nn.init.uniform_(tensor=self.proj[2].bias, a=-bound, b=bound)
+        nn.init.normal_(tensor=self.proj[2].weight, std=0.02)
+        nn.init.zeros_(tensor=self.proj[2].bias)
 
     def forward(
         self,
