@@ -44,7 +44,7 @@ STATIC_WARPS = 32 if not IS_AMD else 16
         for BD in [16, 32, 64, 128]
         for num_warps in NUM_WARPS_AUTOTUNE
     ],
-    key=['D', 'W', 'IS_DYNAMIC'],
+    key=['D', 'W'],
     **autotune_cache_kwargs,
 )
 @triton.jit
@@ -68,17 +68,16 @@ def causal_conv1d_fwd_kernel(
     BW: tl.constexpr,
     BD: tl.constexpr,
     ACTIVATION: tl.constexpr,
-    IS_DYNAMIC: tl.constexpr,
     HAS_WEIGHT: tl.constexpr,
     HAS_BIAS: tl.constexpr,
     HAS_RESIDUAL: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_d, i_t, i_b = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_d, i_t, i_b = tl.program_id(0), tl.program_id(1), tl.program_id(2)
 
     if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int64), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
         p_x = x + bos * stride_x_t
@@ -94,7 +93,7 @@ def causal_conv1d_fwd_kernel(
     m_w = o_w >= 0
     m_y = (o_t < T)[:, None] & m_d[None, :]
 
-    if HAS_WEIGHT and not IS_DYNAMIC:
+    if HAS_WEIGHT:
         # [BD, BW]
         b_w = tl.load(weight + o_d[:, None] * W + o_w, mask=m_d[:, None] & m_w, other=0).to(tl.float32)
 
@@ -105,10 +104,7 @@ def causal_conv1d_fwd_kernel(
             p_yi = p_x + o_x[:, None] * stride_x_t + o_d[None, :] * stride_x_d
             # [BT, BD]
             b_yi = tl.load(p_yi, mask=((o_x >= 0) & (o_x < T))[:, None] & m_d[None, :], other=0.0).to(tl.float32)
-            if IS_DYNAMIC:
-                p_w = weight + ((bos + o_t[:, None]) * D + o_d[None, :]) * W + i_w + W - 1
-                b_yi *= tl.load(p_w, mask=m_y, other=0).to(tl.float32)
-            elif HAS_WEIGHT:
+            if HAS_WEIGHT:
                 b_yi *= tl.sum(b_w * (o_w == (i_w + W - 1)), 1)
             b_y += b_yi
     elif i_t * BT >= W:
@@ -118,10 +114,7 @@ def causal_conv1d_fwd_kernel(
             p_yi = p_x + o_x[:, None] * stride_x_t + o_d[None, :] * stride_x_d
             # [BT, BD]
             b_yi = tl.load(p_yi, mask=((o_x >= 0) & (o_x < T))[:, None] & m_d[None, :], other=0.0).to(tl.float32)
-            if IS_DYNAMIC:
-                p_w = weight + ((bos + o_t[:, None]) * D + o_d[None, :]) * W + i_w + W - 1
-                b_yi *= tl.load(p_w, mask=m_y, other=0).to(tl.float32)
-            elif HAS_WEIGHT:
+            if HAS_WEIGHT:
                 b_yi *= tl.sum(b_w * (o_w == (i_w + W - 1)), 1)
             b_y += b_yi
     else:
@@ -135,10 +128,7 @@ def causal_conv1d_fwd_kernel(
 
             b_yi += tl.load(initial_state + i_n * D*W + o_d * W + (o_x + W)[:, None], mask=m_c, other=0).to(tl.float32)
 
-            if IS_DYNAMIC:
-                p_w = weight + ((bos + o_t[:, None]) * D + o_d[None, :]) * W + i_w + W - 1
-                b_yi *= tl.load(p_w, mask=m_y, other=0).to(tl.float32)
-            elif HAS_WEIGHT:
+            if HAS_WEIGHT:
                 b_yi *= tl.sum(b_w * (o_w == (i_w + W - 1)), 1)
             b_y += b_yi
 
@@ -170,7 +160,7 @@ def causal_conv1d_fwd_kernel(
         for BD in [16, 32, 64, 128]
         for num_warps in NUM_WARPS_AUTOTUNE
     ],
-    key=['D', 'W', 'IS_DYNAMIC'],
+    key=['D', 'W'],
     **autotune_cache_kwargs,
 )
 @triton.jit
@@ -203,17 +193,16 @@ def causal_conv1d_bwd_kernel(
     BW: tl.constexpr,
     BD: tl.constexpr,
     ACTIVATION: tl.constexpr,
-    IS_DYNAMIC: tl.constexpr,
     HAS_WEIGHT: tl.constexpr,
     HAS_BIAS: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     USE_FINAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_d, i_t, i_b = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_d, i_t, i_b = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     if IS_VARLEN:
         i_tg = i_t
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int64), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
         p_x = x + bos * stride_x_t
@@ -238,43 +227,14 @@ def causal_conv1d_bwd_kernel(
     if HAS_WEIGHT:
         p_x = p_x + o_t[:, None] * stride_x_t + o_d[None, :] * stride_x_d
         b_x = tl.load(p_x, mask=m_x, other=0.0)
-        if not IS_DYNAMIC:
-            # [BD, BW]
-            b_w = tl.load(weight + o_d[:, None] * W + o_w, mask=m_d[:, None] & m_w, other=0)
+        # [BD, BW]
+        b_w = tl.load(weight + o_d[:, None] * W + o_w, mask=m_d[:, None] & m_w, other=0)
 
     b_dx = tl.zeros((BT, BD), dtype=tl.float32)
     if HAS_BIAS:
         b_db = tl.zeros((BD,), dtype=tl.float32)
 
-    if IS_DYNAMIC:
-        b_dy0 = tl.load(p_dy + o_t[:, None] * stride_dy_t + o_d * stride_dy_d, mask=m_x, other=0).to(tl.float32)
-        if ACTIVATION == 'swish' or ACTIVATION == 'silu':
-            b_y0 = tl.load(y + (bos + o_t[:, None]) * D + o_d, mask=m_x, other=0).to(tl.float32)
-            b_sigmoid = tl.sigmoid(b_y0)
-            b_dy0 *= b_sigmoid * (1 + b_y0 * (1 - b_sigmoid))
-        if HAS_BIAS:
-            b_db = tl.sum(b_dy0, 0)
-        for i_w in tl.static_range(0, W):
-            o_dy = o_t + W - 1 - i_w
-            m_dy = (o_dy < T)[:, None] & m_d[None, :]
-            b_dy = tl.load(p_dy + o_dy[:, None] * stride_dy_t + o_d * stride_dy_d, mask=m_dy, other=0).to(tl.float32)
-            if ACTIVATION == 'swish' or ACTIVATION == 'silu':
-                b_y = tl.load(y + (bos + o_dy[:, None]) * D + o_d, mask=m_dy, other=0).to(tl.float32)
-                b_sigmoid = tl.sigmoid(b_y)
-                b_dy *= b_sigmoid * (1 + b_y * (1 - b_sigmoid))
-            p_w = weight + ((bos + o_dy[:, None]) * D + o_d) * W + i_w
-            b_w = tl.load(p_w, mask=m_dy, other=0).to(tl.float32)
-            b_dx += b_dy * b_w
-
-            o_x = o_t + i_w - W + 1
-            p_xi = p_x + (i_w - W + 1) * stride_x_t
-            b_xi = tl.load(p_xi, mask=((o_x >= 0) & (o_x < T))[:, None] & m_d, other=0).to(tl.float32)
-            if USE_INITIAL_STATE:
-                p_c = initial_state + i_n * D * W + o_d * W + (o_x + W)[:, None]
-                b_xi += tl.load(p_c, mask=((o_x >= -W) & (o_x < 0))[:, None] & m_d, other=0).to(tl.float32)
-            p_dw = dw + ((bos + o_t[:, None]) * D + o_d) * W + i_w
-            tl.store(p_dw, b_dy0 * b_xi, mask=m_x)
-    elif not USE_FINAL_STATE and not USE_INITIAL_STATE:
+    if not USE_FINAL_STATE and not USE_INITIAL_STATE:
         for i_w in tl.static_range(0, W):
             o_dy = o_t + i_w
             p_dy_blk = p_dy + o_dy[:, None] * stride_dy_t + o_d[None, :] * stride_dy_d
@@ -368,7 +328,7 @@ def causal_conv1d_bwd_kernel(
 
     if USE_FINAL_STATE:
         if i_t * BT + BT >= T-W:
-            start_tok = max(0, T - W if IS_DYNAMIC else T - (W - 1))
+            start_tok = max(0, T - (W - 1))
             offset = i_t * BT + tl.arange(0, BT)
             mask = (offset >= start_tok) & (offset < T)
             # state slot w is token T - W + w, so token t takes dht[:, t + W - T].
@@ -400,7 +360,7 @@ def causal_conv1d_bwd_kernel(
         for BD in [8, 16, 32, 64, 128, 256]
         for num_warps in NUM_WARPS_AUTOTUNE
     ],
-    key=['D', 'W', 'IS_DYNAMIC'],
+    key=['D', 'W'],
     restore_value=['cache'],
     **autotune_cache_kwargs,
 )
@@ -421,13 +381,12 @@ def causal_conv1d_update_kernel(
     BD: tl.constexpr,
     BW: tl.constexpr,
     ACTIVATION: tl.constexpr,
-    IS_DYNAMIC: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     HAS_WEIGHT: tl.constexpr,
     HAS_BIAS: tl.constexpr,
     HAS_RESIDUAL: tl.constexpr,
 ):
-    pid = tl.program_id(0).to(tl.int64)
+    pid = tl.program_id(0)
     ND = tl.cdiv(D, BD)
     i_d, i_n = pid % ND, (pid // ND).to(tl.int64)
 
@@ -448,8 +407,6 @@ def causal_conv1d_update_kernel(
         m_update = o_w == (W - 1)
         b_cache = tl.where(m_update[None, :], b_x[:, None], b_cache)
 
-    if IS_DYNAMIC:
-        weight += i_n * D * W
     if HAS_WEIGHT:
         b_w = tl.load(weight + o_d[:, None] * W + o_w, mask=m_d[:, None] & m_w, other=0)
         b_y = tl.sum(b_cache * b_w, 1)
@@ -500,7 +457,6 @@ def compute_dh0_kernel(
     D: tl.constexpr,
     W: tl.constexpr,
     BD: tl.constexpr,
-    IS_DYNAMIC: tl.constexpr,
     USE_ACTIVATION: tl.constexpr,
     USE_FINAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
@@ -511,7 +467,7 @@ def compute_dh0_kernel(
 
     Grid: (cdiv(D, BD) * N,)
     """
-    pid = tl.program_id(0).to(tl.int64)
+    pid = tl.program_id(0)
     ND = tl.cdiv(D, BD)
     i_d, i_n = pid % ND, (pid // ND).to(tl.int64)
 
@@ -523,14 +479,13 @@ def compute_dh0_kernel(
         dy_base = dy + bos * stride_dy_t
     else:
         seq_len = T
-        bos = i_n * T
         # for non-varlen, dy is [B, T, D], offset by i_n * stride_dy_n
         dy_base = dy + tl.cast(i_n, tl.int64) * stride_dy_n
 
     o_d = i_d * BD + tl.arange(0, BD)
     m_d = o_d < D
 
-    for i_w in tl.static_range(0 if IS_DYNAMIC else 1, W):
+    for i_w in tl.static_range(1, W):
         b_dh0 = tl.zeros([BD], dtype=tl.float32)
 
         if USE_FINAL_STATE:
@@ -558,11 +513,7 @@ def compute_dh0_kernel(
                     b_ys = tl.sigmoid(b_y)
                     b_dy = b_dy * b_ys * (1 + b_y * (1 - b_ys))
 
-                if IS_DYNAMIC:
-                    p_w = weight + ((bos + t) * D + o_d) * W + w_idx
-                    b_w_col = tl.load(p_w, mask=m_t, other=0).to(tl.float32)
-                else:
-                    b_w_col = tl.load(weight + o_d * W + w_idx, mask=m_d, other=0).to(tl.float32)
+                b_w_col = tl.load(weight + o_d * W + w_idx, mask=m_d, other=0).to(tl.float32)
 
                 b_dh0 += tl.where(m_t, b_dy * b_w_col, 0)
 
@@ -669,10 +620,10 @@ def causal_conv1d_fwd(
 ) -> torch.Tensor:
     BT = chunk_size
     shape = x.shape
-    if x.shape[-1] != weight.shape[-2]:
+    if x.shape[-1] != weight.shape[0]:
         x = rearrange(x, 'b t ... -> b t (...)')
-    B, T, D = x.shape[0], x.shape[1], weight.shape[-2]
-    W = weight.shape[-1]
+    B, T, D = x.shape[0], x.shape[1], weight.shape[0]
+    W = weight.shape[1]
     stride_x_n, stride_x_t, stride_x_d = x.stride()
 
     BW = triton.next_power_of_2(W)
@@ -680,8 +631,7 @@ def causal_conv1d_fwd(
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT, cu_seqlens_cpu=cu_seqlens_cpu)
     NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
 
-    # dynamic weights keep the preactivation in fp32 for backward; the autograd entry casts the output.
-    y = torch.empty_like(x, dtype=torch.float32 if weight.ndim == 4 else x.dtype, memory_format=torch.contiguous_format)
+    y = torch.empty_like(x, memory_format=torch.contiguous_format)
 
     def grid(meta) -> tuple[int, ...]:
 
@@ -705,7 +655,6 @@ def causal_conv1d_fwd(
         BT=BT,
         BW=BW,
         ACTIVATION=activation,
-        IS_DYNAMIC=weight.ndim == 4,
     )
     final_state = None
     if output_final_state:
@@ -727,7 +676,7 @@ def compute_dh0_triton(
     Compute dh0 (gradient w.r.t. initial_state) using a separate Triton kernel.
     This is a workaround for Triton compiler bugs on some architectures (e.g., GB200).
     """
-    D, W = weight.shape[-2:]
+    D, W = weight.shape
     N = initial_state.shape[0]
     T = dy.shape[1]
 
@@ -754,7 +703,6 @@ def compute_dh0_triton(
         D=D,
         W=W,
         BD=BD,
-        IS_DYNAMIC=weight.ndim == 4,
     )
 
     return dh0
@@ -779,10 +727,10 @@ def causal_conv1d_bwd(
 ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
     BT = chunk_size
     shape = x.shape
-    if x.shape[-1] != weight.shape[-2]:
+    if x.shape[-1] != weight.shape[0]:
         x = rearrange(x, 'b t ... -> b t (...)')
     B, T, D = x.shape
-    W = weight.shape[-1] if weight is not None else None
+    W = weight.shape[1] if weight is not None else None
 
     stride_x_n, stride_x_t, stride_x_d = x.stride()
     stride_dy_n, stride_dy_t, stride_dy_d = dy.stride()
@@ -807,10 +755,7 @@ def causal_conv1d_bwd(
             chunk_indices=chunk_indices,
         )
     dx = torch.empty_like(x)
-    if weight.ndim == 4:
-        dw = torch.empty_like(weight)
-    else:
-        dw = weight.new_empty(B*NT, *weight.shape, dtype=torch.float) if weight is not None else None
+    dw = weight.new_empty(B*NT, *weight.shape, dtype=torch.float) if weight is not None else None
     db = bias.new_empty(B*NT, *bias.shape, dtype=torch.float) if bias is not None else None
     dr = dy if residual is not None else None
 
@@ -847,9 +792,8 @@ def causal_conv1d_bwd(
         BT=BT,
         BW=BW,
         ACTIVATION=activation,
-        IS_DYNAMIC=weight.ndim == 4,
     )
-    if weight is not None and weight.ndim == 2:
+    if weight is not None:
         dw = dw.sum(0).to(weight)
     if bias is not None:
         db = db.sum(0).to(bias)
@@ -930,12 +874,12 @@ def causal_conv1d_update(
     activation: str | None = None,
 ) -> torch.Tensor:
     shape = x.shape
-    if weight is not None and x.shape[-1] != weight.shape[-2]:
+    if weight is not None and x.shape[-1] != weight.shape[0]:
         x = rearrange(x, 'b t ... -> b t (...)')
 
     D = x.shape[-1]
     N = x.numel() // D
-    W = weight.shape[-1] if weight is not None else None
+    W = weight.shape[1] if weight is not None else None
     BW = triton.next_power_of_2(W)
 
     if x.dim() == 2:
@@ -981,7 +925,6 @@ def causal_conv1d_update(
         W=W,
         BW=BW,
         ACTIVATION=activation,
-        IS_DYNAMIC=weight is not None and weight.ndim > 2,
     )
     return y.view(shape), cache
 
@@ -1026,7 +969,7 @@ class CausalConv1dFunction(torch.autograd.Function):
             chunk_size=chunk_size,
             layout_fallback=ctx.layout_fallback,
         )
-        return y.to(x.dtype), final_state
+        return y, final_state
 
     @staticmethod
     @input_guard(no_guard_contiguous=["dy"])
@@ -1075,8 +1018,7 @@ def causal_conv1d(
         x (torch.Tensor):
             Input tensor of shape [B, T, D].
         weight (torch.Tensor, Optional):
-            Shared weights [D, W] or per-token weights [B, T, D, W]. Taps are ordered oldest to newest.
-            Per-token weights use the Triton backend on CUDA/HIP without context parallelism. Default: `None`.
+            Weight tensor of shape [D, W]. Default: `None`.
         bias (torch.Tensor, Optional):
             Bias tensor of shape [D]. Default: `None`.
         residual (torch.Tensor, Optional):
@@ -1111,21 +1053,6 @@ def causal_conv1d(
     # import here to avoid circular dependencies
     from fla.modules.causal_conv1d.backends.cuda import causal_conv1d_cuda, fast_causal_conv1d_fn
     from fla.modules.causal_conv1d.cp import causal_conv1d_cp
-
-    if weight is not None and weight.ndim == 4:
-        if backend != 'triton' or cp_context is not None or x.device.type != 'cuda':
-            raise ValueError('Per-token weights require the Triton backend on CUDA/HIP without context parallelism')
-        if x.ndim != 3 or weight.shape[:-1] != x.shape or weight.shape[-1] < 1:
-            raise ValueError('Per-token weights must have shape [B, T, D, W] with W > 0')
-        if cu_seqlens is not None and x.shape[0] != 1:
-            raise ValueError('Packed inputs require batch size 1')
-        if activation not in (None, 'silu', 'swish'):
-            raise ValueError('activation must be None, silu, or swish')
-        if residual is not None and residual.shape != x.shape:
-            raise ValueError('residual must have the same shape as x')
-        N = x.shape[0] if cu_seqlens is None else len(cu_seqlens) - 1
-        if initial_state is not None and initial_state.shape != (N, x.shape[-1], weight.shape[-1]):
-            raise ValueError('initial_state must have shape [N, D, W]')
 
     if cp_context is not None:
         assert initial_state is None, "Initial state is not supported for CP"
@@ -1284,8 +1211,6 @@ class ShortConvolution(nn.Conv1d):
         output_final_state: bool = False,
         cu_seqlens: torch.LongTensor | None = None,
         chunk_indices: torch.LongTensor | None = None,
-        *,
-        generator_input: torch.Tensor | None = None,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """
@@ -1306,8 +1231,6 @@ class ShortConvolution(nn.Conv1d):
                 Cumulative sequence lengths of shape `[N+1]`. Default: `None`.
             chunk_indices (torch.Tensor, Optional):
                 Chunk indices for variable-length sequences. Default: `None`.
-            generator_input (torch.Tensor, Optional):
-                Conditioning input [B, T, D] for DynamicShortConvolution. Default: `x`.
 
         Returns:
             y (torch.Tensor):
@@ -1315,24 +1238,12 @@ class ShortConvolution(nn.Conv1d):
             final_state (torch.Tensor, Optional):
                 Cache of shape `[N, D, W]` when requested, otherwise `None`.
         """
-        if isinstance(self.weight, nn.Module):
-            if x.device.type != 'cuda' or self.backend != 'triton':
-                raise ValueError('Dynamic weights require the Triton backend on CUDA/HIP')
-            if generator_input is not None and generator_input.shape != x.shape:
-                raise ValueError('generator_input must have the same shape as x')
-            if kwargs.get('cp_context') is not None:
-                raise ValueError('Dynamic weights do not support context parallelism')
         B, T, *_ = x.shape
         N = B if cu_seqlens is None else len(cu_seqlens) - 1
         if mask is not None:
             if cu_seqlens is not None:
                 raise ValueError("`mask` and `cu_seqlens` cannot be provided at the same time")
-            if isinstance(self.weight, nn.Module):
-                x = x * mask.unsqueeze(-1).to(x.dtype)
-                if generator_input is not None:
-                    generator_input = generator_input * mask.unsqueeze(-1).to(generator_input.dtype)
-            else:
-                x = x.mul_(mask.unsqueeze(-1))
+            x = x.mul_(mask.unsqueeze(-1))
 
         # the in-place decode kernel requires autograd off and exactly one token per sequence, including packed inputs.
         if not torch.is_grad_enabled() and B * T == N and (cu_seqlens is None or bool((cu_seqlens.diff() == 1).all())):
@@ -1342,7 +1253,6 @@ class ShortConvolution(nn.Conv1d):
                 cache=cache,
                 output_final_state=output_final_state,
                 cu_seqlens=cu_seqlens,
-                generator_input=generator_input,
             )
             return y, cache
 
@@ -1356,16 +1266,9 @@ class ShortConvolution(nn.Conv1d):
             )
             self.backend = 'triton'
 
-        weight = self.weight
-        if isinstance(weight, nn.Module):
-            weight = weight(x if generator_input is None else generator_input)
-            weight = weight.unflatten(dim=-1, sizes=(self.hidden_size, self.kernel_size[0]))
-        else:
-            weight = rearrange(weight, "d 1 w -> d w")
-
         return causal_conv1d(
             x=x,
-            weight=weight,
+            weight=rearrange(self.weight, "d 1 w -> d w"),
             bias=self.bias,
             residual=residual,
             initial_state=cache,
@@ -1384,30 +1287,18 @@ class ShortConvolution(nn.Conv1d):
         cache: torch.Tensor | None,
         output_final_state: bool = False,
         cu_seqlens: torch.LongTensor | None = None,
-        *,
-        generator_input: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        if isinstance(self.weight, nn.Module):
-            if x.device.type != 'cuda' or self.backend != 'triton':
-                raise ValueError('Dynamic weights require the Triton backend on CUDA/HIP')
-            if generator_input is not None and generator_input.shape != x.shape:
-                raise ValueError('generator_input must have the same shape as x')
         B, _, D, W = *x.shape, self.kernel_size[0]
         N = B if cu_seqlens is None else len(cu_seqlens) - 1
         # the update kernel requires a cache even when the final state is not requested.
         if cache is None:
             cache = x.new_zeros(N, D, W)
-        weight = self.weight
-        if isinstance(weight, nn.Module):
-            weight = weight(x if generator_input is None else generator_input).unflatten(dim=-1, sizes=(D, W))
-        else:
-            weight = rearrange(weight, "d 1 w -> d w")
         if self.backend == 'triton':
             y, cache = causal_conv1d_update(
                 x=x,
                 cache=cache,
                 residual=residual,
-                weight=weight,
+                weight=rearrange(self.weight, "d 1 w -> d w"),
                 bias=self.bias,
                 activation=self.activation,
             )
@@ -1419,7 +1310,7 @@ class ShortConvolution(nn.Conv1d):
         y = causal_conv1d_update_cuda(
             x=x,
             conv_state=cache,
-            weight=weight,
+            weight=rearrange(self.weight, "d 1 w -> d w"),
             bias=self.bias,
             activation=self.activation,
         )
@@ -1431,94 +1322,3 @@ class ShortConvolution(nn.Conv1d):
     @property
     def state_size(self) -> int:
         return self.hidden_size * self.kernel_size[0]
-
-
-class DynamicShortConvolution(ShortConvolution):
-    r"""Depthwise causal convolution with input-dependent weights.
-
-    Let D = hidden_size, r = dynamic_rank_dim, and W = kernel_size.
-    For conditioning input h_t (default: x_t), the kernel generator computes
-
-    .. math::
-        z_t = \phi(A h_t), \qquad
-        K_t = \operatorname{reshape}(B z_t + b, [D, W]),
-
-    where A has shape [r, D], B has shape [D * W, r], and b has shape [D * W].
-    The convolution applies the generated weights from oldest to newest:
-
-    .. math::
-        y_t = \psi\!\left(\sum_{j=0}^{W-1} K_t[:, j] \odot x_{t-W+1+j}\right)
-              + \mathrm{residual}_t.
-
-    Phi is dynamic_activation and psi is activation; None selects the identity.
-    Only the second generator projection has a bias, which is always enabled.
-    The convolution has no additional bias; an absent residual is zero.
-
-    Args:
-        hidden_size (int):
-            Number of conditioning, input, and output channels D.
-        kernel_size (int):
-            Width W of the causal convolution kernel.
-        dynamic_rank_dim (int, Optional):
-            Rank r of the kernel generator. Default: 16.
-        dynamic_activation (str, Optional):
-            Activation between projections: `None`, `"silu"`, or `"swish"`. Default: `None`.
-        activation (str, Optional):
-            Convolution output activation: `None`, `"silu"`, or `"swish"`. Default: `None`.
-        backend (str, Optional):
-            Convolution backend; dynamic weights support `"triton"` on CUDA/HIP. Default: `"triton"`.
-        device (torch.device, Optional):
-            Device for the parameters. Default: `None`.
-        dtype (torch.dtype, Optional):
-            Parameter dtype. Default: `None`.
-    """
-
-    def __init__(
-        self,
-        hidden_size: int,
-        kernel_size: int,
-        dynamic_rank_dim: int = 16,
-        dynamic_activation: str | None = None,
-        activation: str | None = None,
-        backend: str | None = 'triton',
-        device: torch.device | None = None,
-        dtype: torch.dtype | None = None,
-    ) -> None:
-        if min(hidden_size, kernel_size, dynamic_rank_dim) < 1:
-            raise ValueError('hidden_size, kernel_size, and dynamic_rank_dim must be positive')
-        if dynamic_activation not in (None, 'silu', 'swish'):
-            raise ValueError('dynamic_activation must be None, silu, or swish')
-        if os.environ.get('FLA_CONV_BACKEND', backend) != 'triton':
-            raise ValueError('DynamicShortConvolution requires the triton backend')
-        super().__init__(
-            hidden_size=hidden_size,
-            kernel_size=kernel_size,
-            bias=False,
-            activation=activation,
-            backend=backend,
-            device=device,
-            dtype=dtype,
-        )
-        self.dynamic_rank_dim = dynamic_rank_dim
-        del self.weight
-        self.weight = nn.Sequential(
-            nn.Linear(in_features=hidden_size, out_features=dynamic_rank_dim, bias=False, device=device, dtype=dtype),
-            nn.Identity() if dynamic_activation is None else nn.SiLU(),
-            nn.Linear(
-                in_features=dynamic_rank_dim,
-                out_features=hidden_size * kernel_size,
-                bias=True,
-                device=device,
-                dtype=dtype,
-            ),
-        )
-        self.reset_parameters()
-
-    def reset_parameters(self) -> None:
-        if not isinstance(self.weight, nn.Sequential):
-            super().reset_parameters()
-            return
-        nn.init.normal_(self.weight[0].weight, std=0.02)
-        nn.init.zeros_(self.weight[2].weight)
-        bound = self.kernel_size[0] ** -0.5
-        nn.init.uniform_(self.weight[2].bias, -bound, bound)

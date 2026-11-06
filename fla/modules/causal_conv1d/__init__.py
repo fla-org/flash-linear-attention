@@ -6,9 +6,9 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 from fla.backends import GluonBackend, TritonAscendBackend
+from fla.modules.causal_conv1d.dynamic import DynamicShortConvolution
 from fla.modules.causal_conv1d.ops import (
     CausalConv1dFunction,
-    DynamicShortConvolution,
     ShortConvolution,
     causal_conv1d,
     causal_conv1d_bwd,
