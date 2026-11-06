@@ -12,22 +12,22 @@ import torch.nn.functional as F
 def naive_dynamic_conv1d(
     x: torch.Tensor,
     h: torch.Tensor | None,
-    in_proj_weight: torch.Tensor,
-    out_proj_weight: torch.Tensor,
-    out_proj_bias: torch.Tensor,
+    dynamic_proj_w1: torch.Tensor,
+    dynamic_proj_w2: torch.Tensor,
+    dynamic_proj_bias: torch.Tensor,
+    dynamic_activation: str | None = None,
     residual: torch.Tensor | None = None,
     initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
-    dynamic_activation: str | None = None,
     activation: str | None = None,
     cu_seqlens: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     r"""Compute dynamic depthwise causal convolution with PyTorch.
 
     .. math::
-        z_t = \phi(A h_t), \qquad K_t = \operatorname{reshape}(B z_t + b, [D, W]),
+        z_t = \phi(W_1 h_t), \qquad w_t = \operatorname{reshape}(W_2 z_t + b, [D, W]),
 
-        y_t = \psi\!\left(\sum_{j=0}^{W-1} K_t[:, j] \odot x_{t-W+1+j}\right)
+        y_t = \psi\!\left(\sum_{j=0}^{W-1} w_t[:, j] \odot x_{t-W+1+j}\right)
               + \mathrm{residual}_t.
 
     Phi is dynamic_activation and psi is activation; `None` selects the identity.
@@ -39,20 +39,20 @@ def naive_dynamic_conv1d(
             Convolution input [B, T, D]. Packed inputs require B=1.
         h (torch.Tensor | None):
             Conditioning input [B, T, D]. `None` uses x.
-        in_proj_weight (torch.Tensor):
-            First projection A with shape [rank, D].
-        out_proj_weight (torch.Tensor):
-            Second projection B with shape [D * W, rank].
-        out_proj_bias (torch.Tensor):
+        dynamic_proj_w1 (torch.Tensor):
+            First projection W_1 with shape [R, D].
+        dynamic_proj_w2 (torch.Tensor):
+            Second projection W_2 with shape [D * W, R].
+        dynamic_proj_bias (torch.Tensor):
             Second projection bias b with shape [D * W].
+        dynamic_activation (str, Optional):
+            Activation between projections: `None`, `"silu"`, or `"swish"`. Default: `None`.
         residual (torch.Tensor, Optional):
             Tensor [B, T, D] added after the output activation. Default: `None`.
         initial_state (torch.Tensor, Optional):
             Input history [N, D, W], ordered oldest to newest. Default: `None`.
         output_final_state (bool, Optional):
             Whether to return the final input history. Default: `False`.
-        dynamic_activation (str, Optional):
-            Activation between projections: `None`, `"silu"`, or `"swish"`. Default: `None`.
         activation (str, Optional):
             Convolution output activation: `None`, `"silu"`, or `"swish"`. Default: `None`.
         cu_seqlens (torch.LongTensor, Optional):
@@ -62,32 +62,40 @@ def naive_dynamic_conv1d(
         tuple[torch.Tensor, torch.Tensor | None]:
             Output [B, T, D] and final history [N, D, W] when requested, otherwise `None`.
     """
+    dtype = x.dtype
     B, T, D = x.shape
-    W = out_proj_weight.shape[0] // D
+    W = dynamic_proj_w2.shape[0] // D
     h = x if h is None else h
-    z = F.linear(input=h.float(), weight=in_proj_weight.float())
+    x, h, dynamic_proj_w1, dynamic_proj_w2, dynamic_proj_bias = (
+        t.float() for t in (x, h, dynamic_proj_w1, dynamic_proj_w2, dynamic_proj_bias)
+    )
+
+    z = F.linear(input=h, weight=dynamic_proj_w1)
     if dynamic_activation in ('silu', 'swish'):
         z = F.silu(z)
-    weight = F.linear(input=z, weight=out_proj_weight.float(), bias=out_proj_bias.float()).reshape(B, T, D, W)
+    w = F.linear(input=z, weight=dynamic_proj_w2, bias=dynamic_proj_bias).reshape(B * T, D, W)
 
-    if cu_seqlens is None:
-        sequences = [(i, 0, T) for i in range(B)]
-    else:
-        boundaries = cu_seqlens.tolist()
-        sequences = [(0, bos, eos) for bos, eos in zip(boundaries[:-1], boundaries[1:])]
-    outputs, states = [], []
-    for i_n, (i_b, bos, eos) in enumerate(sequences):
-        values = x[i_b, bos:eos].float()
-        history = values.new_zeros(W, D) if initial_state is None else initial_state[i_n].T.float()
-        values = torch.cat((history, values), dim=0)
-        y = (weight[i_b, bos:eos] * values.unfold(0, W, 1)[1:]).sum(-1)
-        if activation in ('silu', 'swish'):
-            y = F.silu(y)
-        if residual is not None:
-            y = y + residual[i_b, bos:eos].float()
-        outputs.append(y)
-        if output_final_state:
-            states.append(values[-W:].T)
-    y = torch.cat(outputs, dim=0).reshape(B, T, D).to(x.dtype)
-    final_state = torch.stack(states).to(x.dtype) if output_final_state else None
-    return y, final_state
+    N = B if cu_seqlens is None else len(cu_seqlens) - 1
+    if cu_seqlens is not None:
+        cu_seqlens = cu_seqlens.tolist()
+    x = x.reshape(B * T, D)
+    y = torch.empty_like(x)
+    ht = x.new_empty(N, D, W) if output_final_state else None
+    for i_n in range(N):
+        if cu_seqlens is None:
+            bos, eos = i_n * T, (i_n + 1) * T
+        else:
+            bos, eos = cu_seqlens[i_n:i_n+2]
+        b_h0 = x.new_zeros(W, D) if initial_state is None else initial_state[i_n].T.float()
+        b_x = torch.cat((b_h0, x[bos:eos]), dim=0)
+        b_w = w[bos:eos]
+        y[bos:eos] = (b_w * b_x.unfold(dimension=0, size=W, step=1)[1:]).sum(-1)
+        if ht is not None:
+            ht[i_n] = b_x[-W:].T
+
+    y = y.reshape(B, T, D)
+    if activation in ('silu', 'swish'):
+        y = F.silu(y)
+    if residual is not None:
+        y = y + residual.float()
+    return y.to(dtype), ht.to(dtype) if ht is not None else None
