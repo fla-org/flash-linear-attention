@@ -65,4 +65,4 @@ if __name__ == '__main__':
 
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
-    run_module_benchmark(benchmark, script_file=__file__)
+    run_module_benchmark(benchmark, script_file=__file__, visualize=False)
