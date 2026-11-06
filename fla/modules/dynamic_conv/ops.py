@@ -21,6 +21,15 @@ from fla.utils import autotune_cache_kwargs, input_guard
 
 
 @triton.heuristics({'IS_VARLEN': lambda args: args['cu_seqlens'] is not None})
+@fla_cache_autotune(
+    configs=[
+        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in [4, 8]
+        for num_stages in [1, 2, 3]
+    ],
+    key=['D', 'R', 'W', 'ACTIVATION', 'IS_VARLEN'],
+    **autotune_cache_kwargs,
+)
 @triton.jit(do_not_specialize=['T'])
 def dynamic_conv1d_fwd_kernel(
     x,
@@ -181,6 +190,15 @@ def dynamic_conv1d_bwd_kernel(
 
 
 @triton.heuristics({'IS_VARLEN': lambda args: args['cu_seqlens'] is not None})
+@fla_cache_autotune(
+    configs=[
+        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in [4, 8]
+        for num_stages in [1, 2, 3]
+    ],
+    key=['D', 'R', 'W', 'IS_VARLEN'],
+    **autotune_cache_kwargs,
+)
 @triton.jit(do_not_specialize=['T'])
 def dynamic_conv1d_bwd_kernel_dw2(
     x,
