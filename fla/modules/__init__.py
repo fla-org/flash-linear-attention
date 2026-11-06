@@ -10,7 +10,7 @@ from importlib import import_module
 from importlib.machinery import ModuleSpec
 from types import ModuleType
 
-from fla.modules.causal_conv1d import ShortConvolution
+from fla.modules.causal_conv1d import DynamicShortConvolution, ShortConvolution
 from fla.modules.fused_bitlinear import BitLinear, FusedBitLinear
 from fla.modules.fused_cross_entropy import FusedCrossEntropyLoss
 from fla.modules.fused_kl_div import FusedKLDivLoss
@@ -129,5 +129,6 @@ __all__ = [
     'RMSNormLinear',
     'RotaryEmbedding',
     'ShortConvolution',
+    'DynamicShortConvolution',
     'TokenShift',
 ]

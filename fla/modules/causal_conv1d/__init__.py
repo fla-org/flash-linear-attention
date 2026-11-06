@@ -8,6 +8,7 @@
 from fla.backends import GluonBackend, TritonAscendBackend
 from fla.modules.causal_conv1d.ops import (
     CausalConv1dFunction,
+    DynamicShortConvolution,
     ShortConvolution,
     causal_conv1d,
     causal_conv1d_bwd,
@@ -18,6 +19,7 @@ from fla.modules.causal_conv1d.ops import (
 
 __all__ = [
     'CausalConv1dFunction',
+    'DynamicShortConvolution',
     'ShortConvolution',
     'causal_conv1d',
     'causal_conv1d_bwd',
