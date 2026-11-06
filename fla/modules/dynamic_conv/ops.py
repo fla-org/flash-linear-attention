@@ -518,7 +518,7 @@ def dynamic_conv1d(
         x (torch.Tensor):
             Convolution inputs of shape [B, T, D].
         z (torch.Tensor):
-            Per-token latent coefficients of shape [B, T, R].
+            Generator latents [B, T, R], after the optional activation between generator projections.
         out_proj_weight (torch.Tensor):
             Generator output projection weight [R, W, D]. Tap zero multiplies the current token.
         out_proj_bias (torch.Tensor, Optional):
@@ -591,6 +591,11 @@ def dynamic_conv1d(
 
 class DynamicShortConvolution(nn.Module):
     """Depthwise causal convolution with a low-rank, input-dependent kernel generator.
+
+    The generator computes z = phi(in_proj(generator_input)), where phi is generator_activation.
+    The fused convolution generates K[t, j, d] = sum_r z[t, r] * out_proj_weight[r, j, d] + out_proj_bias[j, d],
+    then computes y[t, d] = activation(sum_j K[t, j, d] * x[t-j, d]) + residual[t, d].
+    Each activation is the identity when set to None; absent bias and residual terms are zero.
 
     Args:
         hidden_size (int):

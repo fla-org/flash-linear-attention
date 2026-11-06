@@ -34,7 +34,7 @@ def naive_dynamic_conv1d(
         x (torch.Tensor):
             Convolution input [B, T, D].
         z (torch.Tensor):
-            Generator latents [B, T, R].
+            Generator latents [B, T, R], after the optional activation between generator projections.
         out_proj_weight (torch.Tensor):
             Generator output projection weight [R, W, D]. Tap j=0 uses the current token.
         out_proj_bias (torch.Tensor, Optional):
