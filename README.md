@@ -29,7 +29,7 @@
 
 ## News
 
-- [2026-11] 🔀 Add [dynamic short convolution](fla/modules/dynamic_conv) with fused low-rank filter generation ([#1671](https://github.com/fla-org/flash-linear-attention/pull/1671)).
+- [2026-11] 🔀 Add [dynamic short convolution](fla/modules/dynamic_conv) to `fla` ([paper](https://arxiv.org/abs/2606.03825)).
 - [2026-11] 🧱 Add [HC, mHC, and iHC](fla/ops/hc) implementations to `fla` ([paper](https://arxiv.org/abs/2409.19606)).
 - [2026-10] 🧠 Add Gated Slot Attention 2 (GSA2) implementation to `fla` ([paper](https://arxiv.org/abs/2610.02816)).
 - [2026-10] 🛰️ Add Gated KalmaNet (GKA) implementation to `fla` ([paper](https://arxiv.org/abs/2511.21016)) - a fading-memory layer that solves a test-time ridge regression at every token.
