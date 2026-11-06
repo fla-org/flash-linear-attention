@@ -431,17 +431,13 @@ def dynamic_conv1d(
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     r"""Apply dynamic depthwise causal convolution with a low-rank kernel generator.
 
-    Let D be the channel count, R the projection rank, and W the convolution width.
+    A two-layer projection of h_t generates a separate [D, W] convolution kernel at each position.
 
     .. math::
         z_t = \phi(W_1 h_t), \qquad w_t = \operatorname{reshape}(W_2 z_t + b, [D, W]),
 
         y_t = \psi\!\left(\sum_{j=0}^{W-1} w_t[:, j] \odot x_{t-W+1+j}\right)
               + \mathrm{residual}_t.
-
-    Phi is dynamic_activation and psi is activation; `None` selects the identity.
-    Outputs and final states use the input dtype.
-    Negative positions read initial_state or zero padding; packed sequences have separate histories.
 
     Args:
         x (torch.Tensor):
@@ -455,7 +451,7 @@ def dynamic_conv1d(
         dynamic_proj_bias (torch.Tensor):
             Second projection bias b with shape [D * W].
         dynamic_activation (str, Optional):
-            Activation between projections: `None`, `"silu"`, or `"swish"`. Default: `None`.
+            Activation φ between projections: `None`, `"silu"`, or `"swish"`. Default: `None`.
         residual (torch.Tensor, Optional):
             Tensor [B, T, D] added after the output activation. Default: `None`.
         initial_state (torch.Tensor, Optional):
@@ -463,7 +459,7 @@ def dynamic_conv1d(
         output_final_state (bool, Optional):
             Whether to return the final input history. Default: `False`.
         activation (str, Optional):
-            Convolution output activation: `None`, `"silu"`, or `"swish"`. Default: `None`.
+            Output activation ψ: `None`, `"silu"`, or `"swish"`. Default: `None`.
         cu_seqlens (torch.LongTensor, Optional):
             Packed sequence boundaries [N+1]. Default: `None`.
 
@@ -495,24 +491,13 @@ def dynamic_conv1d(
 class DynamicShortConvolution(nn.Module):
     r"""Depthwise causal convolution with input-dependent weights.
 
-    Let D = hidden_size, R = dynamic_rank_dim, and W = kernel_size.
-    For conditioning input h_t (default: x_t), the kernel generator computes
+    A two-layer projection of h_t generates a separate [D, W] convolution kernel at each position.
 
     .. math::
-        z_t = \phi(W_1 h_t), \qquad
-        w_t = \operatorname{reshape}(W_2 z_t + b, [D, W]),
+        z_t = \phi(W_1 h_t), \qquad w_t = \operatorname{reshape}(W_2 z_t + b, [D, W]),
 
-    where W_1 has shape [R, D], W_2 has shape [D * W, R], and b has shape [D * W].
-    The convolution applies the generated weights from oldest to newest:
-
-    .. math::
         y_t = \psi\!\left(\sum_{j=0}^{W-1} w_t[:, j] \odot x_{t-W+1+j}\right)
               + \mathrm{residual}_t.
-
-    Phi is dynamic_activation and psi is activation; `None` selects the identity.
-    The second projection is fused with convolution.
-    Only the second generator projection has a bias, which is always enabled.
-    The convolution has no additional bias; an absent residual is zero.
 
     Args:
         hidden_size (int):
@@ -522,9 +507,9 @@ class DynamicShortConvolution(nn.Module):
         dynamic_rank_dim (int, Optional):
             Rank R of the kernel generator (16–128). Default: 16.
         dynamic_activation (str, Optional):
-            Activation between projections: `None`, `"silu"`, or `"swish"`. Default: `None`.
+            Activation φ between projections: `None`, `"silu"`, or `"swish"`. Default: `None`.
         activation (str, Optional):
-            Convolution output activation: `None`, `"silu"`, or `"swish"`. Default: `None`.
+            Output activation ψ: `None`, `"silu"`, or `"swish"`. Default: `None`.
         backend (str, Optional):
             Convolution backend; dynamic weights support `"triton"` on CUDA/HIP. Default: `"triton"`.
         device (torch.device, Optional):
