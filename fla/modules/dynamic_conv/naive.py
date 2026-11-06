@@ -21,9 +21,10 @@ def naive_dynamic_conv1d(
     output_final_state: bool = False,
     activation: str | None = None,
     cu_seqlens: torch.LongTensor | None = None,
-    chunk_indices: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     r"""Compute dynamic depthwise causal convolution with PyTorch.
+
+    Let D be the channel count, R the projection rank, and W the convolution width.
 
     .. math::
         z_t = \phi(W_1 h_t), \qquad w_t = \operatorname{reshape}(W_2 z_t + b, [D, W]),
@@ -58,9 +59,6 @@ def naive_dynamic_conv1d(
             Convolution output activation: `None`, `"silu"`, or `"swish"`. Default: `None`.
         cu_seqlens (torch.LongTensor, Optional):
             Packed sequence boundaries [N+1]. Default: `None`.
-
-        chunk_indices (torch.LongTensor, Optional):
-            Unused; accepted to match the Triton interface. Default: `None`.
 
     Returns:
         tuple[torch.Tensor, torch.Tensor | None]:
