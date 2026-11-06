@@ -261,7 +261,7 @@ def causal_conv1d_fwd_verifier(
         return False, "Gluon convolution supports float16, bfloat16, and float32"
     if x.ndim != 3 or x.stride(-1) != 1:
         return False, "Gluon convolution requires [B, T, D] with contiguous channels"
-    if weight is None or weight.shape[0] != x.shape[-1] or weight.shape[1] not in (2, 3, 4):
+    if weight is None or weight.ndim != 2 or weight.shape[0] != x.shape[-1] or weight.shape[1] not in (2, 3, 4):
         return False, "Gluon convolution requires a width of 2, 3, or 4"
     if cu_seqlens is not None and x.shape[0] != 1:
         return False, "Gluon packed convolution requires batch size 1"

@@ -5,7 +5,6 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-import inspect
 import os
 import warnings
 
@@ -795,8 +794,7 @@ def causal_conv1d_bwd(
 
     y = None
     if activation is not None:
-        fwd = inspect.unwrap(causal_conv1d_fwd) if weight.ndim == 4 else causal_conv1d_fwd
-        y, _ = fwd(
+        y, _ = causal_conv1d_fwd(
             x=x,
             weight=weight,
             bias=bias,
@@ -1014,8 +1012,7 @@ class CausalConv1dFunction(torch.autograd.Function):
         ctx.chunk_indices = chunk_indices
         ctx.layout_fallback = _has_non_standard_layout(x=x)
         ctx.save_for_backward(x, weight, bias, residual, initial_state)
-        fwd = inspect.unwrap(causal_conv1d_fwd) if weight.ndim == 4 else causal_conv1d_fwd
-        y, final_state = fwd(
+        y, final_state = causal_conv1d_fwd(
             x=x,
             weight=weight,
             bias=bias,
@@ -1035,8 +1032,7 @@ class CausalConv1dFunction(torch.autograd.Function):
     @input_guard(no_guard_contiguous=["dy"])
     def backward(ctx, dy: torch.Tensor, dht: torch.Tensor | None = None) -> tuple[torch.Tensor | None, ...]:
         x, weight, bias, residual, initial_state = ctx.saved_tensors
-        bwd = inspect.unwrap(causal_conv1d_bwd) if weight.ndim == 4 else causal_conv1d_bwd
-        dx, dw, db, dr, dh0 = bwd(
+        dx, dw, db, dr, dh0 = causal_conv1d_bwd(
             x=x,
             dy=dy,
             dht=dht,

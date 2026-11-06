@@ -107,6 +107,7 @@ for _name, _aliases in _SYMBOL_ALIASES.items():
 
 __all__ = [
     'BitLinear',
+    'DynamicShortConvolution',
     'FusedBitLinear',
     'FusedCrossEntropyLoss',
     'FusedKLDivLoss',
@@ -129,6 +130,5 @@ __all__ = [
     'RMSNormLinear',
     'RotaryEmbedding',
     'ShortConvolution',
-    'DynamicShortConvolution',
     'TokenShift',
 ]
