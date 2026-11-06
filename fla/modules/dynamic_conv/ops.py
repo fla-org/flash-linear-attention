@@ -16,7 +16,8 @@ import triton.language as tl
 from fla.modules.activations.ops import swish_bwd
 from fla.modules.causal_conv1d import causal_conv1d_update_states
 from fla.ops.utils import prepare_chunk_indices
-from fla.utils import input_guard
+from fla.ops.utils.cache import fla_cache_autotune
+from fla.utils import autotune_cache_kwargs, input_guard
 
 
 @triton.heuristics({'IS_VARLEN': lambda args: args['cu_seqlens'] is not None})
@@ -83,6 +84,15 @@ def dynamic_conv1d_fwd_kernel(
 
 
 @triton.heuristics({'IS_VARLEN': lambda args: args['cu_seqlens'] is not None})
+@fla_cache_autotune(
+    configs=[
+        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in [4, 8]
+        for num_stages in [1, 2, 3]
+    ],
+    key=['D', 'R', 'W', 'COMPUTE_DH0', 'IS_VARLEN'],
+    **autotune_cache_kwargs,
+)
 @triton.jit(do_not_specialize=['T'])
 def dynamic_conv1d_bwd_kernel(
     x,
@@ -337,8 +347,6 @@ class DynamicConv1dFunction(torch.autograd.Function):
             BD=BD,
             BR=BR,
             COMPUTE_DH0=False,
-            num_warps=8,
-            num_stages=1,
         )
         if dh0 is not None:
             dynamic_conv1d_bwd_kernel[(triton.cdiv(W, BT), len(dh0))](
@@ -361,8 +369,6 @@ class DynamicConv1dFunction(torch.autograd.Function):
                 BD=BD,
                 BR=BR,
                 COMPUTE_DH0=True,
-                num_warps=8,
-                num_stages=1,
             )
         BS = 256
         chunk_indices_dw = prepare_chunk_indices(cu_seqlens=cu_seqlens, chunk_size=BS) if cu_seqlens is not None else None
