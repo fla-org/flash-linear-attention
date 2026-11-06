@@ -7,6 +7,7 @@
 
 # related files are modified and supported by the Moonshot AI Team
 
+import os
 import warnings
 
 import torch
@@ -18,7 +19,7 @@ from fla.ops.cp import FLACPContext
 from fla.ops.kda.chunk_bwd import chunk_kda_bwd
 from fla.ops.kda.chunk_fwd import chunk_kda_fwd
 from fla.ops.utils.index import prepare_chunk_indices, prepare_chunk_indices_static
-from fla.utils import IS_NPU, autocast_custom_bwd, autocast_custom_fwd, input_guard
+from fla.utils import IS_NPU, IS_NVIDIA, autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
 class ChunkKDAFunction(torch.autograd.Function):
@@ -87,6 +88,12 @@ class ChunkKDAFunction(torch.autograd.Function):
 
         g_input = g
 
+        ctx.compact_h = (
+            IS_NVIDIA and cu_seqlens is not None and not return_intermediate_states
+            and (initial_state is None or cp_context is not None)
+            and (cp_context is None or cp_context.layout == 'contiguous')
+            and os.environ.get("FLA_KDA_COMPACT_H", "1") != "0"
+        )
         (o, final_state, g_cumsum, Aqk, Akk, w, u, qg, kg, v_new, h, initial_state) = chunk_kda_fwd(
             q=q,
             k=k,
@@ -111,6 +118,7 @@ class ChunkKDAFunction(torch.autograd.Function):
             cp_context=cp_context,
             use_graph=use_graph,
             chunk_offsets=chunk_offsets,
+            compact_h=ctx.compact_h,
         )
 
         if return_intermediate_states:
@@ -199,6 +207,7 @@ class ChunkKDAFunction(torch.autograd.Function):
             h=h,
             use_graph=ctx.use_graph,
             chunk_offsets=chunk_offsets,
+            compact_h=ctx.compact_h,
         )
         if ctx.use_qk_l2norm_in_kernel:
             dq = l2norm_bwd(q, q_rstd, dq)

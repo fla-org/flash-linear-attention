@@ -786,10 +786,16 @@ def chunk_kda_bwd_wy_dqkg_fused_verifier(
     chunk_indices: torch.LongTensor | None = None,
     chunk_offsets: torch.LongTensor | None = None,
     use_graph: bool = False,
+    compact_h: bool = False,
+    compact_dh: bool = False,
+    dht: torch.Tensor | None = None,
+    last_sequence_idx: int | None = None,
 ) -> tuple[bool, str | None]:
     chunk_size = 64 if chunk_size is None else int(chunk_size)
     if chunk_size % SUB_CHUNK_SIZE != 0:
         return False, f'KDA Ascend bwd requires chunk_size % {SUB_CHUNK_SIZE} == 0, got {chunk_size}'
+    if compact_h or compact_dh:
+        return False, 'KDA Ascend backend does not support compact state layouts'
     return True, None
 
 
