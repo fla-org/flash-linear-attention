@@ -13,8 +13,8 @@ import torch.nn.functional as F
 def naive_dynamic_conv1d(
     x: torch.Tensor,
     z: torch.Tensor,
-    weight: torch.Tensor,
-    kernel_bias: torch.Tensor | None = None,
+    kernel_basis: torch.Tensor,
+    weight: torch.Tensor | None = None,
     bias: torch.Tensor | None = None,
     residual: torch.Tensor | None = None,
     initial_state: torch.Tensor | None = None,
@@ -24,14 +24,14 @@ def naive_dynamic_conv1d(
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Materialized FP32 reference, including differentiable raw-input history."""
     B, T, D = x.shape
-    R, W, _ = weight.shape
+    R, W, _ = kernel_basis.shape
     if cu_seqlens is not None:
         boundaries = cu_seqlens.tolist()
         segments = [(0, start, end) for start, end in zip(boundaries[:-1], boundaries[1:])]
     else:
         segments = [(b, 0, T) for b in range(B)]
-    basis = weight.float().reshape(R, W * D)
-    static = kernel_bias.float() if kernel_bias is not None else None
+    basis = kernel_basis.float().reshape(R, W * D)
+    static = weight.float() if weight is not None else None
     channel_bias = bias.float() if bias is not None else None
     outputs, states = [], []
     for n, (b, start, end) in enumerate(segments):
