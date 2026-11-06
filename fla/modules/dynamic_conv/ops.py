@@ -262,7 +262,7 @@ class DynamicConv1dFunction(torch.autograd.Function):
         B, T, D = x.shape
         R = z.shape[-1]
         W = w2.shape[0] // D
-        BT, BD, BR = 16, 32, max(16, triton.next_power_of_2(R))
+        BT, BD, BR = 16, 32, triton.next_power_of_2(R)
         chunk_indices = prepare_chunk_indices(cu_seqlens=cu_seqlens, chunk_size=BT) if cu_seqlens is not None else None
         NT = len(chunk_indices) if chunk_indices is not None else triton.cdiv(T, BT)
         y = torch.empty_like(x)
@@ -299,7 +299,7 @@ class DynamicConv1dFunction(torch.autograd.Function):
         B, T, D = x.shape
         R = z.shape[-1]
         W = w2.shape[0] // D
-        BT, BD, BR = 16, 32, max(16, triton.next_power_of_2(R))
+        BT, BD, BR = 16, 32, triton.next_power_of_2(R)
         NT = len(chunk_indices) if chunk_indices is not None else triton.cdiv(T, BT)
         dr = dy if residual is not None else None
         if ctx.activation is not None and x.numel():
@@ -431,7 +431,7 @@ def dynamic_conv1d(
         h (torch.Tensor | None):
             Conditioning input [B, T, D]. `None` uses x.
         dynamic_proj_w1 (torch.Tensor):
-            First projection W_1 with shape [R, D].
+            First projection W_1 with shape [R, D], where 16 <= R <= 128.
         dynamic_proj_w2 (torch.Tensor):
             Second projection W_2 with shape [D * W, R].
         dynamic_proj_bias (torch.Tensor):
@@ -453,8 +453,8 @@ def dynamic_conv1d(
         tuple[torch.Tensor, torch.Tensor | None]:
             Output [B, T, D] and final history [N, D, W] when requested, otherwise `None`.
     """
-    if not 1 <= dynamic_proj_w1.shape[0] <= 128:
-        raise ValueError('dynamic_rank_dim must be in [1, 128]')
+    if not 16 <= dynamic_proj_w1.shape[0] <= 128:
+        raise ValueError('dynamic_rank_dim must be in [16, 128]')
     if dynamic_activation not in (None, 'silu', 'swish') or activation not in (None, 'silu', 'swish'):
         raise ValueError('dynamic_activation and activation must be None, silu, or swish')
     h = x if h is None else h
@@ -503,7 +503,7 @@ class DynamicShortConvolution(nn.Module):
         kernel_size (int):
             Width W of the causal convolution kernel.
         dynamic_rank_dim (int, Optional):
-            Rank R of the kernel generator, at most 128. Default: 16.
+            Rank R of the kernel generator (16–128). Default: 16.
         dynamic_activation (str, Optional):
             Activation between projections: `None`, `"silu"`, or `"swish"`. Default: `None`.
         activation (str, Optional):
@@ -530,8 +530,8 @@ class DynamicShortConvolution(nn.Module):
         super().__init__()
         if hidden_size < 1 or kernel_size < 1:
             raise ValueError('hidden_size and kernel_size must be positive')
-        if not 1 <= dynamic_rank_dim <= 128:
-            raise ValueError('dynamic_rank_dim must be in [1, 128]')
+        if not 16 <= dynamic_rank_dim <= 128:
+            raise ValueError('dynamic_rank_dim must be in [16, 128]')
         if dynamic_activation not in (None, 'silu', 'swish') or activation not in (None, 'silu', 'swish'):
             raise ValueError('dynamic_activation and activation must be None, silu, or swish')
         self.backend = os.environ.get('FLA_CONV_BACKEND', backend)

@@ -42,7 +42,7 @@ def naive_dynamic_conv1d(
         h (torch.Tensor | None):
             Conditioning input [B, T, D]. `None` uses x.
         dynamic_proj_w1 (torch.Tensor):
-            First projection W_1 with shape [R, D].
+            First projection W_1 with shape [R, D], where 16 <= R <= 128.
         dynamic_proj_w2 (torch.Tensor):
             Second projection W_2 with shape [D * W, R].
         dynamic_proj_bias (torch.Tensor):
