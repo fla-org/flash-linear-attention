@@ -37,6 +37,10 @@ def shape_BTH(B, T, H, D, **kw):
     return (B, T, H)
 
 
+def shape_BTH1(B, T, H, D, **kw):
+    return (B, T, H, 1)
+
+
 def shape_BHDD(B, T, H, D, **kw):
     return (B, H, D, D)
 
@@ -458,6 +462,20 @@ register_op(OpConfig(
     category='gate_beta',
     dim_constraints={'D': [64, 128, 256]},
     test_file='tests/ops/test_gated_oja_rule2.py',
+))
+
+register_op(OpConfig(
+    name='chunk_ttt',
+    import_path='fla.ops.ttt',
+    inputs={
+        **_simple_qkv,
+        'w': TensorSpec(shape_HD),
+        'b': TensorSpec(shape_HD),
+        'eta': TensorSpec(shape_BTH1, transform=lambda t: t * 5e-3),
+    },
+    func_name='chunk_ttt_linear',
+    category='ttt',
+    test_file='tests/ops/test_ttt.py',
 ))
 
 register_op(OpConfig(
