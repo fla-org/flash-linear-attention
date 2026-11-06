@@ -8,6 +8,7 @@
 # Copyright (c) 2026, Pieter-Jan Hoedt
 
 import torch
+import torch.nn.functional as F
 
 
 def naive_recurrent_mlstm(
@@ -38,7 +39,7 @@ def naive_recurrent_mlstm(
         c, n, m = initial_state
 
     for t in range(T):
-        log_f = m + torch.nn.functional.logsigmoid(f[:, t])
+        log_f = m + F.logsigmoid(f[:, t])
         m = torch.maximum(log_f, i[:, t]).detach()
         i_gate = torch.exp(i[:, t] - m).unsqueeze(dim=-1)
         f_gate = torch.exp(log_f - m).unsqueeze(dim=-1)
@@ -95,35 +96,30 @@ def naive_chunk_mlstm(
     if n is not None:
         n = n.unsqueeze(dim=-1)
 
-    log_f = torch.nn.functional.logsigmoid(f)
+    log_f = F.logsigmoid(f)
     for t, qc, kc, vc, ic, log_fc in zip(range(0, T, chunk_size), *(
         torch.split(x, chunk_size, dim=2) for x in (q, k, v, i, log_f)
     )):
-        log_f_matrix = _build_forget_matrix(log_fc)
+        log_f_matrix = _build_forget_matrix(log_f=log_fc)
         log_d = log_f_matrix + ic.unsqueeze(-2)
         max_log_d = torch.amax(log_d, dim=-1, keepdim=True)
 
-        # recurrent gating
-        log_prod_f = log_fc[..., :1] + log_f_matrix[..., 0]  # torch.cumsum(log_fc, dim=-1)
+        log_prod_f = log_fc[..., :1] + log_f_matrix[..., 0]
         log_f_rec = torch.unsqueeze(m + log_prod_f, dim=-1)
         mc = torch.maximum(max_log_d, log_f_rec).detach()
         fgate = torch.exp(log_f_rec - mc)
 
-        # parallel computation
         d_scaled = scale * torch.exp(log_d - mc)
         e_par = d_scaled * (qc @ kc.transpose(-1, -2))
         s_par = e_par.to(dtype=vc.dtype) @ vc
 
-        # incorporate recurrent state
         q_fgate = fgate * qc
         s_rec = q_fgate @ c
 
-        # recurrent state output
         kc_gated = kc.transpose(-1, -2) * d_scaled[..., -1:, :]
         c = fgate[..., -1:, :] * c + kc_gated.to(dtype=vc.dtype) @ vc
         m = mc[..., -1, :]
 
-        # combine results
         hc_tmp = s_rec + s_par
 
         if max_normalisation is not None:
@@ -160,8 +156,8 @@ def naive_parallel_mlstm(
     if scale is None:
         scale = q.shape[-1] ** -0.5
 
-    log_f = torch.nn.functional.logsigmoid(f)
-    log_f_matrix = _build_forget_matrix(log_f)
+    log_f = F.logsigmoid(f)
+    log_f_matrix = _build_forget_matrix(log_f=log_f)
     log_scale = log_f_matrix + i.unsqueeze(dim=-2)
     max_log_scale = torch.amax(log_scale, dim=-1, keepdim=True).detach()
 
@@ -181,22 +177,7 @@ def naive_parallel_mlstm(
 
 
 def _build_forget_matrix(log_f: torch.Tensor) -> torch.Tensor:
-    """
-    Build logarithm of cumulative forget gate matrix.
-
-    The output matrix models the cumulative effects of forget gates over time.
-    It is useful to compute the mLSTM gating in parallel.
-
-    Parameters
-    ----------
-    log_f : (..., T, H) torch.Tensor
-        Logarithm of forget gates.
-
-    Returns
-    -------
-    log_f_mat : (..., T, T) torch.Tensor
-        The logarithmic cumulative forget gate matrix.
-    """
+    """Return causal log forget products of shape `[..., T, T]` from log gates `[..., T]`."""
     idx = torch.arange(log_f.shape[-1], device=log_f.device)
     ltr_mask = idx.unsqueeze(-1) > idx.unsqueeze(-2)
     log_f_mat = torch.where(ltr_mask, log_f.unsqueeze(-1), 0.)

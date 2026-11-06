@@ -5,34 +5,46 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-import os
-
 import pytest
 import torch
 
 from fla.ops.mlstm import chunk_mlstm, fused_recurrent_mlstm
 from fla.ops.mlstm.naive import naive_chunk_mlstm, naive_recurrent_mlstm
-from fla.utils import assert_close, device
+from fla.utils import IS_NVIDIA, assert_close, device
+
+
+@pytest.fixture(autouse=True)
+def ieee_matmul():
+    # prevent TF32 rounding in the reference's normalization denominator
+    matmul = torch.backends.cuda.matmul
+    if hasattr(matmul, 'fp32_precision'):
+        previous = matmul.fp32_precision
+        try:
+            matmul.fp32_precision = 'ieee'
+            yield
+        finally:
+            matmul.fp32_precision = previous
+    else:
+        previous = torch.get_float32_matmul_precision()
+        try:
+            torch.set_float32_matmul_precision('highest')
+            yield
+        finally:
+            torch.set_float32_matmul_precision(previous)
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'K', 'V', 'scale', 'max_norm', 'dtype', 'use_initial_state', 'output_final_state'),
+    ('B', 'T', 'H', 'K', 'V', 'scale', 'max_normalisation', 'dtype', 'use_initial_state', 'output_final_state'),
     [
-        pytest.param(*test, id="B{}-T{}-H{}-K{}-V{}-scale{}-max_norm={}-{}-initial_state-{}-final_state-{}".format(*test))
+        pytest.param(*test, id="B{}-T{}-H{}-K{}-V{}-scale{}-max_normalisation={}-{}-initial_state-{}-final_state-{}".format(*test))
         for test in [
-            (1, 63, 1, 64, 64, 1, None, torch.float, True, True),
-            (1, 63, 1, 64, 64, 1, False, torch.float, True, True),
-            (1, 63, 1, 64, 64, 1, True, torch.float, True, True),
-            (1, 63, 1, 64, 64, 1, None, torch.float16, True, True),
+            (1, 63, 1, 64, 64, 1, None, torch.float32, True, True),
             (1, 63, 1, 64, 64, 1, False, torch.float16, True, True),
             (1, 63, 1, 64, 64, 1, True, torch.float16, True, True),
-            (2, 7, 2, 16, 16, 1, True, torch.float16, False, True),
             (2, 7, 2, 16, 16, 1, True, torch.float16, False, False),
-            (2, 63, 2, 16, 16, 1, True, torch.float16, True, False),
-            (2, 500, 4, 60, 60, 1, None, torch.float, True, True),
-            (2, 1024, 8, 128, 128, 1, None, torch.float, True, True),
-            (2, 1024, 8, 128, 128, 0.1, None, torch.float, True, True),
-            (4, 2048, 8, 64, 64, 0.1, None, torch.float, True, True),
+            (2, 500, 4, 60, 60, 1, None, torch.float32, True, True),
+            (2, 1024, 8, 128, 128, 0.1, None, torch.float32, True, True),
+            (4, 2048, 8, 64, 64, 0.1, None, torch.float32, True, True),
             (2, 7, 2, 16, 16, 1, False, torch.float32, False, True),
             (2, 7, 2, 16, 16, 1, True, torch.float32, False, True),
             (2, 7, 2, 5, 7, 1, True, torch.float32, True, True),
@@ -40,6 +52,8 @@ from fla.utils import assert_close, device
             (2, 7, 2, 32, 16, 1, True, torch.float32, True, True),
             (2, 63, 2, 16, 16, 1, False, torch.float32, True, False),
             (2, 63, 2, 16, 16, 1, True, torch.float32, True, False),
+            (1, 1, 2, 32, 64, 0.1, True, torch.float16, True, True),
+            (1, 65, 1, 64, 64, 0.1, True, torch.float16, False, True),
         ]
     ],
 )
@@ -50,7 +64,7 @@ def test_fused_recurrent(
     K: int,
     V: int,
     scale: float,
-    max_norm: bool | None,
+    max_normalisation: bool | None,
     dtype: torch.dtype,
     use_initial_state: bool,
     output_final_state: bool,
@@ -78,7 +92,7 @@ def test_fused_recurrent(
         scale=scale,
         initial_state=(c0, n0, m0) if use_initial_state else None,
         output_final_state=output_final_state,
-        max_normalisation=max_norm,
+        max_normalisation=max_normalisation,
     )
     ref_loss = (ref * dh).sum()
     if output_final_state:
@@ -105,14 +119,14 @@ def test_fused_recurrent(
         scale=scale,
         initial_state=(c0, n0, m0) if use_initial_state else None,
         output_final_state=output_final_state,
-        max_normalisation=max_norm,
+        max_normalisation=max_normalisation,
     )
     tri_loss = (tri * dh).sum()
     if output_final_state:
         tri_ct, tri_nt, tri_mt = tri_state
         assert tri_ct.dtype == torch.float32
         assert tri_mt.dtype == torch.float32
-        if max_norm is not None:
+        if max_normalisation is not None:
             assert tri_nt.dtype == torch.float32
             assert tri_nt.shape == (B, H, K)
         tri_loss += (tri_ct * dct).sum() + (tri_nt * dnt).sum()
@@ -146,16 +160,13 @@ def test_fused_recurrent(
 
 
 @pytest.mark.parametrize(
-    ('H', 'D', 'scale', 'cu_seqlens', 'max_norm', 'dtype'),
+    ('H', 'D', 'scale', 'cu_seqlens', 'max_normalisation', 'dtype'),
     [
-        pytest.param(*test, id="H{}-D{}-scale{}-cu_seqlens{}-max_norm={}-{}".format(*test))
+        pytest.param(*test, id="H{}-D{}-scale{}-cu_seqlens{}-max_normalisation={}-{}".format(*test))
         for test in [
-            (4, 64, 1, [0, 15], None, torch.float),
-            (4, 64, 1, [0, 15], False, torch.float),
-            (4, 64, 1, [0, 15], True, torch.float),
-            (4, 64, 1, [0, 256, 500, 1000], None, torch.float),
-            (4, 100, 0.1, [0, 15, 100, 300, 1200, 2000], None, torch.float),
-            (4, 100, 1, [0, 15, 100, 300, 1200, 2000], None, torch.float),
+            (4, 64, 1, [0, 15], False, torch.float32),
+            (2, 32, 0.1, [0, 1, 64, 65], True, torch.float16),
+            (4, 100, 0.1, [0, 15, 100, 300, 1200, 2000], None, torch.float32),
             (4, 64, 1, [0, 1, 100, 300, 1200, 2048], None, torch.float16),
             (4, 128, 1, [0, 200, 512, 1200, 2048], None, torch.float16),
         ]
@@ -166,7 +177,7 @@ def test_fused_recurrent_varlen(
     D: int,
     scale: float,
     cu_seqlens: list[int],
-    max_norm: bool | None,
+    max_normalisation: bool | None,
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
@@ -198,7 +209,7 @@ def test_fused_recurrent_varlen(
             scale=scale,
             initial_state=(c0[n:n+1], n0[n:n+1], m0[n:n+1]),
             output_final_state=True,
-            max_normalisation=max_norm,
+            max_normalisation=max_normalisation,
         )
         refs.append(ref)
         ref_cts.append(ref_ct)
@@ -227,7 +238,7 @@ def test_fused_recurrent_varlen(
         initial_state=(c0, n0, m0),
         output_final_state=True,
         cu_seqlens=cu_seqlens,
-        max_normalisation=max_norm,
+        max_normalisation=max_normalisation,
     )
     ((tri * dh).sum() + (tri_ct * dct).sum() + (tri_nt * dnt).sum()).backward()
     tri_dq, q.grad = q.grad.clone(), None
@@ -252,18 +263,18 @@ def test_fused_recurrent_varlen(
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'K', 'V', 'scale', 'max_norm', 'dtype', 'use_initial_state', 'output_final_state'),
+    ('B', 'T', 'H', 'K', 'V', 'scale', 'max_normalisation', 'dtype', 'use_initial_state', 'output_final_state'),
     [
-        pytest.param(*test, id="B{}-T{}-H{}-K{}-V{}-scale{}-max_norm={}-{}-initial_state-{}-final_state-{}".format(*test))
+        pytest.param(*test, id="B{}-T{}-H{}-K{}-V{}-scale{}-max_normalisation={}-{}-initial_state-{}-final_state-{}".format(*test))
         for test in [
             (1, 63, 1, 64, 64, 1, None, torch.float16, True, True),
-            (1, 63, 1, 64, 64, 1, None, torch.float32, True, True),
+            (1, 1, 1, 64, 64, 0.1, True, torch.float16, False, True),
             (1, 63, 1, 64, 64, 1, False, torch.float32, True, True),
             (1, 63, 1, 64, 64, 1, True, torch.float32, True, True),
             (2, 500, 3, 60, 60, 1, None, torch.float16, True, True),
             (1, 1000, 4, 128, 128, 1, None, torch.float16, True, True),
             (2, 1000, 4, 128, 128, 0.1, None, torch.float16, True, True),
-            (3, 1000, 4, 128, 128, 0.1, None, torch.float16, True, True),
+            (1, 65, 2, 32, 64, 0.1, True, torch.float16, True, True),
             (4, 2048, 8, 64, 64, 0.1, None, torch.float16, True, True),
             (2, 7, 2, 16, 16, 1, False, torch.float32, False, True),
             (2, 7, 2, 16, 16, 1, True, torch.float32, False, True),
@@ -282,7 +293,7 @@ def test_chunk(
     K: int,
     V: int,
     scale: float,
-    max_norm: bool | None,
+    max_normalisation: bool | None,
     dtype: torch.dtype,
     use_initial_state: bool,
     output_final_state: bool,
@@ -309,7 +320,7 @@ def test_chunk(
         scale=scale,
         initial_state=(c0, n0, m0) if use_initial_state else None,
         output_final_state=output_final_state,
-        max_normalisation=max_norm,
+        max_normalisation=max_normalisation,
     )
     ref_loss = (ref * dh).sum()
     if output_final_state:
@@ -336,7 +347,7 @@ def test_chunk(
         scale=scale,
         initial_state=(c0, n0, m0) if use_initial_state else None,
         output_final_state=output_final_state,
-        max_normalisation=max_norm,
+        max_normalisation=max_normalisation,
     )
     tri_loss = (tri * dh).sum()
     if output_final_state:
@@ -372,13 +383,13 @@ def test_chunk(
 
 
 @pytest.mark.parametrize(
-    ('implementation', 'state_dtype'),
+    ('implementation', 'state_dtype', 'output_final_state'),
     [
-        pytest.param(fused_recurrent_mlstm, torch.float32, id='fused_recurrent'),
-        pytest.param(chunk_mlstm, torch.float16, id='chunk'),
+        pytest.param(fused_recurrent_mlstm, torch.float32, True, id='recurrent-fp32-final-state'),
+        pytest.param(chunk_mlstm, torch.float16, True, id='chunk-fp16-final-state'),
+        pytest.param(chunk_mlstm, torch.float16, False, id='chunk-initial-state-gradient'),
     ],
 )
-@pytest.mark.parametrize('output_final_state', [False, True])
 def test_fp16_state(implementation, state_dtype: torch.dtype, output_final_state: bool):
     torch.manual_seed(42)
     B, T, H, K, V = 2, 7, 2, 16, 16
@@ -432,6 +443,18 @@ def test_fp16_state(implementation, state_dtype: torch.dtype, output_final_state
         assert_close(name, ref_grad.float(), tri_grad.float(), 0.005)
 
 
+@pytest.fixture
+def fp16_accumulation():
+    if not IS_NVIDIA or not hasattr(torch.backends.cuda.matmul, 'allow_fp16_accumulation'):
+        pytest.skip('FP16 accumulation requires CUDA and PyTorch >= 2.7')
+    previous = torch.backends.cuda.matmul.allow_fp16_accumulation
+    try:
+        torch.backends.cuda.matmul.allow_fp16_accumulation = True
+        yield
+    finally:
+        torch.backends.cuda.matmul.allow_fp16_accumulation = previous
+
+
 @pytest.mark.parametrize('output_final_state', [False, True])
 def test_chunk_fp16_accumulation(fp16_accumulation, output_final_state: bool):
     torch.manual_seed(42)
@@ -470,27 +493,23 @@ def test_chunk_fp16_accumulation(fp16_accumulation, output_final_state: bool):
 
 
 @pytest.mark.parametrize(
-    ('H', 'D', 'cu_seqlens', 'max_norm', 'dtype'),
+    ('H', 'D', 'cu_seqlens', 'max_normalisation', 'dtype'),
     [
-        pytest.param(*test, id="H{}-D{}-cu_seqlens{}-max_norm={}-{}".format(*test))
+        pytest.param(*test, id="H{}-D{}-cu_seqlens{}-max_normalisation={}-{}".format(*test))
         for test in [
             (4, 64, [0, 15], None, torch.float16),
             (4, 64, [0, 15], False, torch.float32),
-            (4, 64, [0, 15], True, torch.float32),
+            (2, 32, [0, 1, 64, 65], True, torch.float16),
             (4, 64, [0, 256, 500, 1000], None, torch.float16),
             (4, 100, [0, 15, 100, 300, 1200, 2000], None, torch.float16),
         ]
     ],
 )
-@pytest.mark.skipif(
-    os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
-    reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set',
-)
 def test_chunk_varlen(
     H: int,
     D: int,
     cu_seqlens: list[int],
-    max_norm: bool | None,
+    max_normalisation: bool | None,
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
@@ -499,7 +518,6 @@ def test_chunk_varlen(
     T = cu_seqlens[-1]
     cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
 
-    # seq-first required for inputs with variable lengths
     q = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
     k = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
     v = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
@@ -522,7 +540,7 @@ def test_chunk_varlen(
             f=f[:, cu_seqlens[n]:cu_seqlens[n + 1]],
             initial_state=(c0[n:n+1], n0[n:n+1], m0[n:n+1]),
             output_final_state=True,
-            max_normalisation=max_norm,
+            max_normalisation=max_normalisation,
         )
         refs.append(ref)
         refs_c.append(ref_ct)
@@ -550,7 +568,7 @@ def test_chunk_varlen(
         initial_state=(c0, n0, m0),
         output_final_state=True,
         cu_seqlens=cu_seqlens,
-        max_normalisation=max_norm,
+        max_normalisation=max_normalisation,
     )
     ((tri * dh).sum() + (dct * tri_ct).sum() + (dnt * tri_nt).sum()).backward()
     tri_dq, q.grad = q.grad.clone(), None

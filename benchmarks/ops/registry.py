@@ -655,7 +655,7 @@ register_op(OpConfig(
     inputs={
         **_simple_qkv,
         'i': TensorSpec(shape_BTH),
-        'f': TensorSpec(shape_BTH)
+        'f': TensorSpec(shape_BTH),
     },
     category='mlstm',
     test_file='tests/ops/test_mlstm.py',
@@ -667,7 +667,7 @@ register_op(OpConfig(
     inputs={
         **_simple_qkv,
         'i': TensorSpec(shape_BTH),
-        'f': TensorSpec(shape_BTH)
+        'f': TensorSpec(shape_BTH),
     },
     category='mlstm',
     test_file='tests/ops/test_mlstm.py',

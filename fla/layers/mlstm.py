@@ -20,17 +20,17 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 
-from fla.layers.utils import get_unpad_data, index_first_axis, pad_input
-from fla.modules import GroupedLinear, GroupNorm, ShortConvolution
+from fla.layers.utils import get_layer_cache, repad_hidden_states, unpad_hidden_states, update_layer_cache
+from fla.modules import GroupLinear, GroupNorm, ShortConvolution
 from fla.ops.mlstm import chunk_mlstm, fused_recurrent_mlstm
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
-    from fla.models.utils import Cache
+    from fla.models.cache_utils import Cache
 
 
-def round_proj_up_dim(
+def _round_proj_up_dim(
     hidden_size: int,
     proj_factor: float,
     multiple_of: int = 64,
@@ -117,7 +117,7 @@ class MLSTM(nn.Module):
         self.layer_idx = layer_idx
         self.num_blocks = max(num_blocks, 1)
 
-        self.inner_hidden_size = round_proj_up_dim(
+        self.inner_hidden_size = _round_proj_up_dim(
             hidden_size=hidden_size,
             proj_factor=proj_factor,
             multiple_of=round_proj_up_to_multiple_of,
@@ -135,19 +135,19 @@ class MLSTM(nn.Module):
 
         self.proj_up = nn.Linear(hidden_size, 2 * self.inner_hidden_size, bias=bias)
         self.num_proj_heads = self.inner_hidden_size // qkv_proj_blocksize
-        self.q_proj = GroupedLinear(
+        self.q_proj = GroupLinear(
             in_features=self.inner_hidden_size,
             out_features=self.inner_hidden_size,
             groups=self.num_proj_heads,
             bias=bias,
         )
-        self.k_proj = GroupedLinear(
+        self.k_proj = GroupLinear(
             in_features=self.inner_hidden_size,
             out_features=self.inner_hidden_size,
             groups=self.num_proj_heads,
             bias=bias,
         )
-        self.v_proj = GroupedLinear(
+        self.v_proj = GroupLinear(
             in_features=self.inner_hidden_size,
             out_features=self.inner_hidden_size,
             groups=self.num_proj_heads,
@@ -195,23 +195,22 @@ class MLSTM(nn.Module):
         if self.training:
             assert mode == 'chunk', "Only chunk mode is supported in training."
 
-        last_state = None
-        if past_key_values is not None and self.layer_idx is not None and len(past_key_values) > self.layer_idx:
-            last_state = past_key_values[self.layer_idx]
-
-        cu_seqlens = kwargs.get('cu_seqlens')
-        if attention_mask is not None:
-            indices, cu_seqlens, _ = get_unpad_data(attention_mask[:, -seq_len:])
-            hidden_states = index_first_axis(rearrange(hidden_states, "b s ... -> (b s) ..."), indices).unsqueeze(0)
+        last_state = get_layer_cache(self, past_key_values)
+        hidden_states, indices, cu_seqlens = unpad_hidden_states(
+            hidden_states=hidden_states,
+            cu_seqlens=kwargs.get('cu_seqlens'),
+            attention_mask=attention_mask,
+            q_len=seq_len,
+        )
 
         conv_state = last_state['conv_state'] if last_state is not None else None
         recurrent_state = last_state['recurrent_state'] if last_state is not None else None
 
         x_inner = self.proj_up(hidden_states)
-        x_mlstm, z = torch.split(x_inner, self.inner_hidden_size, dim=-1)
+        x, z = torch.split(x_inner, self.inner_hidden_size, dim=-1)
 
         x_conv, conv_state = self.conv1d(
-            x=x_mlstm,
+            x=x,
             cache=conv_state,
             output_final_state=use_cache or past_key_values is not None,
             cu_seqlens=cu_seqlens,
@@ -219,31 +218,31 @@ class MLSTM(nn.Module):
 
         q = self.q_proj(x_conv)
         k = self.k_proj(x_conv)
-        v = self.v_proj(x_mlstm)
+        v = self.v_proj(x)
 
-        x_gate = torch.cat([q, k, v], dim=-1)
+        qkv = torch.cat([q, k, v], dim=-1)
         q, k, v = map(lambda x: rearrange(x, '... (h d) -> ... h d', h=self.num_heads), (q, k, v))
-        igate_preact = self.igate(x_gate)
-        fgate_preact = self.fgate(x_gate)
+        i = self.igate(qkv)
+        f = self.fgate(qkv)
 
         if mode == 'chunk':
-            h_tilde, recurrent_state = chunk_mlstm(
+            o, recurrent_state = chunk_mlstm(
                 q=q,
                 k=k,
                 v=v,
-                i=igate_preact,
-                f=fgate_preact,
+                i=i,
+                f=f,
                 initial_state=recurrent_state,
                 output_final_state=use_cache or past_key_values is not None,
                 cu_seqlens=cu_seqlens,
             )
         elif mode == 'fused_recurrent':
-            h_tilde, recurrent_state = fused_recurrent_mlstm(
+            o, recurrent_state = fused_recurrent_mlstm(
                 q=q,
                 k=k,
                 v=v,
-                i=igate_preact,
-                f=fgate_preact,
+                i=i,
+                f=f,
                 initial_state=recurrent_state,
                 output_final_state=use_cache or past_key_values is not None,
                 cu_seqlens=cu_seqlens,
@@ -251,23 +250,21 @@ class MLSTM(nn.Module):
         else:
             raise NotImplementedError(f"Unsupported mode `{mode}`.")
 
-        h_tilde = rearrange(h_tilde, 'b t h d -> b t (h d)')
-        h_tilde = self.o_norm(h_tilde)
+        o = rearrange(o, 'b t h d -> b t (h d)')
+        o = self.o_norm(o)
 
-        h_tilde = h_tilde + self.learnable_skip * x_conv
-        h_state = h_tilde * F.silu(z)
-        output = self.dropout(self.proj_down(h_state))
+        o = o + self.learnable_skip * x_conv
+        o_gated = o * F.silu(z)
+        output = self.dropout(self.proj_down(o_gated))
 
-        if past_key_values is not None and self.layer_idx is not None:
-            past_key_values.update(
-                recurrent_state=recurrent_state,
-                conv_state=conv_state,
-                layer_idx=self.layer_idx,
-                offset=seq_len,
-            )
-
-        if attention_mask is not None:
-            output = pad_input(output.squeeze(0), indices, batch_size, seq_len)
+        update_layer_cache(
+            module=self,
+            past_key_values=past_key_values,
+            recurrent_state=recurrent_state,
+            conv_state=conv_state,
+            offset=seq_len,
+        )
+        output = repad_hidden_states(output, indices, batch_size, seq_len)
 
         return output, None, past_key_values
 

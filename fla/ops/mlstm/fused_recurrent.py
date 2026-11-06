@@ -8,6 +8,7 @@
 # Copyright (c) 2026, Pieter-Jan Hoedt
 
 import torch
+import torch.nn.functional as F
 import triton
 import triton.language as tl
 
@@ -54,88 +55,86 @@ def fused_recurrent_mlstm_fwd_kernel(
     tl.static_assert(BK >= K, "not implemented yet")
     tl.static_assert(BV >= V, "not implemented yet")
 
-    pid_b = tl.program_id(axis=0).to(tl.int64)
-    pid_h = tl.program_id(axis=1).to(tl.int64)
+    i_b = tl.program_id(axis=0).to(tl.int64)
+    i_h = tl.program_id(axis=1).to(tl.int64)
 
     if IS_VARLEN:
-        offsets_t = tl.load(cu_seqlens + pid_b + tl.arange(0, 2)).to(tl.int64)
-        pid_bt, end_bt = tl.split(offsets_t)
-        T = end_bt - pid_bt
+        o_seqlens = tl.load(cu_seqlens + i_b + tl.arange(0, 2)).to(tl.int64)
+        i_bt, end_bt = tl.split(o_seqlens)
+        T = end_bt - i_bt
     else:
-        pid_bt = pid_b * T
+        i_bt = i_b * T
 
-    # input pointers
     o_1 = tl.arange(0, 1).to(tl.int64)
     o_k = tl.arange(0, BK).to(tl.int64)
     o_v = tl.arange(0, BV).to(tl.int64)
-    q_ptr = q + (pid_bt * H + pid_h) * K + o_k[None, :]
-    k_ptr = k + (pid_bt * H + pid_h) * K + o_k[None, :]
-    v_ptr = v + (pid_bt * H + pid_h) * V + o_v[None, :]
-    log_i_ptr = log_i + pid_bt * H + pid_h + o_1
-    log_f_ptr = log_f + pid_bt * H + pid_h + o_1
-    c_ptr = c0 + (pid_b * H + pid_h) * K * V + o_k[:, None] * V + o_v[None, :]
-    m_ptr = m0 + pid_b * H + pid_h
+    p_q = q + (i_bt * H + i_h) * K + o_k[None, :]
+    p_k = k + (i_bt * H + i_h) * K + o_k[None, :]
+    p_v = v + (i_bt * H + i_h) * V + o_v[None, :]
+    p_log_i = log_i + i_bt * H + i_h + o_1
+    p_log_f = log_f + i_bt * H + i_h + o_1
+    p_c = c0 + (i_b * H + i_h) * K * V + o_k[:, None] * V + o_v[None, :]
+    p_m = m0 + i_b * H + i_h
 
-    # output pointer
-    h_ptr = h + (pid_bt * H + pid_h) * V + o_v[None, :]
-    ms_ptr = ms + pid_bt * H + pid_h + o_1
+    p_h = h + (i_bt * H + i_h) * V + o_v[None, :]
+    p_ms = ms + i_bt * H + i_h + o_1
 
     if STORE_FINAL_STATE:
-        c_out_ptr = c_out + (pid_b * H + pid_h) * K * V + o_k[:, None] * V + o_v[None, :]
-        m_out_ptr = m_out + pid_b * H + pid_h
+        p_c_out = c_out + (i_b * H + i_h) * K * V + o_k[:, None] * V + o_v[None, :]
+        p_m_out = m_out + i_b * H + i_h
 
     if MAX_NORMALISATION is not None:
-        n_ptr = n0 + (pid_b * H + pid_h) * K + o_k
-        z_ptr = z + pid_bt * H + pid_h + o_1
+        p_n = n0 + (i_b * H + i_h) * K + o_k
+        p_z = z + i_bt * H + i_h + o_1
         if STORE_FINAL_STATE:
-            n_out_ptr = n_out + (pid_b * H + pid_h) * K + o_k
+            p_n_out = n_out + (i_b * H + i_h) * K + o_k
 
-    c_vals = tl.load(c_ptr, mask=(o_k[:, None] < K) & (o_v[None, :] < V), other=0)
-    m_val = tl.load(m_ptr)
+    b_c = tl.load(p_c, mask=(o_k[:, None] < K) & (o_v[None, :] < V), other=0)
+    b_m = tl.load(p_m)
     if MAX_NORMALISATION is not None:
-        n_vals = tl.load(n_ptr, mask=(o_k < K), other=0)
-    for offset_t in range(0, T):
-        tl.store(ms_ptr, m_val[None].to(ms.dtype.element_ty))
-        q_vals = tl.load(q_ptr, mask=(o_k[None, :] < K), other=0).ravel()
-        k_vals = qk_scale * tl.load(k_ptr, mask=(o_k[None, :] < K), other=0).ravel()
-        v_vals = tl.load(v_ptr, mask=(o_v[None, :] < V), other=0).ravel()
-        log_i_val = tl.load(log_i_ptr).reshape()
-        log_f_val = tl.load(log_f_ptr).reshape()
+        b_n = tl.load(p_n, mask=(o_k < K), other=0)
+    for i_t in range(0, T):
+        tl.store(p_ms, b_m[None].to(ms.dtype.element_ty))
+        b_q = tl.load(p_q, mask=(o_k[None, :] < K), other=0).ravel()
+        b_k = qk_scale * tl.load(p_k, mask=(o_k[None, :] < K), other=0).ravel()
+        b_v = tl.load(p_v, mask=(o_v[None, :] < V), other=0).ravel()
+        b_log_i = tl.load(p_log_i).reshape()
+        b_log_f = tl.load(p_log_f).reshape()
 
-        log_f_val += m_val
-        m_val = tl.maximum(log_f_val, log_i_val)
-        f_gate = tl.exp(log_f_val - m_val)
-        i_gate = tl.exp(log_i_val - m_val)
-        c_vals = f_gate * c_vals + i_gate * k_vals[:, None] * v_vals[None, :]
-        h_vals = tl.sum(q_vals[:, None] * c_vals, axis=0)
+        b_log_f += b_m
+        b_m = tl.maximum(b_log_f, b_log_i)
+        f_gate = tl.exp(b_log_f - b_m)
+        i_gate = tl.exp(b_log_i - b_m)
+        b_c = f_gate * b_c + i_gate * b_k[:, None] * b_v[None, :]
+        b_h = tl.sum(b_q[:, None] * b_c, axis=0)
         if MAX_NORMALISATION is not None:
-            n_vals = f_gate * n_vals + i_gate * k_vals
-            z_val = tl.sum(q_vals * n_vals)
+            b_n = f_gate * b_n + i_gate * b_k
+            b_z = tl.sum(b_q * b_n)
             if MAX_NORMALISATION:
-                _z = tl.maximum(tl.abs(z_val), tl.exp(-m_val) + eps)
+                _z = tl.maximum(tl.abs(b_z), tl.exp(-b_m) + eps)
             else:
-                _z = z_val + eps
+                _z = b_z + eps
 
-            h_vals = h_vals / _z
+            b_h = b_h / _z
 
-            tl.store(z_ptr, z_val[None].to(z.dtype.element_ty))
-            z_ptr += H
+            tl.store(p_z, b_z[None].to(z.dtype.element_ty))
+            p_z += H
 
-        tl.store(h_ptr, h_vals[None, :].to(h.dtype.element_ty), mask=(o_v[None, :] < V))
+        tl.store(p_h, b_h[None, :].to(h.dtype.element_ty), mask=(o_v[None, :] < V))
 
-        q_ptr += H * K
-        k_ptr += H * K
-        v_ptr += H * V
-        log_i_ptr += H
-        log_f_ptr += H
-        h_ptr += H * V
-        ms_ptr += H
+        p_q += H * K
+        p_k += H * K
+        p_v += H * V
+        p_log_i += H
+        p_log_f += H
+        p_h += H * V
+        p_ms += H
 
     if STORE_FINAL_STATE:
-        tl.store(c_out_ptr, c_vals, mask=(o_k[:, None] < K) & (o_v[None, :] < V))
-        tl.store(m_out_ptr, m_val)
+        tl.store(p_c_out, b_c, mask=(o_k[:, None] < K) & (o_v[None, :] < V))
+        tl.store(p_m_out, b_m)
         if MAX_NORMALISATION is not None:
-            tl.store(n_out_ptr, n_vals, mask=(o_k < K))
+            tl.store(p_n_out, b_n, mask=(o_k < K))
 
 
 @triton.autotune(
@@ -185,186 +184,184 @@ def fused_recurrent_mlstm_bwd_kernel(
     tl.static_assert(BK >= K, "not implemented yet")
     tl.static_assert(BV >= V, "not implemented yet")
 
-    pid_b = tl.program_id(axis=0).to(tl.int64)
-    pid_h = tl.program_id(axis=1).to(tl.int64)
+    i_b = tl.program_id(axis=0).to(tl.int64)
+    i_h = tl.program_id(axis=1).to(tl.int64)
 
     if IS_VARLEN:
-        offsets_t = tl.load(cu_seqlens + pid_b + tl.arange(0, 2)).to(tl.int64)
-        pid_bt, end_bt = tl.split(offsets_t)
-        T = end_bt - pid_bt
+        o_seqlens = tl.load(cu_seqlens + i_b + tl.arange(0, 2)).to(tl.int64)
+        i_bt, end_bt = tl.split(o_seqlens)
+        T = end_bt - i_bt
     else:
-        pid_bt = pid_b * T
+        i_bt = i_b * T
 
-    # input pointers
     o_1 = tl.arange(0, 1).to(tl.int64)
     o_k = tl.arange(0, BK).to(tl.int64)
     o_v = tl.arange(0, BV).to(tl.int64)
-    dh_ptr = dh + (pid_bt * H + pid_h) * V + o_v[None, :]
-    q_ptr = q + (pid_bt * H + pid_h) * K + (T - 1 + o_1)[:, None] * (H * K) + o_k[None, :]
-    k_ptr = k + (pid_bt * H + pid_h) * K + o_k[None, :]
-    v_ptr = v + (pid_bt * H + pid_h) * V + o_v[None, :]
-    log_i_ptr = log_i + pid_bt * H + pid_h + o_1
-    log_f_ptr = log_f + (pid_bt * H + pid_h) + o_1
-    c0_ptr = c0 + (pid_b * H + pid_h) * K * V + o_k[:, None] * V + o_v[None, :]
-    m0_ptr = m0 + pid_b * H + pid_h
-    ms_ptr = ms + (pid_bt * H + pid_h) + (T - 1 + o_1) * H
+    p_dh = dh + (i_bt * H + i_h) * V + o_v[None, :]
+    p_q = q + (i_bt * H + i_h) * K + (T - 1 + o_1)[:, None] * (H * K) + o_k[None, :]
+    p_k = k + (i_bt * H + i_h) * K + o_k[None, :]
+    p_v = v + (i_bt * H + i_h) * V + o_v[None, :]
+    p_log_i = log_i + i_bt * H + i_h + o_1
+    p_log_f = log_f + (i_bt * H + i_h) + o_1
+    p_c0 = c0 + (i_b * H + i_h) * K * V + o_k[:, None] * V + o_v[None, :]
+    p_m0 = m0 + i_b * H + i_h
+    p_ms = ms + (i_bt * H + i_h) + (T - 1 + o_1) * H
 
-    # output pointers
-    dq_ptr = dq + (pid_bt * H + pid_h) * K + o_k[None, :]
-    dk_ptr = dk + (pid_bt * H + pid_h) * K + (T - 1 + o_1)[:, None] * (H * K) + o_k[None, :]
-    dv_ptr = dv + (pid_bt * H + pid_h) * V + (T - 1 + o_1)[:, None] * (H * V) + o_v[None, :]
-    dlog_i_ptr = dlog_i + pid_bt * H + pid_h + (T - 1 + o_1) * H
-    dlog_f_ptr = dlog_f + (pid_bt * H + pid_h) + (T - 1 + o_1) * H
+    p_dq = dq + (i_bt * H + i_h) * K + o_k[None, :]
+    p_dk = dk + (i_bt * H + i_h) * K + (T - 1 + o_1)[:, None] * (H * K) + o_k[None, :]
+    p_dv = dv + (i_bt * H + i_h) * V + (T - 1 + o_1)[:, None] * (H * V) + o_v[None, :]
+    p_dlog_i = dlog_i + i_bt * H + i_h + (T - 1 + o_1) * H
+    p_dlog_f = dlog_f + (i_bt * H + i_h) + (T - 1 + o_1) * H
 
     if MAX_NORMALISATION is not None:
-        n0_ptr = n0 + (pid_b * H + pid_h) * K + o_k
-        h_ptr = h + (pid_bt * H + pid_h) * V + o_v[None, :]
-        z_ptr = z + pid_bt * H + pid_h + o_1
+        p_n0 = n0 + (i_b * H + i_h) * K + o_k
+        p_h = h + (i_bt * H + i_h) * V + o_v[None, :]
+        p_z = z + i_bt * H + i_h + o_1
 
-    c_vals = tl.load(c0_ptr, mask=(o_k[:, None] < K) & (o_v[None, :] < V), other=0)
-    m_val = tl.load(m0_ptr)
+    b_c = tl.load(p_c0, mask=(o_k[:, None] < K) & (o_v[None, :] < V), other=0)
+    b_m = tl.load(p_m0)
     if MAX_NORMALISATION is not None:
-        n_vals = tl.load(n0_ptr, mask=(o_k < K), other=0)
-    for offset_t in range(0, T):
-        k_vals = qk_scale * tl.load(k_ptr, mask=(o_k[None, :] < K), other=0).ravel()
-        v_vals = tl.load(v_ptr, mask=(o_v[None, :] < V), other=0).ravel()
-        log_i_val = tl.load(log_i_ptr).reshape()
-        log_f_val = tl.load(log_f_ptr).reshape()
+        b_n = tl.load(p_n0, mask=(o_k < K), other=0)
+    for i_t in range(0, T):
+        b_k = qk_scale * tl.load(p_k, mask=(o_k[None, :] < K), other=0).ravel()
+        b_v = tl.load(p_v, mask=(o_v[None, :] < V), other=0).ravel()
+        b_log_i = tl.load(p_log_i).reshape()
+        b_log_f = tl.load(p_log_f).reshape()
 
-        log_f_val += m_val
-        m_val = tl.maximum(log_i_val, log_f_val)
-        i_gate = tl.exp(log_i_val - m_val)
-        f_gate = tl.exp(log_f_val - m_val)
-        c_vals = f_gate * c_vals + i_gate * k_vals[:, None] * v_vals[None, :]
+        b_log_f += b_m
+        b_m = tl.maximum(b_log_i, b_log_f)
+        i_gate = tl.exp(b_log_i - b_m)
+        f_gate = tl.exp(b_log_f - b_m)
+        b_c = f_gate * b_c + i_gate * b_k[:, None] * b_v[None, :]
 
-        dh_vals = tl.load(dh_ptr, mask=(o_v[None, :] < V), other=0).ravel()
+        b_dh = tl.load(p_dh, mask=(o_v[None, :] < V), other=0).ravel()
         if MAX_NORMALISATION is not None:
-            h_vals = tl.load(h_ptr, mask=(o_v[None, :] < V), other=0).ravel()
-            n_vals = f_gate * n_vals + i_gate * k_vals
-            z_val = tl.load(z_ptr).reshape()
+            b_h = tl.load(p_h, mask=(o_v[None, :] < V), other=0).ravel()
+            b_n = f_gate * b_n + i_gate * b_k
+            b_z = tl.load(p_z).reshape()
             if MAX_NORMALISATION:
-                _z_mask = tl.abs(z_val) > tl.exp(-m_val) + eps
-                _z = tl.where(_z_mask, tl.abs(z_val), tl.exp(-m_val) + eps)
-                z_neg_sign = tl.where(z_val < 0, 1, -1)
-                ds = tl.cast(dh_vals / _z, dtype=tl.float32)
-                dz = _z_mask * z_neg_sign * tl.sum(ds * h_vals)
+                _z_mask = tl.abs(b_z) > tl.exp(-b_m) + eps
+                _z = tl.where(_z_mask, tl.abs(b_z), tl.exp(-b_m) + eps)
+                z_neg_sign = tl.where(b_z < 0, 1, -1)
+                ds = tl.cast(b_dh / _z, dtype=tl.float32)
+                dz = _z_mask * z_neg_sign * tl.sum(ds * b_h)
             else:
-                _z = z_val + eps
-                ds = tl.cast(dh_vals / _z, dtype=tl.float32)
-                dz = -tl.sum(ds * h_vals)
+                _z = b_z + eps
+                ds = tl.cast(b_dh / _z, dtype=tl.float32)
+                dz = -tl.sum(ds * b_h)
 
-            dq_vals = n_vals * dz
+            b_dq = b_n * dz
 
-            h_ptr += H * V
-            z_ptr += H
+            p_h += H * V
+            p_z += H
         else:
-            dq_vals = tl.zeros([BK], dtype=tl.float32)
-            ds = dh_vals
+            b_dq = tl.zeros([BK], dtype=tl.float32)
+            ds = b_dh
 
-        dq_vals += tl.sum(c_vals * ds[None, :], axis=1)
-        tl.store(dq_ptr, dq_vals[None, :].to(dq.dtype.element_ty), mask=(o_k[None, :] < K))
+        b_dq += tl.sum(b_c * ds[None, :], axis=1)
+        tl.store(p_dq, b_dq[None, :].to(dq.dtype.element_ty), mask=(o_k[None, :] < K))
 
-        k_ptr += H * K
-        v_ptr += H * V
-        log_i_ptr += H
-        log_f_ptr += H
-        dh_ptr += H * V
-        dq_ptr += H * K
+        p_k += H * K
+        p_v += H * V
+        p_log_i += H
+        p_log_f += H
+        p_dh += H * V
+        p_dq += H * K
 
-    # prepare pointers for reuse
-    k_ptr -= H * K
-    v_ptr -= H * V
-    log_i_ptr -= H
-    log_f_ptr -= H
-    dh_ptr -= H * V
-    dq_ptr -= H * K
+    p_k -= H * K
+    p_v -= H * V
+    p_log_i -= H
+    p_log_f -= H
+    p_dh -= H * V
+    p_dq -= H * K
     if MAX_NORMALISATION is not None:
-        h_ptr -= H * V
-        z_ptr -= H
+        p_h -= H * V
+        p_z -= H
 
     if WITH_FINAL_STATE:
-        dc_ptr = dc + (pid_b * H + pid_h) * K * V + o_k[:, None] * V + o_v[None, :]
-        dc_out_ptr = dc_out + (pid_b * H + pid_h) * K * V + o_k[:, None] * V + o_v[None, :]
+        p_dc = dc + (i_b * H + i_h) * K * V + o_k[:, None] * V + o_v[None, :]
+        p_dc_out = dc_out + (i_b * H + i_h) * K * V + o_k[:, None] * V + o_v[None, :]
 
-        dc_vals = tl.load(dc_ptr, mask=(o_k[:, None] < K) & (o_v[None, :] < V), other=0)
-        df_val = tl.sum(dc_vals * c_vals)
+        b_dc = tl.load(p_dc, mask=(o_k[:, None] < K) & (o_v[None, :] < V), other=0)
+        b_df = tl.sum(b_dc * b_c)
         if MAX_NORMALISATION is not None:
-            dn_ptr = dn + (pid_b * H + pid_h) * K + o_k
-            dn_out_ptr = dn_out + (pid_b * H + pid_h) * K + o_k
+            p_dn = dn + (i_b * H + i_h) * K + o_k
+            p_dn_out = dn_out + (i_b * H + i_h) * K + o_k
 
-            dn_vals = tl.load(dn_ptr, mask=(o_k < K), other=0)
-            df_val += tl.sum(dn_vals * n_vals)
+            b_dn = tl.load(p_dn, mask=(o_k < K), other=0)
+            b_df += tl.sum(b_dn * b_n)
     else:
-        df_val = 0.
-        dc_vals = tl.zeros([BK, BV], dtype=tl.float32)
+        b_df = 0.
+        b_dc = tl.zeros([BK, BV], dtype=tl.float32)
         if MAX_NORMALISATION is not None:
-            dn_vals = tl.zeros([BK], dtype=tl.float32)
-    m_prev_val = m_val
-    for offset_t in range(T - 1, -1, -1):
-        dh_vals = tl.load(dh_ptr, mask=(o_v[None, :] < V), other=0).ravel()
-        dq_vals = tl.load(dq_ptr, mask=(o_k[None, :] < K), other=0)
-        q_vals = tl.load(q_ptr, mask=(o_k[None, :] < K), other=0).ravel()
-        k_vals = qk_scale * tl.load(k_ptr, mask=(o_k[None, :] < K), other=0).ravel()
-        v_vals = tl.load(v_ptr, mask=(o_v[None, :] < V), other=0).ravel()
-        log_i_val = tl.load(log_i_ptr).reshape()
-        log_f_val = tl.load(log_f_ptr).reshape()
+            b_dn = tl.zeros([BK], dtype=tl.float32)
+    b_m_prev = b_m
+    for i_t in range(T - 1, -1, -1):
+        b_dh = tl.load(p_dh, mask=(o_v[None, :] < V), other=0).ravel()
+        b_dq = tl.load(p_dq, mask=(o_k[None, :] < K), other=0)
+        b_q = tl.load(p_q, mask=(o_k[None, :] < K), other=0).ravel()
+        b_k = qk_scale * tl.load(p_k, mask=(o_k[None, :] < K), other=0).ravel()
+        b_v = tl.load(p_v, mask=(o_v[None, :] < V), other=0).ravel()
+        b_log_i = tl.load(p_log_i).reshape()
+        b_log_f = tl.load(p_log_f).reshape()
 
-        m_prev_val, m_val = tl.load(ms_ptr).reshape().to(tl.float32), m_prev_val
-        i_gate = tl.exp(log_i_val - m_val)
-        f_gate = tl.exp(log_f_val + m_prev_val - m_val)
+        b_m_prev, b_m = tl.load(p_ms).reshape().to(tl.float32), b_m_prev
+        i_gate = tl.exp(b_log_i - b_m)
+        f_gate = tl.exp(b_log_f + b_m_prev - b_m)
         if MAX_NORMALISATION is not None:
-            h_vals = tl.load(h_ptr, mask=(o_v[None, :] < V), other=0)
-            z_val = tl.load(z_ptr)
+            b_h = tl.load(p_h, mask=(o_v[None, :] < V), other=0)
+            b_z = tl.load(p_z)
             if MAX_NORMALISATION:
-                _z_mask = tl.abs(z_val) > tl.exp(-m_val) + eps
-                _z = tl.where(_z_mask, tl.abs(z_val), tl.exp(-m_val) + eps)
-                z_neg_sign = tl.where(z_val < 0, 1, -1)
-                ds = tl.cast(dh_vals / _z, dtype=tl.float32)
-                dz = _z_mask * z_neg_sign * tl.sum(ds * h_vals, axis=1)
+                _z_mask = tl.abs(b_z) > tl.exp(-b_m) + eps
+                _z = tl.where(_z_mask, tl.abs(b_z), tl.exp(-b_m) + eps)
+                z_neg_sign = tl.where(b_z < 0, 1, -1)
+                ds = tl.cast(b_dh / _z, dtype=tl.float32)
+                dz = _z_mask * z_neg_sign * tl.sum(ds * b_h, axis=1)
             else:
-                _z = z_val + eps
-                ds = tl.cast(dh_vals / _z, dtype=tl.float32)
-                dz = -tl.sum(ds * h_vals, axis=1)
+                _z = b_z + eps
+                ds = tl.cast(b_dh / _z, dtype=tl.float32)
+                dz = -tl.sum(ds * b_h, axis=1)
 
-            dn_vals += dz * q_vals
-            dk_vals = i_gate * dn_vals
-            dn_vals *= f_gate
+            b_dn += dz * b_q
+            b_dk = i_gate * b_dn
+            b_dn *= f_gate
 
-            h_ptr -= H * V
-            z_ptr -= H
+            p_h -= H * V
+            p_z -= H
         else:
-            ds = dh_vals
-            dk_vals = tl.zeros([BK], dtype=tl.float32)
+            ds = b_dh
+            b_dk = tl.zeros([BK], dtype=tl.float32)
 
-        dc_vals += q_vals[:, None] * ds[None, :]
-        dk_vals += i_gate * tl.sum(dc_vals * v_vals[None, :], axis=1)
-        dv_vals = i_gate * tl.sum(k_vals[:, None] * dc_vals, axis=0)
-        dc_vals *= f_gate
-        di_val = tl.sum(dk_vals * k_vals)
-        df_val += tl.sum(dq_vals * q_vals) - di_val  # catastrophic forgetting
-        dk_vals *= qk_scale
-        tl.store(dk_ptr, dk_vals[None, :].to(dk.dtype.element_ty), mask=(o_k[None, :] < K))
-        tl.store(dv_ptr, dv_vals[None, :].to(dv.dtype.element_ty), mask=(o_v[None, :] < V))
-        tl.store(dlog_i_ptr, di_val[None].to(dlog_i.dtype.element_ty))
-        tl.store(dlog_f_ptr, df_val[None].to(dlog_f.dtype.element_ty))
+        b_dc += b_q[:, None] * ds[None, :]
+        b_dk += i_gate * tl.sum(b_dc * b_v[None, :], axis=1)
+        b_dv = i_gate * tl.sum(b_k[:, None] * b_dc, axis=0)
+        b_dc *= f_gate
+        b_di = tl.sum(b_dk * b_k)
+        # cancellation in this difference requires the FP32 query gradient
+        b_df += tl.sum(b_dq * b_q) - b_di
+        b_dk *= qk_scale
+        tl.store(p_dk, b_dk[None, :].to(dk.dtype.element_ty), mask=(o_k[None, :] < K))
+        tl.store(p_dv, b_dv[None, :].to(dv.dtype.element_ty), mask=(o_v[None, :] < V))
+        tl.store(p_dlog_i, b_di[None].to(dlog_i.dtype.element_ty))
+        tl.store(p_dlog_f, b_df[None].to(dlog_f.dtype.element_ty))
 
-        dh_ptr -= H * V
-        dq_ptr -= H * K
-        q_ptr -= H * K
-        k_ptr -= H * K
-        v_ptr -= H * V
-        log_i_ptr -= H
-        log_f_ptr -= H
-        ms_ptr -= H
-        dk_ptr -= H * K
-        dv_ptr -= H * V
-        dlog_i_ptr -= H
-        dlog_f_ptr -= H
+        p_dh -= H * V
+        p_dq -= H * K
+        p_q -= H * K
+        p_k -= H * K
+        p_v -= H * V
+        p_log_i -= H
+        p_log_f -= H
+        p_ms -= H
+        p_dk -= H * K
+        p_dv -= H * V
+        p_dlog_i -= H
+        p_dlog_f -= H
 
     if WITH_FINAL_STATE:
-        tl.store(dc_out_ptr, dc_vals.to(dc_out.dtype.element_ty), mask=(o_k[:, None] < K) & (o_v[None, :] < V))
+        tl.store(p_dc_out, b_dc.to(dc_out.dtype.element_ty), mask=(o_k[:, None] < K) & (o_v[None, :] < V))
         if MAX_NORMALISATION is not None:
-            tl.store(dn_out_ptr, dn_vals.to(dn_out.dtype.element_ty), mask=(o_k < K))
+            tl.store(p_dn_out, b_dn.to(dn_out.dtype.element_ty), mask=(o_k < K))
 
 
 def fused_recurrent_mlstm_fwd(
@@ -410,7 +407,7 @@ def fused_recurrent_mlstm_fwd(
         k=k,
         v=v,
         log_i=i,
-        log_f=torch.nn.functional.logsigmoid(f),
+        log_f=F.logsigmoid(f),
         c0=c0,
         n0=n0,
         m0=m0,
@@ -496,7 +493,7 @@ def fused_recurrent_mlstm_bwd(
         k=k,
         v=v,
         log_i=i,
-        log_f=torch.nn.functional.logsigmoid(f),
+        log_f=F.logsigmoid(f),
         c0=c0,
         n0=n0,
         m0=m0,
@@ -617,14 +614,15 @@ def fused_recurrent_mlstm(
     cu_seqlens: torch.LongTensor | None = None,
     max_normalisation: bool | None = True,
 ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor | None, torch.Tensor] | None]:
-    r"""
+    r"""Compute mLSTM with a fused recurrent scan.
+
     Args:
         q (torch.Tensor):
-            queries of shape `[B, T, H, K]`.
+            Queries of shape `[B, T, H, K]`.
         k (torch.Tensor):
-            keys of shape `[B, T, H, K]`.
+            Keys of shape `[B, T, H, K]`.
         v (torch.Tensor):
-            values of shape `[B, T, H, V]`.
+            Values of shape `[B, T, H, V]`.
         i (torch.Tensor):
             Input gate logits of shape `[B, T, H]`.
         f (torch.Tensor):
@@ -642,12 +640,13 @@ def fused_recurrent_mlstm(
             State tensors are converted to FP32 for computation. Default: `None`.
         output_final_state (bool, Optional):
             Whether to output the final state tuple `(c, n, m)`. Default: `False`.
+            Gradients are supported for `c` and `n`, but not the stabilizer `m`.
         cu_seqlens (torch.LongTensor, Optional):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API. Default: `None`.
         max_normalisation (bool | None, Optional):
             Whether to use the maximum-based normalisation of the original paper
-            or a regular FLA normalisation inside the kernel.
+            or division by the signed normaliser plus `eps` when `False`.
             If set to `None`, no normalisation will be computed in the kernel
             and the normaliser state will not be updated.
             Default: `True`.
@@ -657,38 +656,6 @@ def fused_recurrent_mlstm(
             Outputs of shape `[B, T, H, V]`.
         final_state (tuple[torch.Tensor, torch.Tensor | None, torch.Tensor] | None):
             Final state in FP32 with same shapes as `initial_state` if `output_final_state=True` else `None`.
-
-    Examples::
-        >>> import torch
-        >>> import torch.nn.functional as F
-        >>> from fla.ops.mlstm import fused_recurrent_mlstm
-        # inputs with equal lengths
-        >>> B, T, H, K, V = 4, 2048, 4, 512, 512
-        >>> q = torch.randn(B, T, H, K, device='cuda')
-        >>> k = torch.randn(B, T, H, K, device='cuda')
-        >>> v = torch.randn(B, T, H, V, device='cuda')
-        >>> i = torch.randn(B, T, H, device='cuda')
-        >>> f = torch.randn(B, T, H, device='cuda')
-        >>> c0 = torch.randn(B, H, K, V, device='cuda')
-        >>> n0 = torch.randn(B, H, K, device='cuda')
-        >>> m0 = torch.randn(B, H, device='cuda')
-        >>> h, ct = fused_recurrent_mlstm(
-            q, k, v, i, f,
-            initial_state=(c0, n0, m0),
-            output_final_state=True
-        )
-        # for variable-length inputs, the batch size `B` is expected to be 1 and `cu_seqlens` is required
-        >>> q, k, v = map(lambda x: x.flatten(end_dim=1).unsqueeze(0), (q, k, v))
-        >>> i, f = map(lambda x: x.flatten(end_dim=1).unsqueeze(0), (i, f))
-        # for a batch with 4 sequences, `cu_seqlens` with 5 start/end positions are expected
-        >>> cu_seqlens = q.new_tensor([0, 2048, 4096, 6144, 8192], dtype=torch.long)
-        >>> h_var, ct_var = fused_recurrent_mlstm(
-            q, k, v, i, f,
-            initial_state=(c0, n0, m0),
-            output_final_state=True,
-            cu_seqlens=cu_seqlens
-        )
-        >>> assert h.allclose(h_var.view(h.shape))
     """
     if cu_seqlens is not None:
         if q.shape[0] != 1:

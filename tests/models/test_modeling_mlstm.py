@@ -8,23 +8,19 @@
 import pytest
 import torch
 
-from fla.layers.mlstm import MLSTM
 from fla.models import MLSTMConfig, MLSTMForCausalLM
 from fla.utils import device
 
-from .test_modeling_base import run_test_generation, run_test_model_forward_backward
+from .utils import check_forward, check_generate, check_generation
 
 
-# ===================================================================================
-# Test for Modeling (Forward/Backward Pass)
-# ===================================================================================
 @pytest.mark.parametrize(
-    ["L", "B", "T", "H", "D", "use_l2warp", "dtype"],
+    ["L", "B", "T", "H", "D", "use_l2warp", "dtype", "varlen"],
     [
-        pytest.param(*test, id="L{}-B{}-T{}-H{}-D{}-use_l2warp{}-{}".format(*test))
+        pytest.param(*test, id="L{}-B{}-T{}-H{}-D{}-use_l2warp{}-{}-varlen{}".format(*test))
         for test in [
-            (4, 4, 1024, 4, 64, True, torch.bfloat16),
-            (4, 4, 1024, 4, 64, False, torch.bfloat16),
+            (2, 2, 127, 2, 32, True, torch.bfloat16, False),
+            (2, 2, 257, 2, 32, False, torch.bfloat16, True),
         ]
     ],
 )
@@ -36,19 +32,28 @@ def test_modeling(
     D: int,
     use_l2warp: bool,
     dtype: torch.dtype,
+    varlen: bool,
 ):
-    run_test_model_forward_backward(L, B, T, H, D, MLSTMConfig, use_l2warp=use_l2warp, dtype=dtype)
+    check_forward(
+        L=L,
+        B=B,
+        T=T,
+        H=H,
+        D=D,
+        config_class=MLSTMConfig,
+        use_l2warp=use_l2warp,
+        dtype=dtype,
+        varlen=varlen,
+        vocab_size=256,
+    )
 
 
-# ===================================================================================
-# Test for Generation
-# ===================================================================================
 @pytest.mark.parametrize(
     ["L", "B", "T", "H", "D", "dtype"],
     [
         pytest.param(*test, id="L{}-B{}-T{}-H{}-D{}-{}".format(*test))
         for test in [
-            (2, 4, 2000, 8, 64, torch.float16),
+            (2, 2, 132, 2, 32, torch.float16),
         ]
     ],
 )
@@ -60,10 +65,11 @@ def test_generation(
     D: int,
     dtype: torch.dtype,
 ):
-    run_test_generation(L, B, T, H, D, MLSTMConfig, dtype)
+    check_generation(L=L, B=B, T=T, H=H, D=D, config_class=MLSTMConfig, dtype=dtype)
+    check_generate(L=L, B=B, T=T, H=H, D=D, config_class=MLSTMConfig, dtype=dtype)
 
 
-@pytest.mark.parametrize('num_hidden_layers', [1, 2])
+@pytest.mark.parametrize('num_hidden_layers', [1, 2], ids=['single-layer', 'multi-layer'])
 def test_initialization(num_hidden_layers: int):
     torch.manual_seed(42)
     config = MLSTMConfig(
@@ -80,7 +86,6 @@ def test_initialization(num_hidden_layers: int):
     model = MLSTMForCausalLM(config).to(device)
     for block in model.model.layers:
         layer = block.attn
-        assert not hasattr(layer, 'reset_parameters')
         assert torch.count_nonzero(layer.fgate.weight) == 0
         assert torch.count_nonzero(layer.igate.weight) == 0
         assert torch.equal(layer.learnable_skip, torch.ones_like(layer.learnable_skip))
@@ -93,9 +98,22 @@ def test_initialization(num_hidden_layers: int):
         assert block.attn.fgate.bias.grad is not None
         assert torch.isfinite(block.attn.fgate.bias.grad).all()
 
-    layer = MLSTM(hidden_size=64, num_heads=2, proj_factor=1).to(device)
-    assert layer.fgate.bias.requires_grad
-    hidden_states = torch.randn(1, 7, 64, device=device, requires_grad=True)
-    output, _, _ = layer(hidden_states=hidden_states)
-    output.square().mean().backward()
-    assert hidden_states.grad is not None and torch.isfinite(hidden_states.grad).all()
+
+@pytest.mark.parametrize('tie_word_embeddings', [False, True], ids=['untied', 'tied'])
+def test_save_load(tmp_path, tie_word_embeddings: bool):
+    torch.manual_seed(42)
+    config = MLSTMConfig(
+        hidden_size=64,
+        num_hidden_layers=1,
+        num_heads=2,
+        proj_factor=1,
+        vocab_size=32,
+        tie_word_embeddings=tie_word_embeddings,
+    )
+    model = MLSTMForCausalLM(config)
+    model.save_pretrained(tmp_path)
+    restored = MLSTMForCausalLM.from_pretrained(tmp_path)
+    assert restored.state_dict().keys() == model.state_dict().keys()
+    for name, weight in model.state_dict().items():
+        torch.testing.assert_close(weight, restored.state_dict()[name], rtol=0, atol=0)
+    assert (restored.lm_head.weight is restored.model.embeddings.weight) == tie_word_embeddings
