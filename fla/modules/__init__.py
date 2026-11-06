@@ -34,7 +34,7 @@ from fla.modules.norm import (
     RMSNorm,
     RMSNormLinear,
 )
-from fla.modules.residuals import AttentionResidual, StandardDeferredResidual, StandardResidual
+from fla.modules.residuals import AttentionResidual, StandardResidual
 from fla.modules.rotary import RotaryEmbedding
 from fla.modules.token_shift import TokenShift
 
@@ -135,7 +135,6 @@ __all__ = [
     'RMSNormLinear',
     'RotaryEmbedding',
     'ShortConvolution',
-    'StandardDeferredResidual',
     'StandardResidual',
     'TokenShift',
 ]

@@ -20,9 +20,11 @@ ContextT = TypeVar('ContextT')
 class BaseResidual(nn.Module, ABC, Generic[StateT, ContextT]):
     """Own normalization, learned residual parameters, and residual state transitions.
 
-    `pre` returns a normalized branch input and per-call context; `post` returns the updated state.
+    `initialize` creates state from embeddings.
+    `pre` returns a normalized branch input and the context needed by `post` to incorporate that branch's output.
+    `get_hidden_state` exposes the intermediate representation;
+    calling the module performs the final readout and normalization.
     State and context retain autograd connections and must not be mutated or cached on the module.
-    The output module initializes state and performs the final readout and normalization.
     """
 
     supports_reentrant_checkpointing = True
@@ -30,19 +32,11 @@ class BaseResidual(nn.Module, ABC, Generic[StateT, ContextT]):
     def __init__(
         self,
         hidden_size: int,
-        sub_layer_idx: int,
-        num_sublayers: int,
-        is_output: bool = False,
         norm_eps: float = 1e-6,
         fuse_norm: bool = True,
     ):
         super().__init__()
         self.hidden_size = hidden_size
-        self.sub_layer_idx = sub_layer_idx
-        self.num_sublayers = num_sublayers
-        self.is_last_sublayer = sub_layer_idx == num_sublayers - 1
-        self.is_output = is_output
-
         self.fuse_norm = fuse_norm
         self.norm = (RMSNorm if fuse_norm else nn.RMSNorm)(hidden_size, eps=norm_eps)
 
@@ -59,10 +53,13 @@ class BaseResidual(nn.Module, ABC, Generic[StateT, ContextT]):
         raise NotImplementedError
 
     @abstractmethod
-    def post(self, state: StateT, branch_output: torch.Tensor, context: ContextT) -> StateT:
+    def post(self, branch_output: torch.Tensor, context: ContextT) -> StateT:
         raise NotImplementedError
 
-    @staticmethod
     @abstractmethod
-    def get_hidden_state(state: StateT) -> torch.Tensor:
+    def get_hidden_state(self, state: StateT) -> torch.Tensor:
         raise NotImplementedError
+
+    def forward(self, state: StateT) -> torch.Tensor:
+        """Normalize the final readout; implementations may override its aggregation."""
+        return self.norm(self.get_hidden_state(state))
