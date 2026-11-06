@@ -16,6 +16,7 @@ from fla.modules.fused_bitlinear import BitLinear, FusedBitLinear
 from fla.modules.fused_cross_entropy import FusedCrossEntropyLoss
 from fla.modules.fused_kl_div import FusedKLDivLoss
 from fla.modules.fused_linear_cross_entropy import FusedLinearCrossEntropyLoss
+from fla.modules.grouplinear import GroupLinear
 from fla.modules.long_conv import ImplicitLongConvolution, LongConvolution
 from fla.modules.mlp import GatedMLP
 from fla.modules.norm import (
@@ -120,6 +121,7 @@ __all__ = [
     'FusedRMSNormSwishGate',
     'FusedRMSNormSwishGateLinear',
     'GatedMLP',
+    'GroupLinear',
     'GroupNorm',
     'GroupNormLinear',
     'ImplicitLongConvolution',
