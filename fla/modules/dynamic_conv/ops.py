@@ -23,7 +23,6 @@ def dynamic_conv1d_proj_kernel(
     a,
     b,
     c,
-    pre_activation,
     M,
     N: tl.constexpr,
     K: tl.constexpr,
@@ -35,6 +34,7 @@ def dynamic_conv1d_proj_kernel(
     BN: tl.constexpr,
     BK: tl.constexpr,
     BS: tl.constexpr,
+    ACTIVATION: tl.constexpr,
 ):
     i = tl.program_id(0).to(tl.int64)
     NM, NN = tl.cdiv(M, BM), tl.cdiv(N, BN)
@@ -54,8 +54,7 @@ def dynamic_conv1d_proj_kernel(
         b_c += tl.dot(b_a, b_b, input_precision='ieee')
     o_c = i_s * M * N + o_m[:, None] * N + o_n[None, :]
     m_c = m_m[:, None] & m_n[None, :]
-    if pre_activation is not None:
-        tl.store(pre_activation + o_c, b_c, mask=m_c)
+    if ACTIVATION == 'silu' or ACTIVATION == 'swish':
         b_c *= tl.sigmoid(b_c)
     tl.store(c + o_c, b_c.to(c.dtype.element_ty), mask=m_c)
 
@@ -69,7 +68,6 @@ def dynamic_conv1d_fwd_kernel(
     residual,
     initial_state,
     y,
-    pre_activation,
     cu_seqlens,
     chunk_indices,
     T,
@@ -79,6 +77,7 @@ def dynamic_conv1d_fwd_kernel(
     BT: tl.constexpr,
     BD: tl.constexpr,
     BR: tl.constexpr,
+    ACTIVATION: tl.constexpr,
 ):
     i = tl.program_id(0).to(tl.int64)
     i_t, i_d, i_n = i // tl.cdiv(D, BD), i % tl.cdiv(D, BD), tl.program_id(1).to(tl.int64)
@@ -116,8 +115,7 @@ def dynamic_conv1d_fwd_kernel(
         b_y += b_k * b_x
     o_y = (bos + o_t[:, None]) * D + o_d[None, :]
     m_y = m_t[:, None] & m_d[None, :]
-    if pre_activation is not None:
-        tl.store(pre_activation + o_y, b_y, mask=m_y)
+    if ACTIVATION == 'silu' or ACTIVATION == 'swish':
         b_y *= tl.sigmoid(b_y)
     if residual is not None:
         b_y += tl.load(residual + o_y, mask=m_y, other=0).to(tl.float32)
@@ -329,13 +327,11 @@ class DynamicConv1dFunction(torch.autograd.Function):
         W = out_proj_weight.shape[0] // D
         BT, BD, BR = 16, 32, max(16, triton.next_power_of_2(R))
         z = x.new_empty(B, T, R, dtype=torch.float32)
-        z_pre_activation = torch.empty_like(z) if dynamic_activation is not None else None
         if B * T:
             dynamic_conv1d_proj_kernel[(triton.cdiv(B * T, BT),)](
                 a=generator_input,
                 b=in_proj_weight,
                 c=z,
-                pre_activation=z_pre_activation,
                 M=B * T,
                 N=R,
                 K=D,
@@ -347,12 +343,12 @@ class DynamicConv1dFunction(torch.autograd.Function):
                 BN=BR,
                 BK=32,
                 BS=0,
+                ACTIVATION=dynamic_activation,
             )
         if cu_seqlens is not None and chunk_indices is None:
             chunk_indices = prepare_chunk_indices(cu_seqlens=cu_seqlens, chunk_size=BT)
         NT = len(chunk_indices) if chunk_indices is not None else triton.cdiv(T, BT)
         y = torch.empty_like(x)
-        y_pre_activation = torch.empty_like(x, dtype=torch.float32) if activation is not None else None
         if NT:
             dynamic_conv1d_fwd_kernel[(triton.cdiv(D, BD) * NT, B)](
                 x=x,
@@ -362,7 +358,6 @@ class DynamicConv1dFunction(torch.autograd.Function):
                 residual=residual,
                 initial_state=initial_state,
                 y=y,
-                pre_activation=y_pre_activation,
                 cu_seqlens=cu_seqlens,
                 chunk_indices=chunk_indices,
                 T=T,
@@ -372,6 +367,7 @@ class DynamicConv1dFunction(torch.autograd.Function):
                 BT=BT,
                 BD=BD,
                 BR=BR,
+                ACTIVATION=activation,
             )
         final_state = None
         if output_final_state:
@@ -385,11 +381,11 @@ class DynamicConv1dFunction(torch.autograd.Function):
             residual,
             initial_state,
             z,
-            z_pre_activation,
-            y_pre_activation,
             cu_seqlens,
             chunk_indices,
         )
+        ctx.dynamic_activation = dynamic_activation
+        ctx.activation = activation
         return y, final_state
 
     @staticmethod
@@ -404,8 +400,6 @@ class DynamicConv1dFunction(torch.autograd.Function):
             residual,
             initial_state,
             z,
-            z_pre_activation,
-            y_pre_activation,
             cu_seqlens,
             chunk_indices,
         ) = ctx.saved_tensors
@@ -415,8 +409,29 @@ class DynamicConv1dFunction(torch.autograd.Function):
         BT, BD, BR = 16, 32, max(16, triton.next_power_of_2(R))
         NT = len(chunk_indices) if chunk_indices is not None else triton.cdiv(T, BT)
         dresidual = dy.to(residual) if residual is not None else None
-        if y_pre_activation is not None and x.numel():
-            dy = swish_bwd(x=y_pre_activation, dy=dy, output_contiguous=True)
+        if ctx.activation is not None and x.numel():
+            y = torch.empty_like(x, dtype=torch.float32)
+            dynamic_conv1d_fwd_kernel[(triton.cdiv(D, BD) * NT, B)](
+                x=x,
+                z=z,
+                out_proj_weight=out_proj_weight,
+                out_proj_bias=out_proj_bias,
+                residual=None,
+                initial_state=initial_state,
+                y=y,
+                cu_seqlens=cu_seqlens,
+                chunk_indices=chunk_indices,
+                T=T,
+                D=D,
+                R=R,
+                W=W,
+                BT=BT,
+                BD=BD,
+                BR=BR,
+                ACTIVATION=None,
+            )
+            dy = swish_bwd(x=y, dy=dy, output_contiguous=True)
+            del y
         dx, dz = torch.empty_like(x), torch.empty_like(z)
         dh0 = torch.empty_like(initial_state) if initial_state is not None else None
         if NT:
@@ -499,8 +514,27 @@ class DynamicConv1dFunction(torch.autograd.Function):
                 BS=BS,
             )
         dout_proj_weight, dout_proj_bias = dout_proj_weight.sum(0).to(out_proj_weight), dout_proj_bias.sum(0).to(out_proj_bias)
-        if z_pre_activation is not None and z.numel():
-            dz = swish_bwd(x=z_pre_activation, dy=dz, output_contiguous=True)
+        if ctx.dynamic_activation is not None and z.numel():
+            z = torch.empty_like(z)
+            dynamic_conv1d_proj_kernel[(triton.cdiv(B * T, BT),)](
+                a=generator_input,
+                b=in_proj_weight,
+                c=z,
+                M=B * T,
+                N=R,
+                K=D,
+                stride_am=D,
+                stride_ak=1,
+                stride_bk=1,
+                stride_bn=D,
+                BM=BT,
+                BN=BR,
+                BK=32,
+                BS=0,
+                ACTIVATION=None,
+            )
+            dz = swish_bwd(x=z, dy=dz, output_contiguous=True)
+            del z
         dgenerator_input = torch.empty_like(generator_input)
         NS = triton.cdiv(B * T, BS)
         din_proj_weight = in_proj_weight.new_empty(NS, R, D, dtype=torch.float32)
@@ -509,7 +543,6 @@ class DynamicConv1dFunction(torch.autograd.Function):
                 a=dz,
                 b=in_proj_weight,
                 c=dgenerator_input,
-                pre_activation=None,
                 M=B * T,
                 N=D,
                 K=R,
@@ -521,13 +554,13 @@ class DynamicConv1dFunction(torch.autograd.Function):
                 BN=BD,
                 BK=BR,
                 BS=0,
+                ACTIVATION=None,
             )
         if NS:
             dynamic_conv1d_proj_kernel[(triton.cdiv(R, BT) * triton.cdiv(D, BD) * NS,)](
                 a=dz,
                 b=generator_input,
                 c=din_proj_weight,
-                pre_activation=None,
                 M=R,
                 N=D,
                 K=B * T,
@@ -539,6 +572,7 @@ class DynamicConv1dFunction(torch.autograd.Function):
                 BN=BD,
                 BK=32,
                 BS=BS,
+                ACTIVATION=None,
             )
         din_proj_weight = din_proj_weight.sum(0).to(in_proj_weight)
         return dx, dgenerator_input, din_proj_weight, dout_proj_weight, dout_proj_bias, dresidual, dh0, None, None, None, None, None
@@ -563,6 +597,7 @@ class DynamicShortConvolution(nn.Module):
 
     Phi is dynamic_activation and psi is activation; None selects the identity.
     Both projections and the convolution accumulate in FP32. The second projection is fused with convolution.
+    Activation inputs are recomputed during backward.
     Only the second generator projection has a bias, which is always enabled.
     The convolution has no additional bias; an absent residual is zero.
 
