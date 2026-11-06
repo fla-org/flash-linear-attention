@@ -73,6 +73,7 @@ def dynamic_conv1d_fwd_kernel(
         b_w = tl.full((BT, BD), 0, tl.float32)
         b_w += tl.dot(b_z, b_w2, input_precision='ieee')
         b_w += tl.load(b + o_d * W + i_w, mask=m_d, other=0)[None, :].to(tl.float32)
+        b_w = b_w.to(z.dtype.element_ty).to(tl.float32)
 
         o_x = o_t - W + 1 + i_w
         p_x = x + (bos + o_x[:, None]) * D + o_d[None, :]
@@ -160,6 +161,7 @@ def dynamic_conv1d_bwd_kernel(
             b_w = tl.full((BT, BD), 0, tl.float32)
             b_w += tl.dot(b_z, b_w2, input_precision='ieee')
             b_w += tl.load(b + o_d * W + i_w, mask=m_d, other=0)[None, :].to(tl.float32)
+            b_w = b_w.to(z.dtype.element_ty).to(tl.float32)
             p_dy = dy + (bos + o_y[:, None]) * D + o_d[None, :]
             b_dy_shift = tl.load(p_dy, mask=m_y[:, None] & m_d[None, :], other=0).to(tl.float32)
             b_dx += b_dy_shift * b_w
@@ -173,7 +175,8 @@ def dynamic_conv1d_bwd_kernel(
                     p_h0 = initial_state + (i_n * D + o_d[None, :]) * W + o_x[:, None] + W
                     m_h0 = ((o_x >= -W) & (o_x < 0))[:, None] & m_d[None, :]
                     b_x += tl.load(p_h0, mask=m_h0, other=0).to(tl.float32)
-                b_dz += tl.dot(b_dy * b_x, tl.trans(b_w2), input_precision='ieee')
+                b_dw = (b_dy * b_x).to(z.dtype.element_ty).to(tl.float32)
+                b_dz += tl.dot(b_dw, tl.trans(b_w2), input_precision='ieee')
         if dht is not None:
             o_h = o_t - T + W
             p_dht = dht + (i_n * D + o_d[None, :]) * W + o_h[:, None]
@@ -252,7 +255,7 @@ def dynamic_conv1d_bwd_kernel_dw2(
                 p_h0 = initial_state + (i_n * D + o_d[None, :]) * W + o_x[:, None] + W
                 m_h0 = ((o_x >= -W) & (o_x < 0))[:, None] & m_d[None, :]
                 b_x += tl.load(p_h0, mask=m_h0, other=0).to(tl.float32)
-            b_dw = b_dy * b_x
+            b_dw = (b_dy * b_x).to(z.dtype.element_ty).to(tl.float32)
             b_dw2 += tl.dot(b_z, b_dw, input_precision='ieee')
             b_db += tl.sum(b_dw, axis=0)
         p_dw2 = dw2 + ((i_s * D + o_d[None, :]) * W + i_w) * R + o_r[:, None]
