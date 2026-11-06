@@ -84,13 +84,16 @@ def dynamic_conv1d_fwd_kernel(
 
 @triton.heuristics({'IS_VARLEN': lambda args: args['cu_seqlens'] is not None})
 @triton.jit(do_not_specialize=['T'])
-def dynamic_conv1d_bwd_kernel_dx(
+def dynamic_conv1d_bwd_kernel(
+    x,
     z,
     w2,
     b,
+    initial_state,
     dy,
     dht,
     dx,
+    dz,
     cu_seqlens,
     chunk_indices,
     T,
@@ -103,8 +106,7 @@ def dynamic_conv1d_bwd_kernel_dx(
     COMPUTE_DH0: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i = tl.program_id(0).to(tl.int64)
-    i_t, i_d, i_n = i // tl.cdiv(D, BD), i % tl.cdiv(D, BD), tl.program_id(1).to(tl.int64)
+    i_t, i_n = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     if IS_VARLEN:
         if not COMPUTE_DH0:
             i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int64), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
@@ -119,85 +121,53 @@ def dynamic_conv1d_bwd_kernel_dx(
         m_t = o_t < 0
     else:
         m_t = o_t < T
-    o_d = i_d * BD + tl.arange(0, BD)
     o_r = tl.arange(0, BR).to(tl.int64)
-    m_d, m_r = o_d < D, o_r < R
-    b_dx = tl.full((BT, BD), 0, tl.float32)
-    for i_w in range(W):
-        o_y = o_t + W - 1 - i_w
-        m_y = (o_y >= 0) & (o_y < T)
-        p_z = z + (bos + o_y[:, None]) * R + o_r[None, :]
-        p_w2 = w2 + (o_d[None, :] * W + i_w) * R + o_r[:, None]
-        b_z = tl.load(p_z, mask=m_y[:, None] & m_r[None, :], other=0).to(tl.float32)
-        b_w2 = tl.load(p_w2, mask=m_r[:, None] & m_d[None, :], other=0).to(tl.float32)
-        b_w = tl.full((BT, BD), 0, tl.float32)
-        b_w += tl.dot(b_z, b_w2, input_precision='ieee')
-        b_w += tl.load(b + o_d * W + i_w, mask=m_d, other=0)[None, :].to(tl.float32)
-        p_dy = dy + (bos + o_y[:, None]) * D + o_d[None, :]
-        b_dy = tl.load(p_dy, mask=m_y[:, None] & m_d[None, :], other=0).to(tl.float32)
-        b_dx += b_dy * b_w
-    if dht is not None:
-        o_h = o_t - T + W
-        p_dht = dht + (i_n * D + o_d[None, :]) * W + o_h[:, None]
-        m_h = ((o_h >= 0) & (o_h < W))[:, None] & m_d[None, :]
-        b_dx += tl.load(p_dht, mask=m_h, other=0).to(tl.float32)
-    if COMPUTE_DH0:
-        p_dx = dx + (i_n * D + o_d[None, :]) * W + o_t[:, None] + W
-    else:
-        p_dx = dx + (bos + o_t[:, None]) * D + o_d[None, :]
-    tl.store(p_dx, b_dx.to(dx.dtype.element_ty), mask=m_t[:, None] & m_d[None, :])
-
-
-@triton.heuristics({'IS_VARLEN': lambda args: args['cu_seqlens'] is not None})
-@triton.jit(do_not_specialize=['T'])
-def dynamic_conv1d_bwd_kernel_dz(
-    x,
-    w2,
-    initial_state,
-    dy,
-    dz,
-    cu_seqlens,
-    chunk_indices,
-    T,
-    D: tl.constexpr,
-    R: tl.constexpr,
-    W: tl.constexpr,
-    BT: tl.constexpr,
-    BD: tl.constexpr,
-    BR: tl.constexpr,
-    IS_VARLEN: tl.constexpr,
-):
-    i_t, i_n = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
-    if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int64), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
-        T = eos - bos
-    else:
-        bos, eos = i_n * T, i_n * T + T
-
-    o_t = i_t * BT + tl.arange(0, BT)
-    o_r = tl.arange(0, BR).to(tl.int64)
-    m_t, m_r = o_t < T, o_r < R
+    m_r = o_r < R
     b_dz = tl.full((BT, BR), 0, tl.float32)
     for i_d in range(tl.cdiv(D, BD)):
         o_d = i_d.to(tl.int64) * BD + tl.arange(0, BD)
         m_d = o_d < D
-        p_dy = dy + (bos + o_t[:, None]) * D + o_d[None, :]
-        b_dy = tl.load(p_dy, mask=m_t[:, None] & m_d[None, :], other=0).to(tl.float32)
+        b_dx = tl.full((BT, BD), 0, tl.float32)
+        if not COMPUTE_DH0:
+            p_dy = dy + (bos + o_t[:, None]) * D + o_d[None, :]
+            b_dy = tl.load(p_dy, mask=m_t[:, None] & m_d[None, :], other=0).to(tl.float32)
         for i_w in range(W):
-            o_x = o_t - W + 1 + i_w
-            p_x = x + (bos + o_x[:, None]) * D + o_d[None, :]
-            m_x = ((o_x >= 0) & (o_x < T))[:, None] & m_d[None, :]
-            b_x = tl.load(p_x, mask=m_x, other=0).to(tl.float32)
-            if initial_state is not None:
-                p_h0 = initial_state + (i_n * D + o_d[None, :]) * W + o_x[:, None] + W
-                m_h0 = ((o_x >= -W) & (o_x < 0))[:, None] & m_d[None, :]
-                b_x += tl.load(p_h0, mask=m_h0, other=0).to(tl.float32)
-            p_w2 = w2 + (o_d[:, None] * W + i_w) * R + o_r[None, :]
-            b_w2 = tl.load(p_w2, mask=m_d[:, None] & m_r[None, :], other=0).to(tl.float32)
-            b_dz += tl.dot(b_dy * b_x, b_w2, input_precision='ieee')
-    p_dz = dz + (bos + o_t[:, None]) * R + o_r[None, :]
-    tl.store(p_dz, b_dz.to(dz.dtype.element_ty), mask=m_t[:, None] & m_r[None, :])
+            p_w2 = w2 + (o_d[None, :] * W + i_w) * R + o_r[:, None]
+            b_w2 = tl.load(p_w2, mask=m_r[:, None] & m_d[None, :], other=0).to(tl.float32)
+            o_y = o_t + W - 1 - i_w
+            m_y = (o_y >= 0) & (o_y < T)
+            p_z = z + (bos + o_y[:, None]) * R + o_r[None, :]
+            b_z = tl.load(p_z, mask=m_y[:, None] & m_r[None, :], other=0).to(tl.float32)
+            b_w = tl.full((BT, BD), 0, tl.float32)
+            b_w += tl.dot(b_z, b_w2, input_precision='ieee')
+            b_w += tl.load(b + o_d * W + i_w, mask=m_d, other=0)[None, :].to(tl.float32)
+            p_dy = dy + (bos + o_y[:, None]) * D + o_d[None, :]
+            b_dy_shift = tl.load(p_dy, mask=m_y[:, None] & m_d[None, :], other=0).to(tl.float32)
+            b_dx += b_dy_shift * b_w
+
+            if not COMPUTE_DH0:
+                o_x = o_t - W + 1 + i_w
+                p_x = x + (bos + o_x[:, None]) * D + o_d[None, :]
+                m_x = ((o_x >= 0) & (o_x < T))[:, None] & m_d[None, :]
+                b_x = tl.load(p_x, mask=m_x, other=0).to(tl.float32)
+                if initial_state is not None:
+                    p_h0 = initial_state + (i_n * D + o_d[None, :]) * W + o_x[:, None] + W
+                    m_h0 = ((o_x >= -W) & (o_x < 0))[:, None] & m_d[None, :]
+                    b_x += tl.load(p_h0, mask=m_h0, other=0).to(tl.float32)
+                b_dz += tl.dot(b_dy * b_x, tl.trans(b_w2), input_precision='ieee')
+        if dht is not None:
+            o_h = o_t - T + W
+            p_dht = dht + (i_n * D + o_d[None, :]) * W + o_h[:, None]
+            m_h = ((o_h >= 0) & (o_h < W))[:, None] & m_d[None, :]
+            b_dx += tl.load(p_dht, mask=m_h, other=0).to(tl.float32)
+        if COMPUTE_DH0:
+            p_dx = dx + (i_n * D + o_d[None, :]) * W + o_t[:, None] + W
+        else:
+            p_dx = dx + (bos + o_t[:, None]) * D + o_d[None, :]
+        tl.store(p_dx, b_dx.to(dx.dtype.element_ty), mask=m_t[:, None] & m_d[None, :])
+    if not COMPUTE_DH0:
+        p_dz = dz + (bos + o_t[:, None]) * R + o_r[None, :]
+        tl.store(p_dz, b_dz.to(dz.dtype.element_ty), mask=m_t[:, None] & m_r[None, :])
 
 
 @triton.heuristics({'IS_VARLEN': lambda args: args['cu_seqlens'] is not None})
@@ -347,29 +317,15 @@ class DynamicConv1dFunction(torch.autograd.Function):
             del y
         dx, dz = torch.empty_like(x), torch.empty_like(z)
         dh0 = torch.empty_like(initial_state) if initial_state is not None else None
-        dynamic_conv1d_bwd_kernel_dx[(triton.cdiv(D, BD) * NT, B)](
+        dynamic_conv1d_bwd_kernel[(NT, B)](
+            x=x,
             z=z,
             w2=w2,
             b=b,
+            initial_state=initial_state,
             dy=dy,
             dht=dht,
             dx=dx,
-            cu_seqlens=cu_seqlens,
-            chunk_indices=chunk_indices,
-            T=T,
-            D=D,
-            R=R,
-            W=W,
-            BT=BT,
-            BD=BD,
-            BR=BR,
-            COMPUTE_DH0=False,
-        )
-        dynamic_conv1d_bwd_kernel_dz[(NT, B)](
-            x=x,
-            w2=w2,
-            initial_state=initial_state,
-            dy=dy,
             dz=dz,
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
@@ -380,15 +336,21 @@ class DynamicConv1dFunction(torch.autograd.Function):
             BT=BT,
             BD=BD,
             BR=BR,
+            COMPUTE_DH0=False,
+            num_warps=8,
+            num_stages=1,
         )
         if dh0 is not None:
-            dynamic_conv1d_bwd_kernel_dx[(triton.cdiv(D, BD) * triton.cdiv(W, BT), len(dh0))](
+            dynamic_conv1d_bwd_kernel[(triton.cdiv(W, BT), len(dh0))](
+                x=x,
                 z=z,
                 w2=w2,
                 b=b,
+                initial_state=initial_state,
                 dy=dy,
                 dht=dht,
                 dx=dh0,
+                dz=None,
                 cu_seqlens=cu_seqlens,
                 chunk_indices=None,
                 T=T,
@@ -399,6 +361,8 @@ class DynamicConv1dFunction(torch.autograd.Function):
                 BD=BD,
                 BR=BR,
                 COMPUTE_DH0=True,
+                num_warps=8,
+                num_stages=1,
             )
         BS = 256
         chunk_indices_dw = prepare_chunk_indices(cu_seqlens=cu_seqlens, chunk_size=BS) if cu_seqlens is not None else None
