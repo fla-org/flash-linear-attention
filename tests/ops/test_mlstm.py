@@ -273,7 +273,7 @@ def test_fused_recurrent_varlen(
             (1, 63, 1, 64, 64, 1, True, torch.float32, True, True),
             (2, 500, 3, 60, 60, 1, None, torch.float16, True, True),
             (1, 1000, 4, 128, 128, 1, None, torch.float16, True, True),
-            (2, 1000, 4, 128, 128, 0.1, None, torch.float16, True, True),
+            (3, 1000, 4, 128, 128, 0.1, None, torch.float16, True, True),
             (1, 65, 2, 32, 64, 0.1, True, torch.float16, True, True),
             (4, 2048, 8, 64, 64, 0.1, None, torch.float16, True, True),
             (2, 7, 2, 16, 16, 1, False, torch.float32, False, True),

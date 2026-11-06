@@ -565,7 +565,7 @@ def chunk_mlstm_bwd_kernel_dv(
     b_dc = tl.load(p_dcs, mask=(o_k[:, None] < K) & ((offset_l + o_v)[None, :] < V), other=0)
     k_gated = b_k * scale_last[:, None]
     b_dv = tl.dot(k_gated, b_dc, out_dtype=ACC_DTYPE, input_precision=FP32_PREC)
-    b_dv = tl.dot(kq.to(scale_t.type.element_ty) * scale_t, ds, b_dv, input_precision=FP32_PREC)
+    b_dv = tl.dot(kq.to(scale_t.type.element_ty) * scale_t, ds, b_dv, out_dtype=ACC_DTYPE, input_precision=FP32_PREC)
 
     tl.store(p_dv, b_dv.to(dv.type.element_ty), mask=((o_chunk + o_t)[:, None] < T) & ((offset_l + o_v)[None, :] < V))
 
@@ -719,15 +719,15 @@ def chunk_mlstm_bwd_kernel_dqk(
         dlog_f_vals_state = 0
 
     b_vt = tl.load(p_vt, mask=(o_v[:, None] < V) & ((o_chunk + o_t)[None, :] < T), other=0)
-    de = tl.dot(ds, b_vt, de, input_precision=FP32_PREC)
+    de = tl.dot(ds, b_vt, de, out_dtype=ACC_DTYPE, input_precision=FP32_PREC)
     dqk = scale * tl.cast(de, dtype=scale.type.element_ty)
 
     b_ct = tl.load(p_cst, mask=(o_v[:, None] < V) & ((offset_k + o_k)[None, :] < K), other=0)
-    b_dq = tl.dot(ds, b_ct, b_dq, input_precision=FP32_PREC)
+    b_dq = tl.dot(ds, b_ct, b_dq, out_dtype=ACC_DTYPE, input_precision=FP32_PREC)
     b_dq *= b_f_all[:, None]
 
     b_dc = tl.load(p_dcs, mask=((offset_k + o_k)[:, None] < K) & (o_v[None, :] < V), other=0)
-    b_dkt = tl.dot(b_dc, b_vt, b_dkt, input_precision=FP32_PREC)
+    b_dkt = tl.dot(b_dc, b_vt, b_dkt, out_dtype=ACC_DTYPE, input_precision=FP32_PREC)
     b_dkt *= scale_last[None, :]
 
     dlog_f_mat = tl.cumsum(dqk.T * kq, axis=1, reverse=True)
@@ -738,8 +738,8 @@ def chunk_mlstm_bwd_kernel_dqk(
     b_dlog_f += tl.sum(dlog_f_mat, axis=0)
     b_dlog_f += b_f_all_final * (dlog_f_vals_state + tl.sum(b_dc.T * b_ct))
 
-    b_dq = tl.dot(dqk, b_k, b_dq, input_precision=FP32_PREC)
-    b_dkt = tl.dot(b_qt, dqk, b_dkt, input_precision=FP32_PREC)
+    b_dq = tl.dot(dqk, b_k, b_dq, out_dtype=ACC_DTYPE, input_precision=FP32_PREC)
+    b_dkt = tl.dot(b_qt, dqk, b_dkt, out_dtype=ACC_DTYPE, input_precision=FP32_PREC)
 
     b_di = tl.sum(b_dkt.T * b_k, axis=1)
 
