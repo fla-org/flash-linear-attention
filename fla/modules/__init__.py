@@ -11,7 +11,6 @@ from importlib.machinery import ModuleSpec
 from types import ModuleType
 
 from fla.modules.causal_conv1d import ShortConvolution
-from fla.modules.dynamic_conv import DynamicShortConvolution
 from fla.modules.fused_bitlinear import BitLinear, FusedBitLinear
 from fla.modules.fused_cross_entropy import FusedCrossEntropyLoss
 from fla.modules.fused_kl_div import FusedKLDivLoss
@@ -108,7 +107,6 @@ for _name, _aliases in _SYMBOL_ALIASES.items():
 
 __all__ = [
     'BitLinear',
-    'DynamicShortConvolution',
     'FusedBitLinear',
     'FusedCrossEntropyLoss',
     'FusedKLDivLoss',
