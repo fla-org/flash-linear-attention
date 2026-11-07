@@ -24,6 +24,8 @@ jobs:
     timeout-minutes: 5
     outputs:
       npu_related: ${{ steps.detect.outputs.npu_related }}
+      changed_files: ${{ steps.detect.outputs.changed_files }}
+      all_modules: ${{ steps.detect.outputs.all_modules }}
     steps:
       - name: Detect NPU-related diff
         id: detect
@@ -39,17 +41,21 @@ jobs:
             const files = await github.paginate(github.rest.pulls.listFiles, {
               owner, repo, pull_number: pr.number, per_page: 100,
             });
+            core.setOutput('changed_files', files.map(f => f.filename).join(' '));
+            const shared = /^(pyproject\.toml|fla\/backends\.py|tests\/conftest\.py|scripts\/find_dependent_tests\.py)$|^fla\/utils\//;
+            core.setOutput('all_modules', files.some(f => shared.test(f.filename)) ? 'true' : 'false');
             // NPU-related set: triton-ascend backend files, Ascend workflow
             // definitions, and the files that define the NPU CI stack itself:
             //   pyproject.toml    - pins the [npu] extra (torch_npu / triton-ascend)
             //   fla/backends.py   - shared dispatch machinery
             //   fla/utils/        - IS_NPU / device_platform detection, ascend_ub_manager
-            //   fla/modules/      - pure-torch modules run on NPU in the A2 test suite
+            //   fla/modules/      - modules and their tests run on NPU in the A2 test suite
+            //   tests/modules/    - test-only module changes
             //   tests/conftest.py - FLA_NPU_XDIST xdist worker -> device mapping
             // Unlike the H100 'npu_only' detection, __init__.py is NOT excluded
             // here: a change to it affects the NPU backend too, so it should
             // trigger this CI.
-            const npuPattern = /^fla\/(.+\/)?backends\/triton_ascend(\/|\.py$)|^\.github\/workflows\/ascend-|^pyproject\.toml$|^fla\/backends\.py$|^fla\/utils\/|^fla\/modules\/|^tests\/conftest\.py$/;
+            const npuPattern = /^fla\/(.+\/)?backends\/triton_ascend(\/|\.py$)|^\.github\/workflows\/ascend-|^pyproject\.toml$|^fla\/backends\.py$|^fla\/utils\/|^fla\/modules\/|^tests\/modules\/|^tests\/conftest\.py$|^scripts\/find_dependent_tests\.py$/;
             const graphPaths = new Set([
               'tests/ops/kda_graph.py',
               'tests/ops/test_kda_graph.py',
@@ -168,11 +174,26 @@ jobs:
         shell: bash
         env:
           FLA_NPU_XDIST: "1"
+          EVENT_NAME: ${{ github.event_name }}
+          CHANGED_FILES: ${{ needs.changes.outputs.changed_files }}
+          ALL_MODULES: ${{ needs.changes.outputs.all_modules }}
         run: |
           source /usr/local/Ascend/ascend-toolkit/set_env.sh
+          module_tests=(tests/modules)
+          if [[ "$EVENT_NAME" == "pull_request" && "$ALL_MODULES" != "true" ]]; then
+            dependent_tests=$(TEST_SCOPE=EXCLUDE_MODELS python scripts/find_dependent_tests.py "$CHANGED_FILES")
+            read -r -a candidates <<< "$dependent_tests"
+            module_tests=()
+            for path in "${candidates[@]}"; do
+              if [[ "$path" == "$PWD/tests/modules/"* ]]; then
+                module_tests+=("$path")
+              fi
+            done
+          fi
+          printf 'Selected module tests: %s\n' "${module_tests[*]}"
           pytest -s -v --exitfirst -n 8 --dist load \
             tests/benchmarks \
-            tests/modules \
+            "${module_tests[@]}" \
             tests/ops/test_backends.py \
             tests/test_dispatch.py \
             tests/test_public_api.py \
