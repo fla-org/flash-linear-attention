@@ -24,6 +24,7 @@ from fla.models.cache_utils import Cache
 from fla.models.configuration_utils import get_attention_spec
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
 from fla.modules.l2warp import l2_warp
+from fla.modules.residuals import BaseResidual
 from fla.ops.attnres import fused_attnres
 
 
@@ -53,6 +54,12 @@ class FLAPreTrainedModel(PreTrainedModel):
     def set_output_embeddings(self, new_embeddings):
         # allow reattaching a head after set_output_embeddings(None)
         self.lm_head = new_embeddings
+
+    def _initialize_weights(self, module: nn.Module, *args, **kwargs):
+        # residuals initialize child parameters; Transformers' custom-code shortcut only checks direct parameters.
+        if isinstance(module, BaseResidual):
+            return super()._initialize_weights(module)
+        return super()._initialize_weights(module, *args, **kwargs)
 
     def _init_weights(
         self,
