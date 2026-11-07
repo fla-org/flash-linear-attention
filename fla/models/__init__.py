@@ -29,6 +29,7 @@ from fla.models.kda import KDAConfig, KDAForCausalLM, KDAModel
 from fla.models.lightnet import LightNetConfig, LightNetForCausalLM, LightNetModel
 from fla.models.linear_attn import LinearAttentionConfig, LinearAttentionForCausalLM, LinearAttentionModel
 from fla.models.log_linear_mamba2 import LogLinearMamba2Config, LogLinearMamba2ForCausalLM, LogLinearMamba2Model
+from fla.models.lolcats import LoLCATsConfig, LoLCATsForCausalLM, LoLCATsModel
 from fla.models.mamba import MambaConfig, MambaForCausalLM, MambaModel
 from fla.models.mamba2 import Mamba2Config, Mamba2ForCausalLM, Mamba2Model
 from fla.models.mamba3 import Mamba3Config, Mamba3ForCausalLM, Mamba3Model
@@ -123,6 +124,9 @@ __all__ = [
     'LinearAttentionConfig',
     'LinearAttentionForCausalLM',
     'LinearAttentionModel',
+    'LoLCATsConfig',
+    'LoLCATsForCausalLM',
+    'LoLCATsModel',
     'LogLinearMamba2Config',
     'LogLinearMamba2ForCausalLM',
     'LogLinearMamba2Model',
