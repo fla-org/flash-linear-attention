@@ -144,7 +144,7 @@ def test_attnres(block_size, dtype, input_dtype, output_norm, request):
             ref_input = naive_attnres(
                 query=module.query.weight,
                 residuals=ref_blocks,
-                rms_weight=module.key_norm.weight,
+                rms_weight=module.attnres_norm.weight,
                 output_rms_weight=module.norm.weight,
                 rms_eps=module.norm.eps,
             )
@@ -170,7 +170,7 @@ def test_attnres(block_size, dtype, input_dtype, output_norm, request):
     ref = naive_attnres(
         query=module.query.weight,
         residuals=ref_blocks,
-        rms_weight=module.key_norm.weight,
+        rms_weight=module.attnres_norm.weight,
         output_rms_weight=module.norm.weight if output_norm else None,
         rms_eps=module.norm.eps,
     )

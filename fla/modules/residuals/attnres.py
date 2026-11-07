@@ -31,7 +31,7 @@ class AttentionResidual(BaseResidual[AttentionResidualState, AttentionResidualSt
         \qquad h_l = \sum_{i=0}^{l-1} \alpha_{i\to l} v_i.
 
     `readout` computes h_l; `pre` additionally applies the branch norm and returns the existing state as context.
-    Key normalization only affects the attention weights; the values v_i remain unnormalized.
+    `attnres_norm` normalizes keys to compute attention weights; the values v_i remain unnormalized.
     `post` appends the new branch output v_l, making it available to the next residual module's query.
 
     Block AttnRes stores b_0 = h_1, completed block sums b_n, and the nonempty current partial sum b_n^j.
@@ -60,13 +60,13 @@ class AttentionResidual(BaseResidual[AttentionResidualState, AttentionResidualSt
         self.block_size = block_size
         self.query = nn.Linear(hidden_size, 1, bias=False)
         self.query._is_attnres_proj = True
-        self.key_norm = nn.RMSNorm(hidden_size, eps=self.norm.eps)
+        self.attnres_norm = nn.RMSNorm(hidden_size, eps=self.norm.eps)
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
         super().reset_parameters()
         nn.init.zeros_(self.query.weight)
-        self.key_norm.reset_parameters()
+        self.attnres_norm.reset_parameters()
 
     def initialize(self, x: torch.Tensor) -> AttentionResidualState:
         return AttentionResidualState([x], 0)
@@ -93,7 +93,7 @@ class AttentionResidual(BaseResidual[AttentionResidualState, AttentionResidualSt
         return fused_attnres(
             query=self.query.weight.squeeze(0),
             residuals=state.blocks,
-            rms_weight=self.key_norm.weight,
+            rms_weight=self.attnres_norm.weight,
             rms_eps=self.norm.eps,
         )
 
@@ -101,7 +101,7 @@ class AttentionResidual(BaseResidual[AttentionResidualState, AttentionResidualSt
         return fused_attnres(
             query=self.query.weight.squeeze(0),
             residuals=state.blocks,
-            rms_weight=self.key_norm.weight,
+            rms_weight=self.attnres_norm.weight,
             output_rms_weight=self.norm.weight,
             rms_eps=self.norm.eps,
         )
