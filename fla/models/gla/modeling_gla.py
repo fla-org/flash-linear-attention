@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import warnings
-from functools import partial
 from typing import TYPE_CHECKING
 
 import torch
@@ -19,34 +18,18 @@ from transformers.modeling_outputs import BaseModelOutputWithPast
 from fla.layers.gla import GatedLinearAttention
 from fla.models.cache_utils import Cache
 from fla.models.generation_utils import FLAUnsupportedCacheGenerationMixin
-from fla.models.gla.checkpoint import load_legacy_checkpoint
 from fla.models.gla.configuration_gla import GLAConfig
 from fla.models.modeling_utils import FLAForCausalLM, FLAPreTrainedModel, get_attention
 from fla.modules import GatedMLP as GLAMLP
-from fla.modules.residuals import AttentionResidual, StandardResidual
+from fla.modules.residuals import create_residual
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
-    from fla.modules.residuals import BaseResidual
     from fla.modules.residuals.base import ResidualState
 
 
-def _create_residual(config: GLAConfig, *, fuse_residual: bool = False) -> BaseResidual:
-    constructors = {
-        'standard': partial(StandardResidual, fuse_residual=fuse_residual),
-        'attnres': partial(AttentionResidual, block_size=config.attnres_block_size),
-    }
-    residual_type = 'standard' if config.attnres_block_size is None else 'attnres'
-    return constructors[residual_type](hidden_size=config.hidden_size, norm_eps=config.norm_eps, fuse_norm=config.fuse_norm)
-
-
 class GLABlock(GradientCheckpointingLayer):
-    """Run attention and MLP branches with residual aggregation before and state updates after each branch.
-
-    The current hidden tensor is passed explicitly for gradient checkpointing.
-    Residual state retains the depth history; the block does not inspect its representation.
-    """
 
     def __init__(self, config: GLAConfig, layer_idx: int):
         super().__init__()
@@ -83,9 +66,14 @@ class GLABlock(GradientCheckpointingLayer):
             fuse_swiglu=config.fuse_swiglu,
         )
 
-        # materialize the MLP residual at the layer boundary to preserve low-precision rounding.
-        self.attn_residual = _create_residual(config, fuse_residual=True)
-        self.mlp_residual = _create_residual(config)
+        residual_kwargs = dict(
+            hidden_size=config.hidden_size,
+            norm_eps=config.norm_eps,
+            fuse_norm=config.fuse_norm,
+            block_size=config.attnres_block_size,
+        )
+        self.attn_residual = create_residual(**residual_kwargs)
+        self.mlp_residual = create_residual(**residual_kwargs)
 
     def forward(
         self,
@@ -126,10 +114,6 @@ class GLAPreTrainedModel(FLAPreTrainedModel):
     _no_split_modules = ['GLABlock']
     _supports_cache_class = True
 
-    def __init__(self, config: GLAConfig):
-        super().__init__(config)
-        self.register_load_state_dict_pre_hook(load_legacy_checkpoint)
-
 
 class GLAModel(GLAPreTrainedModel):
 
@@ -143,7 +127,12 @@ class GLAModel(GLAPreTrainedModel):
             GLABlock(config=config, layer_idx=layer_idx)
             for layer_idx in range(config.num_hidden_layers)
         ])
-        self.output_residual = _create_residual(config)
+        self.output_residual = create_residual(
+            hidden_size=config.hidden_size,
+            norm_eps=config.norm_eps,
+            fuse_norm=config.fuse_norm,
+            block_size=config.attnres_block_size,
+        )
 
         self.gradient_checkpointing = False
 
