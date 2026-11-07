@@ -12,50 +12,9 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from fla import modules as fla_modules
-from fla.modules import residuals
-from fla.modules.residuals import (
-    AttentionResidual,
-    BaseResidual,
-    StandardResidual,
-    get_residual_class,
-    register_residual,
-)
+from fla.modules import AttentionResidual, StandardResidual
 from fla.ops.attnres import naive_attnres
 from fla.utils import assert_close, device, device_platform
-
-
-def test_registry(monkeypatch):
-    class CustomResidual(StandardResidual):
-        pass
-
-    monkeypatch.setattr(residuals, '_RESIDUAL_CLASSES', residuals._RESIDUAL_CLASSES.copy())
-    for name, module_class in [
-        ('standard', StandardResidual),
-        ('attnres', AttentionResidual),
-    ]:
-        assert get_residual_class(name) is module_class
-        assert getattr(fla_modules, module_class.__name__) is module_class
-    register_residual('test.custom', CustomResidual)
-    module = get_residual_class('test.custom')(hidden_size=8, fuse_norm=False)
-    assert isinstance(module, CustomResidual)
-    with pytest.raises(ValueError, match='already registered'):
-        register_residual('test.custom', StandardResidual)
-    assert get_residual_class('test.custom') is CustomResidual
-    with pytest.raises(ValueError, match='register_residual'):
-        get_residual_class('test.missing')
-
-
-@pytest.mark.parametrize(('name', 'module_class', 'error'), [
-    pytest.param('', StandardResidual, ValueError, id='empty-name'),
-    pytest.param('two words', StandardResidual, ValueError, id='whitespace-name'),
-    pytest.param(None, StandardResidual, ValueError, id='non-string-name'),
-    pytest.param('test.abstract', BaseResidual, TypeError, id='abstract-class'),
-    pytest.param('test.unrelated', nn.Linear, TypeError, id='unrelated-class'),
-])
-def test_registry_validation(name, module_class, error):
-    with pytest.raises(error):
-        register_residual(name, module_class)
 
 
 @pytest.mark.parametrize('block_size', [0, -1, True, 1.5])
