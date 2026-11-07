@@ -1886,18 +1886,20 @@ def causal_conv1d_bwd_npu(
 ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
     BT = chunk_size
     shape = x.shape
+    dr = dy if residual is not None else None
     y_linear = getattr(x, '_fla_causal_conv_y_linear', None)
     if y_linear is not None:
         del x._fla_causal_conv_y_linear
     if weight is not None and x.shape[-1] != weight.shape[0]:
         x = rearrange(x, 'b t ... -> b t (...)')
+        dy = rearrange(dy, 'b t ... -> b t (...)')
         if y_linear is not None and y_linear.shape != x.shape:
             y_linear = rearrange(y_linear, 'b t ... -> b t (...)')
     if _can_use_coregrid(x=x, residual=residual, initial_state=initial_state, dht=dht, layout_fallback=layout_fallback):
         # core-grid assumes packed BTD; cheap-copy strided dy from cat/split views.
         if dy is not None and not dy.is_contiguous():
             dy = dy.contiguous()
-        dx, dw, db, dr = _launch_bwd_coregrid(
+        dx, dw, db, _ = _launch_bwd_coregrid(
             x=x,
             dy=dy,
             weight=weight,
@@ -1918,7 +1920,6 @@ def causal_conv1d_bwd_npu(
     if not x.is_contiguous():
         x = x.contiguous()
 
-    dr = dy if residual is not None else None
     dy_conv = dy
 
     y_pre = None
