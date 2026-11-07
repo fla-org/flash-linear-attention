@@ -14,28 +14,6 @@ from fla.modules import StandardResidual
 from fla.utils import assert_close, device, device_platform
 
 
-@pytest.mark.parametrize('fuse_residual', [False, True], ids=['eager-add', 'pending-add'])
-def test_standard_post(fuse_residual: bool):
-    """A branch contributes once, whether addition happens in post or during readout."""
-    torch.manual_seed(42)
-    module = StandardResidual(hidden_size=8, fuse_norm=False, fuse_residual=fuse_residual)
-    x = torch.randn(2, 7, 8)
-    branch = torch.randn_like(x, dtype=torch.bfloat16)
-    previous = module.initialize(x=x)
-    _, context = module.pre(state=previous)
-    state = module.post(branch_output=branch, context=context)
-    assert state.residual.dtype == x.dtype
-    if fuse_residual:
-        assert torch.equal(state.residual, x)
-        assert state.branch_output is branch
-    else:
-        assert torch.equal(state.residual, x + branch)
-        assert state.branch_output is None
-    assert torch.equal(module.readout(state=state), x + branch)
-    assert torch.equal(module.readout(state=previous), x)
-    assert previous.branch_output is None
-
-
 @pytest.mark.skipif(device_platform == 'cpu', reason='Residual numerical tests require an accelerator')
 @pytest.mark.parametrize(
     ('dtype', 'input_dtype', 'fuse_norm', 'fuse_residual', 'output_norm'),

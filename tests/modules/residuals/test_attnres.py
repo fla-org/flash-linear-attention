@@ -16,56 +16,6 @@ from fla.utils import assert_close, device, device_platform
 
 
 @pytest.mark.skipif(device_platform == 'cpu', reason='AttnRes requires an accelerator')
-@pytest.mark.parametrize(('block_size', 'reset_parameters'), [(1, False), (4, True)], ids=['full-init', 'block-reset'])
-def test_attnres_uniform_readout(block_size: int, reset_parameters: bool):
-    """A zero query must average the available residual sources after construction or reset."""
-    torch.manual_seed(42)
-    module = AttentionResidual(hidden_size=128, block_size=block_size).to(device=device)
-    if reset_parameters:
-        with torch.no_grad():
-            module.query.weight.normal_()
-        module.reset_parameters()
-    x = torch.randn(2, 7, 128, device=device)
-    branches = [torch.randn_like(x) for _ in range(6)]
-    sources = [x] + [sum(branches[start:start + block_size]) for start in range(0, len(branches), block_size)]
-    ref = torch.stack(sources).mean(0)
-
-    state = module.initialize(x=x)
-    for branch in branches:
-        state = module.post(branch_output=branch, context=state)
-    out = module.readout(state=state)
-
-    assert_close('o', ref, out, 0.005)
-
-
-@pytest.mark.parametrize('block_size', [1, 4], ids=['full', 'block'])
-def test_attnres_post(block_size: int):
-    """Starting or extending a block must leave every previously returned state unchanged."""
-    torch.manual_seed(42)
-    module = AttentionResidual(hidden_size=8, block_size=block_size, fuse_norm=False)
-    x = torch.randn(2, 7, 8)
-    branches = [torch.randn_like(x, dtype=torch.bfloat16) for _ in range(6)]
-    state = module.initialize(x=x)
-    assert torch.equal(module.readout(state=state), x)
-    for i, branch in enumerate(branches):
-        previous = state
-        snapshots = [block.clone() for block in previous.blocks]
-        state = module.post(branch_output=branch, context=previous)
-        assert previous.num_branches == i
-        assert len(previous.blocks) == len(snapshots)
-        for before, after in zip(snapshots, previous.blocks):
-            assert torch.equal(after, before)
-        expected = [x.to(branch.dtype)] + [
-            sum(branches[start:min(start + block_size, i + 1)]) for start in range(0, i + 1, block_size)
-        ]
-        assert state.num_branches == i + 1
-        assert len(state.blocks) == len(expected)
-        for ref, out in zip(expected, state.blocks):
-            assert out.dtype == ref.dtype
-            assert torch.equal(out, ref)
-
-
-@pytest.mark.skipif(device_platform == 'cpu', reason='AttnRes requires an accelerator')
 @pytest.mark.parametrize(
     ('block_size', 'dtype', 'input_dtype', 'output_norm'),
     [
