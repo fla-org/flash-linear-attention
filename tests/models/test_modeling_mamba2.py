@@ -550,3 +550,41 @@ def test_mamba2_layer_gradient_vs_official(
             diff = (cg - og).abs().max().item()
             assert torch.allclose(cg, og, atol=atol, rtol=0), \
                 f"Param '{name}' grad mismatch: max diff = {diff}"
+
+
+def test_initialization():
+    """Linear and convolution weights follow the PyTorch defaults kept by mamba_ssm, not `initializer_range`."""
+    torch.manual_seed(42)
+    config = Mamba2Config(
+        hidden_size=256, num_hidden_layers=4, num_heads=8, head_dim=64, state_size=16, n_groups=1,
+        vocab_size=1000, fuse_cross_entropy=False,
+    )
+    model = Mamba2ForCausalLM(config)
+    layer = model.backbone.layers[0].mixer
+
+    def assert_uniform(w, bound):
+        w = w.detach()
+        assert w.abs().max().item() <= bound
+        assert w.std().item() == pytest.approx(bound / 3 ** 0.5, rel=0.05)
+
+    assert_uniform(layer.in_proj.weight, 1 / layer.in_proj.in_features ** 0.5)
+    assert_uniform(layer.conv1d.weight, 1 / config.conv_kernel ** 0.5)
+    # out_proj is rescaled by the number of layers
+    assert_uniform(layer.out_proj.weight, 1 / layer.out_proj.in_features ** 0.5 / config.num_hidden_layers ** 0.5)
+    assert model.backbone.embeddings.weight.detach().std().item() == pytest.approx(config.initializer_range, rel=0.05)
+    assert ((layer.A_log.exp() >= 1) & (layer.A_log.exp() <= 16)).all()
+    assert (layer.D == 1).all()
+
+
+def test_initialization_conv_init():
+    torch.manual_seed(42)
+    config = Mamba2Config(
+        hidden_size=256, num_hidden_layers=2, num_heads=8, head_dim=64, state_size=16, n_groups=1,
+        vocab_size=1000, conv_init=0.01, fuse_cross_entropy=False,
+    )
+    model = Mamba2ForCausalLM(config)
+    for block in model.backbone.layers:
+        assert block.mixer.conv1d.weight.abs().max() <= 0.01
+    model.post_init()
+    for block in model.backbone.layers:
+        assert block.mixer.conv1d.weight.abs().max() <= 0.01
