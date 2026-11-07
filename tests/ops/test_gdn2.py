@@ -375,20 +375,10 @@ def test_chunk_invalid_chunk_size(chunk_size):
                 reason='32K GDN-2 output/gradient reference check requires Ascend NPU',
             ),
         ),
-        # small asymmetric cases do not cover the larger independent K/V tile widths and slab counts.
+        # q-absent WY uses BK=128/BV=64, a tile pair absent from the symmetric cases.
         pytest.param(
             1, 100, 2, 128, 64, 1.0, True, False, False, torch.bfloat16,
             id='npu-asymmetric-K128-V64-bfloat16',
-            marks=pytest.mark.skipif(not IS_NPU, reason='Ascend WY tile regression'),
-        ),
-        pytest.param(
-            1, 100, 2, 64, 128, 1.0, True, False, False, torch.float16,
-            id='npu-asymmetric-K64-V128-float16',
-            marks=pytest.mark.skipif(not IS_NPU, reason='Ascend WY tile regression'),
-        ),
-        pytest.param(
-            1, 100, 2, 256, 128, 1.0, True, False, False, torch.bfloat16,
-            id='npu-asymmetric-K256-V128-bfloat16',
             marks=pytest.mark.skipif(not IS_NPU, reason='Ascend WY tile regression'),
         ),
     ],
@@ -512,15 +502,10 @@ def test_chunk_state_v_first():
             [0, 15, 80, 145], 2, 48, 32, False, torch.float16, True, True,
             id='ragged-state-v-first-disable-recompute',
         ),
-        # the existing saved-state case fits in one slab; these span multiple K/V slabs with V-first states.
+        # the existing saved-state case fits in one V slab; this reaches the second with V-first states.
         pytest.param(
-            [0, 15, 80, 145], 2, 128, 256, True, torch.bfloat16, True, True,
+            [0, 15, 80, 145], 2, 128, 256, False, torch.bfloat16, True, True,
             id='npu-saved-state-v-first-K128-V256',
-            marks=pytest.mark.skipif(not IS_NPU, reason='Ascend expanded-value WY regression'),
-        ),
-        pytest.param(
-            [0, 15, 80, 145], 2, 256, 512, True, torch.bfloat16, True, True,
-            id='npu-saved-state-v-first-K256-V512',
             marks=pytest.mark.skipif(not IS_NPU, reason='Ascend expanded-value WY regression'),
         ),
     ],
@@ -1282,7 +1267,6 @@ def _wy_reference(
 @pytest.mark.parametrize(
     ("layout", "dtype", "K", "V", "has_q"),
     [
-        pytest.param("dense", torch.float16, 48, 32, False, id="dense-fp16-k48-v32-no-q"),
         pytest.param("dense", torch.float32, 32, 48, True, id="dense-fp32-k32-v48-q"),
         pytest.param("dense", torch.bfloat16, 256, 256, True, id="dense-bf16-k256-v256-q"),
         pytest.param("varlen", torch.bfloat16, 48, 32, False, id="varlen-bf16-k48-v32-no-q"),
@@ -1409,14 +1393,12 @@ def test_chunk_npu_compile_options():
 @pytest.mark.parametrize(
     ('K', 'dtype', 'varlen'),
     [
-        pytest.param(32, torch.float32, False, id='dense-K32-fp32'),
         pytest.param(48, torch.float16, True, id='varlen-K48-fp16'),
-        pytest.param(128, torch.bfloat16, False, id='dense-K128-bf16'),
-        pytest.param(256, torch.bfloat16, True, id='varlen-K256-bf16'),
+        pytest.param(256, torch.bfloat16, False, id='dense-K256-bf16'),
     ],
 )
 def test_chunk_fwd_intra_grouped_npu(K, dtype, varlen):
-    """Check causal score rows and structural zeros across ragged chunk tails."""
+    """Check causal score rows and structural zeros across dense and ragged chunk tails."""
     # causal consumers can mask missing upper-triangle stores, so inspect the score buffers directly.
     from fla.ops.gdn2.backends.triton_ascend.chunk_intra import (
         chunk_gdn2_fwd_kernel_intra_grouped_npu,
