@@ -7,10 +7,12 @@
 
 from fla.modules.residuals.attnres import AttentionResidual
 from fla.modules.residuals.base import BaseResidual
+from fla.modules.residuals.mhc import ManifoldHyperConnection
 from fla.modules.residuals.standard import StandardResidual
 
 __all__ = [
     'AttentionResidual',
     'BaseResidual',
+    'ManifoldHyperConnection',
     'StandardResidual',
 ]

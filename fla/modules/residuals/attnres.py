@@ -53,8 +53,23 @@ class AttentionResidual(BaseResidual[AttentionResidualState, AttentionResidualSt
 
     supports_reentrant_checkpointing = False
 
-    def __init__(self, hidden_size: int, block_size: int = 1, norm_eps: float = 1e-6, fuse_norm: bool = True):
-        super().__init__(hidden_size=hidden_size, norm_eps=norm_eps, fuse_norm=fuse_norm)
+    def __init__(
+        self,
+        hidden_size: int,
+        block_size: int = 1,
+        norm_eps: float = 1e-6,
+        fuse_norm: bool = True,
+        *,
+        sub_layer_idx: int,
+        num_sublayers: int,
+    ):
+        super().__init__(
+            hidden_size=hidden_size,
+            norm_eps=norm_eps,
+            fuse_norm=fuse_norm,
+            sub_layer_idx=sub_layer_idx,
+            num_sublayers=num_sublayers,
+        )
         if isinstance(block_size, bool) or not isinstance(block_size, int) or block_size < 1:
             raise ValueError('block_size must be a positive integer')
         self.block_size = block_size
