@@ -21,6 +21,7 @@ from fla.models.gated_deltanet import GatedDeltaNetConfig, GatedDeltaNetForCausa
 from fla.models.gated_deltaproduct import GatedDeltaProductConfig, GatedDeltaProductForCausalLM, GatedDeltaProductModel
 from fla.models.gka import GKAConfig, GKAForCausalLM, GKAModel
 from fla.models.gla import GLAConfig, GLAForCausalLM, GLAModel
+from fla.models.griffin import GriffinConfig, GriffinForCausalLM, GriffinModel
 from fla.models.gsa import GSAConfig, GSAForCausalLM, GSAModel
 from fla.models.gsa2 import GSA2Config, GSA2ForCausalLM, GSA2Model
 from fla.models.hgrn import HGRNConfig, HGRNForCausalLM, HGRNModel
@@ -108,6 +109,9 @@ __all__ = [
     'GatedDeltaProductConfig',
     'GatedDeltaProductForCausalLM',
     'GatedDeltaProductModel',
+    'GriffinConfig',
+    'GriffinForCausalLM',
+    'GriffinModel',
     'HGRN2Config',
     'HGRN2ForCausalLM',
     'HGRN2Model',
