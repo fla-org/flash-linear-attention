@@ -12,6 +12,7 @@ import torch
 
 from fla.models import GLAConfig
 from fla.models.gla.modeling_gla import GLAForCausalLM, GLAModel
+from fla.ops.attnres import fused_attnres
 from fla.utils import assert_close, device, device_platform
 
 from .utils import check_forward, check_generation, create_model_and_config
@@ -70,101 +71,130 @@ def test_generation(L, B, T, H, D, dtype, block_size):
     check_generation(L, B, T, H, D, GLAConfig, dtype, model=model, config=config)
 
 
-@pytest.mark.skipif(device_platform == 'cpu', reason='GLA checkpointing requires an accelerator')
-@pytest.mark.parametrize(('block_size', 'fuse_norm', 'dtype', 'checkpoint_kwargs', 'input_kind'), [
-    pytest.param(None, False, torch.float32, None, 'input_ids', id='standard-default'),
-    pytest.param(None, True, torch.float16, {'use_reentrant': True}, 'inputs_embeds', id='standard-reentrant'),
-    pytest.param(1, True, torch.float16, None, 'input_ids', id='full-attnres-default'),
-    pytest.param(4, True, torch.bfloat16, {'use_reentrant': False}, 'inputs_embeds', id='block-attnres'),
+@pytest.mark.skipif(device_platform == 'cpu', reason='GLA kernels require an accelerator')
+@pytest.mark.parametrize(('block_size', 'fuse_norm', 'dtype'), [
+    pytest.param(None, True, torch.bfloat16, id='standard-fused'),
+    pytest.param(None, False, torch.float16, id='standard-unfused'),
+    pytest.param(1, True, torch.bfloat16, id='full-attnres'),
+    pytest.param(4, True, torch.float16, id='block-attnres'),
 ])
-def test_checkpointing(block_size, fuse_norm, dtype, checkpoint_kwargs, input_kind):
-    """Checkpoint three connected layers without changing their outputs or input/parameter gradients."""
+def test_residual(block_size, fuse_norm, dtype):
+    """Compare three GLA layers with explicit residual accumulation, including every layer output and gradient."""
     torch.manual_seed(42)
-    config = GLAConfig(
+    model = GLAModel(GLAConfig(
         hidden_size=128,
         num_hidden_layers=3,
         num_heads=2,
         intermediate_size=256,
         vocab_size=128,
         attnres_block_size=block_size,
-        attn_mode='chunk',
         fuse_norm=fuse_norm,
-        fuse_swiglu=True,
+        use_cache=False,
+    )).to(device=device, dtype=dtype)
+    with torch.no_grad():
+        for name, parameter in model.named_parameters():
+            if name.endswith('query.weight'):
+                parameter.normal_(std=0.03)
+    x = torch.randn(2, 65, 128, device=device, dtype=dtype, requires_grad=True)
+    actual = model(inputs_embeds=x, output_hidden_states=True)
+
+    expected_hidden_states = []
+    if block_size is None:
+        hidden_states = x
+        for layer in model.layers:
+            expected_hidden_states.append(hidden_states)
+            branch_output = layer.attn(layer.residual_attn.norm(hidden_states))[0]
+            if fuse_norm:
+                mlp_input, residual = layer.residual_mlp.norm(branch_output, hidden_states, prenorm=True)
+            else:
+                residual = hidden_states + branch_output
+                mlp_input = layer.residual_mlp.norm(residual)
+            hidden_states = residual + layer.mlp(mlp_input)
+        expected_hidden_states.append(model.residual_output.norm(hidden_states))
+    else:
+        blocks, partial = [x], None
+        for layer_idx, layer in enumerate(model.layers):
+            expected_hidden_states.append(x if partial is None else partial)
+            for branch_idx, (residual, branch) in enumerate([
+                (layer.residual_attn, layer.attn),
+                (layer.residual_mlp, layer.mlp),
+            ]):
+                index = 2 * layer_idx + branch_idx
+                if index == 0:
+                    branch_input = residual.norm(x)
+                else:
+                    sources = [*blocks, partial]
+                    branch_input = fused_attnres(
+                        query=residual.query.weight,
+                        residuals=sources,
+                        rms_weight=residual.attnres_norm.weight,
+                        output_rms_weight=residual.norm.weight,
+                        rms_eps=residual.norm.eps,
+                    )
+                    if index % block_size == 0:
+                        blocks, partial = sources, None
+                branch_output = branch(branch_input)
+                if branch_idx == 0:
+                    branch_output = branch_output[0]
+                partial = branch_output if partial is None else partial + branch_output
+        output = model.residual_output
+        expected_hidden_states.append(fused_attnres(
+            query=output.query.weight,
+            residuals=[*blocks, partial],
+            rms_weight=output.attnres_norm.weight,
+            output_rms_weight=output.norm.weight,
+            rms_eps=output.norm.eps,
+        ))
+    for expected, hidden in zip(expected_hidden_states, actual.hidden_states, strict=True):
+        assert_close('hidden_states', expected, hidden, 1e-3)
+    parameters = (x, *model.parameters())
+    gradient = torch.randn_like(actual.last_hidden_state)
+    actual_grads = torch.autograd.grad(actual.last_hidden_state, parameters, gradient, allow_unused=True)
+    expected_grads = torch.autograd.grad(expected_hidden_states[-1], parameters, gradient, allow_unused=True)
+    for expected, actual in zip(expected_grads, actual_grads, strict=True):
+        if expected is None:
+            assert actual is None
+        else:
+            assert actual is not None and torch.isfinite(actual).all()
+            assert_close('gradient', expected, actual, 1e-3)
+
+
+@pytest.mark.skipif(device_platform == 'cpu', reason='GLA checkpointing requires an accelerator')
+@pytest.mark.parametrize(('block_size', 'use_reentrant', 'dtype'), [
+    pytest.param(None, True, torch.float16, id='standard-reentrant'),
+    pytest.param(4, False, torch.bfloat16, id='attnres-non-reentrant'),
+])
+def test_checkpointing(block_size, use_reentrant, dtype):
+    """Preserve loss and gradients when recomputing three layers from a residual state."""
+    torch.manual_seed(42)
+    model = GLAForCausalLM(GLAConfig(
+        hidden_size=128,
+        num_hidden_layers=3,
+        num_heads=2,
+        intermediate_size=256,
+        vocab_size=128,
+        attnres_block_size=block_size,
         fuse_cross_entropy=False,
         use_cache=False,
-    )
-    model = GLAForCausalLM(config).to(device=device, dtype=dtype).train()
+    )).to(device=device, dtype=dtype).train()
     with torch.no_grad():
         for name, parameter in model.named_parameters():
             if name.endswith('query.weight'):
                 parameter.normal_(std=0.03)
     reference = copy.deepcopy(model)
-    model.gradient_checkpointing_enable(checkpoint_kwargs)
-    assert model.is_gradient_checkpointing and not reference.is_gradient_checkpointing
-    ids = torch.randint(config.vocab_size, (2, 65), device=device)
-    if input_kind == 'inputs_embeds':
-        embeddings = model.get_input_embeddings()(ids).detach().requires_grad_()
-        ref_embeddings = embeddings.detach().clone().requires_grad_()
-        actual_inputs, expected_inputs = {'inputs_embeds': embeddings}, {'inputs_embeds': ref_embeddings}
-    else:
-        actual_inputs = expected_inputs = {'input_ids': ids}
-    actual = model(**actual_inputs, labels=ids, output_hidden_states=True)
-    expected = reference(**expected_inputs, labels=ids, output_hidden_states=True)
+    model.gradient_checkpointing_enable({'use_reentrant': use_reentrant})
+    labels = torch.randint(model.config.vocab_size, (2, 65), device=device)
+    x = torch.randn(2, 65, 128, device=device, dtype=dtype, requires_grad=True)
+    ref_x = x.detach().clone().requires_grad_()
+    actual = model(inputs_embeds=x, labels=labels)
+    expected = reference(inputs_embeds=ref_x, labels=labels)
     actual.loss.backward()
     expected.loss.backward()
-    if input_kind == 'inputs_embeds':
-        assert embeddings.grad is not None and torch.isfinite(embeddings.grad).all()
-        assert_close('dinputs_embeds', ref_embeddings.grad, embeddings.grad, 1e-3)
     assert_close('loss', expected.loss, actual.loss, 1e-3)
-    assert len(actual.hidden_states) == len(expected.hidden_states) == config.num_hidden_layers + 1
-    assert actual.past_key_values is None
-    for ref, tri in zip(expected.hidden_states, actual.hidden_states):
-        assert_close('hidden_states', ref, tri, 1e-3)
-    for (name, parameter), (_, target) in zip(model.named_parameters(), reference.named_parameters()):
+    assert_close('dx', ref_x.grad, x.grad, 1e-3)
+    for (name, parameter), (_, target) in zip(model.named_parameters(), reference.named_parameters(), strict=True):
         if target.grad is None:
             assert parameter.grad is None, name
         else:
             assert parameter.grad is not None and torch.isfinite(parameter.grad).all(), name
             assert_close(name, target.grad, parameter.grad, 1e-3)
-    model.gradient_checkpointing_disable()
-    assert not model.is_gradient_checkpointing
-
-
-@pytest.mark.parametrize(('dtype', 'fuse_norm'), [
-    pytest.param(torch.bfloat16, True, id='fused-bf16'),
-    pytest.param(torch.float16, False, id='unfused-fp16'),
-])
-@pytest.mark.skipif(device_platform == 'cpu', reason='Native GLA block kernels require an accelerator')
-def test_block(dtype, fuse_norm):
-    """Keep the attention-to-MLP fused sum and the materialized layer output numerically unchanged."""
-    torch.manual_seed(42)
-    config = GLAConfig(
-        hidden_size=128,
-        num_hidden_layers=1,
-        num_heads=2,
-        intermediate_size=256,
-        vocab_size=128,
-        fuse_norm=fuse_norm,
-    )
-    block = GLAModel(config).to(device=device, dtype=dtype).layers[0]
-    x = torch.randn(2, 65, 128, device=device, dtype=dtype, requires_grad=True)
-    state = block.residual_attn.initialize(x)
-    state, _, _ = block(state)
-    output = block.residual_mlp.readout(state)
-    legacy_output, attentions, cache, attnres_states = block(x)
-    assert attentions is None and cache is None and attnres_states is None
-    assert_close('legacy_output', output, legacy_output, 1e-3)
-    branch, _, _ = block.attn(block.residual_attn.norm(x))
-    if fuse_norm:
-        hidden, residual = block.residual_mlp.norm(branch, x, prenorm=True)
-    else:
-        residual = x + branch
-        hidden = block.residual_mlp.norm(residual)
-    expected = residual + block.mlp(hidden)
-    grad = torch.randn_like(output)
-    parameters = (x, *block.parameters())
-    actual_grads = torch.autograd.grad(output, parameters, grad_outputs=grad)
-    expected_grads = torch.autograd.grad(expected, parameters, grad_outputs=grad)
-    assert_close('output', expected, output, 1e-3)
-    for actual, target in zip(actual_grads, expected_grads):
-        assert_close('gradient', target, actual, 1e-3)

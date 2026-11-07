@@ -28,7 +28,6 @@ if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
     from fla.models.cache_utils import Cache
-    from fla.modules.residuals.standard import StandardResidualState
 
 
 _RESIDUAL_KEY_MAPPING = {
@@ -105,27 +104,14 @@ class GLABlock(GradientCheckpointingLayer):
 
     def forward(
         self,
-        hidden_states: torch.Tensor | StandardResidualState | AttentionResidualState,
+        state,
         attention_mask: torch.Tensor | None = None,
         past_key_values: Cache | list[torch.FloatTensor] | None = None,
         use_cache: bool | None = False,
         output_attentions: bool | None = False,
-        attnres_states: list[torch.Tensor] | None = None,
         **kwargs: Unpack[dict],
     ) -> tuple:
-        """Apply attention and MLP residual updates.
-
-        A residual state returns `(state, attentions, cache)`. Tensor inputs retain the legacy
-        `(hidden_states, attentions, cache, attnres_states)` interface, including partial AttnRes block sums.
-        """
-        legacy_input = isinstance(hidden_states, torch.Tensor)
-        if legacy_input:
-            if attnres_states is None:
-                state = self.residual_attn.initialize(hidden_states)
-            else:
-                state = AttentionResidualState([*attnres_states, hidden_states], 2 * self.layer_idx)
-        else:
-            state = hidden_states
+        """Apply attention and MLP, each surrounded by its residual pre/post operations."""
         hidden_states, context = self.residual_attn.pre(state)
         hidden_states, attentions, past_key_values = self.attn(
             hidden_states=hidden_states,
@@ -140,10 +126,6 @@ class GLABlock(GradientCheckpointingLayer):
         hidden_states, context = self.residual_mlp.pre(state)
         hidden_states = self.mlp(hidden_states, **kwargs)
         state = self.residual_mlp.post(hidden_states, context)
-        if legacy_input:
-            if isinstance(state, AttentionResidualState):
-                return state.blocks[-1], attentions, past_key_values, state.blocks[:-1]
-            return self.residual_mlp.readout(state), attentions, past_key_values, None
         return state, attentions, past_key_values
 
 
