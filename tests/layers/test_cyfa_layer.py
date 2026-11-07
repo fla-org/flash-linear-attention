@@ -5,6 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+from copy import deepcopy
 from unittest import mock
 
 import pytest
@@ -81,3 +82,39 @@ def test_cached_multi_token_attention_mask():
     cu_seqlens = torch.tensor([0, 1, 3], dtype=torch.int32, device=device)
     expected = layer(packed, past_key_values=caches[1], use_cache=True, cu_seqlens=cu_seqlens)[0]
     assert_close('o', expected.squeeze(0).float(), actual[attention_mask.bool()].float(), 1e-6)
+
+
+@pytest.mark.parametrize('dtype', [pytest.param(torch.float32, id='fp32'), pytest.param(torch.bfloat16, id='bf16')])
+@torch.no_grad()
+def test_cached_compiled_decode(dtype):
+    """Consecutive compiled decode calls return updated recurrent state."""
+    torch.manual_seed(42)
+    torch.compiler.reset()
+    layer = CyclicFlowAttention(
+        hidden_size=128, num_heads=2, head_dim=64, num_slots=64, use_short_conv=True, conv_size=4, layer_idx=0,
+    ).to(device).eval()
+    reference = deepcopy(layer)
+    x = torch.randn(1, 71, 128, device=device)
+    stages = ((0, 65), (65, 69), (69, 70), (70, 71))
+    expected = {}
+    with torch.autocast(device_type=device, dtype=dtype, enabled=dtype == torch.bfloat16):
+        for _, stop in stages:
+            cache = Cache()
+            output = reference(x[:, :stop], past_key_values=cache, use_cache=True)[0]
+            expected[stop] = (output.clone(), tuple(state.clone() for state in cache[0]['recurrent_state']))
+
+        cache = Cache()
+        run = torch.compile(layer)
+        previous_state = None
+        for start, stop in stages:
+            output = run(x[:, start:stop], past_key_values=cache, use_cache=True)[0]
+            state = tuple(tensor.clone() for tensor in cache[0]['recurrent_state'])
+            reference_output, reference_state = expected[stop]
+            assert_close(f'o{stop}', reference_output[:, start:stop].float(), output.float(), 0.006)
+            for name, actual, expected_state in zip(('hkt', 'hvt', 'lambda'), state, reference_state, strict=True):
+                assert torch.isfinite(actual).all(), name
+                assert_close(f'{name}{stop}', expected_state, actual, 0.006)
+            if previous_state is not None:
+                for name, actual, previous in zip(('hkt', 'hvt'), state[:2], previous_state[:2], strict=True):
+                    assert not torch.equal(actual, previous), f'{name} did not update at token {stop}'
+            previous_state = state

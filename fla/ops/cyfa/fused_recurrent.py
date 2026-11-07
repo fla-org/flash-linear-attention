@@ -683,7 +683,8 @@ def _fused_recurrent_cyfa_decode_fwd(
             state_v = torch.empty(batch, n_heads, num_slots, d_v, device=q.device, dtype=torch.float32)
             state_lambda = torch.empty(batch, n_heads, device=q.device, dtype=torch.float32)
         else:
-            state_k, state_v = initial_k, initial_v
+            # compiled callers must return updated buffers rather than the original input aliases
+            state_k, state_v = torch.empty_like(initial_k), torch.empty_like(initial_v)
             state_lambda = torch.empty_like(initial_lambda) if use_pdl else initial_lambda
 
     bk = min(128, triton.next_power_of_2(d_k))
