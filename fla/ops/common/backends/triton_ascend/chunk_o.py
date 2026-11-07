@@ -260,11 +260,11 @@ def chunk_o_fwd_kernel(
             else:
                 p_h = tl.make_block_ptr(h_base, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
             # [BT, BK]
-            b_q = tl.load(p_q, boundary_check=(0, 1))
+            b_q = tl.load(p_q, boundary_check=(0, 1), padding_option="zero")
             # [BK, BT]
-            b_k = tl.load(p_k, boundary_check=(0, 1))
+            b_k = tl.load(p_k, boundary_check=(0, 1), padding_option="zero")
             # [BK, BV]
-            b_h = tl.load(p_h, boundary_check=(0, 1))
+            b_h = tl.load(p_h, boundary_check=(0, 1), padding_option="zero")
 
             # ascend tl.dot clobbers lhs; copy before the first dot on b_q.
             b_q_c = b_q + 0.0
@@ -301,7 +301,7 @@ def chunk_o_fwd_kernel(
         p_v = tl.make_block_ptr(v_ptr, (T_cur, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
         p_o = tl.make_block_ptr(o_ptr, (T_cur, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
 
-        b_v = tl.load(p_v, boundary_check=(0, 1))
+        b_v = tl.load(p_v, boundary_check=(0, 1), padding_option="zero")
         b_o = b_o * scale + tl.dot(b_A.to(b_v.dtype), b_v) * scale
         tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
 

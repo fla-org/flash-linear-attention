@@ -208,6 +208,7 @@ def test_chunk_varlen(
     )
     ((ref * do).sum() + (ref_ht * dht).sum()).backward(retain_graph=True)
     ref_dq, ref_dk, ref_dv, ref_dbeta, ref_dh0 = q.grad, k.grad, v.grad, beta.grad, h0.grad
+    q.grad = k.grad = v.grad = beta.grad = h0.grad = None
 
     tri, tri_ht = chunk_delta_rule(
         q=q.clone(),
