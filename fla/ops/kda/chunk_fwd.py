@@ -79,6 +79,7 @@ def chunk_kda_fwd(
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
         safe_gate=safe_gate,
+        lower_bound=lower_bound,
         disable_recompute=disable_recompute,
         use_graph=use_graph,
     )
