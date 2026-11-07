@@ -18,10 +18,11 @@ from fla.ops.kda.gate import kda_gate_bwd, kda_gate_chunk_cumsum
 from fla.ops.kda.wy_fast import recompute_w_u_fwd
 from fla.ops.utils import chunk_local_cumsum, prepare_chunk_indices
 from fla.ops.utils.cache import fla_cache_autotune
+from fla.ops.utils.chunk_state import compact_chunk_state_gradient_index, compact_chunk_state_index
 from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.graph import get_static_buffer
 from fla.ops.utils.op import exp2
-from fla.utils import IS_NVIDIA_HOPPER, IS_NVIDIA_SM100, autotune_cache_kwargs, check_shared_mem
+from fla.utils import IS_NVIDIA, IS_NVIDIA_HOPPER, IS_NVIDIA_SM100, autotune_cache_kwargs, check_shared_mem
 
 BK_LIST = [32, 64] if check_shared_mem() else [16, 32]
 BV_LIST = [64, 128] if check_shared_mem('ampere') else [16, 32]
@@ -156,6 +157,8 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
     dA,
     cu_seqlens,
     chunk_indices,
+    dht,
+    last_sequence_idx,
     scale,
     T,
     H: tl.constexpr,
@@ -168,6 +171,12 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
     STATE_V_FIRST: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     USE_GRAPH: tl.constexpr = False,
+    COMPACT_H: tl.constexpr = False,
+    H_CHUNKS: tl.constexpr = 0,
+    HAS_INITIAL_STATE: tl.constexpr = False,
+    COMPACT_DH: tl.constexpr = False,
+    USE_FINAL_STATE_GRADIENT: tl.constexpr = False,
+    USE_LAST_FINAL_STATE_GRADIENT: tl.constexpr = False,
 ):
     i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_hv = i_bh // HV, i_bh % HV
@@ -198,9 +207,25 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
     g += (bos * HV + i_hv) * K
     beta += bos * HV + i_hv
     A += (bos * HV + i_hv) * BT
-    h += (i_tg * HV + i_hv) * K*V
+    i_hg = i_tg
+    if COMPACT_H:
+        i_hg = compact_chunk_state_index(bos, i_t, i_n, H_CHUNKS, BT, HAS_INITIAL_STATE)
+    h += (tl.maximum(i_hg, 0) * HV + i_hv).to(tl.int64) * K*V
     do += (bos * HV + i_hv) * V
-    dh += (i_tg * HV + i_hv) * K*V
+    load_dh = True
+    if COMPACT_DH:
+        i_dhg = compact_chunk_state_gradient_index(bos, eos, i_t, BT)
+        load_dh = i_dhg >= 0
+        dh += (tl.maximum(i_dhg, 0) * HV + i_hv).to(tl.int64) * K*V
+        if USE_FINAL_STATE_GRADIENT:
+            read_dht = i_t == NT - 1
+            if USE_LAST_FINAL_STATE_GRADIENT:
+                dht += i_hv.to(tl.int64) * K*V
+                read_dht = read_dht & (i_n == tl.load(last_sequence_idx))
+            else:
+                dht += (i_n.to(tl.int64) * HV + i_hv) * K*V
+    else:
+        dh += (i_tg * HV + i_hv) * K*V
     dq += (bos * HV + i_hv) * K
     dk += (bos * HV + i_hv) * K
     dv += (bos * HV + i_hv) * V
@@ -255,8 +280,17 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
             b_v_new = tl.load(p_v_new, mask=m_tv, other=0.0)
             b_do = tl.load(p_do, mask=m_tv, other=0.0)
             # [BV, BK]
-            b_h = tl.load(p_h, mask=m_h, other=0.0)
-            b_dh = tl.load(p_dh, mask=m_h, other=0.0)
+            b_h = tl.load(p_h, mask=m_h & (i_hg >= 0), other=0.0)
+            b_dh = tl.load(p_dh, mask=m_h & load_dh, other=0.0)
+            if COMPACT_DH and USE_FINAL_STATE_GRADIENT:
+                if STATE_V_FIRST:
+                    p_dht = dht + o_v[:, None] * K + o_k[None, :]
+                else:
+                    p_dht = dht + o_v[:, None] + o_k[None, :] * V
+                b_dht = tl.full([BV, BK], 0, tl.float32)
+                b_dht += tl.load(p_dht, mask=m_h & read_dht, other=0.0)
+                # Preserve the rounding of the original dh checkpoint.
+                b_dh = tl.where(load_dh, b_dh, b_dht.to(dh.dtype.element_ty))
             # [BT, BV]
             b_dv = tl.load(p_dv, mask=m_tv, other=0.0)
 
@@ -399,9 +433,16 @@ def chunk_kda_bwd_wy_dqkg_fused(
     chunk_indices: torch.LongTensor | None = None,
     chunk_offsets: torch.LongTensor | None = None,
     use_graph: bool = False,
+    compact_h: bool = False,
+    compact_dh: bool = False,
+    dht: torch.Tensor | None = None,
+    last_sequence_idx: torch.Tensor | None = None,
 ):
     B, T, H, K, HV, V = *k.shape, v.shape[2], v.shape[-1]
     BT = chunk_size
+
+    if compact_h or compact_dh:
+        assert cu_seqlens is not None
 
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
@@ -444,6 +485,8 @@ def chunk_kda_bwd_wy_dqkg_fused(
         dA=dA,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
+        dht=dht,
+        last_sequence_idx=last_sequence_idx,
         scale=scale,
         T=T,
         H=H,
@@ -453,6 +496,12 @@ def chunk_kda_bwd_wy_dqkg_fused(
         BT=BT,
         STATE_V_FIRST=state_v_first,
         USE_GRAPH=use_graph,
+        COMPACT_H=compact_h,
+        H_CHUNKS=T // BT if compact_h else 0,
+        HAS_INITIAL_STATE=compact_h and h.shape[1] > T // BT,
+        COMPACT_DH=compact_dh,
+        USE_FINAL_STATE_GRADIENT=compact_dh and dht is not None,
+        USE_LAST_FINAL_STATE_GRADIENT=compact_dh and last_sequence_idx is not None,
     )
     dv = dv2
     return dq, dk, dv, db, dg, dA
@@ -484,11 +533,39 @@ def chunk_kda_bwd(
     cp_context: FLACPContext | None = None,
     use_graph: bool = False,
     chunk_offsets: torch.LongTensor | None = None,
+    compact_h: bool = False,
     **kwargs,
 ):
     H, HV = q.shape[2], v.shape[2]
     G = HV // H
-
+    assert not compact_h or cp_context is None or cp_context.layout == 'contiguous', (
+        "compact_h requires contiguous CP layout"
+    )
+    use_singleton_cp_state = (
+        IS_NVIDIA
+        and cp_context is not None
+        and cp_context.group is not None
+        and cp_context.layout == 'contiguous'
+        and cu_seqlens is not None
+    )
+    # Resolved on device: host values are frozen at capture time, so a captured call must derive
+    # the last non-empty sequence from the live cu_seqlens.
+    last_sequence_idx = None
+    if use_singleton_cp_state:
+        last_sequence_idx = torch.searchsorted(cu_seqlens, cu_seqlens[-1]) - 1
+    compact_forward_kwargs = {}
+    compact_backward_kwargs = {}
+    compact_fused_kwargs = {}
+    if compact_h or use_singleton_cp_state:
+        compact_forward_kwargs = {
+            'use_first_initial_state': use_singleton_cp_state,
+            'compact_h': compact_h,
+        }
+        compact_backward_kwargs = {
+            'last_sequence_idx': last_sequence_idx,
+            'use_first_initial_state': use_singleton_cp_state,
+            'compact_dh': compact_h,
+        }
     if disable_recompute is False:
         if use_gate_in_kernel:
             g = kda_gate_chunk_cumsum(
@@ -513,7 +590,7 @@ def chunk_kda_bwd(
             chunk_indices=chunk_indices,
             use_graph=use_graph,
         )
-        if cp_context is not None:
+        if cp_context is not None and not use_singleton_cp_state:
             # Restore the full initial_state tensor from the compressed version.
             # Only the first sequence's state is non-zero as it's the only one that could be cross-rank.
             initial_state = expand_h0(initial_state, context=cp_context)
@@ -529,10 +606,11 @@ def chunk_kda_bwd(
             chunk_offsets=chunk_offsets,
             chunk_size=chunk_size,
             state_v_first=state_v_first,
+            **compact_forward_kwargs,
         )
     else:
         w, u, qg, kg, v_new, h = kwargs["w"], kwargs["u"], kwargs["qg"], kwargs["kg"], kwargs["v_new"], kwargs["h"]
-        if cp_context is not None:
+        if cp_context is not None and not use_singleton_cp_state:
             # Restore the full initial_state tensor from the compressed version.
             # Only the first sequence's state is non-zero as it's the only one that could be cross-rank.
             initial_state = expand_h0(initial_state, context=cp_context)
@@ -570,6 +648,7 @@ def chunk_kda_bwd(
             chunk_size=chunk_size,
             state_v_first=state_v_first,
             use_graph=use_graph,
+            **({"use_singleton_state": True} if use_singleton_cp_state else {}),
         )
 
     dh, dh0, dv = chunk_gated_delta_rule_bwd_dhu(
@@ -587,7 +666,17 @@ def chunk_kda_bwd(
         chunk_indices=chunk_indices,
         chunk_offsets=chunk_offsets,
         state_v_first=state_v_first,
+        **compact_backward_kwargs,
     )
+
+    if compact_h:
+        # dht is only resolved after the CP pre-process, so build this after it.
+        compact_fused_kwargs = {
+            'compact_h': True,
+            'compact_dh': True,
+            'dht': dht,
+            'last_sequence_idx': last_sequence_idx,
+        }
 
     dq, dk, dv, db, dg, dAkk = chunk_kda_bwd_wy_dqkg_fused(
         q=q,
@@ -608,6 +697,7 @@ def chunk_kda_bwd(
         chunk_offsets=chunk_offsets,
         state_v_first=state_v_first,
         use_graph=use_graph,
+        **compact_fused_kwargs,
     )
 
     dq, dk, db, dg = chunk_kda_bwd_intra(

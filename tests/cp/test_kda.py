@@ -9,6 +9,7 @@
 
 import contextlib
 import math
+import os
 from datetime import timedelta
 
 import pytest
@@ -25,7 +26,7 @@ from fla.ops.cp import build_cp_context
 from fla.ops.kda import chunk_kda
 from fla.ops.kda.gate import naive_kda_gate, naive_kda_lowerbound_gate
 from fla.ops.kda.naive import naive_recurrent_kda
-from fla.utils import IS_NPU, IS_TF32_SUPPORTED, assert_close, device, device_platform
+from fla.utils import IS_NPU, IS_NVIDIA, IS_TF32_SUPPORTED, assert_close, device, device_platform
 from tests.cp.utils import gather_global, shard_tensor
 
 pytestmark = pytest.mark.skipif(not (IS_TF32_SUPPORTED or IS_NPU), reason="requires NVIDIA Ampere or newer, or Ascend")
@@ -252,11 +253,13 @@ def _run_chunk(
     state_v_first: bool = False,
     use_tf32x3_affine_chain: bool | None = None,
     layout: str = 'contiguous',
+    compact_h: bool = True,
 ):
     T = sum(lengths)
     assert T % world_size == 0, f"T={T} must be divisible by world_size={world_size}"
     if layout == 'zigzag':
         assert T % (2 * world_size) == 0, f"T={T} must be divisible by 2*world_size={2 * world_size} for zigzag"
+    os.environ["FLA_KDA_COMPACT_H"] = "1" if compact_h else "0"
 
     q_global, k_global, v_global, g_global, beta_global, do_global, A_log_global, dt_bias_global = _make_inputs(
         rank=rank,
@@ -328,6 +331,8 @@ def _run_chunk(
         dt_bias=dt_bias_global if use_gate_in_kernel else None,
     )
 
+    if IS_NVIDIA:
+        assert o_local.grad_fn.compact_h == (compact_h and layout == 'contiguous')
     o_local.backward(do_local)
 
     o_cp_global = gather_global(o_local, world_size=world_size, layout=layout)
@@ -400,4 +405,20 @@ def test_chunk(
         state_v_first=state_v_first,
         use_tf32x3_affine_chain=use_tf32x3_affine_chain,
         layout=layout,
+    )
+
+
+@pytest.mark.skipif(not IS_NVIDIA, reason="Singleton CP states require NVIDIA")
+def test_chunk_dense_singleton_cp_state(run_distributed):
+    run_distributed(
+        worker=_run_chunk,
+        world_size=2,
+        H=12,
+        D=128,
+        lengths=[3000, 4000, 3240],
+        dtype=torch.bfloat16,
+        use_gate_in_kernel=True,
+        safe_gate=True,
+        lower_bound=-5.0,
+        compact_h=False,
     )
