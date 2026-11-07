@@ -21,7 +21,7 @@ from fla.models.generation_utils import FLAUnsupportedCacheGenerationMixin
 from fla.models.gla.configuration_gla import GLAConfig
 from fla.models.modeling_utils import FLAForCausalLM, FLAPreTrainedModel, get_attention
 from fla.modules import GatedMLP as GLAMLP
-from fla.modules.residuals import create_residual
+from fla.modules.residuals import BaseResidual
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
@@ -66,14 +66,8 @@ class GLABlock(GradientCheckpointingLayer):
             fuse_swiglu=config.fuse_swiglu,
         )
 
-        residual_kwargs = dict(
-            hidden_size=config.hidden_size,
-            norm_eps=config.norm_eps,
-            fuse_norm=config.fuse_norm,
-            block_size=config.attnres_block_size,
-        )
-        self.attn_residual = create_residual(**residual_kwargs)
-        self.mlp_residual = create_residual(**residual_kwargs)
+        self.attn_residual = BaseResidual.from_config(config)
+        self.mlp_residual = BaseResidual.from_config(config)
 
     def forward(
         self,
@@ -128,12 +122,7 @@ class GLAModel(GLAPreTrainedModel):
             GLABlock(config=config, layer_idx=layer_idx)
             for layer_idx in range(config.num_hidden_layers)
         ])
-        self.output_residual = create_residual(
-            hidden_size=config.hidden_size,
-            norm_eps=config.norm_eps,
-            fuse_norm=config.fuse_norm,
-            block_size=config.attnres_block_size,
-        )
+        self.output_residual = BaseResidual.from_config(config)
 
         self.gradient_checkpointing = False
 

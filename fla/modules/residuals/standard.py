@@ -5,11 +5,14 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 import torch
 
 from fla.modules.residuals.base import BaseResidual
+
+if TYPE_CHECKING:
+    from transformers.configuration_utils import PretrainedConfig
 
 
 class StandardResidualState(NamedTuple):
@@ -56,6 +59,11 @@ class StandardResidual(BaseResidual[StandardResidualState, torch.Tensor]):
     ):
         super().__init__(hidden_size=hidden_size, norm_eps=norm_eps, fuse_norm=fuse_norm)
         self.fuse_residual = fuse_residual
+
+    @classmethod
+    def from_config(cls, config: 'PretrainedConfig', **kwargs) -> 'StandardResidual':
+        kwargs.setdefault('fuse_residual', True)
+        return super().from_config(config, **kwargs)
 
     def initialize(self, x: torch.Tensor) -> StandardResidualState:
         return StandardResidualState(x, None)

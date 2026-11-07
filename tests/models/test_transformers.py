@@ -11,7 +11,7 @@ from torch import nn
 from transformers import AutoConfig, AutoModelForCausalLM
 
 from fla import models
-from fla.modules.residuals import AttentionResidual
+from fla.modules.residuals import AttentionResidual, BaseResidual
 from fla.utils import find_spec_cached
 
 CONFIG_CLASSES = [getattr(models, name) for name in models.__all__ if name.endswith('Config')]
@@ -95,6 +95,8 @@ def test_initialization(config_class, block_size, make_model):
         pytest.skip('MLA initialization requires flash-attn.')
     torch.manual_seed(42)
     kwargs = {'expand_ratio': 16} if config_class is models.HGRN2Config else {}
+    if config_class is models.GLAConfig:
+        kwargs['residual_type'] = 'standard' if block_size is None else 'attnres'
     model = make_model(
         config_class,
         num_heads=4,
@@ -108,6 +110,10 @@ def test_initialization(config_class, block_size, make_model):
     assert model.get_input_embeddings().weight[0].count_nonzero() == model.config.hidden_size
     assert all(torch.isfinite(parameter).all() for parameter in model.parameters())
     queries = {module.query for module in model.modules() if isinstance(module, AttentionResidual)}
+    if config_class is models.GLAConfig:
+        residuals = [module for module in model.modules() if isinstance(module, BaseResidual)]
+        assert len(residuals) == 2 * model.config.num_hidden_layers + 1
+        assert len(queries) == (len(residuals) if block_size is not None else 0)
     for query in queries:
         assert query.weight.count_nonzero() == 0
     for module in model.modules():

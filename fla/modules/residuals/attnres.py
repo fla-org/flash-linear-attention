@@ -5,7 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 import torch
 import torch.nn.functional as F
@@ -13,6 +13,9 @@ from torch import nn
 
 from fla.modules.residuals.base import BaseResidual
 from fla.ops.attnres import fused_attnres
+
+if TYPE_CHECKING:
+    from transformers.configuration_utils import PretrainedConfig
 
 
 class AttentionResidualState(NamedTuple):
@@ -84,6 +87,11 @@ class AttentionResidual(BaseResidual[AttentionResidualState, AttentionResidualSt
         self.query = AttentionResidualQuery(hidden_size)
         self.attnres_norm = nn.RMSNorm(hidden_size, eps=self.norm.eps)
         self.reset_parameters()
+
+    @classmethod
+    def from_config(cls, config: 'PretrainedConfig', **kwargs) -> 'AttentionResidual':
+        kwargs.setdefault('block_size', config.attnres_block_size if config.attnres_block_size is not None else 1)
+        return super().from_config(config, **kwargs)
 
     def reset_parameters(self) -> None:
         super().reset_parameters()

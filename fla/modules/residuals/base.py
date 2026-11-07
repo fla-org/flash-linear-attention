@@ -6,13 +6,16 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 from abc import ABC, abstractmethod
-from typing import Generic, Protocol, TypeVar
+from typing import TYPE_CHECKING, ClassVar, Generic, Protocol, TypeVar
 
 import torch
 from torch import nn
 from typing_extensions import Self
 
 from fla.modules.norm import RMSNorm
+
+if TYPE_CHECKING:
+    from transformers.configuration_utils import PretrainedConfig
 
 
 class ResidualState(Protocol):
@@ -62,6 +65,7 @@ class BaseResidual(nn.Module, ABC, Generic[StateT, ContextT]):
     """
 
     supports_reentrant_checkpointing = True
+    _registry: ClassVar[dict[str, type['BaseResidual']]] = {}
 
     def __init__(
         self,
@@ -73,6 +77,26 @@ class BaseResidual(nn.Module, ABC, Generic[StateT, ContextT]):
         self.hidden_size = hidden_size
         self.fuse_norm = fuse_norm
         self.norm = (RMSNorm if fuse_norm else nn.RMSNorm)(hidden_size, eps=norm_eps)
+
+    @classmethod
+    def register(cls, residual_type: str, residual_class: type['BaseResidual']) -> None:
+        """Register an implementation for selection through `config.residual_type`."""
+        cls._registry[residual_type] = residual_class
+
+    @classmethod
+    def from_config(cls, config: 'PretrainedConfig', **kwargs) -> 'BaseResidual':
+        """Construct a residual module from model settings.
+
+        On `BaseResidual`, `config.residual_type` selects the registered implementation.
+        Concrete classes read their own options from the configuration.
+        Additional keyword arguments supply constructor parameters specific to one branch.
+        """
+        if cls is BaseResidual:
+            residual_class = cls._registry.get(config.residual_type)
+            if residual_class is None:
+                raise ValueError(f'Unknown residual type: {config.residual_type}')
+            return residual_class.from_config(config, **kwargs)
+        return cls(hidden_size=config.hidden_size, norm_eps=config.norm_eps, fuse_norm=config.fuse_norm, **kwargs)
 
     def reset_parameters(self) -> None:
         """Initialize owned parameters; custom implementations may override this method."""
