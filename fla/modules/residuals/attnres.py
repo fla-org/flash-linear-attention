@@ -59,7 +59,6 @@ class AttentionResidual(BaseResidual[AttentionResidualState, AttentionResidualSt
             raise ValueError('block_size must be a positive integer')
         self.block_size = block_size
         self.query = nn.Linear(hidden_size, 1, bias=False)
-        self.query._is_attnres_proj = True
         self.attnres_norm = nn.RMSNorm(hidden_size, eps=self.norm.eps)
         self.reset_parameters()
 
