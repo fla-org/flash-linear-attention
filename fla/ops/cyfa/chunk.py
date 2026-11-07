@@ -23,6 +23,8 @@ from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.cumsum import chunk_global_cumsum, chunk_local_cumsum
 from fla.ops.utils.op import exp2
 from fla.utils import (
+    IS_NVIDIA,
+    IS_NVIDIA_BLACKWELL,
     IS_NVIDIA_HOPPER,
     IS_NVIDIA_SM100,
     autocast_custom_bwd,
@@ -48,6 +50,14 @@ from .utils import (
 )
 
 _CHUNK_SIZE = 64
+
+# The fused dqk/dv backward keeps two [BT, BK] FP32 accumulators live across
+# the V loop. Triton keeps the dot operands in registers on SM8x (mma.sync), so
+# the accumulators spill to local memory and the kernel ends up ~20x slower
+# than the separate dqk/dv kernels. Hopper and Blackwell use WGMMA/tcgen05 with
+# shared-memory or TMEM operands, so keep the fusion there. Non-NVIDIA backends
+# keep their existing path.
+USE_FUSED_DQK_DV = not IS_NVIDIA or IS_NVIDIA_HOPPER or IS_NVIDIA_BLACKWELL
 _READOUT_BWD_AUTOTUNE_CONFIGS = [
     triton.Config({'BT': bt}, num_warps=num_warps, num_stages=num_stages)
     for bt in [16, 32, 64]
@@ -1056,10 +1066,14 @@ def _scalar_decay_fused_readout_fwd(
 
 @fla_cache_autotune(
     configs=_READOUT_BWD_AUTOTUNE_CONFIGS,
-    key=['M', 'C'],
+    # The grid is `cdiv(N, BT) x H`: with few tokens a small `BT` exposes more
+    # blocks, while long sequences prefer one block per 32 tokens. Bucketing the
+    # token count keys the tile on its size class, so a new sequence length
+    # reuses the tile instead of re-benchmarking every config.
+    key=['M', 'C', 'N_BUCKET', 'H'],
     **autotune_cache_kwargs,
 )
-@triton.jit(do_not_specialize=['N'])
+@triton.jit(do_not_specialize=['N', 'N_BUCKET'])
 def _chunk_cyfa_fused_readout_bwd_kernel(
     lambdas,
     table,
@@ -1070,6 +1084,7 @@ def _chunk_cyfa_fused_readout_bwd_kernel(
     draw_logits,
     dlambda,
     N,
+    N_BUCKET,
     H: tl.constexpr,
     M: tl.constexpr,
     C: tl.constexpr,
@@ -1180,6 +1195,8 @@ def _readout_backward(
         draw_logits,
         dlambda,
         N=n_tokens,
+        # the bucket selects an autotune config; `N` remains the runtime bound
+        N_BUCKET=triton.next_power_of_2(n_tokens),
         H=n_heads,
         M=num_slots,
         C=readout_slots,
@@ -1206,11 +1223,14 @@ def _prune_table_grad_configs(configs, nargs, **kwargs):
 
 @fla_cache_autotune(
     configs=_TABLE_GRAD_AUTOTUNE_CONFIGS,
-    key=['M', 'C'],
+    # `n_splits` and hence the grid are derived from `T`; larger outputs favor
+    # 64x64 tiles, while short sequences only fill the smaller ones. Bucket `T`
+    # so a new token count reuses the tile instead of re-benchmarking.
+    key=['M', 'C', 'T_BUCKET', 'H'],
     prune_configs_by={'early_config_prune': _prune_table_grad_configs},
     **autotune_cache_kwargs,
 )
-@triton.jit(do_not_specialize=['T'])
+@triton.jit(do_not_specialize=['T', 'T_BUCKET'])
 def _chunk_cyfa_readout_table_grad_kernel(
     lambdas,
     left_a,
@@ -1219,6 +1239,7 @@ def _chunk_cyfa_readout_table_grad_kernel(
     right_b,
     dtable,
     T,
+    T_BUCKET,
     H: tl.constexpr,
     M: tl.constexpr,
     C: tl.constexpr,
@@ -1308,6 +1329,8 @@ def _readout_table_grad_dual(
         right_b.contiguous(),
         partials,
         T=n_tokens,
+        # the bucket selects an autotune config; `T` remains the runtime bound
+        T_BUCKET=triton.next_power_of_2(n_tokens),
         H=n_heads,
         M=num_slots,
         C=readout_slots,
@@ -1505,7 +1528,7 @@ class ChunkCyFAFunction(torch.autograd.Function):
             cu_seqlens=cu_seqlens,
             chunk_size=chunk_size,
             chunk_indices=chunk_indices,
-            fuse_dv_single_k=True,
+            fuse_dv_single_k=USE_FUSED_DQK_DV,
         )
 
         if raw_logits is None:
