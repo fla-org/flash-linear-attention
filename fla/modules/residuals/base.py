@@ -38,12 +38,18 @@ class BaseResidual(nn.Module, ABC, Generic[StateT, ContextT]):
     The model executes its branch between `pre` and `post` to produce v_l = f_l(h_l).
     Here f_l includes the normalization performed by `pre`; the model owns the remaining branch computation.
     Context carries the old state and any update coefficients needed after that computation.
-    The next residual module reads the updated state using its own mixing weights.
+    The next residual module reads the updated state according to its aggregation rule.
 
     `initialize(x)` creates the initial state from embeddings.
     Calling the output residual module applies output normalization to its readout.
     State and context retain autograd connections and must not be mutated or cached on the module.
     See Section 6.2 of `Attention Residuals <https://arxiv.org/abs/2603.15031>`_.
+
+    Args:
+        sub_layer_idx (int):
+            Zero-based branch index; the output residual uses `num_sublayers`.
+        num_sublayers (int):
+            Total number of branches, counting attention and MLP separately.
     """
 
     supports_reentrant_checkpointing = True
@@ -53,9 +59,18 @@ class BaseResidual(nn.Module, ABC, Generic[StateT, ContextT]):
         hidden_size: int,
         norm_eps: float = 1e-6,
         fuse_norm: bool = True,
+        *,
+        sub_layer_idx: int,
+        num_sublayers: int,
     ):
         super().__init__()
+        if isinstance(num_sublayers, bool) or not isinstance(num_sublayers, int) or num_sublayers < 0:
+            raise ValueError('num_sublayers must be a non-negative integer')
+        if isinstance(sub_layer_idx, bool) or not isinstance(sub_layer_idx, int) or not 0 <= sub_layer_idx <= num_sublayers:
+            raise ValueError('sub_layer_idx must be an integer between 0 and num_sublayers')
         self.hidden_size = hidden_size
+        self.sub_layer_idx = sub_layer_idx
+        self.num_sublayers = num_sublayers
         self.fuse_norm = fuse_norm
         self.norm = (RMSNorm if fuse_norm else nn.RMSNorm)(hidden_size, eps=norm_eps)
 
