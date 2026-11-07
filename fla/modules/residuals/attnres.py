@@ -20,12 +20,28 @@ class AttentionResidualState(NamedTuple):
 
 
 class AttentionResidual(BaseResidual[AttentionResidualState, AttentionResidualState]):
-    """Read completed blocks and the partial sum using this sublayer's learned query.
+    r"""Attention over completed residual blocks and the current block's partial sum.
 
-    Blocks contain the embedding b_0 and block sums b_n; the latest block may be a partial sum b_n^i.
-    The number of completed branches determines block boundaries.
-    Each `post` returns new state without mutating the incoming history.
-    Gradient checkpointing requires `use_reentrant=False`.
+    Following Attention Residuals, b_0 = h_1 is the embedding, b_n is the sum of branch outputs in block n,
+    and b_n^i is its partial sum after i branches. State stores these sources and the completed branch count.
+    Each attention or MLP counts as one branch; block_size=1 gives Full AttnRes.
+
+    For the sources v_j available to layer l, the learned query w_l and key normalization define
+
+    .. math::
+        \alpha_{j\to l}
+        = \operatorname{softmax}_j\!\left(w_l^\top\operatorname{RMSNorm}(v_j)\right),
+        \qquad h_l = \sum_j \alpha_{j\to l} v_j.
+
+    `readout` returns h_l; `pre` additionally applies the branch norm, separate from the key norm above.
+    At a new block, `post` starts its sum with f_l(h_l); within the block, it applies
+
+    .. math::
+        b_n^i = b_n^{i-1} + f_l(h_l).
+
+    Completed blocks remain unchanged. The output residual uses its own query to aggregate all sources,
+    followed by output normalization. Gradient checkpointing requires `use_reentrant=False`.
+    See `Attention Residuals <https://arxiv.org/abs/2603.15031>`_.
     """
 
     supports_reentrant_checkpointing = False

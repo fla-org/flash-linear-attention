@@ -18,12 +18,15 @@ ContextT = TypeVar('ContextT')
 
 
 class BaseResidual(nn.Module, ABC, Generic[StateT, ContextT]):
-    """Own normalization, learned residual parameters, and residual state transitions.
+    r"""Own residual parameters, residual state transitions, and branch/output normalization.
 
-    `initialize` creates state from embeddings.
-    `pre` returns a normalized branch input and the context needed by `post` to incorporate that branch's output.
-    `readout` returns the layer input h_l before branch normalization;
-    calling the module performs the final readout and normalization.
+    Following Attention Residuals, each attention or MLP is a layer l, h_l is its input before normalization,
+    and f_l(h_l) includes the branch's PreNorm. The caller owns the attention/MLP computation and layer order.
+
+    `initialize(h_1)` creates residual state from embeddings.
+    `readout(state)` returns h_l; `pre(state)` returns Norm_l(h_l) and the context needed for writeback.
+    The caller computes the branch output f_l(h_l), which `post(branch_output, context)` writes into new state.
+    Calling the output residual module performs its final readout and output normalization.
     State and context retain autograd connections and must not be mutated or cached on the module.
     """
 
@@ -61,5 +64,5 @@ class BaseResidual(nn.Module, ABC, Generic[StateT, ContextT]):
         raise NotImplementedError
 
     def forward(self, state: StateT) -> torch.Tensor:
-        """Normalize the final readout; implementations may override its aggregation."""
+        """Normalize the final readout; implementations may fuse aggregation and normalization."""
         return self.norm(self.readout(state))

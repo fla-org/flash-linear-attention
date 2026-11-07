@@ -18,7 +18,17 @@ class StandardResidualState(NamedTuple):
 
 
 class StandardResidual(BaseResidual[StandardResidualState, torch.Tensor]):
-    """Add each branch output to the residual, optionally fusing the addition with the next normalization.
+    r"""Standard residual accumulation, optionally fusing addition with the next normalization.
+
+    With h_1 as the embedding and f_l including branch normalization, the update is
+
+    .. math::
+        h_{l+1} = h_l + f_l(h_l).
+
+    State stores two summands `(residual, branch_output)` of h_l; `None` means the sum is already materialized.
+    `readout` returns their sum, and `pre` normalizes it while retaining h_l as writeback context.
+    `post` stores `(h_l + f_l(h_l), None)` when fusion is disabled, or `(h_l, f_l(h_l))` when enabled.
+    The latter lets the next `pre` fuse addition and normalization without changing the residual rule.
 
     Unfused addition follows PyTorch dtype promotion.
     Fused addition retains the residual dtype and returns the normalized input in the branch dtype.

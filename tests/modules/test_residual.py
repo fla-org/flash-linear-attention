@@ -5,8 +5,6 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-import copy
-
 import pytest
 import torch
 import torch.nn.functional as F
@@ -44,84 +42,80 @@ def test_initialization(module_class):
         torch.testing.assert_close(value, defaults[name], rtol=0, atol=0)
 
 
+@pytest.mark.parametrize('output_norm', [False, True])
+def test_standard_empty_state(output_norm):
+    torch.manual_seed(42)
+    module = StandardResidual(hidden_size=8, fuse_norm=False)
+    x = torch.randn(2, 7, 8, requires_grad=True)
+    state = module.initialize(x)
+    ref = F.rms_norm(x, (8,), module.norm.weight, module.norm.eps) if output_norm else x
+    actual = module(state) if output_norm else module.readout(state)
+    torch.testing.assert_close(actual, ref)
+    do = torch.randn_like(x)
+    torch.testing.assert_close(torch.autograd.grad(actual, x, do)[0], torch.autograd.grad(ref, x, do)[0])
+
+
 @pytest.mark.skipif(device_platform == 'cpu', reason='Residual numerical tests require an accelerator')
-@pytest.mark.parametrize(('batch_size', 'dtype', 'fuse_norm', 'fuse_residual', 'input_dtype', 'num_branches'), [
-    pytest.param(1, torch.float32, False, False, torch.float32, 2, id='fp32'),
-    pytest.param(2, torch.bfloat16, True, False, torch.bfloat16, 2, id='bf16-fused-norm'),
-    pytest.param(1, torch.float16, True, False, torch.float16, 2, id='fp16-fused-norm'),
-    pytest.param(1, torch.float32, False, True, torch.float32, 2, id='fp32-pending-add'),
-    pytest.param(2, torch.float16, True, True, torch.float16, 2, id='fp16-fused-add-norm'),
-    pytest.param(2, torch.bfloat16, False, True, torch.bfloat16, 2, id='bf16-pending-add'),
-    pytest.param(1, torch.bfloat16, True, False, torch.float32, 2, id='mixed-dtype'),
-    pytest.param(1, torch.bfloat16, True, True, torch.float32, 2, id='mixed-dtype-fused-add-norm'),
-    pytest.param(2, torch.bfloat16, True, True, torch.bfloat16, 6, id='bf16-multiple-blocks'),
-    pytest.param(1, torch.float16, True, True, torch.float32, 6, id='mixed-dtype-multiple-blocks'),
-    pytest.param(1, torch.float32, False, False, torch.float32, 0, id='empty-stack'),
+@pytest.mark.parametrize('output_norm', [False, True])
+@pytest.mark.parametrize(('dtype', 'input_dtype', 'fuse_norm', 'fuse_residual'), [
+    pytest.param(torch.float32, torch.float32, False, False, id='fp32'),
+    pytest.param(torch.float16, torch.float16, True, False, id='fp16-fused-norm'),
+    pytest.param(torch.bfloat16, torch.bfloat16, False, True, id='bf16-unfused-norm'),
+    pytest.param(torch.bfloat16, torch.bfloat16, True, True, id='bf16-fused-add-norm'),
+    pytest.param(torch.float16, torch.float16, True, True, id='fp16-fused-add-norm'),
+    pytest.param(torch.bfloat16, torch.float32, True, False, id='mixed-bf16'),
+    pytest.param(torch.bfloat16, torch.float32, True, True, id='mixed-bf16-fused-add-norm'),
+    pytest.param(torch.float16, torch.float32, True, True, id='mixed-fp16-fused-add-norm'),
 ])
-def test_standard(batch_size, dtype, fuse_norm, fuse_residual, input_dtype, num_branches):
+def test_standard(dtype, input_dtype, fuse_norm, fuse_residual, output_norm):
     torch.manual_seed(42)
     modules = nn.ModuleList([
-        StandardResidual(hidden_size=128, fuse_norm=fuse_norm, fuse_residual=fuse_residual)
-        for _ in range(num_branches + 1)
+        StandardResidual(hidden_size=128, fuse_norm=fuse_norm, fuse_residual=fuse_residual) for _ in range(7)
     ]).to(device=device, dtype=dtype)
-    reference = copy.deepcopy(modules)
-    x = torch.randn(batch_size, 7, 128, device=device, dtype=input_dtype, requires_grad=True)
-    branches = [torch.randn_like(x, dtype=dtype, requires_grad=True) for _ in range(num_branches)]
-    ref_x = x.detach().clone().requires_grad_()
-    ref_branches = [branch.detach().clone().requires_grad_() for branch in branches]
+    x = torch.randn(2, 7, 128, device=device, dtype=input_dtype, requires_grad=True)
     state = modules[0].initialize(x)
-    assert_close('initial_state', x, modules[0].readout(state), 0.005)
-    residual, pending = ref_x, None
-    loss, ref_loss = 0, 0
-    for i, (module, ref_module) in enumerate(zip(modules, reference)):
-        if i == num_branches:
-            output = module(state)
-        else:
-            output, context = module.pre(state)
-        value = residual if pending is None else residual + pending
-        output_dtype = value.dtype
-        ref_context = value
-        if fuse_residual and 0 < i < num_branches and fuse_norm:
-            value = residual.float() + pending.float()
-            ref_context = value.to(residual.dtype)
-            output_dtype = pending.dtype
-        expected = F.rms_norm(value.float(), (128,), ref_module.norm.weight.float(), ref_module.norm.eps).to(output_dtype)
-        assert output.shape == x.shape and output.dtype == expected.dtype
-        assert_close('output', expected, output, 0.005)
-        grad = torch.randn_like(output)
-        loss = loss + (output * grad).sum()
-        ref_loss = ref_loss + (expected * grad).sum()
-        if i < num_branches:
-            assert context.dtype == ref_context.dtype
-            assert_close('context', ref_context, context, 0.005)
-        if i == num_branches:
-            break
+    ref_h = x.clone()
+    for i, module in enumerate(modules[:-1]):
+        ref_dtype = dtype if fuse_residual and fuse_norm and i > 0 else input_dtype
+        ref_input = F.rms_norm(ref_h.float(), (128,), module.norm.weight.float(), module.norm.eps).to(ref_dtype)
+        actual_input, context = module.pre(state)
+        assert actual_input.dtype == ref_dtype
+        assert_close('input', ref_input, actual_input, 0.005)
+        assert_close('context', ref_h.to(input_dtype), context, 0.005)
         previous = state
-        previous_hidden = module.readout(previous).detach().clone()
-        state = module.post(branch_output=branches[i], context=context)
-        torch.testing.assert_close(module.readout(previous), previous_hidden, rtol=0, atol=0)
-        if fuse_residual:
-            residual, pending = ref_context, ref_branches[i]
-            expected_state = residual + pending
+        previous_h = module.readout(previous).detach().clone()
+        state = module.post(F.silu(actual_input).to(dtype), context)
+        torch.testing.assert_close(module.readout(previous), previous_h, rtol=0, atol=0)
+        ref_branch = F.silu(ref_input).to(dtype)
+        # fused prenorm reads the fp32 sum but stores its residual in input_dtype.
+        if fuse_residual and fuse_norm:
+            ref_h = ref_h.to(input_dtype).float() + ref_branch.float()
         else:
-            residual, pending = ref_context + ref_branches[i], None
-            expected_state = residual
-        hidden = module.readout(state)
-        assert hidden.dtype == expected_state.dtype
-        assert_close('state', expected_state, hidden, 0.005)
-        grad = torch.randn_like(hidden)
-        loss = loss + (hidden * grad).sum()
-        ref_loss = ref_loss + (expected_state * grad).sum()
-    loss.backward()
-    ref_loss.backward()
-    assert_close('dx', ref_x.grad, x.grad, 0.005)
-    for ref, actual in zip(ref_branches, branches):
-        assert_close('dbranch', ref.grad, actual.grad, 0.005)
-    for ref_module, module in zip(reference, modules):
-        assert_close('dweight', ref_module.norm.weight.grad, module.norm.weight.grad, 0.005)
+            ref_h = ref_h + ref_branch
+        actual_h = module.readout(state)
+        assert actual_h.dtype == input_dtype
+        assert_close('state', ref_h.to(input_dtype), actual_h, 0.005)
+
+    ref = ref_h.to(input_dtype)
+    if output_norm:
+        ref = F.rms_norm(ref.float(), (128,), modules[-1].norm.weight.float(), modules[-1].norm.eps).to(input_dtype)
+    actual = modules[-1](state) if output_norm else modules[-1].readout(state)
+    assert actual.dtype == ref.dtype
+    assert_close('output', ref, actual, 0.005)
+    do = torch.randn_like(actual)
+    parameters = {'x': x, **dict(modules.named_parameters())}
+    ref_grads = torch.autograd.grad(ref, tuple(parameters.values()), do, allow_unused=True)
+    actual_grads = torch.autograd.grad(actual, tuple(parameters.values()), do, allow_unused=True)
+    for name, ref_grad, actual_grad in zip(parameters, ref_grads, actual_grads):
+        if ref_grad is None:
+            assert actual_grad is None, name
+        else:
+            assert actual_grad is not None, name
+            assert_close(name, ref_grad, actual_grad, 0.005)
 
 
 @pytest.mark.skipif(device_platform == 'cpu', reason='AttnRes requires an accelerator')
+@pytest.mark.parametrize('output_norm', [False, True])
 @pytest.mark.parametrize(('block_size', 'dtype', 'input_dtype'), [
     pytest.param(1, torch.float32, torch.float32, id='full-fp32'),
     pytest.param(4, torch.float16, torch.float16, id='block-fp16'),
@@ -129,77 +123,67 @@ def test_standard(batch_size, dtype, fuse_norm, fuse_residual, input_dtype, num_
     pytest.param(4, torch.bfloat16, torch.float32, id='block-mixed-dtype'),
     pytest.param(1, torch.bfloat16, torch.bfloat16, id='full-bf16'),
 ])
-def test_attnres(block_size, dtype, input_dtype, request):
+def test_attnres(block_size, dtype, input_dtype, output_norm, request):
     torch.manual_seed(42)
     allow_tf32 = torch.backends.cuda.matmul.allow_tf32
     request.addfinalizer(lambda: setattr(torch.backends.cuda.matmul, 'allow_tf32', allow_tf32))
     torch.backends.cuda.matmul.allow_tf32 = False
-    modules = torch.nn.ModuleList([
+    modules = nn.ModuleList([
         AttentionResidual(hidden_size=128, block_size=block_size) for _ in range(7)
     ]).to(device=device, dtype=dtype)
     with torch.no_grad():
         for module in modules:
             module.query.weight.normal_(std=0.03)
-    reference = copy.deepcopy(modules)
     x = torch.randn(2, 7, 128, device=device, dtype=input_dtype, requires_grad=True)
-    branches = [torch.randn_like(x, dtype=dtype, requires_grad=True) for _ in range(6)]
-    ref_x = x.detach().clone().requires_grad_()
-    ref_branches = [branch.detach().clone().requires_grad_() for branch in branches]
-    state, ref_state = modules[0].initialize(x), [ref_x]
-    assert_close('initial_state', x, modules[0].readout(state), 0.005)
-    loss, ref_loss = 0, 0
-    for i, (module, ref_module) in enumerate(zip(modules, reference)):
-        if i == 6:
-            output = module(state)
-        else:
-            output, context = module.pre(state)
+    state = modules[0].initialize(x)
+    ref_blocks, ref_branches = [x.clone()], []
+    for i, module in enumerate(modules[:-1]):
         if i == 0:
-            expected = F.rms_norm(ref_x.float(), (128,), ref_module.norm.weight.float(), ref_module.norm.eps).to(input_dtype)
+            ref_input = F.rms_norm(x.float(), (128,), module.norm.weight.float(), module.norm.eps).to(input_dtype)
         else:
-            expected = naive_attnres(
-                query=ref_module.query.weight,
-                residuals=ref_state,
-                rms_weight=ref_module.key_norm.weight,
-                output_rms_weight=ref_module.norm.weight,
-                rms_eps=ref_module.norm.eps,
+            ref_input = naive_attnres(
+                query=module.query.weight,
+                residuals=ref_blocks,
+                rms_weight=module.key_norm.weight,
+                output_rms_weight=module.norm.weight,
+                rms_eps=module.norm.eps,
             )
-        assert output.dtype == ref_state[0].dtype
-        assert_close('output', expected, output, 0.005)
-        readout = module.readout(state)
-        ref_readout = ref_x if i == 0 else naive_attnres(
-            query=ref_module.query.weight,
-            residuals=ref_state,
-            rms_weight=ref_module.key_norm.weight,
-            rms_eps=ref_module.norm.eps,
-        )
-        assert readout.dtype == ref_readout.dtype
-        assert_close('readout', ref_readout, readout, 0.005)
-        grad = torch.randn_like(output)
-        loss = loss + (output * grad).sum() + (readout * grad).sum()
-        ref_loss = ref_loss + (expected * grad).sum() + (ref_readout * grad).sum()
-        if i == 6:
-            break
-        previous = tuple(state.blocks)
-        state = module.post(branch_output=branches[i], context=context)
-        assert len(previous) == len(ref_state)
-        for ref, actual in zip(ref_state, previous):
-            assert_close('previous_state', ref, actual, 0.005)
-        if i == 0:
-            ref_state = [ref_x.to(dtype)]
-        if i % block_size == 0:
-            ref_state = [*ref_state, ref_branches[i]]
+        actual_input, context = module.pre(state)
+        assert actual_input.dtype == ref_input.dtype
+        assert_close('input', ref_input, actual_input, 0.005)
+        previous = state
+        previous_blocks = [block.detach().clone() for block in previous.blocks]
+        state = module.post(F.silu(actual_input).to(dtype), context)
+        for before, after in zip(previous_blocks, previous.blocks):
+            torch.testing.assert_close(after, before, rtol=0, atol=0)
+        ref_branches.append(F.silu(ref_input).to(dtype))
+        ref_blocks = [x.to(dtype)] + [
+            sum(ref_branches[start:start + block_size]) for start in range(0, len(ref_branches), block_size)
+        ]
+        assert state.num_branches == i + 1
+        assert len(state.blocks) == len(ref_blocks)
+        for ref, actual in zip(ref_blocks, state.blocks):
+            assert actual.dtype == ref.dtype
+            assert_close('block', ref, actual, 0.005)
+
+    module = modules[-1]
+    ref = naive_attnres(
+        query=module.query.weight,
+        residuals=ref_blocks,
+        rms_weight=module.key_norm.weight,
+        output_rms_weight=module.norm.weight if output_norm else None,
+        rms_eps=module.norm.eps,
+    )
+    actual = module(state) if output_norm else module.readout(state)
+    assert actual.dtype == ref.dtype
+    assert_close('output', ref, actual, 0.005)
+    do = torch.randn_like(actual)
+    parameters = {'x': x, **dict(modules.named_parameters())}
+    ref_grads = torch.autograd.grad(ref, tuple(parameters.values()), do, allow_unused=True)
+    actual_grads = torch.autograd.grad(actual, tuple(parameters.values()), do, allow_unused=True)
+    for name, ref_grad, actual_grad in zip(parameters, ref_grads, actual_grads):
+        if ref_grad is None:
+            assert actual_grad is None, name
         else:
-            ref_state = [*ref_state[:-1], ref_state[-1] + ref_branches[i]]
-        assert len(state.blocks) == len(ref_state)
-        for ref, tri in zip(ref_state, state.blocks):
-            assert_close('state', ref, tri, 0.005)
-    loss.backward()
-    ref_loss.backward()
-    assert_close('dx', ref_x.grad, x.grad, 0.005)
-    for ref, tri in zip(ref_branches, branches):
-        assert_close('dbranch', ref.grad, tri.grad, 0.005)
-    for (name, ref), (_, tri) in zip(reference.named_parameters(), modules.named_parameters()):
-        if ref.grad is None:
-            assert tri.grad is None, name
-        else:
-            assert_close(name, ref.grad, tri.grad, 0.005)
+            assert actual_grad is not None, name
+            assert_close(name, ref_grad, actual_grad, 0.005)
