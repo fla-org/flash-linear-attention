@@ -22,7 +22,7 @@ from fla.backends import TritonAscendBackend, register
 from fla.ops.common.chunk_h import chunk_bwd_dh, chunk_fwd_h
 from fla.ops.utils import prepare_chunk_offsets
 from fla.ops.utils.op import exp2
-from fla.utils import input_guard
+from fla.utils import IS_NPU, ascend_compile_kwargs, get_device_arch, input_guard
 from fla.utils.ascend_ub_manager import launch_grid_chunked
 
 # fixed tiles prevent autotuning from selecting configurations that overflow UB.
@@ -30,8 +30,19 @@ _BK = 64
 _BV = 64
 
 
-def _chunk_h_tile_size(K: int, V: int) -> tuple[int, int]:
-    """Use smaller tiles for large fp32 states and gates to avoid UB overflow and MTE faults."""
+def _use_portable_lowering() -> bool:
+    """Whether the current target requires conservative dot lowering."""
+    return IS_NPU and get_device_arch().startswith(("Ascend950", "Ascend910_95"))
+
+
+def _chunk_h_tile_size(K: int, V: int, T: int) -> tuple[int, int]:
+    """Use smaller tiles for large states and restricted dot-lowering targets."""
+    if _use_portable_lowering():
+        if T <= 32:
+            return 16, 16
+        if K <= 64 and V <= 128:
+            return (64, 64) if T <= 512 else (32, 32)
+        return 16, 16
     if K > 128 or V > 128:
         return 32, 32
     return _BK, _BV
@@ -68,6 +79,9 @@ def chunk_h_fwd_kernel(
     USE_INITIAL_STATE: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
     STATE_V_FIRST: tl.constexpr,
+    USE_NATIVE_DOT: tl.constexpr,
+    USE_SAFE_DOT: tl.constexpr,
+    MANUAL_DOT: tl.constexpr,
     K_OFFSET,
     V_OFFSET,
     NH_OFFSET,
@@ -115,9 +129,11 @@ def chunk_h_fwd_kernel(
         if i_t % NTS == 0:
             tl.store(p_h, (tl.trans(b_h) if STATE_V_FIRST else b_h).to(p_h.dtype.element_ty), mask=m_h)
 
-        # fp32 recurrence avoids instability from bf16 tl.dot on Ascend.
-        b_k = tl.load(p_k, mask=(o_k[:, None] < K) & m_t[None, :], other=0.0).to(tl.float32)
-        b_v = tl.load(p_v, mask=m_t[:, None] & (o_v < V)[None, :], other=0.0).to(tl.float32)
+        b_k = tl.load(p_k, mask=(o_k[:, None] < K) & m_t[None, :], other=0.0)
+        b_v = tl.load(p_v, mask=m_t[:, None] & (o_v < V)[None, :], other=0.0)
+        if not USE_NATIVE_DOT:
+            b_k = b_k.to(tl.float32)
+            b_v = b_v.to(tl.float32)
         last_idx = min((i_t + 1) * BT, T) - 1
 
         if USE_G:
@@ -126,11 +142,15 @@ def chunk_h_fwd_kernel(
             b_g = tl.load(p_g, mask=m_t, other=0.).to(tl.float32)
             b_h *= exp2(b_g_last)
             b_v = b_v * exp2(b_g_last - b_g)[:, None]
+            if USE_NATIVE_DOT:
+                b_v = b_v.to(b_k.dtype)
 
         if USE_G_GAMMA:
             b_g_last = b_gamma * min(BT, T - i_t * BT)
             b_h *= exp2(b_g_last)
             b_v = b_v * exp2(b_g_last - b_g)[:, None]
+            if USE_NATIVE_DOT:
+                b_v = b_v.to(b_k.dtype)
 
         if USE_GK:
             p_gk = gk + kv_base + o_k[:, None] + o_t[None, :] * (H * K)
@@ -139,6 +159,8 @@ def chunk_h_fwd_kernel(
             b_gk = tl.load(p_gk, mask=(o_k[:, None] < K) & m_t[None, :], other=0.0).to(tl.float32)
             b_h *= exp2(b_gk_last)[:, None]
             b_k = b_k * exp2(b_gk_last[:, None] - b_gk)
+            if USE_NATIVE_DOT:
+                b_k = b_k.to(b_v.dtype)
 
         if USE_GV:
             p_gv = gv + (bos * H + i_h) * V + o_t[:, None] * (H * V) + o_v[None, :]
@@ -147,8 +169,23 @@ def chunk_h_fwd_kernel(
             b_gv = tl.load(p_gv, mask=m_t[:, None] & (o_v < V)[None, :], other=0.0).to(tl.float32)
             b_h *= exp2(b_gv_last)[None, :]
             b_v = b_v * exp2(b_gv_last[None, :] - b_gv)
+            if USE_NATIVE_DOT:
+                b_v = b_v.to(b_k.dtype)
 
-        b_h = tl.dot(b_k, b_v, b_h)
+        if MANUAL_DOT:
+            for i in tl.range(0, BT):
+                t = i_t * BT + i
+                m_i = t < T
+                p_k_i = k + kv_base + o_k + tl.cast(t, tl.int64) * (H * K)
+                p_v_i = v + (bos * H + i_h) * V + tl.cast(t, tl.int64) * (H * V) + o_v
+                b_k_i = tl.load(p_k_i, mask=(o_k < K) & m_i, other=0.0)
+                b_v_i = tl.load(p_v_i, mask=m_i & (o_v < V), other=0.0)
+                b_decay_i = exp2(b_g_last - b_gamma * (i + 1))
+                b_h += b_k_i.to(tl.float32)[:, None] * (b_v_i * b_decay_i).to(tl.float32)[None, :]
+        elif USE_SAFE_DOT:
+            b_h = tl.dot(b_k, b_v, b_h, allow_tf32=False)
+        else:
+            b_h = tl.dot(b_k, b_v, b_h)
 
     if STORE_FINAL_STATE:
         ht_base = (i_nh * K * V)
@@ -194,6 +231,9 @@ def chunk_h_bwd_kernel(
     STORE_INITIAL_STATE_GRADIENT: tl.constexpr,
     USE_FINAL_STATE_GRADIENT: tl.constexpr,
     STATE_V_FIRST: tl.constexpr,
+    USE_NATIVE_DOT: tl.constexpr,
+    USE_SAFE_DOT: tl.constexpr,
+    MANUAL_DOT: tl.constexpr,
     K_OFFSET,
     V_OFFSET,
     NH_OFFSET,
@@ -242,19 +282,29 @@ def chunk_h_bwd_kernel(
         qv_base = bos * HQ + i_hq
         p_q = q + qv_base * K + o_k[:, None] + o_t[None, :] * (HQ * K)
         p_do = do + qv_base * V + o_t[:, None] * (HQ * V) + o_v[None, :]
-        b_q = tl.load(p_q, mask=(o_k[:, None] < K) & m_t[None, :], other=0.0).to(tl.float32) * scale
-        b_do = tl.load(p_do, mask=m_t[:, None] & (o_v < V)[None, :], other=0.0).to(tl.float32)
+        b_q = tl.load(p_q, mask=(o_k[:, None] < K) & m_t[None, :], other=0.0)
+        b_do = tl.load(p_do, mask=m_t[:, None] & (o_v < V)[None, :], other=0.0)
+        if not USE_NATIVE_DOT:
+            b_q = b_q.to(tl.float32)
+            b_do = b_do.to(tl.float32)
+        b_q = b_q * scale
+        if USE_NATIVE_DOT:
+            b_q = b_q.to(b_do.dtype)
 
         if USE_G:
             p_g = g + bos * H + o_t * H + i_h
             b_g_last = tl.load(g + bos * H + last_idx.to(tl.int64) * H + i_h).to(tl.float32)
             b_g = tl.load(p_g, mask=m_t, other=0.).to(tl.float32)
             b_q = b_q * exp2(b_g)[None, :]
+            if USE_NATIVE_DOT:
+                b_q = b_q.to(b_do.dtype)
             b_dh *= exp2(b_g_last)
 
         if USE_G_GAMMA:
             b_g_last = b_gamma * min(BT, T - i_t * BT)
             b_q = b_q * exp2(b_g)[None, :]
+            if USE_NATIVE_DOT:
+                b_q = b_q.to(b_do.dtype)
             b_dh *= exp2(b_g_last)
 
         if USE_GK:
@@ -264,6 +314,8 @@ def chunk_h_bwd_kernel(
             b_gk = tl.load(p_gk, mask=(o_k[:, None] < K) & m_t[None, :], other=0.0).to(tl.float32)
             b_gk_last = tl.load(p_gk_last, mask=(i_k * BK + tl.arange(0, BK) < K), other=0.).to(tl.float32)
             b_q = b_q * exp2(b_gk)
+            if USE_NATIVE_DOT:
+                b_q = b_q.to(b_do.dtype)
             b_dh *= exp2(b_gk_last)[:, None]
 
         if USE_GV:
@@ -272,9 +324,24 @@ def chunk_h_bwd_kernel(
             b_gv = tl.load(p_gv, mask=m_t[:, None] & (o_v < V)[None, :], other=0.0).to(tl.float32)
             b_gv_last = tl.load(p_gv_last, mask=(i_v * BV + tl.arange(0, BV) < V), other=0.).to(tl.float32)
             b_do = b_do * exp2(b_gv)
+            if USE_NATIVE_DOT:
+                b_do = b_do.to(b_q.dtype)
             b_dh *= exp2(b_gv_last)[None, :]
 
-        b_dh = tl.dot(b_q, b_do, b_dh)
+        if MANUAL_DOT:
+            for i in tl.range(0, BT):
+                t = i_t * BT + i
+                m_i = t < T
+                p_q_i = q + qv_base * K + o_k + tl.cast(t, tl.int64) * (HQ * K)
+                p_do_i = do + qv_base * V + tl.cast(t, tl.int64) * (HQ * V) + o_v
+                b_q_i = tl.load(p_q_i, mask=(o_k < K) & m_i, other=0.0)
+                b_do_i = tl.load(p_do_i, mask=m_i & (o_v < V), other=0.0)
+                b_q_i = b_q_i.to(tl.float32) * scale * exp2(b_gamma * (i + 1))
+                b_dh += b_q_i[:, None] * b_do_i.to(tl.float32)[None, :]
+        elif USE_SAFE_DOT:
+            b_dh = tl.dot(b_q, b_do, b_dh, allow_tf32=False)
+        else:
+            b_dh = tl.dot(b_q, b_do, b_dh)
 
     if STORE_INITIAL_STATE_GRADIENT:
         dh0_base = (i_nh * K * V)
@@ -316,7 +383,7 @@ def chunk_fwd_h_npu(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = chunk_size
-    BS = BT if split_size is None else split_size
+    BS = chunk_size if split_size is None else split_size
     assert BS % BT == 0, f"The `split_size` (got {BS}) must be a multiple of `chunk_size` {BT}"
 
     # packed varlen: run the equal-length kernel per sequence for complete state stores
@@ -365,11 +432,23 @@ def chunk_fwd_h_npu(
     h = k.new_zeros(B, NS, H, *state_shape, dtype=torch.float if states_in_fp32 else k.dtype)
     ht = k.new_zeros(N, H, *state_shape, dtype=torch.float) if output_final_state else None
 
-    BK, BV = _chunk_h_tile_size(K=K, V=V)
+    BK, BV = _chunk_h_tile_size(K=K, V=V, T=T)
+    use_portable_lowering = _use_portable_lowering()
+    state_compile_kwargs = ascend_compile_kwargs(blacklist_auto_blockify=True) if use_portable_lowering else {}
+    manual_dot = (
+        g_gamma is not None and g is None
+        and k.dtype == torch.float16 and use_portable_lowering and BK <= 16 and BV <= 16
+    )
+    native_dot = k.dtype == torch.float16 and use_portable_lowering and not manual_dot
+    safe_dot = use_portable_lowering
+    if state_compile_kwargs and manual_dot:
+        state_compile_kwargs['compile_mode'] = 'simd'
+        state_compile_kwargs['disable_tightly_coupled_buffer_reuse'] = True
     launch_grid_chunked(
         kernel=chunk_h_fwd_kernel,
         grid=(triton.cdiv(K, BK), triton.cdiv(V, BV), N * H),
         offset_keys=('K_OFFSET', 'V_OFFSET', 'NH_OFFSET'),
+        compile_kwargs=state_compile_kwargs,
         kernel_kwargs=dict(
             k=k,
             v=v,
@@ -394,6 +473,9 @@ def chunk_fwd_h_npu(
             USE_GK=gk is not None,
             USE_GV=gv is not None,
             STATE_V_FIRST=state_v_first,
+            USE_NATIVE_DOT=native_dot,
+            USE_SAFE_DOT=safe_dot,
+            MANUAL_DOT=manual_dot,
             K_OFFSET=0,
             V_OFFSET=0,
             NH_OFFSET=0,
@@ -432,7 +514,7 @@ def chunk_bwd_dh_npu(
     B, T, H, K, V = *k.shape, v.shape[-1]
     HQ = q.shape[2]
     BT = chunk_size
-    BS = BT if split_size is None else split_size
+    BS = chunk_size if split_size is None else split_size
     assert BS % BT == 0, f"The `split_size` (got {BS}) must be a multiple of `chunk_size` {BT}"
 
     # packed varlen: run the equal-length kernel per sequence for complete state stores
@@ -484,11 +566,23 @@ def chunk_bwd_dh_npu(
     dh = k.new_zeros(B, NS, HQ, *state_shape, dtype=torch.float if states_in_fp32 else k.dtype)
     dh0 = torch.zeros_like(h0, dtype=torch.float) if h0 is not None else None
 
-    BK, BV = _chunk_h_tile_size(K=K, V=V)
+    BK, BV = _chunk_h_tile_size(K=K, V=V, T=T)
+    use_portable_lowering = _use_portable_lowering()
+    state_compile_kwargs = ascend_compile_kwargs(blacklist_auto_blockify=True) if use_portable_lowering else {}
+    manual_dot = (
+        g_gamma is not None and g is None
+        and q.dtype == torch.float16 and use_portable_lowering and BK <= 16 and BV <= 16
+    )
+    native_dot = False
+    safe_dot = use_portable_lowering
+    if state_compile_kwargs and manual_dot:
+        state_compile_kwargs['compile_mode'] = 'simd'
+        state_compile_kwargs['disable_tightly_coupled_buffer_reuse'] = True
     launch_grid_chunked(
         kernel=chunk_h_bwd_kernel,
         grid=(triton.cdiv(K, BK), triton.cdiv(V, BV), N * HQ),
         offset_keys=('K_OFFSET', 'V_OFFSET', 'NH_OFFSET'),
+        compile_kwargs=state_compile_kwargs,
         kernel_kwargs=dict(
             q=q,
             g=g,
@@ -516,6 +610,9 @@ def chunk_bwd_dh_npu(
             USE_GK=gk is not None,
             USE_GV=gv is not None,
             STATE_V_FIRST=state_v_first,
+            USE_NATIVE_DOT=native_dot,
+            USE_SAFE_DOT=safe_dot,
+            MANUAL_DOT=manual_dot,
             K_OFFSET=0,
             V_OFFSET=0,
             NH_OFFSET=0,
