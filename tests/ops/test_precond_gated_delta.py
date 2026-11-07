@@ -792,6 +792,7 @@ def test_chunk_A_state(
 
     assert_close('o', ref, tri, 0.005)
     assert_close('ht', ref_ht, tri_ht, 0.005)
+    assert tri_at.dtype == torch.float32
     assert_close('at', ref_at, tri_at, 0.005)
     assert_close('dq', q.grad, tri_dq, 0.008)
     assert_close('dk', k.grad, tri_dk, 0.008)
@@ -883,6 +884,7 @@ def test_chunk_varlen_empty_A_state(with_initial_A_state: bool):
 
     assert_close('o', ref, tri, 0.005)
     assert_close('ht', ref_ht, tri_ht, 0.005)
+    assert tri_at.dtype == torch.float32
     assert_close('at', ref_at, tri_at, 0.005)
     names = ('dq', 'dk', 'dv', 'dg_atk', 'dg', 'dbeta_atk', 'dbeta', 'dh0')
     if with_initial_A_state:
