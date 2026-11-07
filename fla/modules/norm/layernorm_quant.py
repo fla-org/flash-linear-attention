@@ -105,6 +105,7 @@ def layer_norm_quant_fwd_kernel(
     if HAS_BIAS:
         b_b = tl.load(b + o_d, mask=m_d, other=0.0).to(tl.float32)
     b_x_hat = (b_x - b_mean) * b_rstd if not IS_RMS_NORM else b_x * b_rstd
+    b_x_hat = tl.where(m_d, b_x_hat, 0.0)
     b_y = b_x_hat * b_w if HAS_WEIGHT else b_x_hat
     if HAS_BIAS:
         b_y = b_y + b_b
