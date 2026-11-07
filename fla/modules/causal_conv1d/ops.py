@@ -44,10 +44,10 @@ STATIC_WARPS = 32 if not IS_AMD else 16
         for BD in [16, 32, 64, 128]
         for num_warps in NUM_WARPS_AUTOTUNE
     ],
-    key=['D', 'W'],
+    key=['D', 'W', 'BT', 'N_TILES_BUCKET'],
     **autotune_cache_kwargs,
 )
-@triton.jit
+@triton.jit(do_not_specialize=['N_TILES_BUCKET'])
 def causal_conv1d_fwd_kernel(
     x,
     y,
@@ -57,7 +57,7 @@ def causal_conv1d_fwd_kernel(
     cu_seqlens,
     initial_state,
     chunk_indices,
-    B,
+    N_TILES_BUCKET,
     T,
     stride_x_n,
     stride_x_t,
@@ -623,6 +623,9 @@ def causal_conv1d_fwd(
     if x.shape[-1] != weight.shape[0]:
         x = rearrange(x, 'b t ... -> b t (...)')
     B, T, D = x.shape[0], x.shape[1], weight.shape[0]
+    # avoid mostly masked time tiles for short dense sequences.
+    if cu_seqlens is None and T > 0:
+        BT = min(BT, triton.next_power_of_2(T))
     W = weight.shape[1]
     stride_x_n, stride_x_t, stride_x_d = x.stride()
 
@@ -630,6 +633,8 @@ def causal_conv1d_fwd(
     if cu_seqlens is not None and chunk_indices is None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT, cu_seqlens_cpu=cu_seqlens_cpu)
     NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
+    # keep packed lengths in one tuning group; dense groups grow logarithmically.
+    N_TILES_BUCKET = 0 if cu_seqlens is not None else triton.next_power_of_2(max(B * NT, 1))
 
     y = torch.empty_like(x, memory_format=torch.contiguous_format)
 
@@ -645,7 +650,7 @@ def causal_conv1d_fwd(
         cu_seqlens=cu_seqlens,
         initial_state=initial_state,
         chunk_indices=chunk_indices,
-        B=B,
+        N_TILES_BUCKET=N_TILES_BUCKET,
         T=T,
         stride_x_n=stride_x_n,
         stride_x_t=stride_x_t,
