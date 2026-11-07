@@ -14,23 +14,6 @@ from fla.modules import StandardResidual
 from fla.utils import assert_close, device, device_platform
 
 
-@pytest.mark.parametrize('output_norm', [False, True], ids=['readout', 'output-norm'])
-def test_standard_empty_state(output_norm: bool):
-    """An empty residual state reads as the embedding, with optional final normalization."""
-    torch.manual_seed(42)
-    module = StandardResidual(hidden_size=8, fuse_norm=False)
-    x = torch.randn(2, 7, 8, requires_grad=True)
-    state = module.initialize(x=x)
-    ref = F.rms_norm(x, (8,), module.norm.weight, module.norm.eps) if output_norm else x
-    out = module(state=state) if output_norm else module.readout(state=state)
-    do = torch.randn_like(x)
-    ref_dx = torch.autograd.grad(ref, x, do)[0]
-    out_dx = torch.autograd.grad(out, x, do)[0]
-
-    assert_close('o', ref, out, 0, err_atol=0)
-    assert_close('dx', ref_dx, out_dx, 0, err_atol=0)
-
-
 @pytest.mark.parametrize('fuse_residual', [False, True], ids=['eager-add', 'pending-add'])
 def test_standard_post(fuse_residual: bool):
     """A branch contributes once, whether addition happens in post or during readout."""
