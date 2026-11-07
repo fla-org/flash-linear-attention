@@ -20,6 +20,8 @@ class AttentionSpec(TypedDict):
     qkv_bias: NotRequired[bool]
     window_size: NotRequired[int | None]
     rope_theta: NotRequired[float]
+    rotary_dim: NotRequired[int | None]
+    o_bias: NotRequired[bool]
 
 
 AttentionConfig = AttentionSpec | list[AttentionSpec] | None
@@ -97,6 +99,13 @@ def parse_attention_config(attn: AttentionConfig, *, num_hidden_layers: int) -> 
             valid_rope_theta = False
         if not valid_rope_theta:
             raise ValueError(f"{context} field 'rope_theta' must be positive and finite; got {rope_theta!r}")
+
+        # optional fields, left out of the normalized form when absent
+        rotary_dim = config.get('rotary_dim')
+        if rotary_dim is not None and (isinstance(rotary_dim, bool) or not isinstance(rotary_dim, int) or rotary_dim <= 0):
+            raise ValueError(f"{context} field 'rotary_dim' must be a positive integer; got {rotary_dim!r}")
+        if not isinstance(config.get('o_bias', False), bool):
+            raise ValueError(f"{context} field 'o_bias' must be a Boolean; got {config['o_bias']!r}")
         configs.append(config)
 
     return configs[0] if isinstance(attn, dict) else configs
