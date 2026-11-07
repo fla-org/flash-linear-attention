@@ -738,24 +738,28 @@ def deltaformer_attn(
     B, T, H, D = k.shape
     C = min(C, T)
 
+    indices_q = None
+    if attention_mask is not None and cu_seqlens is None:
+        states = (k, v) if beta is None else (k, v, beta)
+        q, states, indices_q, cu_seqlens_lens, max_seq_lens = unpad_input(
+            q, states, attention_mask, T, keepdim=True,
+        )
+        k, v = states[:2]
+        beta = states[2] if beta is not None else None
+        cu_seqlens = cu_seqlens_lens[0]
+        max_seqlen = max_seq_lens[0]
+        if q.shape[1] == 0:
+            # keep zero gradients connected when every token is masked.
+            o = q + k + v
+            if beta is not None:
+                o = o + beta.sum()
+            return pad_input(o.squeeze(0), indices_q, B, T)
+
     u = ParallelDeltaformerFunction.apply(q, k, v, beta, C, cu_seqlens)
 
-    if attention_mask is not None:
-        q_padded, (k_padded, u_padded), indices_q, cu_seqlens_lens, max_seq_lens = unpad_input(q, (k, u), attention_mask, T)
-        cu_seqlens_q, cu_seqlens_k = cu_seqlens_lens
-        max_seqlen_q, max_seqlen_k = max_seq_lens
-        o = flash_attn_varlen_func(
-            q_padded, k_padded, u_padded,
-            cu_seqlens_q=cu_seqlens_q,
-            cu_seqlens_k=cu_seqlens_k,
-            max_seqlen_q=max_seqlen_q,
-            max_seqlen_k=max_seqlen_k,
-            causal=True,
-            window_size=(-1, -1),
-        )
-        o = pad_input(o, indices_q, B, T)
-    elif cu_seqlens is not None:
-        max_seqlen = int((cu_seqlens[1:] - cu_seqlens[:-1]).max().item())
+    if cu_seqlens is not None:
+        if indices_q is None:
+            max_seqlen = int((cu_seqlens[1:] - cu_seqlens[:-1]).max().item())
         o = flash_attn_varlen_func(
             q.squeeze(0), k.squeeze(0), u.squeeze(0),
             cu_seqlens_q=cu_seqlens,
@@ -768,6 +772,8 @@ def deltaformer_attn(
     else:
         o = flash_attn_func(q, k, u, causal=True, window_size=(-1, -1))
 
+    if indices_q is not None:
+        o = pad_input(o.squeeze(0), indices_q, B, T)
     return o
 
 
