@@ -8,12 +8,16 @@
 from __future__ import annotations
 
 import math
+import re
 import warnings
 from copy import copy
+from functools import partial
 
 import torch
 from torch import nn
+from torch.utils._pytree import tree_flatten, tree_unflatten
 from transformers.configuration_utils import PretrainedConfig
+from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils.deprecation import deprecate_kwarg
@@ -45,11 +49,68 @@ def get_attention(config: PretrainedConfig, layer_idx: int) -> Attention | None:
     )
 
 
+def _checkpoint_residual_state(function, *args, checkpoint_func):
+    """Expose tensors inside residual state to reentrant checkpointing."""
+    flat_args, input_spec = tree_flatten(args)
+    output_spec = None
+
+    def forward(*flat_args):
+        nonlocal output_spec
+        outputs = function(*tree_unflatten(flat_args, input_spec))
+        flat_outputs, output_spec = tree_flatten(outputs)
+        return tuple(flat_outputs)
+
+    outputs = checkpoint_func(forward, *flat_args)
+    return tree_unflatten(outputs, output_spec)
+
+
 class FLAPreTrainedModel(PreTrainedModel):
-    """Shared Transformers integration without changing model parameter paths."""
+    """Shared Transformers integration for FLA models."""
 
     _is_stateful = True
     _input_embed_layer = "embeddings"
+    _checkpoint_conversion_mapping: dict[str, str] = {}
+
+    @classmethod
+    def from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
+        if cls._checkpoint_conversion_mapping:
+            # transformers loads meta parameters without invoking module load hooks.
+            kwargs['key_mapping'] = dict(kwargs.get('key_mapping') or {})
+            for source, target in cls._checkpoint_conversion_mapping.items():
+                kwargs['key_mapping'].setdefault(source, target)
+        return super().from_pretrained(pretrained_model_name_or_path, *args, **kwargs)
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        if self._checkpoint_conversion_mapping:
+            for key in list(state_dict):
+                if not key.startswith(prefix):
+                    continue
+                converted = key[len(prefix):]
+                for pattern, replacement in self._checkpoint_conversion_mapping.items():
+                    converted = re.sub(pattern, replacement, converted)
+                converted = prefix + converted
+                if converted != key:
+                    state_dict.setdefault(converted, state_dict.pop(key))
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+
+    def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
+        residual = getattr(self.base_model, 'residual_output', None)
+        if not isinstance(residual, BaseResidual):
+            return super().gradient_checkpointing_enable(gradient_checkpointing_kwargs)
+
+        checkpoint_kwargs = {'use_reentrant': False, **(gradient_checkpointing_kwargs or {})}
+        if checkpoint_kwargs['use_reentrant'] is None:
+            checkpoint_kwargs['use_reentrant'] = False
+        if checkpoint_kwargs['use_reentrant'] and not residual.supports_reentrant_checkpointing:
+            raise ValueError(f'{type(residual).__name__} requires gradient checkpointing with use_reentrant=False')
+        super().gradient_checkpointing_enable(gradient_checkpointing_kwargs=checkpoint_kwargs)
+        if checkpoint_kwargs['use_reentrant']:
+            for module in self.modules():
+                if isinstance(module, GradientCheckpointingLayer):
+                    module._gradient_checkpointing_func = partial(
+                        _checkpoint_residual_state,
+                        checkpoint_func=module._gradient_checkpointing_func,
+                    )
 
     def set_output_embeddings(self, new_embeddings):
         # allow reattaching a head after set_output_embeddings(None)

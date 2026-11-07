@@ -7,13 +7,10 @@
 
 from __future__ import annotations
 
-import re
-from functools import partial
 from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
-from torch.utils._pytree import tree_flatten, tree_unflatten
 from transformers.modeling_layers import GradientCheckpointingLayer
 
 from fla.layers.gla import GatedLinearAttention
@@ -28,32 +25,6 @@ if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
     from fla.models.cache_utils import Cache
-
-
-_RESIDUAL_KEY_MAPPING = {
-    rf'layers\.(\d+)\.{sublayer}_{old}\.': rf'layers.\1.residual_{sublayer}.{new}.'
-    for sublayer in ('attn', 'mlp')
-    for old, new in (('norm', 'norm'), ('res_proj', 'query'), ('res_norm', 'attnres_norm'))
-} | {
-    r'^(model\.|)norm\.': r'\1residual_output.norm.',
-    r'^(model\.|)res_proj\.': r'\1residual_output.query.',
-    r'^(model\.|)res_norm\.': r'\1residual_output.attnres_norm.',
-}
-
-
-def _checkpoint_residual_state(function, *args, checkpoint_func):
-    """Expose tensors inside residual state to reentrant checkpointing."""
-    flat_args, input_spec = tree_flatten(args)
-    output_spec = None
-
-    def forward(*flat_args):
-        nonlocal output_spec
-        outputs = function(*tree_unflatten(flat_args, input_spec))
-        flat_outputs, output_spec = tree_flatten(outputs)
-        return tuple(flat_outputs)
-
-    outputs = checkpoint_func(forward, *flat_args)
-    return tree_unflatten(outputs, output_spec)
 
 
 class GLABlock(GradientCheckpointingLayer):
@@ -111,7 +82,6 @@ class GLABlock(GradientCheckpointingLayer):
         output_attentions: bool | None = False,
         **kwargs: Unpack[dict],
     ) -> tuple:
-        """Apply attention and MLP, each surrounded by its residual pre/post operations."""
         hidden_states, context = self.residual_attn.pre(state)
         hidden_states, attentions, past_key_values = self.attn(
             hidden_states=hidden_states,
@@ -137,28 +107,17 @@ class GLAPreTrainedModel(FLAPreTrainedModel):
     _no_split_modules = ['GLABlock']
     _supports_cache_class = True
 
-    @classmethod
-    def from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
-        # transformers loads meta parameters without invoking module load hooks.
-        kwargs['key_mapping'] = dict(kwargs.get('key_mapping') or {})
-        for source, target in _RESIDUAL_KEY_MAPPING.items():
-            kwargs['key_mapping'].setdefault(source, target)
-        return super().from_pretrained(pretrained_model_name_or_path, *args, **kwargs)
-
-    def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
-        checkpoint_kwargs = {'use_reentrant': False, **(gradient_checkpointing_kwargs or {})}
-        if checkpoint_kwargs['use_reentrant'] is None:
-            checkpoint_kwargs['use_reentrant'] = False
-        if checkpoint_kwargs['use_reentrant'] and self.config.attnres_block_size is not None:
-            raise ValueError('AttentionResidual requires gradient checkpointing with use_reentrant=False')
-        super().gradient_checkpointing_enable(gradient_checkpointing_kwargs=checkpoint_kwargs)
-        if checkpoint_kwargs['use_reentrant']:
-            for module in self.modules():
-                if isinstance(module, GLABlock):
-                    module._gradient_checkpointing_func = partial(
-                        _checkpoint_residual_state,
-                        checkpoint_func=module._gradient_checkpointing_func,
-                    )
+    _checkpoint_conversion_mapping = {
+        r'layers\.(\d+)\.attn_norm\.': r'layers.\1.residual_attn.norm.',
+        r'layers\.(\d+)\.attn_res_proj\.': r'layers.\1.residual_attn.query.',
+        r'layers\.(\d+)\.attn_res_norm\.': r'layers.\1.residual_attn.attnres_norm.',
+        r'layers\.(\d+)\.mlp_norm\.': r'layers.\1.residual_mlp.norm.',
+        r'layers\.(\d+)\.mlp_res_proj\.': r'layers.\1.residual_mlp.query.',
+        r'layers\.(\d+)\.mlp_res_norm\.': r'layers.\1.residual_mlp.attnres_norm.',
+        r'^(model\.|)norm\.': r'\1residual_output.norm.',
+        r'^(model\.|)res_proj\.': r'\1residual_output.query.',
+        r'^(model\.|)res_norm\.': r'\1residual_output.attnres_norm.',
+    }
 
 
 class GLAModel(GLAPreTrainedModel, FLAModel):
@@ -179,18 +138,6 @@ class GLAModel(GLAPreTrainedModel, FLAModel):
         self.gradient_checkpointing = False
 
         self.post_init()
-
-    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
-        for key in list(state_dict):
-            if not key.startswith(prefix):
-                continue
-            converted = key[len(prefix):]
-            for pattern, replacement in _RESIDUAL_KEY_MAPPING.items():
-                converted = re.sub(pattern, replacement, converted)
-            converted = prefix + converted
-            if converted != key:
-                state_dict.setdefault(converted, state_dict.pop(key))
-        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
 
     def _forward_layers(
         self,
