@@ -713,6 +713,23 @@ register_op(OpConfig(
     category='hgrn',
 ))
 
+register_op(OpConfig(
+    name='fused_recurrent_mamba',
+    import_path='fla.ops.mamba',
+    inputs={
+        'x': TensorSpec(shape_BTD),
+        'dt': TensorSpec(shape_BTD),
+        # a negative diagonal state matrix [H * D, N] with N = 16
+        'A': TensorSpec(lambda B, T, H, D, **kw: (H * D, 16), dtype='float32', transform=lambda t: -t.abs() - 1),
+        'B': TensorSpec(lambda B, T, H, D, **kw: (B, T, 16)),
+        'C': TensorSpec(lambda B, T, H, D, **kw: (B, T, 16)),
+        'D': TensorSpec(lambda B, T, H, D, **kw: (H * D,), dtype='float32'),
+        'dt_bias': TensorSpec(lambda B, T, H, D, **kw: (H * D,), dtype='float32'),
+    },
+    category='hgrn',
+    test_file='tests/ops/test_mamba.py',
+))
+
 # --- Generalized delta rule (DPLR) ---
 
 register_op(OpConfig(
