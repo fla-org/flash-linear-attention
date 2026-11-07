@@ -24,6 +24,7 @@ except ImportError:
     flash_attn_func = None
 
 from fla.layers.utils import pad_input, unpad_input
+from fla.utils import autotune_cache_kwargs
 
 BLOCK_SIZE_C = 512
 
@@ -63,7 +64,7 @@ def parallel_deltaformer_bwd_u_chunk(
 
     parallel_deltaformer_bwd_kernel_u[grid](
         grad_u, q, k, grad_v, lse, beta,
-        H, T, C, D, fa_scale,
+        H, T, C, triton.next_power_of_2(T), D, fa_scale,
     )
     return grad_u
 
@@ -86,7 +87,7 @@ def parallel_deltaformer_bwd_qk(
 
     parallel_deltaformer_bwd_kernel_row_sum[grid_bp](
         row_dot_sum, q, k, grad_v, u, lse,
-        H, T, D,
+        H, T, triton.next_power_of_2(T), D,
         fa_scale,
     )
     grad_k = torch.empty_like(k)
@@ -94,7 +95,7 @@ def parallel_deltaformer_bwd_qk(
 
     parallel_deltaformer_bwd_kernel_qk[grid_bp](
         grad_q, grad_k, q, k, grad_v, u, lse, beta, row_dot_sum,
-        H, T, D,
+        H, T, triton.next_power_of_2(T), D,
         fa_scale, qk_scale,
     )
     return grad_q, grad_k, row_dot_sum
@@ -118,10 +119,12 @@ def parallel_deltaformer_kernel(
 
     parallel_deltaformer_fwd_kernel[grid](
         q, k, v, u, w, lse, beta,
-        H, T, C, D, qk_scale,
+        H, T, C, triton.next_power_of_2(T), D, qk_scale,
     )
 
 
+# The kernels tune on T_BUCKET, the next power of two of T, rather than on T or C: both change with every
+# packed batch, and each tune takes seconds.
 def _config_deltaformer():
     return [
         triton.Config({'BLOCK_C': BC, 'BLOCK_T': BT}, num_stages=ns, num_warps=nw)
@@ -132,7 +135,7 @@ def _config_deltaformer():
     ]
 
 
-@triton.autotune(configs=_config_deltaformer(), key=['C', 'D'])
+@triton.autotune(configs=_config_deltaformer(), key=['T_BUCKET', 'D'], **autotune_cache_kwargs)
 @triton.jit
 def parallel_deltaformer_fwd_kernel(
     q_ptr,
@@ -145,6 +148,7 @@ def parallel_deltaformer_fwd_kernel(
     H,
     T,
     C,
+    T_BUCKET,
     D: tl.constexpr,
     qk_scale: float,
     BLOCK_C: tl.constexpr,
@@ -227,7 +231,7 @@ def parallel_deltaformer_fwd_kernel(
         tl.store(w_blk_ptr, p.to(w_ptr.dtype.element_ty), mask=m_c[:, None] & (o_wc[None, :] < C))
 
 
-@triton.autotune(configs=_config_deltaformer(), key=['C', 'D'])
+@triton.autotune(configs=_config_deltaformer(), key=['T_BUCKET', 'D'], **autotune_cache_kwargs)
 @triton.jit
 def parallel_deltaformer_bwd_kernel_u(
     o_ptr,
@@ -239,6 +243,7 @@ def parallel_deltaformer_bwd_kernel_u(
     H,
     T,
     C,
+    T_BUCKET,
     D: tl.constexpr,
     fa_scale,
     BLOCK_C: tl.constexpr,
@@ -277,7 +282,7 @@ def parallel_deltaformer_bwd_kernel_u(
     tl.store(o_blk_ptr, acc.to(o_ptr.dtype.element_ty), mask=m_c[:, None])
 
 
-@triton.autotune(configs=_config_deltaformer(), key=['T', 'D'])
+@triton.autotune(configs=_config_deltaformer(), key=['T_BUCKET', 'D'], **autotune_cache_kwargs)
 @triton.jit
 def parallel_deltaformer_bwd_kernel_row_sum(
     row_dot_ptr,
@@ -288,6 +293,7 @@ def parallel_deltaformer_bwd_kernel_row_sum(
     lse_ptr,
     H,
     T,
+    T_BUCKET,
     D: tl.constexpr,
     fa_scale,
     BLOCK_C: tl.constexpr,
@@ -333,7 +339,7 @@ def parallel_deltaformer_bwd_kernel_row_sum(
 @triton.autotune(configs=[triton.Config({'BLOCK_C': BC}, num_stages=ns, num_warps=nw)
                           for BC in [64, 32]
                           for ns in [4, 3]
-                          for nw in [4]], key=['T', 'D'])
+                          for nw in [4]], key=['T_BUCKET', 'D'], **autotune_cache_kwargs)
 @triton.jit
 def parallel_deltaformer_bwd_kernel_qk(
     grad_q_ptr,
@@ -347,6 +353,7 @@ def parallel_deltaformer_bwd_kernel_qk(
     row_dot_ptr,
     H,
     T,
+    T_BUCKET,
     D: tl.constexpr,
     fa_scale: tl.constexpr,
     qk_scale: tl.constexpr,

@@ -12,7 +12,13 @@ import torch
 
 from fla.ops.deltaformer import deltaformer_attn
 from fla.ops.deltaformer.naive import naive_deltaformer_attn, tril_softmax
-from fla.ops.deltaformer.parallel import ParallelDeltaformerFunction
+from fla.ops.deltaformer.parallel import (
+    ParallelDeltaformerFunction,
+    parallel_deltaformer_bwd_kernel_qk,
+    parallel_deltaformer_bwd_kernel_row_sum,
+    parallel_deltaformer_bwd_kernel_u,
+    parallel_deltaformer_fwd_kernel,
+)
 from fla.utils import IS_INTEL_ALCHEMIST, assert_close, device, find_spec_cached
 
 # Only the public deltaformer_attn needs flash-attn (to consume u); the u computation itself
@@ -236,3 +242,33 @@ def test_deltaformer_attn_varlen(
     assert_close('dk', ref_dk, tri_dk, 0.008)
     assert_close('dv', ref_dv, tri_dv, 0.008)
     assert_close('dbeta', ref_dbeta, tri_dbeta, 0.008)
+
+
+@requires_flash_attn
+@pytest.mark.skipif(
+    IS_INTEL_ALCHEMIST,
+    reason="Skipping test on Intel Alchemist due to known issues with SRAM.",
+)
+def test_deltaformer_attn_varlen_reuses_tuning_for_new_lengths():
+    """Each packed batch brings new sequence lengths and chunk tails, and each tune stalls the step for seconds.
+
+    Lengths that stay within the powers of two already seen must not tune again.
+    """
+    kernels = (
+        parallel_deltaformer_fwd_kernel,
+        parallel_deltaformer_bwd_kernel_u,
+        parallel_deltaformer_bwd_kernel_row_sum,
+        parallel_deltaformer_bwd_kernel_qk,
+    )
+
+    def step(cu_seqlens):
+        q, k, v = (
+            torch.randn((1, cu_seqlens[-1], 2, 64), dtype=torch.float16, device=device).requires_grad_() for _ in range(3)
+        )
+        cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
+        deltaformer_attn(q, k, v, cu_seqlens=cu_seqlens, C=64).sum().backward()
+
+    step([0, 256, 500])
+    tuned = [len(kernel.cache) for kernel in kernels]
+    step([0, 250, 480])
+    assert [len(kernel.cache) for kernel in kernels] == tuned
