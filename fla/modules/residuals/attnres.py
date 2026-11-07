@@ -15,14 +15,15 @@ from fla.ops.attnres import fused_attnres
 
 
 class AttentionResidualState(NamedTuple):
-    residuals: list[torch.Tensor]
+    blocks: list[torch.Tensor]
     num_branches: int
 
 
 class AttentionResidual(BaseResidual[AttentionResidualState, AttentionResidualState]):
     """Read completed blocks and the partial sum using this sublayer's learned query.
 
-    State contains the residual sources and the number of completed branches, which determines block boundaries.
+    Blocks contain the embedding b_0 and block sums b_n; the latest block may be a partial sum b_n^i.
+    The number of completed branches determines block boundaries.
     Each `post` returns new state without mutating the incoming history.
     Gradient checkpointing requires `use_reentrant=False`.
     """
@@ -49,27 +50,34 @@ class AttentionResidual(BaseResidual[AttentionResidualState, AttentionResidualSt
 
     def pre(self, state: AttentionResidualState) -> tuple[torch.Tensor, AttentionResidualState]:
         if state.num_branches == 0:
-            return self.norm(state.residuals[0]), state
+            return self.norm(state.blocks[0]), state
         return self(state), state
 
     def post(self, branch_output: torch.Tensor, context: AttentionResidualState) -> AttentionResidualState:
-        residuals, num_branches = context
+        blocks, num_branches = context
         # all sources passed to fused_attnres must share the first branch's dtype.
         if num_branches == 0:
-            residuals = [residuals[0].to(branch_output.dtype)]
+            blocks = [blocks[0].to(branch_output.dtype)]
         if num_branches % self.block_size == 0:
-            residuals = [*residuals, branch_output]
+            blocks = [*blocks, branch_output]
         else:
-            residuals = [*residuals[:-1], residuals[-1] + branch_output]
-        return AttentionResidualState(residuals, num_branches + 1)
+            blocks = [*blocks[:-1], blocks[-1] + branch_output]
+        return AttentionResidualState(blocks, num_branches + 1)
 
-    def get_hidden_state(self, state: AttentionResidualState) -> torch.Tensor:
-        return state.residuals[-1]
+    def readout(self, state: AttentionResidualState) -> torch.Tensor:
+        if state.num_branches == 0:
+            return state.blocks[0]
+        return fused_attnres(
+            query=self.query.weight.squeeze(0),
+            residuals=state.blocks,
+            rms_weight=self.key_norm.weight,
+            rms_eps=self.norm.eps,
+        )
 
     def forward(self, state: AttentionResidualState) -> torch.Tensor:
         return fused_attnres(
-            query=self.query.weight,
-            residuals=state.residuals,
+            query=self.query.weight.squeeze(0),
+            residuals=state.blocks,
             rms_weight=self.key_norm.weight,
             output_rms_weight=self.norm.weight,
             rms_eps=self.norm.eps,

@@ -22,7 +22,7 @@ class BaseResidual(nn.Module, ABC, Generic[StateT, ContextT]):
 
     `initialize` creates state from embeddings.
     `pre` returns a normalized branch input and the context needed by `post` to incorporate that branch's output.
-    `get_hidden_state` exposes the intermediate representation;
+    `readout` returns the layer input h_l before branch normalization;
     calling the module performs the final readout and normalization.
     State and context retain autograd connections and must not be mutated or cached on the module.
     """
@@ -57,9 +57,9 @@ class BaseResidual(nn.Module, ABC, Generic[StateT, ContextT]):
         raise NotImplementedError
 
     @abstractmethod
-    def get_hidden_state(self, state: StateT) -> torch.Tensor:
+    def readout(self, state: StateT) -> torch.Tensor:
         raise NotImplementedError
 
     def forward(self, state: StateT) -> torch.Tensor:
         """Normalize the final readout; implementations may override its aggregation."""
-        return self.norm(self.get_hidden_state(state))
+        return self.norm(self.readout(state))

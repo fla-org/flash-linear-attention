@@ -70,7 +70,7 @@ def test_standard(batch_size, dtype, fuse_norm, fuse_residual, input_dtype, num_
     ref_x = x.detach().clone().requires_grad_()
     ref_branches = [branch.detach().clone().requires_grad_() for branch in branches]
     state = modules[0].initialize(x)
-    assert_close('initial_state', x, modules[0].get_hidden_state(state), 0.005)
+    assert_close('initial_state', x, modules[0].readout(state), 0.005)
     residual, pending = ref_x, None
     loss, ref_loss = 0, 0
     for i, (module, ref_module) in enumerate(zip(modules, reference)):
@@ -97,16 +97,16 @@ def test_standard(batch_size, dtype, fuse_norm, fuse_residual, input_dtype, num_
         if i == num_branches:
             break
         previous = state
-        previous_hidden = module.get_hidden_state(previous).detach().clone()
+        previous_hidden = module.readout(previous).detach().clone()
         state = module.post(branch_output=branches[i], context=context)
-        torch.testing.assert_close(module.get_hidden_state(previous), previous_hidden, rtol=0, atol=0)
+        torch.testing.assert_close(module.readout(previous), previous_hidden, rtol=0, atol=0)
         if fuse_residual:
             residual, pending = ref_context, ref_branches[i]
             expected_state = residual + pending
         else:
             residual, pending = ref_context + ref_branches[i], None
             expected_state = residual
-        hidden = module.get_hidden_state(state)
+        hidden = module.readout(state)
         assert hidden.dtype == expected_state.dtype
         assert_close('state', expected_state, hidden, 0.005)
         grad = torch.randn_like(hidden)
@@ -129,9 +129,11 @@ def test_standard(batch_size, dtype, fuse_norm, fuse_residual, input_dtype, num_
     pytest.param(4, torch.bfloat16, torch.float32, id='block-mixed-dtype'),
     pytest.param(1, torch.bfloat16, torch.bfloat16, id='full-bf16'),
 ])
-def test_attnres(block_size, dtype, input_dtype, monkeypatch):
+def test_attnres(block_size, dtype, input_dtype, request):
     torch.manual_seed(42)
-    monkeypatch.setattr(torch.backends.cuda.matmul, 'allow_tf32', False)
+    allow_tf32 = torch.backends.cuda.matmul.allow_tf32
+    request.addfinalizer(lambda: setattr(torch.backends.cuda.matmul, 'allow_tf32', allow_tf32))
+    torch.backends.cuda.matmul.allow_tf32 = False
     modules = torch.nn.ModuleList([
         AttentionResidual(hidden_size=128, block_size=block_size) for _ in range(7)
     ]).to(device=device, dtype=dtype)
@@ -144,7 +146,7 @@ def test_attnres(block_size, dtype, input_dtype, monkeypatch):
     ref_x = x.detach().clone().requires_grad_()
     ref_branches = [branch.detach().clone().requires_grad_() for branch in branches]
     state, ref_state = modules[0].initialize(x), [ref_x]
-    assert_close('initial_state', x, modules[0].get_hidden_state(state), 0.005)
+    assert_close('initial_state', x, modules[0].readout(state), 0.005)
     loss, ref_loss = 0, 0
     for i, (module, ref_module) in enumerate(zip(modules, reference)):
         if i == 6:
@@ -163,12 +165,21 @@ def test_attnres(block_size, dtype, input_dtype, monkeypatch):
             )
         assert output.dtype == ref_state[0].dtype
         assert_close('output', expected, output, 0.005)
+        readout = module.readout(state)
+        ref_readout = ref_x if i == 0 else naive_attnres(
+            query=ref_module.query.weight,
+            residuals=ref_state,
+            rms_weight=ref_module.key_norm.weight,
+            rms_eps=ref_module.norm.eps,
+        )
+        assert readout.dtype == ref_readout.dtype
+        assert_close('readout', ref_readout, readout, 0.005)
         grad = torch.randn_like(output)
-        loss = loss + (output * grad).sum()
-        ref_loss = ref_loss + (expected * grad).sum()
+        loss = loss + (output * grad).sum() + (readout * grad).sum()
+        ref_loss = ref_loss + (expected * grad).sum() + (ref_readout * grad).sum()
         if i == 6:
             break
-        previous = tuple(state.residuals)
+        previous = tuple(state.blocks)
         state = module.post(branch_output=branches[i], context=context)
         assert len(previous) == len(ref_state)
         for ref, actual in zip(ref_state, previous):
@@ -179,10 +190,9 @@ def test_attnres(block_size, dtype, input_dtype, monkeypatch):
             ref_state = [*ref_state, ref_branches[i]]
         else:
             ref_state = [*ref_state[:-1], ref_state[-1] + ref_branches[i]]
-        assert len(state.residuals) == len(ref_state)
-        for ref, tri in zip(ref_state, state.residuals):
+        assert len(state.blocks) == len(ref_state)
+        for ref, tri in zip(ref_state, state.blocks):
             assert_close('state', ref, tri, 0.005)
-        assert_close('hidden_state', ref_state[-1], module.get_hidden_state(state), 0.005)
     loss.backward()
     ref_loss.backward()
     assert_close('dx', ref_x.grad, x.grad, 0.005)

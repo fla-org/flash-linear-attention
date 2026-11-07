@@ -56,7 +56,7 @@ class StandardResidual(BaseResidual[StandardResidualState, torch.Tensor]):
             return StandardResidualState(context, branch_output)
         return StandardResidualState(context + branch_output, None)
 
-    def get_hidden_state(self, state: StandardResidualState) -> torch.Tensor:
+    def readout(self, state: StandardResidualState) -> torch.Tensor:
         if state.branch_output is None:
             return state.residual
         return state.residual + state.branch_output
