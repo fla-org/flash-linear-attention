@@ -16,6 +16,13 @@ class StandardResidualState(NamedTuple):
     residual: torch.Tensor
     branch_output: torch.Tensor | None
 
+    @property
+    def hidden_states(self) -> torch.Tensor:
+        return self.residual if self.branch_output is None else self.residual + self.branch_output
+
+    def with_hidden_states(self, hidden_states: torch.Tensor) -> 'StandardResidualState':
+        return StandardResidualState(hidden_states, None)
+
 
 class StandardResidual(BaseResidual[StandardResidualState, torch.Tensor]):
     r"""Standard residual accumulation, optionally fusing addition with the next normalization.

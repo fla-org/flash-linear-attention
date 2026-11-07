@@ -234,9 +234,10 @@ def test_decoder_fwd(config_class, training, use_cache, return_dict, make_model)
     torch.manual_seed(42)
     model = make_model(config_class).model.train(training)
     model.layers = nn.ModuleList([nn.Module(), nn.Module()])
+    state_key = 'residual_state' if config_class is models.GLAConfig else 'attnres_states'
     for layer in model.layers:
         layer.forward = Mock(side_effect=lambda hidden_states, **kwargs: (
-            hidden_states + hidden_states.tanh(), None, kwargs['past_key_values'], kwargs['attnres_states'],
+            hidden_states + hidden_states.tanh(), None, kwargs['past_key_values'], kwargs[state_key],
         ))
     input_ids = torch.randint(0, 64, (2, 7))
     attention_mask = torch.ones_like(input_ids)
@@ -267,14 +268,16 @@ def test_decoder_fwd(config_class, training, use_cache, return_dict, make_model)
         assert kwargs['past_key_values'] is cache
         assert kwargs['use_cache'] is expected_cache
         assert kwargs['output_attentions'] is False
-        assert kwargs['attnres_states'] is None
+        if config_class is not models.GLAConfig:
+            assert kwargs['attnres_states'] is None
         assert kwargs['cu_seqlens'] is cu_seqlens
         reference = reference + reference.tanh()
-    reference = model.norm(reference)
+    norm = model.output_residual.norm if config_class is models.GLAConfig else model.norm
+    reference = norm(reference)
     torch.testing.assert_close(outputs[0], reference)
     torch.testing.assert_close(hidden_states[-1], reference)
     gradient = torch.randn_like(reference)
-    parameters = (model.embeddings.weight, model.norm.weight)
+    parameters = (model.embeddings.weight, norm.weight)
     actual_gradients = torch.autograd.grad(outputs[0], parameters, grad_outputs=gradient)
     reference_gradients = torch.autograd.grad(reference, parameters, grad_outputs=gradient)
     torch.testing.assert_close(actual_gradients, reference_gradients)

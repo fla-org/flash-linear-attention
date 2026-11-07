@@ -8,6 +8,7 @@
 from typing import NamedTuple
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from fla.modules.residuals.base import BaseResidual
@@ -17,6 +18,28 @@ from fla.ops.attnres import fused_attnres
 class AttentionResidualState(NamedTuple):
     blocks: list[torch.Tensor]
     num_branches: int
+
+    @property
+    def hidden_states(self) -> torch.Tensor:
+        return self.blocks[-1]
+
+    def with_hidden_states(self, hidden_states: torch.Tensor) -> 'AttentionResidualState':
+        return AttentionResidualState([*self.blocks[:-1], hidden_states], self.num_branches)
+
+
+class AttentionResidualQuery(nn.Module):
+    """Depth query with zero initialization, giving equal initial weights to all residual sources."""
+
+    def __init__(self, hidden_size: int):
+        super().__init__()
+        self.weight = nn.Parameter(torch.empty(1, hidden_size))
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        nn.init.zeros_(self.weight)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return F.linear(x, self.weight)
 
 
 class AttentionResidual(BaseResidual[AttentionResidualState, AttentionResidualState]):
@@ -58,13 +81,13 @@ class AttentionResidual(BaseResidual[AttentionResidualState, AttentionResidualSt
         if isinstance(block_size, bool) or not isinstance(block_size, int) or block_size < 1:
             raise ValueError('block_size must be a positive integer')
         self.block_size = block_size
-        self.query = nn.Linear(hidden_size, 1, bias=False)
+        self.query = AttentionResidualQuery(hidden_size)
         self.attnres_norm = nn.RMSNorm(hidden_size, eps=self.norm.eps)
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
         super().reset_parameters()
-        nn.init.zeros_(self.query.weight)
+        self.query.reset_parameters()
         self.attnres_norm.reset_parameters()
 
     def initialize(self, x: torch.Tensor) -> AttentionResidualState:

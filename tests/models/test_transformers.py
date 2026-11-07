@@ -11,6 +11,7 @@ from torch import nn
 from transformers import AutoConfig, AutoModelForCausalLM
 
 from fla import models
+from fla.modules.residuals import AttentionResidual
 from fla.utils import find_spec_cached
 
 CONFIG_CLASSES = [getattr(models, name) for name in models.__all__ if name.endswith('Config')]
@@ -106,6 +107,9 @@ def test_initialization(config_class, block_size, make_model):
     )
     assert model.get_input_embeddings().weight[0].count_nonzero() == model.config.hidden_size
     assert all(torch.isfinite(parameter).all() for parameter in model.parameters())
+    queries = {module.query for module in model.modules() if isinstance(module, AttentionResidual)}
+    for query in queries:
+        assert query.weight.count_nonzero() == 0
     for module in model.modules():
         if isinstance(module, (nn.Linear, nn.Conv1d)):
             if getattr(module, '_is_attnres_proj', False):

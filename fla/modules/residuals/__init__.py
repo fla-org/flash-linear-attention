@@ -13,4 +13,17 @@ __all__ = [
     'AttentionResidual',
     'BaseResidual',
     'StandardResidual',
+    'create_residual',
 ]
+
+
+def create_residual(
+    hidden_size: int,
+    norm_eps: float = 1e-6,
+    fuse_norm: bool = True,
+    block_size: int | None = None,
+) -> BaseResidual:
+    """Create standard residuals for `block_size=None`, or attention residuals with the given block size."""
+    if block_size is None:
+        return StandardResidual(hidden_size=hidden_size, norm_eps=norm_eps, fuse_norm=fuse_norm, fuse_residual=True)
+    return AttentionResidual(hidden_size=hidden_size, block_size=block_size, norm_eps=norm_eps, fuse_norm=fuse_norm)

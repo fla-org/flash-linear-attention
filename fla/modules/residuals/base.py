@@ -6,14 +6,29 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 from abc import ABC, abstractmethod
-from typing import Generic, TypeVar
+from typing import Generic, Protocol, TypeVar
 
 import torch
 from torch import nn
+from typing_extensions import Self
 
 from fla.modules.norm import RMSNorm
 
-StateT = TypeVar('StateT')
+
+class ResidualState(Protocol):
+    """Current model-visible tensor and the residual history retained between layers."""
+
+    @property
+    def hidden_states(self) -> torch.Tensor:
+        """Current sum exposed by the model, before residual readout and normalization."""
+        ...
+
+    def with_hidden_states(self, hidden_states: torch.Tensor) -> Self:
+        """Replace the current tensor while retaining completed residual history."""
+        ...
+
+
+StateT = TypeVar('StateT', bound=ResidualState)
 ContextT = TypeVar('ContextT')
 
 
