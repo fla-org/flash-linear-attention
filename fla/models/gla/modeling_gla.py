@@ -103,7 +103,8 @@ class GLABlock(GradientCheckpointingLayer):
         hidden_states, context = self.mlp_residual.pre(state)
         hidden_states = self.mlp(hidden_states, **kwargs)
         state = self.mlp_residual.post(hidden_states, context)
-        return state.hidden_states, attentions, past_key_values, state
+        hidden_states = state.hidden_states
+        return hidden_states, attentions, past_key_values, state.with_hidden_states(hidden_states)
 
 
 class GLAPreTrainedModel(FLAPreTrainedModel):
