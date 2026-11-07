@@ -125,28 +125,17 @@ def chunk_momentum_delta_rule_ref(
 
     log_a_cum = log_alpha.squeeze(-1).cumsum(-1)
     log_m_cum = log_mu.squeeze(-1).cumsum(-1)
-    log_beta = (beta + 1e-6).squeeze(-1).log()
-
-    log_c_before = log_beta + log_m_cum - log_a_cum
-    log_ct = torch.logcumsumexp(log_c_before, dim=-1)
-    log_ct_tm1 = torch.cat(
-        [torch.full_like(log_ct[:, :, :, :1], float('-inf')), log_ct[:, :, :, :-1]], dim=-1,
-    )
-
-    a = log_ct.unsqueeze(-1)
-    b = log_ct_tm1.unsqueeze(-2)
-    x = (b - a).tril()
-    temp = 1 - torch.exp(x)
-
     log_bar_a_tm1 = torch.cat(
         [torch.zeros_like(log_a_cum[:, :, :, :1]), log_a_cum[:, :, :, :-1]], dim=3,
     )
     bar_a_tm1 = log_bar_a_tm1.exp()
 
-    b_t = (log_a_cum + log_ct).exp()
+    # within-chunk differences keep every exponent <= 0, so mu^-c never forms and 1 - exp() never cancels
+    decay_a = (log_a_cum.unsqueeze(-1) - log_a_cum.unsqueeze(-2)).tril().exp().tril()
+    decay_mu = (log_m_cum.unsqueeze(-1) - log_m_cum.unsqueeze(-2)).tril().exp().tril()
+    b_t = (decay_a @ (beta * log_m_cum.exp().unsqueeze(-1))).squeeze(-1)
     b_tm1 = torch.cat([torch.zeros_like(b_t[:, :, :, :1]), b_t[:, :, :, :-1]], dim=3)
-
-    gamma_mask_q = (log_a_cum.unsqueeze(-1) - log_m_cum.unsqueeze(-2) + a).exp().float().tril() * temp
+    gamma_mask_q = decay_a @ (beta * decay_mu)
     gamma_mask = torch.cat(
         [torch.zeros_like(gamma_mask_q[:, :, :, :1]), gamma_mask_q[:, :, :, :-1]], dim=3,
     )

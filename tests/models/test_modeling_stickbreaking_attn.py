@@ -12,6 +12,8 @@ from transformers import AutoConfig, AutoModel, AutoModelForCausalLM
 from fla.models import StickBreakingAttentionConfig, StickBreakingAttentionForCausalLM, StickBreakingAttentionModel
 from fla.utils import IS_AMD, IS_INTEL, IS_NVIDIA, assert_close, device
 
+from .utils import check_generation
+
 TOL = {torch.float16: 0.005, torch.bfloat16: 0.02}
 
 
@@ -44,20 +46,11 @@ def test_registration_and_checkpoint(tmp_path):
         assert torch.equal(value, restored.state_dict()[name]), name
 
 
-@pytest.mark.parametrize(
-    'kwargs',
-    [{'use_cache': True}, {'past_key_values': ()}, {'output_attentions': True}],
-    ids=['cache', 'past', 'attention-matrix'],
-)
+@pytest.mark.parametrize('kwargs', [{'output_attentions': True}], ids=['attention-matrix'])
 def test_rejects_unsupported_outputs(kwargs):
     model = AutoModelForCausalLM.from_config(_config())
     with pytest.raises(NotImplementedError):
         model(input_ids=torch.ones(1, 3, dtype=torch.long), **kwargs)
-
-
-def test_rejects_cache_configuration():
-    with pytest.raises(ValueError, match='does not support KV-cache'):
-        _config(use_cache=True)
 
 
 @pytest.mark.skipif(not (IS_NVIDIA or IS_AMD or IS_INTEL), reason="Requires a supported GPU")
@@ -157,3 +150,51 @@ def test_generation_matches_full_prefix(attend_current):
             expected = torch.cat((expected, logits[:, -1].argmax(-1, keepdim=True)), dim=1)
             expected_mask = torch.cat((expected_mask, torch.ones_like(expected_mask[:, :1])), dim=1)
     assert torch.equal(generated, expected)
+
+
+@pytest.mark.skipif(not (IS_NVIDIA or IS_AMD or IS_INTEL), reason="Requires a supported GPU")
+@pytest.mark.parametrize('attend_current', [False, True])
+def test_cached_generation_matches_full_prefix(attend_current):
+    torch.manual_seed(42)
+    model = AutoModelForCausalLM.from_config(_config(attend_current=attend_current)).to(device=device, dtype=torch.bfloat16)
+    model.eval()
+    ids = torch.randint(3, 64, (2, 9), device=device)
+    mask = torch.ones_like(ids)
+    ids[0, :3], mask[0, :3] = 0, 0
+    with torch.no_grad():
+        generated = model.generate(
+            input_ids=ids,
+            attention_mask=mask,
+            max_new_tokens=4,
+            do_sample=False,
+            use_cache=True,
+            eos_token_id=None,
+            output_logits=True,
+            return_dict_in_generate=True,
+        )
+        sequences = generated.sequences[:, :-1]
+        mask = torch.cat((mask, torch.ones_like(sequences[:, ids.shape[1]:])), dim=1)
+        # one uncached forward over the generated tokens scores every step,
+        # and comparing logits rather than tokens keeps near-tied argmaxes in bf16 from failing the test
+        expected = model(input_ids=sequences, attention_mask=mask, use_cache=False).logits[:, ids.shape[1] - 1:]
+    assert_close(prefix='logits', ref=expected, tri=torch.stack(generated.logits, dim=1), ratio=TOL[torch.bfloat16])
+
+
+@pytest.mark.skipif(not (IS_NVIDIA or IS_AMD or IS_INTEL), reason="Requires a supported GPU")
+@pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16], ids=['fp16', 'bf16'])
+@pytest.mark.parametrize('attend_current', [False, True])
+def test_generation(dtype, attend_current):
+    config = _config(attend_current=attend_current)
+    model = AutoModelForCausalLM.from_config(config)
+    check_generation(
+        L=config.num_hidden_layers,
+        B=4,
+        T=100,
+        H=config.num_heads,
+        D=config.hidden_size // config.num_heads,
+        config_class=StickBreakingAttentionConfig,
+        dtype=dtype,
+        model=model,
+        config=config,
+        tol=TOL[dtype],
+    )

@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from fla.ops.stickbreaking_attn import naive_stickbreaking_attn, parallel_stickbreaking_attn
+from fla.ops.stickbreaking_attn.decoding import stickbreaking_attn_decoding
 from fla.utils import FLA_DISABLE_TENSOR_CACHE, IS_AMD, IS_INTEL_ALCHEMIST, IS_NVIDIA, assert_close, check_shared_mem, device
 
 TOL = {torch.float16: 0.005, torch.bfloat16: 0.02}
@@ -334,9 +335,120 @@ def test_parallel_cuda_graph(cu_seqlens: list[int] | None):
         assert torch.equal(x, y)
 
 
-@pytest.mark.parametrize("op", [naive_stickbreaking_attn, parallel_stickbreaking_attn], ids=["naive", "parallel"])
+@pytest.mark.parametrize(
+    ('B', 'T', 'TQ', 'H', 'HQ', 'K', 'V', 'z', 'attend_current', 'cu_seqlens'),
+    [
+        pytest.param(*test, id="B{}-T{}-TQ{}-H{}-HQ{}-K{}-V{}-z{}-attend_current{}-cu_seqlens{}".format(*test))
+        for test in [
+            (3, 1, 1, 2, 2, 64, 64, None, False, None),
+            (3, 1, 1, 2, 2, 64, 64, None, True, None),
+            (2, 33, 1, 2, 8, 100, 100, None, True, None),
+            (2, 300, 1, 1, 4, 128, 64, None, False, None),
+            (2, 70, 6, 2, 4, 64, 64, None, False, None),
+            (2, 65, 65, 1, 2, 32, 32, None, True, None),
+            (1, 603, 1, 2, 8, 60, 60, None, True, [0, 0, 1, 16, 47, 79, 112, 176, 303, 603]),
+            (1, 603, 20, 1, 4, 256, 256, None, False, [0, 0, 1, 16, 47, 79, 112, 176, 303, 603]),
+            (2, 1000, 1, 2, 4, 64, 64, -6.4, True, None),
+            (1, 603, 3, 1, 2, 32, 32, -6.4, False, [0, 0, 1, 16, 47, 79, 112, 176, 303, 603]),
+            (1, 603, 1, 1, 2, 32, 32, 11., True, [0, 0, 1, 16, 47, 79, 112, 176, 303, 603]),
+            (2, 100, 4, 1, 2, 32, 32, 20., False, None),
+        ]
+    ],
+)
+@pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16], ids=['fp16', 'bf16'])
+@pytest.mark.smoke
+def test_decoding(
+    B: int,
+    T: int,
+    TQ: int,
+    H: int,
+    HQ: int,
+    K: int,
+    V: int,
+    z: float | None,
+    attend_current: bool,
+    cu_seqlens: list[int] | None,
+    dtype: torch.dtype,
+):
+    torch.manual_seed(42)
+    if z is None:
+        scale = None
+        q = torch.randn((B, T, HQ, K), dtype=dtype, device=device)
+        k = torch.randn((B, T, H, K), dtype=dtype, device=device)
+    else:
+        # every logit is z plus a small jitter: a negative z keeps the stick alive for distant key blocks,
+        # and a large z makes the nearest key take the whole stick, past z = 10.4 on the linear branch of softplus2
+        scale = 1.
+        q, k = 0.25 * torch.randn((B, T, HQ, K), device=device), 0.25 * torch.randn((B, T, H, K), device=device)
+        q[..., 0], k[..., 0] = z, 1
+        q, k = q.to(dtype), k.to(dtype)
+    v = torch.randn((B, T, H, V), dtype=dtype, device=device)
+    kwargs = dict(scale=scale, attend_current=attend_current)
+    if cu_seqlens is None:
+        rows, cu_seqlens_q = torch.arange(T - TQ, T, device=device), None
+        ref = naive_stickbreaking_attn(q=q.double(), k=k.double(), v=v.double(), **kwargs)
+    else:
+        # each sequence has up to TQ queries at its end, so a shorter one has fewer and an empty one has none
+        lens_q = [min(TQ, eos - bos) for bos, eos in zip(cu_seqlens[:-1], cu_seqlens[1:], strict=True)]
+        rows = torch.tensor([i for eos, n in zip(cu_seqlens[1:], lens_q, strict=True) for i in range(eos - n, eos)])
+        rows = rows.to(device)
+        cu_seqlens_q = torch.tensor([0, *lens_q], device=device).cumsum(0).to(torch.int32)
+        ref = _naive_varlen(q=q.double(), k=k.double(), v=v.double(), cu_seqlens=cu_seqlens, **kwargs)
+        cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
+
+    tri = stickbreaking_attn_decoding(
+        q=q[:, rows].requires_grad_(),
+        k=k,
+        v=v,
+        cu_seqlens_q=cu_seqlens_q,
+        cu_seqlens_k=cu_seqlens,
+        **kwargs,
+    )
+    for name, x, y in zip(("o", "rem"), ref, tri, strict=True):
+        assert_close(prefix=name, ref=x[:, rows].to(dtype), tri=y, ratio=TOL[dtype])
+    # the new queries must agree with their rows of the full forward over the same sequences
+    if check_shared_mem(arch='hopper') or max(K, V) <= 128:
+        full = parallel_stickbreaking_attn(q=q, k=k, v=v, cu_seqlens=cu_seqlens, **kwargs)
+        for name, x, y in zip(("full o", "full rem"), full, tri, strict=True):
+            assert_close(prefix=name, ref=x[:, rows], tri=y, ratio=TOL[dtype])
+    with pytest.raises(NotImplementedError, match='forward only'):
+        tri[0].sum().backward()
+
+
+@pytest.mark.parametrize(
+    ("q_shape", "k_shape", "v_shape", "cu_seqlens", "match"),
+    [
+        ((2, 9, 2, 16), (2, 8, 2, 16), (2, 8, 2, 16), None, "Expected q, k and v of shapes"),
+        ((2, 1, 2, 16), (1, 8, 2, 16), (1, 8, 2, 16), None, "Expected q, k and v of shapes"),
+        ((1, 2, 2, 16), (1, 8, 2, 16), (1, 8, 2, 16), ([0, 1, 2], [0, 8]), "Expected q, k and v of shapes"),
+        ((1, 2, 2, 16), (1, 8, 2, 16), (1, 8, 2, 16), ([0, 1, 2], None), "Expected q, k and v of shapes"),
+        ((2, 1, 2, 16), (2, 8, 2, 16), (2, 8, 2, 16), ([0, 1, 2], [0, 4, 8]), "Expected q, k and v of shapes"),
+        ((1, 1, 2, 16), (1, 8, 2, 16), (1, 4, 2, 16), None, "Expected q, k and v of shapes"),
+        ((1, 1, 2, 32), (1, 8, 2, 16), (1, 8, 2, 16), None, "Expected q, k and v of shapes"),
+        ((1, 1, 2, 257), (1, 8, 2, 257), (1, 8, 2, 64), None, "key dimension"),
+        ((1, 1, 2, 64), (1, 8, 2, 64), (1, 8, 2, 257), None, "value dimension"),
+    ],
+    ids=["more-queries", "batch", "sequence-count", "one-cu_seqlens", "batched-varlen", "value-length", "key-dim", "K", "V"],
+)
+def test_decoding_rejects_invalid_shapes(q_shape, k_shape, v_shape, cu_seqlens, match):
+    cu_seqlens_q, cu_seqlens_k = cu_seqlens or (None, None)
+    with pytest.raises(ValueError, match=match):
+        stickbreaking_attn_decoding(
+            q=torch.empty(q_shape),
+            k=torch.empty(k_shape),
+            v=torch.empty(v_shape),
+            cu_seqlens_q=None if cu_seqlens_q is None else torch.tensor(cu_seqlens_q, dtype=torch.int32),
+            cu_seqlens_k=None if cu_seqlens_k is None else torch.tensor(cu_seqlens_k, dtype=torch.int32),
+        )
+
+
+@pytest.mark.parametrize(
+    "op",
+    [naive_stickbreaking_attn, parallel_stickbreaking_attn, stickbreaking_attn_decoding],
+    ids=["naive", "parallel", "decoding"],
+)
 @pytest.mark.parametrize(("HQ", "H"), [(3, 2), (1, 2), (2, 0)], ids=["remainder", "fewer-query-heads", "zero-kv-heads"])
-def test_parallel_rejects_invalid_gqa_head_counts(op, HQ, H):
+def test_rejects_invalid_gqa_head_counts(op, HQ, H):
     q = torch.empty(1, 1, HQ, 16)
     k = torch.empty(1, 1, H, 16)
     v = torch.empty_like(k)

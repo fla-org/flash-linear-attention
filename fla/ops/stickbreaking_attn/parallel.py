@@ -602,7 +602,7 @@ def parallel_stickbreaking_attn(
         raise ValueError(
             f"Expected q, k and v of shapes [B, T, HQ, K], [B, T, H, K] and [B, T, H, V], "
             f"got {tuple(q.shape)}, {tuple(k.shape)} and {tuple(v.shape)}. "
-            f"Decoding against a longer key/value prefix is not supported.",
+            f"For queries over a longer key/value prefix, use stickbreaking_attn_decoding.",
         )
     if scale is None:
         scale = k.shape[-1] ** -0.5

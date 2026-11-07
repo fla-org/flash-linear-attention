@@ -13,6 +13,7 @@ from fla.layers.comba import Comba
 from fla.layers.delta_net import DeltaNet
 from fla.layers.gated_deltanet import GatedDeltaNet
 from fla.layers.gated_deltaproduct import GatedDeltaProduct
+from fla.layers.gka import GatedKalmaNet
 from fla.layers.gla import GatedLinearAttention
 from fla.layers.gsa import GatedSlotAttention
 from fla.layers.hgrn import HGRNAttention
@@ -31,6 +32,7 @@ from fla.layers.rodimus import RodimusAttention
 from fla.layers.rwkv6 import RWKV6Attention
 from fla.layers.rwkv7 import RWKV7Attention
 from fla.layers.simple_gla import SimpleGatedLinearAttention
+from fla.layers.stickbreaking_attn import StickBreakingAttention
 from fla.utils import device
 
 
@@ -128,6 +130,11 @@ CACHE_REQUIRES_LAYER_IDX_CASES = [
         id="mesa_net",
     ),
     pytest.param(
+        lambda: GatedKalmaNet(hidden_size=16, num_heads=4, head_dim=16),
+        torch.randn(1, 2, 16),
+        id="gka",
+    ),
+    pytest.param(
         lambda: KimiDeltaAttention(hidden_size=16, num_heads=4),
         torch.randn(1, 2, 16),
         id="kda",
@@ -171,6 +178,11 @@ CACHE_REQUIRES_LAYER_IDX_CASES = [
         lambda: Comba(hidden_size=16, num_heads=4),
         torch.randn(1, 2, 16),
         id="comba",
+    ),
+    pytest.param(
+        lambda: StickBreakingAttention(hidden_size=16, num_heads=4),
+        torch.randn(1, 2, 16),
+        id="stickbreaking_attn",
     ),
 ]
 

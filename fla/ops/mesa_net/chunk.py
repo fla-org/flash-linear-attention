@@ -182,6 +182,31 @@ def chunk_fwd_mesa_net_bwd(
     return dq, dk, dv, dg, dbeta, dlamb, -dh0_kk if dh0_kk is not None else None, dh0_kv if dh0_kv is not None else None
 
 
+def _upstream_grad_scale(*grads: torch.Tensor | None) -> torch.Tensor:
+    """
+    Power-of-two factor that lifts the largest magnitude among `grads` into `[0.5, 1)`.
+
+    The factor is 1 when that magnitude is already at least 0.5, zero, or non-finite.
+    """
+    amax = torch.stack([torch.linalg.vector_norm(g, float('inf')).float() for g in grads if g is not None]).amax()
+    # amax lies in [2^(e-1), 2^e), so amax * 2^-e lies in [0.5, 1)
+    e = torch.floor(torch.log2(amax)).clamp(min=-127) + 1
+    return torch.where(amax.isfinite() & (amax > 0) & (e < 0), torch.exp2(-e), torch.ones_like(amax))
+
+
+def _rescale(x: torch.Tensor | None, scale: torch.Tensor, dtype: torch.dtype | None = None) -> torch.Tensor | None:
+    """
+    Returns `x * scale` in `dtype` (default: the dtype of `x`), which is exact for a power-of-two `scale`.
+    """
+    if x is None:
+        return None
+    dtype = dtype or x.dtype
+    # fp16 cannot represent every power of two used here, so it goes through fp32
+    if dtype == torch.float16:
+        return (x.float() * scale).to(dtype)
+    return x.to(dtype) * scale
+
+
 class ChunkMesaNetFunction(torch.autograd.Function):
     @staticmethod
     @input_guard
@@ -212,6 +237,8 @@ class ChunkMesaNetFunction(torch.autograd.Function):
         else:
             chunk_indices = None
 
+        # dq and dk are computed in fp16; the backward returns them in these input dtypes
+        ctx.q_dtype, ctx.k_dtype = q.dtype, k.dtype
         if use_qk_l2norm_in_kernel:
             q, q_rstd = l2norm_fwd(q, output_dtype=torch.float16)
             k, k_rstd = l2norm_fwd(k, output_dtype=torch.float16)
@@ -279,6 +306,10 @@ class ChunkMesaNetFunction(torch.autograd.Function):
         max_CG_iteration = ctx.max_CG_iteration
         chunk_size = ctx.chunk_size
         cu_seqlens = ctx.cu_seqlens
+        # the backward keeps fp16 intermediates and adds an absolute epsilon in the CG solver,
+        # so run it on upstream gradients rescaled to unit magnitude; a power of two keeps the rescaling exact
+        scale = _upstream_grad_scale(do, dh_kk_final, dh_kv_final)
+        do, dh_kk_final, dh_kv_final = (_rescale(x, scale) for x in (do, dh_kk_final, dh_kv_final))
         dq, dk, dv, dg, dbeta, dlamb, dh0_kk, dh0_kv = chunk_fwd_mesa_net_bwd(
             q=q,
             k=k,
@@ -300,6 +331,10 @@ class ChunkMesaNetFunction(torch.autograd.Function):
         if ctx.use_qk_l2norm_in_kernel:
             dq = l2norm_bwd(q, q_rstd, dq)
             dk = l2norm_bwd(k, k_rstd, dk)
+        # undo the rescaling only after leaving fp16, which cannot hold the small gradients
+        inv_scale = scale.reciprocal()
+        dq, dk = _rescale(dq, inv_scale, ctx.q_dtype), _rescale(dk, inv_scale, ctx.k_dtype)
+        dv, dg, dbeta, dlamb, dh0_kk, dh0_kv = (_rescale(x, inv_scale) for x in (dv, dg, dbeta, dlamb, dh0_kk, dh0_kv))
         return dq, dk, dv.to(v), dg.to(g), dbeta.to(beta), dlamb.to(lamb), None, None, None, dh0_kk, dh0_kv, None, None
 
 

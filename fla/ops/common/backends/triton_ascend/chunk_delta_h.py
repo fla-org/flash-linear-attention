@@ -13,6 +13,8 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.backends import TritonAscendBackend, register
+from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu, chunk_gated_delta_rule_fwd_h
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 from fla.ops.utils.op import exp2
 from fla.utils import input_guard
@@ -630,6 +632,7 @@ def _prepare_fwd_gk_last_exp(
     return gk, None
 
 
+@register(chunk_gated_delta_rule_fwd_h, backend=TritonAscendBackend)
 @input_guard
 def chunk_gated_delta_rule_fwd_h_npu(
     k: torch.Tensor,
@@ -1124,6 +1127,7 @@ def _prepare_dhu_gate_tensors(
     return g_log, None, None, None, False
 
 
+@register(chunk_gated_delta_rule_bwd_dhu, backend=TritonAscendBackend)
 @input_guard
 def chunk_gated_delta_rule_bwd_dhu_npu(
     q: torch.Tensor,

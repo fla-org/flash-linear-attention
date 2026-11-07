@@ -29,6 +29,38 @@ def _full_causal_attn(q, k, v, cu_seqlens, max_seqlen):
     ).unsqueeze(0)
 
 
+def _naive_moba(q, k, v, cu_seqlens, chunk_size, topk):
+    # Selects with torch.topk over a contiguous chunk axis and attends through an explicit mask, so
+    # it shares only the gate definition with `parallel_moba`: a token scores each strictly earlier
+    # chunk of its own sequence by its query against the chunk's mean key, keeps the top `topk - 1`,
+    # and attends to them plus the causal prefix of its own chunk.
+    H, D = q.shape[-2:]
+    num_target_chunks = sum(
+        (eos - bos - 1) // chunk_size for bos, eos in zip(cu_seqlens[:-1], cu_seqlens[1:], strict=True)
+    )
+    k_sel = min(topk - 1, num_target_chunks)
+    o = torch.empty_like(q, dtype=torch.float)
+    for bos, eos in zip(cu_seqlens[:-1], cu_seqlens[1:], strict=True):
+        q_i, k_i, v_i = (x[0, bos:eos] for x in (q, k, v))
+        T, num_chunks = eos - bos, (eos - bos + chunk_size - 1) // chunk_size
+        chunk = torch.arange(T, device=q.device) // chunk_size
+        mean_k = torch.stack([k_i[j * chunk_size:(j + 1) * chunk_size].mean(0) for j in range(num_chunks)]).float()
+        gate = torch.einsum('thd,nhd->thn', q_i.float(), mean_k)
+        earlier = torch.arange(num_chunks, device=q.device)[None, :] < chunk[:, None]
+        gate = gate.masked_fill(~earlier[:, None, :], float('-inf'))
+        picked = torch.zeros_like(gate, dtype=torch.bool)
+        if min(k_sel, num_chunks) > 0:
+            picked.scatter_(-1, gate.topk(min(k_sel, num_chunks), dim=-1).indices, True)
+        picked &= earlier[:, None, :]
+        # [H, T, T]: own-chunk causal prefix, or a key in a chunk this (token, head) picked
+        causal = torch.ones(T, T, dtype=torch.bool, device=q.device).tril()
+        allowed = (causal & (chunk[:, None] == chunk[None, :]))[None] | picked.permute(1, 0, 2)[..., chunk]
+        scores = torch.einsum('thd,shd->hts', q_i.float(), k_i.float()) * D ** -0.5
+        p = scores.masked_fill(~allowed, float('-inf')).softmax(-1)
+        o[0, bos:eos] = torch.einsum('hts,shd->thd', p, v_i.float())
+    return o.to(q.dtype)
+
+
 # When `topk - 1` is large enough to cover every earlier chunk, MoBA's
 # per-query attention set equals (chunk-local causal prefix) ∪ (all earlier
 # chunks), which is exactly full causal attention. This gives a deterministic
@@ -132,6 +164,36 @@ def test_parallel_moba_backward():
     assert_close("dq", ref_dq, q.grad, 0.005)
     assert_close("dk", ref_dk, k.grad, 0.005)
     assert_close("dv", ref_dv, v.grad, 0.005)
+
+
+# With `topk - 1` below the number of earlier chunks, which chunks are picked decides the output,
+# so this checks the selection itself rather than only that it is sparse.
+@pytest.mark.skipif(flash_attn_varlen_func is None, reason="flash-attn is required")
+@pytest.mark.parametrize(
+    ('cu_seqlens', 'H', 'D', 'chunk_size', 'topk'),
+    [
+        pytest.param(*test, id="cs{}-H{}-D{}-C{}-K{}".format(*test))
+        for test in [
+            ([0, 512], 4, 64, 64, 3),
+            ([0, 200, 600, 1024], 4, 64, 64, 3),
+            ([0, 300, 1100], 2, 128, 128, 4),
+        ]
+    ],
+)
+def test_parallel_moba_selects_top_scoring_chunks(cu_seqlens, H, D, chunk_size, topk):
+    torch.manual_seed(42)
+    T = cu_seqlens[-1]
+    dtype = torch.float16
+    q = torch.randn((1, T, H, D), dtype=dtype, device=device)
+    k = torch.randn((1, T, H, D), dtype=dtype, device=device)
+    v = torch.randn((1, T, H, D), dtype=dtype, device=device)
+    cu_seqlens_th = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
+    max_seqlen = max(b - a for a, b in zip(cu_seqlens[:-1], cu_seqlens[1:], strict=True))
+
+    o_moba = parallel_moba(q, k, v, cu_seqlens_th, max_seqlen, chunk_size, topk)
+    o_ref = _naive_moba(q, k, v, cu_seqlens, chunk_size, topk)
+
+    assert_close(" o", o_ref, o_moba, 0.005)
 
 
 # Enforce the fla varlen convention: `cu_seqlens` requires B=1.

@@ -44,6 +44,7 @@ def test_chunk(
         pytest.skip(reason="Current CI do not support this config")
     if T > 1000:
         pytest.skip(reason="Current CI do not support this config")
+    torch.manual_seed(42)
     eta_base = 5e-3
     q = torch.randn(B, T, H, D, dtype=dtype)
     k = F.normalize(torch.randn(B, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
@@ -136,6 +137,7 @@ def test_fused_chunk(
         pytest.skip(reason="Current CI do not support this config")
     if T > 1000:
         pytest.skip(reason="Current CI do not support this config")
+    torch.manual_seed(42)
     eta_base = 5e-3
     q = torch.randn(B, T, H, D, dtype=dtype)
     k = F.normalize(torch.randn(B, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)

@@ -54,9 +54,11 @@ def naive_recurrent_comba(
         b_k = k[:, :, i]
         b_v = v[:, :, i].clone()
         b_p = p[:, :, i]
-        h = h.clone() * g[:, :, i].exp()[..., None, None]
         b_beta = beta[:, :, i]
+        # The closed-loop correction reads the state before this step's decay,
+        # as in the fused recurrent and chunk kernels
         b_v = b_v - (h.clone() * b_p[..., None]).sum(-2)
+        h = h.clone() * g[:, :, i].exp()[..., None, None]
         b_v = b_v * b_beta[..., None]
         h = h.clone() + b_k.unsqueeze(-1) * b_v.unsqueeze(-2)
         o[:, :, i] = torch.einsum('bhd,bhdm->bhm', b_q, h)
