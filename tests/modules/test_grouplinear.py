@@ -10,7 +10,7 @@ import torch
 import torch.nn.functional as F
 
 from fla.modules import GroupLinear
-from fla.utils import IS_NPU, assert_close, device, device_torch_lib
+from fla.utils import assert_close, device, device_torch_lib
 
 
 @pytest.mark.parametrize(
@@ -18,8 +18,7 @@ from fla.utils import IS_NPU, assert_close, device, device_torch_lib
     [
         ((2, 7), 5, 1, True, False, torch.float32),
         ((2, 3, 12), 20, 4, False, True, torch.float32),
-        # addmm on NPU does not support float64.
-        ((2, 3, 16), 16, 4, True, False, torch.float32 if IS_NPU else torch.float64),
+        ((2, 3, 16), 16, 4, True, False, torch.float64),
         ((5,), 10, 5, True, False, torch.float32),
         ((2, 3, 12), 8, 4, True, False, torch.bfloat16),
     ],
