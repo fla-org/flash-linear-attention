@@ -71,15 +71,26 @@ def test_generation(L, B, T, H, D, dtype, block_size):
     check_generation(L, B, T, H, D, GLAConfig, dtype, model=model, config=config)
 
 
+def _check_residual_gradients(model, x, ref, tri):
+    do = torch.randn_like(tri)
+    parameters = {'x': x, **dict(model.named_parameters())}
+    ref_grads = torch.autograd.grad(ref, tuple(parameters.values()), do, allow_unused=True)
+    tri_grads = torch.autograd.grad(tri, tuple(parameters.values()), do, allow_unused=True)
+    for name, ref_grad, tri_grad in zip(parameters, ref_grads, tri_grads, strict=True):
+        if ref_grad is None:
+            assert tri_grad is None, name
+        else:
+            assert tri_grad is not None and torch.isfinite(tri_grad).all(), name
+            assert_close(name, ref_grad, tri_grad, 1e-3)
+
+
 @pytest.mark.skipif(device_platform == 'cpu', reason='GLA kernels require an accelerator')
-@pytest.mark.parametrize(('block_size', 'fuse_norm', 'dtype'), [
-    pytest.param(None, True, torch.bfloat16, id='standard-fused'),
-    pytest.param(None, False, torch.float16, id='standard-unfused'),
-    pytest.param(1, True, torch.bfloat16, id='full-attnres'),
-    pytest.param(4, True, torch.float16, id='block-attnres'),
+@pytest.mark.parametrize(('fuse_norm', 'dtype'), [
+    pytest.param(True, torch.bfloat16, id='fused-bf16'),
+    pytest.param(False, torch.float16, id='unfused-fp16'),
 ])
-def test_residual(block_size, fuse_norm, dtype):
-    """Compare three GLA layers with explicit residual accumulation, including every layer output and gradient."""
+def test_standard_residual(fuse_norm: bool, dtype: torch.dtype):
+    """Match three pre-norm GLA layers, including fused addition rounding and all training gradients."""
     torch.manual_seed(42)
     model = GLAModel(GLAConfig(
         hidden_size=128,
@@ -87,8 +98,45 @@ def test_residual(block_size, fuse_norm, dtype):
         num_heads=2,
         intermediate_size=256,
         vocab_size=128,
-        attnres_block_size=block_size,
         fuse_norm=fuse_norm,
+        use_cache=False,
+    )).to(device=device, dtype=dtype)
+    x = torch.randn(2, 65, 128, device=device, dtype=dtype, requires_grad=True)
+    tri = model(inputs_embeds=x, output_hidden_states=True)
+
+    hidden_states, ref_hidden_states = x, []
+    for layer in model.layers:
+        ref_hidden_states.append(hidden_states)
+        branch_output = layer.attn(layer.residual_attn.norm(hidden_states))[0]
+        if fuse_norm:
+            mlp_input, residual = layer.residual_mlp.norm(branch_output, hidden_states, prenorm=True)
+        else:
+            residual = hidden_states + branch_output
+            mlp_input = layer.residual_mlp.norm(residual)
+        hidden_states = residual + layer.mlp(mlp_input)
+    ref_hidden_states.append(model.residual_output.norm(hidden_states))
+
+    for i, (ref, out) in enumerate(zip(ref_hidden_states, tri.hidden_states, strict=True)):
+        assert_close(f'layer_{i}', ref, out, 1e-3)
+    _check_residual_gradients(model, x, ref_hidden_states[-1], tri.last_hidden_state)
+
+
+@pytest.mark.skipif(device_platform == 'cpu', reason='GLA kernels require an accelerator')
+@pytest.mark.parametrize(('block_size', 'dtype'), [
+    pytest.param(1, torch.bfloat16, id='full-bf16'),
+    pytest.param(4, torch.float16, id='block-fp16'),
+])
+def test_attention_residual(block_size: int, dtype: torch.dtype):
+    """Match six GLA branches with explicit completed blocks and a partial sum, including gradients."""
+    torch.manual_seed(42)
+    model = GLAModel(GLAConfig(
+        hidden_size=128,
+        num_hidden_layers=3,
+        num_heads=2,
+        intermediate_size=256,
+        vocab_size=128,
+        residual_type='attnres',
+        residual_kwargs={'block_size': block_size},
         use_cache=False,
     )).to(device=device, dtype=dtype)
     with torch.no_grad():
@@ -96,67 +144,45 @@ def test_residual(block_size, fuse_norm, dtype):
             if name.endswith('query.weight'):
                 parameter.normal_(std=0.03)
     x = torch.randn(2, 65, 128, device=device, dtype=dtype, requires_grad=True)
-    actual = model(inputs_embeds=x, output_hidden_states=True)
+    tri = model(inputs_embeds=x, output_hidden_states=True)
 
-    expected_hidden_states = []
-    if block_size is None:
-        hidden_states = x
-        for layer in model.layers:
-            expected_hidden_states.append(hidden_states)
-            branch_output = layer.attn(layer.residual_attn.norm(hidden_states))[0]
-            if fuse_norm:
-                mlp_input, residual = layer.residual_mlp.norm(branch_output, hidden_states, prenorm=True)
+    blocks, partial, ref_hidden_states = [x], None, []
+    for layer_idx, layer in enumerate(model.layers):
+        ref_hidden_states.append(x if partial is None else partial)
+        for branch_idx, (residual, branch) in enumerate([
+            (layer.residual_attn, layer.attn),
+            (layer.residual_mlp, layer.mlp),
+        ]):
+            index = 2 * layer_idx + branch_idx
+            if index == 0:
+                branch_input = residual.norm(x)
             else:
-                residual = hidden_states + branch_output
-                mlp_input = layer.residual_mlp.norm(residual)
-            hidden_states = residual + layer.mlp(mlp_input)
-        expected_hidden_states.append(model.residual_output.norm(hidden_states))
-    else:
-        blocks, partial = [x], None
-        for layer_idx, layer in enumerate(model.layers):
-            expected_hidden_states.append(x if partial is None else partial)
-            for branch_idx, (residual, branch) in enumerate([
-                (layer.residual_attn, layer.attn),
-                (layer.residual_mlp, layer.mlp),
-            ]):
-                index = 2 * layer_idx + branch_idx
-                if index == 0:
-                    branch_input = residual.norm(x)
-                else:
-                    sources = [*blocks, partial]
-                    branch_input = fused_attnres(
-                        query=residual.query.weight,
-                        residuals=sources,
-                        rms_weight=residual.attnres_norm.weight,
-                        output_rms_weight=residual.norm.weight,
-                        rms_eps=residual.norm.eps,
-                    )
-                    if index % block_size == 0:
-                        blocks, partial = sources, None
-                branch_output = branch(branch_input)
-                if branch_idx == 0:
-                    branch_output = branch_output[0]
-                partial = branch_output if partial is None else partial + branch_output
-        output = model.residual_output
-        expected_hidden_states.append(fused_attnres(
-            query=output.query.weight,
-            residuals=[*blocks, partial],
-            rms_weight=output.attnres_norm.weight,
-            output_rms_weight=output.norm.weight,
-            rms_eps=output.norm.eps,
-        ))
-    for expected, hidden in zip(expected_hidden_states, actual.hidden_states, strict=True):
-        assert_close('hidden_states', expected, hidden, 1e-3)
-    parameters = (x, *model.parameters())
-    gradient = torch.randn_like(actual.last_hidden_state)
-    actual_grads = torch.autograd.grad(actual.last_hidden_state, parameters, gradient, allow_unused=True)
-    expected_grads = torch.autograd.grad(expected_hidden_states[-1], parameters, gradient, allow_unused=True)
-    for expected, actual in zip(expected_grads, actual_grads, strict=True):
-        if expected is None:
-            assert actual is None
-        else:
-            assert actual is not None and torch.isfinite(actual).all()
-            assert_close('gradient', expected, actual, 1e-3)
+                sources = [*blocks, partial]
+                branch_input = fused_attnres(
+                    query=residual.query.weight,
+                    residuals=sources,
+                    rms_weight=residual.attnres_norm.weight,
+                    output_rms_weight=residual.norm.weight,
+                    rms_eps=residual.norm.eps,
+                )
+                if index % block_size == 0:
+                    blocks, partial = sources, None
+            branch_output = branch(branch_input)
+            if branch_idx == 0:
+                branch_output = branch_output[0]
+            partial = branch_output if partial is None else partial + branch_output
+    output = model.residual_output
+    ref_hidden_states.append(fused_attnres(
+        query=output.query.weight,
+        residuals=[*blocks, partial],
+        rms_weight=output.attnres_norm.weight,
+        output_rms_weight=output.norm.weight,
+        rms_eps=output.norm.eps,
+    ))
+
+    for i, (ref, out) in enumerate(zip(ref_hidden_states, tri.hidden_states, strict=True)):
+        assert_close(f'layer_{i}', ref, out, 1e-3)
+    _check_residual_gradients(model, x, ref_hidden_states[-1], tri.last_hidden_state)
 
 
 @pytest.mark.skipif(device_platform == 'cpu', reason='GLA checkpointing requires an accelerator')

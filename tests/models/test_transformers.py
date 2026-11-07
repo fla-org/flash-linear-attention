@@ -112,9 +112,11 @@ def test_initialization(config_class, block_size, make_model):
     assert model.get_input_embeddings().weight[0].count_nonzero() == model.config.hidden_size
     assert all(torch.isfinite(parameter).all() for parameter in model.parameters())
     queries = {module.query for module in model.modules() if isinstance(module, AttentionResidual)}
+    for query in queries:
+        assert query.weight.count_nonzero() == 0
     for module in model.modules():
         if isinstance(module, (nn.Linear, nn.Conv1d)):
-            if module in queries or getattr(module, '_is_attnres_proj', False):
+            if getattr(module, '_is_attnres_proj', False):
                 assert module.weight.count_nonzero() == 0
             else:
                 assert module.weight.count_nonzero() > 0

@@ -8,16 +8,13 @@
 from __future__ import annotations
 
 import math
-import re
 import warnings
 from copy import copy
 from functools import partial
 
 import torch
 from torch import nn
-from torch.utils._pytree import tree_flatten, tree_unflatten
 from transformers.configuration_utils import PretrainedConfig
-from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils.deprecation import deprecate_kwarg
@@ -28,7 +25,7 @@ from fla.models.cache_utils import Cache
 from fla.models.configuration_utils import get_attention_spec
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
 from fla.modules.l2warp import l2_warp
-from fla.modules.residuals import BaseResidual
+from fla.modules.residuals import AttentionResidual, BaseResidual, StandardResidual
 from fla.ops.attnres import fused_attnres
 
 
@@ -49,78 +46,35 @@ def get_attention(config: PretrainedConfig, layer_idx: int) -> Attention | None:
     )
 
 
-def _checkpoint_residual_state(function, *args, checkpoint_func):
-    """Expose tensors inside residual state to reentrant checkpointing."""
-    flat_args, input_spec = tree_flatten(args)
-    output_spec = None
-
-    def forward(*flat_args):
-        nonlocal output_spec
-        outputs = function(*tree_unflatten(flat_args, input_spec))
-        flat_outputs, output_spec = tree_flatten(outputs)
-        return tuple(flat_outputs)
-
-    outputs = checkpoint_func(forward, *flat_args)
-    return tree_unflatten(outputs, output_spec)
+def get_residual(config: PretrainedConfig, *, fuse_residual: bool = False) -> BaseResidual:
+    """Construct the configured residual; translate the legacy AttnRes option only at this boundary."""
+    residual_type = config.residual_type
+    kwargs = dict(hidden_size=config.hidden_size, norm_eps=config.norm_eps, fuse_norm=config.fuse_norm)
+    kwargs.update(config.residual_kwargs)
+    if residual_type is None:
+        residual_type = 'standard' if config.attnres_block_size is None else 'attnres'
+    if config.attnres_block_size is not None:
+        if residual_type != 'attnres' or kwargs.get('block_size', config.attnres_block_size) != config.attnres_block_size:
+            raise ValueError('attnres_block_size conflicts with residual_type or residual_kwargs')
+        kwargs['block_size'] = config.attnres_block_size
+    constructors = {
+        'standard': partial(StandardResidual, fuse_residual=fuse_residual),
+        'attnres': AttentionResidual,
+    }
+    if residual_type not in constructors:
+        raise ValueError(f'Unknown residual type: {residual_type!r}; expected one of {tuple(constructors)}')
+    return constructors[residual_type](**kwargs)
 
 
 class FLAPreTrainedModel(PreTrainedModel):
-    """Shared Transformers integration for FLA models."""
+    """Shared Transformers integration without changing model parameter paths."""
 
     _is_stateful = True
     _input_embed_layer = "embeddings"
-    _checkpoint_conversion_mapping: dict[str, str] = {}
-
-    @classmethod
-    def from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
-        if cls._checkpoint_conversion_mapping:
-            # transformers loads meta parameters without invoking module load hooks.
-            kwargs['key_mapping'] = dict(kwargs.get('key_mapping') or {})
-            for source, target in cls._checkpoint_conversion_mapping.items():
-                kwargs['key_mapping'].setdefault(source, target)
-        return super().from_pretrained(pretrained_model_name_or_path, *args, **kwargs)
-
-    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
-        if self._checkpoint_conversion_mapping:
-            for key in list(state_dict):
-                if not key.startswith(prefix):
-                    continue
-                converted = key[len(prefix):]
-                for pattern, replacement in self._checkpoint_conversion_mapping.items():
-                    converted = re.sub(pattern, replacement, converted)
-                converted = prefix + converted
-                if converted != key:
-                    state_dict.setdefault(converted, state_dict.pop(key))
-        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
-
-    def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
-        residual = getattr(self.base_model, 'residual_output', None)
-        if not isinstance(residual, BaseResidual):
-            return super().gradient_checkpointing_enable(gradient_checkpointing_kwargs)
-
-        checkpoint_kwargs = {'use_reentrant': False, **(gradient_checkpointing_kwargs or {})}
-        if checkpoint_kwargs['use_reentrant'] is None:
-            checkpoint_kwargs['use_reentrant'] = False
-        if checkpoint_kwargs['use_reentrant'] and not residual.supports_reentrant_checkpointing:
-            raise ValueError(f'{type(residual).__name__} requires gradient checkpointing with use_reentrant=False')
-        super().gradient_checkpointing_enable(gradient_checkpointing_kwargs=checkpoint_kwargs)
-        if checkpoint_kwargs['use_reentrant']:
-            for module in self.modules():
-                if isinstance(module, GradientCheckpointingLayer):
-                    module._gradient_checkpointing_func = partial(
-                        _checkpoint_residual_state,
-                        checkpoint_func=module._gradient_checkpointing_func,
-                    )
 
     def set_output_embeddings(self, new_embeddings):
         # allow reattaching a head after set_output_embeddings(None)
         self.lm_head = new_embeddings
-
-    def _initialize_weights(self, module: nn.Module, *args, **kwargs):
-        # residuals initialize child parameters; Transformers' custom-code shortcut only checks direct parameters.
-        if isinstance(module, BaseResidual):
-            return super()._initialize_weights(module)
-        return super()._initialize_weights(module, *args, **kwargs)
 
     def _init_weights(
         self,
@@ -252,35 +206,6 @@ class FLAModel(FLAPreTrainedModel):
         if use_cache and not isinstance(past_key_values, Cache):
             past_key_values = Cache.from_legacy_cache(past_key_values)
 
-        hidden_states, past_key_values, all_hidden_states, all_attns = self._forward_layers(
-            hidden_states=hidden_states,
-            attention_mask=attention_mask,
-            past_key_values=past_key_values,
-            use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            **kwargs,
-        )
-
-        if not return_dict:
-            return tuple(i for i in [hidden_states, past_key_values, all_hidden_states, all_attns] if i is not None)
-        return BaseModelOutputWithPast(
-            last_hidden_state=hidden_states,
-            past_key_values=past_key_values,
-            hidden_states=all_hidden_states,
-            attentions=all_attns,
-        )
-
-    def _forward_layers(
-        self,
-        hidden_states: torch.Tensor,
-        attention_mask: torch.Tensor | None = None,
-        past_key_values: Cache | None = None,
-        use_cache: bool = False,
-        output_attentions: bool = False,
-        output_hidden_states: bool = False,
-        **kwargs: Unpack[dict],
-    ) -> tuple:
         attnres_states: list[torch.Tensor] | None = None
 
         all_hidden_states = () if output_hidden_states else None
@@ -319,7 +244,14 @@ class FLAModel(FLAPreTrainedModel):
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
 
-        return hidden_states, past_key_values, all_hidden_states, all_attns
+        if not return_dict:
+            return tuple(i for i in [hidden_states, past_key_values, all_hidden_states, all_attns] if i is not None)
+        return BaseModelOutputWithPast(
+            last_hidden_state=hidden_states,
+            past_key_values=past_key_values,
+            hidden_states=all_hidden_states,
+            attentions=all_attns,
+        )
 
 
 class FLAForCausalLM(FLAPreTrainedModel):

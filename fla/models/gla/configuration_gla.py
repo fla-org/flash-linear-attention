@@ -16,6 +16,15 @@ from fla.models.configuration_utils import (
 
 
 class GLAConfig(AttentionConfigBase, PreTrainedConfig):
+    """GLA configuration with a residual implementation shared by all attention and MLP branches.
+
+    Args:
+        residual_type (str, Optional):
+            Residual implementation: `standard` or `attnres`.
+            Default: `None`, selecting from the existing `attnres_block_size` option.
+        residual_kwargs (dict, Optional):
+            Residual constructor options, such as `block_size` for AttnRes. Default: `None`.
+    """
 
     model_type = 'gla'
     keys_to_ignore_at_inference = ['past_key_values']
@@ -56,6 +65,8 @@ class GLAConfig(AttentionConfigBase, PreTrainedConfig):
         use_l2warp: bool = False,
         vocab_size: int = 32000,
         attnres_block_size: int | None = None,
+        residual_type: str | None = None,
+        residual_kwargs: dict | None = None,
         **kwargs,
     ):
         self.hidden_size = hidden_size
@@ -89,6 +100,8 @@ class GLAConfig(AttentionConfigBase, PreTrainedConfig):
         self.use_l2warp = use_l2warp
         self.vocab_size = vocab_size
         self.attnres_block_size = attnres_block_size
+        self.residual_type = residual_type
+        self.residual_kwargs = dict(residual_kwargs or {})
 
         validate_loss_config(fuse_cross_entropy=fuse_cross_entropy, fuse_linear_cross_entropy=fuse_linear_cross_entropy)
 
