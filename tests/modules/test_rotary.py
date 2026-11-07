@@ -89,45 +89,112 @@ def test_rotary_with_offsets(B: int, T: int, H: int, G: int, D: int, dtype: torc
     assert_close("dk", ref_dk, tri_dk, ratio=1e-5)
 
 
-@pytest.mark.parametrize("N", [4])
-@pytest.mark.parametrize("T", [2048, 4096])
-@pytest.mark.parametrize("H", [4])
-@pytest.mark.parametrize("G", [1, 4])
-@pytest.mark.parametrize("D", [128, 256])
-@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-def test_rotary_varlen(N: int, T: int, H: int, G: int, D: int, dtype: torch.dtype):
+@pytest.mark.parametrize(
+    ("N", "T", "H", "G", "D", "dtype", "lengths", "seqlen_offset", "interleaved", "max_seqlen_delta"),
+    [
+        pytest.param(*case, None, 0, False, 0, id=f"N{case[0]}-T{case[1]}-G{case[3]}-D{case[4]}-{case[5]}")
+        for case in product([4], [2048, 4096], [4], [1, 4], [128, 256], [torch.float32, torch.bfloat16])
+    ] + [
+        pytest.param(
+            len(lengths), sum(lengths), 2, 2, 16, dtype, lengths, offset, interleaved, 0,
+            id=f"lengths{lengths}-offset{offset}-interleaved{interleaved}-{dtype}",
+        )
+        for lengths, offset, interleaved, dtype in product(
+            [(3, 5), (0, 3, 0, 5, 0)], [0, 2, -1], [False, True],
+            [torch.float32, torch.float16, torch.bfloat16],
+        )
+    ] + [
+        pytest.param(
+            2, 8, 2, 2, D, dtype, (3, 5), 2, True, 0,
+            id=f"small-head-D{D}-offset2-interleavedTrue-{dtype}",
+        )
+        for D, dtype in product([4, 8], [torch.float32, torch.float16, torch.bfloat16])
+    ] + [
+        pytest.param(2, 65536, 2, 2, 4, torch.float16, (32767, 32769), 0, True, 0, id="small-head-long-packed"),
+    ] + [
+        pytest.param(
+            2, 8, 2, 2, 16, torch.float32, (3, 5), offset, interleaved, -1,
+            id=f"short-cache-offset{offset}-interleaved{interleaved}",
+        )
+        for offset, interleaved in product([0, 2, -1], [False, True])
+    ] + [
+        pytest.param(
+            2, 8, 2, 2, 16, torch.float32, (3, 5), 2**32, False, -(2**32),
+            id="short-cache-large-scalar-offset",
+        ),
+    ],
+)
+def test_rotary_varlen(
+    N: int,
+    T: int,
+    H: int,
+    G: int,
+    D: int,
+    dtype: torch.dtype,
+    lengths: tuple[int, ...] | None,
+    seqlen_offset: int,
+    interleaved: bool,
+    max_seqlen_delta: int,
+):
     torch.manual_seed(42)
-    q = torch.randn(1, T, H, D).to(device).to(dtype=dtype).requires_grad_()
-    k = torch.randn(1, T, H//G, D).to(device).to(dtype=dtype).requires_grad_()
-    cu_seqlens = torch.cat(
-        [
+    test_device = "cpu" if max_seqlen_delta < 0 else device
+    q = torch.randn(1, T, H, D).to(test_device).to(dtype=dtype).requires_grad_()
+    k = torch.randn(1, T, H//G, D).to(test_device).to(dtype=dtype).requires_grad_()
+    if lengths is None:
+        cu_seqlens = torch.cat([
             torch.tensor([0], dtype=torch.long),
             torch.arange(1, T)[torch.randperm(T - 1)[:N-1]],
             torch.tensor([T], dtype=torch.long),
-        ],
-        0,
-    ).to(device).sort()[0]
-    rotary = RotaryEmbedding(D).to(device)
+        ]).to(test_device).sort()[0]
+    else:
+        cu_seqlens = torch.tensor([0, *lengths], dtype=torch.int32, device=test_device).cumsum(0, dtype=torch.int32)
+    rotary_dim = D if lengths is None else D // 2
+    rotary = RotaryEmbedding(rotary_dim, interleaved=interleaved).to(test_device)
+    max_seqlen = None if lengths is None else max(lengths) + seqlen_offset + max_seqlen_delta
 
-    tri_q, tri_k = rotary(q, k, cu_seqlens=cu_seqlens)
-    tri_dq = torch.autograd.grad(tri_q.sum(), q, retain_graph=True)[0]
-    tri_dk = torch.autograd.grad(tri_k.sum(), k, retain_graph=True)[0]
+    if max_seqlen_delta < 0:
+        error = AssertionError if seqlen_offset > max_seqlen else RuntimeError
+        with pytest.raises(error, match="Rotary cache is too short"):
+            rotary(q, k, seqlen_offset=seqlen_offset, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+        return
 
-    ref_q = torch.cat([
-        rotary_embedding_ref(q[0, start:end].float(), rotary._cos_cached[:end-start], rotary._sin_cached[:end-start])
-        for start, end in zip(cu_seqlens.tolist(), cu_seqlens[1:].tolist(), strict=False)
-    ]).to(dtype=dtype).unsqueeze(0)
-    ref_k = torch.cat([
-        rotary_embedding_ref(k[0, start:end].float(), rotary._cos_cached[:end-start], rotary._sin_cached[:end-start])
-        for start, end in zip(cu_seqlens.tolist(), cu_seqlens[1:].tolist(), strict=False)
-    ]).to(dtype=dtype).unsqueeze(0)
-    ref_dq = torch.autograd.grad(ref_q.sum(), q, retain_graph=True)[0]
-    ref_dk = torch.autograd.grad(ref_k.sum(), k, retain_graph=True)[0]
+    tri_q, tri_k = rotary(q, k, seqlen_offset=seqlen_offset, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+    dq = torch.ones_like(q) if lengths is None else torch.randn_like(q)
+    dk = torch.ones_like(k) if lengths is None else torch.randn_like(k)
+    tri_dq, tri_dk = torch.autograd.grad((tri_q, tri_k), (q, k), (dq, dk))
 
-    assert_close(" q", ref_q, tri_q, ratio=1e-5)
-    assert_close(" k", ref_k, tri_k, ratio=1e-5)
-    assert_close("dq", ref_dq, tri_dq, ratio=1e-5)
-    assert_close("dk", ref_dk, tri_dk, ratio=1e-5)
+    def reference(x):
+        outputs = []
+        for start, end in zip(cu_seqlens.tolist(), cu_seqlens[1:].tolist(), strict=False):
+            if start == end:
+                continue
+            pad = min(max(-seqlen_offset, 0), end - start)
+            prefix = x[0, start:start+pad].float()
+            outputs.append(torch.cat((torch.zeros_like(prefix[..., :rotary_dim]), prefix[..., rotary_dim:]), dim=-1))
+            offset = max(seqlen_offset, 0)
+            outputs.append(rotary_embedding_ref(
+                x[0, start+pad:end].float(),
+                rotary._cos_cached[offset:offset+end-start-pad],
+                rotary._sin_cached[offset:offset+end-start-pad],
+                interleaved=interleaved,
+            ))
+        return torch.cat(outputs).to(dtype=dtype).unsqueeze(0)
+
+    ref_q, ref_k = reference(q), reference(k)
+    ref_dq, ref_dk = torch.autograd.grad((ref_q, ref_k), (q, k), (dq, dk))
+    expected = (ref_q, ref_k, ref_dq, ref_dk)
+    for name, ref, tri in zip(("q", "k", "dq", "dk"), expected, (tri_q, tri_k, tri_dq, tri_dk), strict=True):
+        assert torch.isfinite(tri).all()
+        assert_close(name, ref, tri, ratio=1e-5)
+
+    if lengths is not None:
+        for offset_dtype in (torch.int32, torch.int64):
+            tensor_offsets = torch.full((N,), seqlen_offset, dtype=offset_dtype, device=test_device)
+            tri_q, tri_k = rotary(q, k, seqlen_offset=tensor_offsets, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+            tri_dq, tri_dk = torch.autograd.grad((tri_q, tri_k), (q, k), (dq, dk))
+            for name, ref, tri in zip(("q", "k", "dq", "dk"), expected, (tri_q, tri_k, tri_dq, tri_dk), strict=True):
+                assert torch.isfinite(tri).all()
+                assert_close(name, ref, tri, ratio=1e-5)
 
 
 @pytest.mark.parametrize("B", [4])
