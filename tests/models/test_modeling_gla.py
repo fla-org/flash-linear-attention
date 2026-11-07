@@ -12,33 +12,25 @@ import torch
 
 from fla.models import GLAConfig
 from fla.models.gla.modeling_gla import GLAForCausalLM, GLAModel
-from fla.utils import IS_NVIDIA, assert_close, device, device_platform
+from fla.utils import assert_close, device, device_platform
 
 from .utils import check_forward, check_generation, create_model_and_config
-
-REQUIRES_NVIDIA = pytest.mark.skipif(not IS_NVIDIA, reason='mHC requires NVIDIA CUDA')
 
 
 @pytest.mark.skipif(device_platform == 'cpu', reason='GLA kernels require an accelerator')
 @pytest.mark.parametrize(
-    ('L', 'B', 'T', 'H', 'D', 'use_l2warp', 'residual_mode', 'residual_kwargs', 'dtype', 'varlen'),
+    ['L', 'B', 'T', 'H', 'D', 'use_l2warp', 'attnres_block_size', 'dtype', 'varlen'],
     [
-        pytest.param(*test, id="L{}-B{}-T{}-H{}-D{}-l2{}-{}-{}-{}-varlen{}".format(*test))
+        pytest.param(*test, id="L{}-B{}-T{}-H{}-D{}-l2{}-bs{}-{}-varlen{}".format(*test))
         for test in [
-            (4, 4, 1024, 4, 64,  True,  None,       {},                torch.bfloat16, True),
-            (4, 4, 1024, 4, 64,  False, None,       {},                torch.bfloat16, True),
-            (4, 4, 1024, 4, 128, False, None,       {},                torch.bfloat16, True),
-            (4, 4, 1024, 4, 64,  False, 'standard', {},                torch.bfloat16, True),
-            (4, 4, 1024, 4, 64,  False, 'attnres',  {'block_size': 1}, torch.bfloat16, True),
-            (4, 4, 1024, 4, 64,  False, 'attnres',  {'block_size': 4}, torch.bfloat16, True),
-            (2, 2, 65,   2, 64,  False, None,       {},                torch.float16,  False),
-            (2, 2, 129,  2, 64,  False, 'attnres',  {'block_size': 4}, torch.bfloat16, False),
+            (4, 4, 1024, 4, 64,  True,  None, torch.bfloat16, True),
+            (4, 4, 1024, 4, 64,  False, None, torch.bfloat16, True),
+            (4, 4, 1024, 4, 128, False, None, torch.bfloat16, True),
+            (4, 4, 1024, 4, 64,  False, 1,    torch.bfloat16, True),
+            (4, 4, 1024, 4, 64,  False, 4,    torch.bfloat16, True),
+            (2, 2, 65,   2, 64,  False, None, torch.float16,  False),
+            (3, 2, 129,  2, 64,  False, 4,    torch.bfloat16, False),
         ]
-    ] + [
-        pytest.param(4, 4, 1024, 4, 64, False, 'mhc', {'num_streams': 4}, torch.bfloat16, True,
-                     id='mhc-varlen', marks=REQUIRES_NVIDIA),
-        pytest.param(2, 2, 65, 2, 64, False, 'mhc', {'num_streams': 2}, torch.float16, False,
-                     id='mhc-training', marks=REQUIRES_NVIDIA),
     ],
 )
 def test_modeling(
@@ -48,8 +40,7 @@ def test_modeling(
     H: int,
     D: int,
     use_l2warp: bool,
-    residual_mode: str | None,
-    residual_kwargs: dict,
+    attnres_block_size: int | None,
     dtype: torch.dtype,
     varlen: bool,
 ):
@@ -61,79 +52,48 @@ def test_modeling(
         D,
         GLAConfig,
         use_l2warp=use_l2warp,
-        residual_mode=residual_mode,
-        residual_kwargs=residual_kwargs,
+        attnres_block_size=attnres_block_size,
         dtype=dtype,
         varlen=varlen,
     )
 
 
-@pytest.mark.parametrize(
-    ('L', 'B', 'T', 'H', 'D', 'dtype', 'residual_mode', 'residual_kwargs'),
-    [
-        (2, 4, 2000, 8, 64, torch.float16, None, {}),
-        (2, 2, 256, 2, 64, torch.float16, 'standard', {}),
-        (2, 2, 256, 2, 64, torch.float16, 'attnres', {'block_size': 1}),
-        (2, 2, 256, 2, 64, torch.float16, 'attnres', {'block_size': 4}),
-        pytest.param(2, 2, 256, 2, 64, torch.float16, 'mhc', {'num_streams': 4}, marks=REQUIRES_NVIDIA),
-    ],
-)
-@pytest.mark.skipif(device_platform == 'cpu', reason='Native GLA generation requires an accelerator')
-def test_generation(
-    residual_mode: str | None,
-    residual_kwargs: dict,
-    L: int,
-    B: int,
-    T: int,
-    H: int,
-    D: int,
-    dtype: torch.dtype,
-):
+@pytest.mark.skipif(device_platform == 'cpu', reason='GLA generation requires an accelerator')
+@pytest.mark.parametrize(('L', 'B', 'T', 'H', 'D', 'dtype', 'block_size'), [
+    pytest.param(2, 4, 2000, 8, 64, torch.float16, None, id='standard'),
+    pytest.param(2, 2, 256, 2, 64, torch.float16, 1, id='full-attnres'),
+    pytest.param(3, 2, 256, 2, 64, torch.float16, 4, id='block-attnres'),
+])
+def test_generation(L, B, T, H, D, dtype, block_size):
     torch.manual_seed(42)
-    model, config = create_model_and_config(
-        GLAConfig, L, H, D, dtype, residual_mode=residual_mode, residual_kwargs=residual_kwargs,
-    )
+    model, config = create_model_and_config(GLAConfig, L, H, D, dtype, attnres_block_size=block_size)
     check_generation(L, B, T, H, D, GLAConfig, dtype, model=model, config=config)
 
 
-@pytest.mark.skipif(device_platform != 'cuda', reason='GLA checkpointing tests require CUDA')
-@pytest.mark.parametrize(
-    ('residual_mode', 'residual_kwargs', 'param_dtype', 'dtype', 'checkpoint_kwargs', 'input_kind', 'num_layers'),
-    [
-        pytest.param('standard', {'fuse_norm': False}, torch.float32, torch.float32, None, 'input_ids', 1,
-                     id='standard-default'),
-        pytest.param('standard_defer', {}, torch.float16, torch.float16, {'use_reentrant': True}, 'inputs_embeds', 3,
-                     id='deferred-reentrant-embeds'),
-        pytest.param('attnres', {'block_size': 4}, torch.bfloat16, torch.bfloat16, {'use_reentrant': False}, 'input_ids', 3,
-                     id='attnres-block'),
-        pytest.param('mhc', {'num_streams': 4}, torch.bfloat16, torch.bfloat16, {'use_reentrant': True}, 'input_ids', 3,
-                     id='mhc-reentrant', marks=REQUIRES_NVIDIA),
-        pytest.param('mhc', {'num_streams': 2}, torch.float32, torch.bfloat16, None, 'input_ids', 1,
-                     id='mhc-autocast', marks=REQUIRES_NVIDIA),
-    ],
-)
-def test_checkpointing(
-    residual_mode, residual_kwargs, param_dtype, dtype, checkpoint_kwargs, input_kind, num_layers, monkeypatch,
-):
+@pytest.mark.skipif(device_platform == 'cpu', reason='GLA checkpointing requires an accelerator')
+@pytest.mark.parametrize(('block_size', 'fuse_norm', 'dtype', 'checkpoint_kwargs', 'input_kind'), [
+    pytest.param(None, False, torch.float32, None, 'input_ids', id='standard-default'),
+    pytest.param(None, True, torch.float16, {'use_reentrant': True}, 'inputs_embeds', id='standard-reentrant'),
+    pytest.param(1, True, torch.float16, None, 'input_ids', id='full-attnres-default'),
+    pytest.param(4, True, torch.bfloat16, {'use_reentrant': False}, 'inputs_embeds', id='block-attnres'),
+])
+def test_checkpointing(block_size, fuse_norm, dtype, checkpoint_kwargs, input_kind):
+    """Checkpoint three connected layers without changing their outputs or input/parameter gradients."""
     torch.manual_seed(42)
-    monkeypatch.setattr(torch.backends.cuda.matmul, 'allow_tf32', False)
     config = GLAConfig(
         hidden_size=128,
-        num_hidden_layers=num_layers,
+        num_hidden_layers=3,
         num_heads=2,
         intermediate_size=256,
         vocab_size=128,
-        residual_mode=residual_mode,
-        residual_kwargs=residual_kwargs,
+        attnres_block_size=block_size,
         attn_mode='chunk',
-        fuse_norm=True,
+        fuse_norm=fuse_norm,
         fuse_swiglu=True,
         fuse_cross_entropy=False,
         use_cache=False,
     )
-    model = GLAForCausalLM(config).to(device=device, dtype=param_dtype).train()
-    assert config.residual_mode == residual_mode
-    assert model.model.residual_output.fuse_norm == residual_kwargs.get('fuse_norm', config.fuse_norm)
+    model = GLAForCausalLM(config).to(device=device, dtype=dtype).train()
     with torch.no_grad():
         for name, parameter in model.named_parameters():
             if name.endswith('query.weight'):
@@ -148,9 +108,8 @@ def test_checkpointing(
         actual_inputs, expected_inputs = {'inputs_embeds': embeddings}, {'inputs_embeds': ref_embeddings}
     else:
         actual_inputs = expected_inputs = {'input_ids': ids}
-    with torch.autocast(device_type=torch.device(device).type, dtype=dtype, enabled=param_dtype != dtype):
-        actual = model(**actual_inputs, labels=ids, output_hidden_states=True)
-        expected = reference(**expected_inputs, labels=ids, output_hidden_states=True)
+    actual = model(**actual_inputs, labels=ids, output_hidden_states=True)
+    expected = reference(**expected_inputs, labels=ids, output_hidden_states=True)
     actual.loss.backward()
     expected.loss.backward()
     if input_kind == 'inputs_embeds':
@@ -162,10 +121,8 @@ def test_checkpointing(
     for ref, tri in zip(expected.hidden_states, actual.hidden_states):
         assert_close('hidden_states', ref, tri, 1e-3)
     for (name, parameter), (_, target) in zip(model.named_parameters(), reference.named_parameters()):
-        assert parameter.dtype == param_dtype
         if target.grad is None:
             assert parameter.grad is None, name
-            assert residual_mode != 'mhc' or (input_kind == 'inputs_embeds' and name == 'model.embeddings.weight'), name
         else:
             assert parameter.grad is not None and torch.isfinite(parameter.grad).all(), name
             assert_close(name, target.grad, parameter.grad, 1e-3)
@@ -173,9 +130,13 @@ def test_checkpointing(
     assert not model.is_gradient_checkpointing
 
 
-@pytest.mark.parametrize(('dtype', 'fuse_norm'), [(torch.float16, True), (torch.bfloat16, False)])
+@pytest.mark.parametrize(('dtype', 'fuse_norm'), [
+    pytest.param(torch.bfloat16, True, id='fused-bf16'),
+    pytest.param(torch.float16, False, id='unfused-fp16'),
+])
 @pytest.mark.skipif(device_platform == 'cpu', reason='Native GLA block kernels require an accelerator')
 def test_block(dtype, fuse_norm):
+    """Keep the attention-to-MLP fused sum and the materialized layer output numerically unchanged."""
     torch.manual_seed(42)
     config = GLAConfig(
         hidden_size=128,
@@ -189,7 +150,10 @@ def test_block(dtype, fuse_norm):
     x = torch.randn(2, 65, 128, device=device, dtype=dtype, requires_grad=True)
     state = block.residual_attn.initialize(x)
     state, _, _ = block(state)
-    output = block.residual_mlp.get_hidden_state(state)
+    output = block.residual_mlp.readout(state)
+    legacy_output, attentions, cache, attnres_states = block(x)
+    assert attentions is None and cache is None and attnres_states is None
+    assert_close('legacy_output', output, legacy_output, 1e-3)
     branch, _, _ = block.attn(block.residual_attn.norm(x))
     if fuse_norm:
         hidden, residual = block.residual_mlp.norm(branch, x, prenorm=True)

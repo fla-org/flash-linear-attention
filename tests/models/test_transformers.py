@@ -15,8 +15,7 @@ from transformers import AutoConfig, AutoModelForCausalLM
 
 from fla import models
 from fla.models.gla.modeling_gla import GLAForCausalLM, GLAModel
-from fla.modules import residuals
-from fla.modules.residuals import StandardResidual, register_residual
+from fla.modules.residuals import AttentionResidual
 from fla.utils import find_spec_cached
 
 CONFIG_CLASSES = [getattr(models, name) for name in models.__all__ if name.endswith('Config')]
@@ -112,9 +111,10 @@ def test_initialization(config_class, block_size, make_model):
     )
     assert model.get_input_embeddings().weight[0].count_nonzero() == model.config.hidden_size
     assert all(torch.isfinite(parameter).all() for parameter in model.parameters())
+    queries = {module.query for module in model.modules() if isinstance(module, AttentionResidual)}
     for module in model.modules():
         if isinstance(module, (nn.Linear, nn.Conv1d)):
-            if getattr(module, '_is_attnres_proj', False):
+            if module in queries or getattr(module, '_is_attnres_proj', False):
                 assert module.weight.count_nonzero() == 0
             else:
                 assert module.weight.count_nonzero() > 0
@@ -136,14 +136,14 @@ def test_initialization(config_class, block_size, make_model):
             model._init_weights(module, prenorm_residual_strategy='invalid')
 
 
-@pytest.mark.parametrize(('model_class', 'mode', 'legacy', 'fuse_norm', 'save_original_format'), [
-    pytest.param(GLAModel, 'standard_defer', True, True, True, id='legacy-deferred'),
-    pytest.param(GLAForCausalLM, 'standard', True, False, False, id='legacy-standard'),
-    pytest.param(GLAForCausalLM, 'attnres', True, True, True, id='legacy-attnres'),
-    pytest.param(GLAModel, 'mhc', False, True, False, id='mhc'),
-    pytest.param(GLAForCausalLM, None, False, False, True, id='default'),
+@pytest.mark.parametrize(('model_class', 'block_size', 'fuse_norm', 'save_original_format'), [
+    pytest.param(GLAModel, None, True, True, id='standard-fused'),
+    pytest.param(GLAForCausalLM, None, False, False, id='standard-unfused-lm'),
+    pytest.param(GLAForCausalLM, 1, True, True, id='full-attnres-lm'),
+    pytest.param(GLAModel, 4, False, False, id='block-attnres'),
 ])
-def test_gla_checkpoint(model_class, mode, legacy, fuse_norm, save_original_format, tmp_path):
+def test_gla_checkpoint(model_class, block_size, fuse_norm, save_original_format, tmp_path):
+    """Load legacy weights through both PyTorch and Transformers, then preserve the requested save format."""
     torch.manual_seed(42)
     config = models.GLAConfig(
         hidden_size=64,
@@ -152,26 +152,24 @@ def test_gla_checkpoint(model_class, mode, legacy, fuse_norm, save_original_form
         intermediate_size=128,
         vocab_size=64,
         fuse_norm=fuse_norm,
-        residual_mode=mode,
+        attnres_block_size=block_size,
     )
     model = model_class(config)
     state = {name: torch.randn_like(value) for name, value in model.state_dict().items()}
-    saved = dict(state)
-    if legacy:
-        saved = {}
-        for name, value in state.items():
-            name = re.sub(r'residual_(attn|mlp)\.norm\.', r'\1_norm.', name)
-            name = re.sub(r'residual_(attn|mlp)\.query\.', r'\1_res_proj.', name)
-            name = re.sub(r'residual_(attn|mlp)\.key_norm\.', r'\1_res_norm.', name)
-            name = name.replace('residual_output.norm.', 'norm.')
-            name = name.replace('residual_output.query.', 'res_proj.')
-            name = name.replace('residual_output.key_norm.', 'res_norm.')
-            saved[name] = value
+    saved = {}
+    for name, value in state.items():
+        name = re.sub(r'residual_(attn|mlp)\.norm\.', r'\1_norm.', name)
+        name = re.sub(r'residual_(attn|mlp)\.query\.', r'\1_res_proj.', name)
+        name = re.sub(r'residual_(attn|mlp)\.attnres_norm\.', r'\1_res_norm.', name)
+        name = name.replace('residual_output.norm.', 'norm.')
+        name = name.replace('residual_output.query.', 'res_proj.')
+        name = name.replace('residual_output.attnres_norm.', 'res_norm.')
+        saved[name] = value
     model.load_state_dict(saved, strict=True)
     config.save_pretrained(tmp_path)
     save_file(saved, tmp_path / 'model.safetensors', metadata={'format': 'pt'})
     restored, info = model_class.from_pretrained(tmp_path, output_loading_info=True)
-    assert restored.config.residual_mode == model.config.residual_mode
+    assert restored.config.attnres_block_size == block_size
     assert not info['missing_keys'] and not info['unexpected_keys'] and not info['mismatched_keys']
     for name, value in restored.state_dict().items():
         torch.testing.assert_close(value, state[name], rtol=0, atol=0)
@@ -186,60 +184,6 @@ def test_gla_checkpoint(model_class, mode, legacy, fuse_norm, save_original_form
     reloaded.load_state_dict(reloaded.state_dict(), strict=True)
     for name, value in reloaded.state_dict().items():
         torch.testing.assert_close(value, state[name], rtol=0, atol=0)
-
-
-@pytest.mark.parametrize('missing', [None, 'scale', 'projection.weight', 'norm.weight'])
-def test_gla_custom_residual(missing, make_model, monkeypatch, tmp_path):
-    class ProjectedResidual(StandardResidual):
-        supports_reentrant_checkpointing = False
-
-        def __init__(self, hidden_size, scale=0.25, **kwargs):
-            super().__init__(hidden_size=hidden_size, **kwargs)
-            self.initial_scale = scale
-            self.scale = nn.Parameter(torch.empty(()))
-            self.projection = nn.Linear(hidden_size, hidden_size, bias=False)
-            self.reset_parameters()
-
-        def reset_parameters(self):
-            super().reset_parameters()
-            nn.init.constant_(self.scale, self.initial_scale)
-            nn.init.zeros_(self.projection.weight)
-
-        def post(self, state: torch.Tensor, branch_output: torch.Tensor, context: None = None) -> torch.Tensor:
-            branch_output = self.scale * branch_output + self.projection(branch_output)
-            return super().post(state, branch_output, context)
-
-    torch.manual_seed(42)
-    monkeypatch.setattr(residuals, '_RESIDUAL_CLASSES', residuals._RESIDUAL_CLASSES.copy())
-    register_residual('test.projected', ProjectedResidual)
-    with pytest.raises(ValueError, match='already registered'):
-        register_residual('test.projected', ProjectedResidual)
-    model = make_model(models.GLAConfig, num_hidden_layers=2, residual_mode='test.projected', residual_kwargs={'scale': 0.5})
-    with pytest.raises(ValueError, match='use_reentrant=False'):
-        model.gradient_checkpointing_enable({'use_reentrant': True})
-    assert not model.is_gradient_checkpointing
-    missing_key = f'model.layers.0.residual_attn.{missing}' if missing else None
-    defaults = {name: value.clone() for name, value in model.state_dict().items()}
-    model.load_state_dict(defaults, strict=True)
-    residual = model.model.layers[0].residual_attn
-    assert residual.scale.item() == 0.5 and residual.projection.weight.count_nonzero() == 0
-    x, branch = torch.randn(2, 7, 64), torch.randn(2, 7, 64)
-    residual_state = residual.initialize(x)
-    _, context = residual.pre(residual_state)
-    residual_state = residual.post(residual_state, branch, context)
-    torch.testing.assert_close(residual.get_hidden_state(residual_state), x + 0.5 * branch)
-    state = {name: torch.randn_like(value) for name, value in defaults.items() if name != missing_key}
-    model.config.save_pretrained(tmp_path)
-    save_file(state, tmp_path / 'model.safetensors', metadata={'format': 'pt'})
-    restored, info = GLAForCausalLM.from_pretrained(tmp_path, output_loading_info=True)
-    assert set(info['missing_keys']) == ({missing_key} if missing_key else set())
-    assert not info['unexpected_keys'] and not info['mismatched_keys']
-    restored.init_weights()
-    for name, value in restored.state_dict().items():
-        torch.testing.assert_close(value, defaults[name] if name == missing_key else state[name], rtol=0, atol=0)
-    monkeypatch.delitem(residuals._RESIDUAL_CLASSES, 'test.projected')
-    with pytest.raises(ValueError, match='register_residual'):
-        GLAForCausalLM.from_pretrained(tmp_path)
 
 
 def test_gla_key_mapping(make_model, tmp_path):

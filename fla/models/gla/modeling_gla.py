@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 from functools import partial
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -21,26 +21,28 @@ from fla.models.generation_utils import FLAUnsupportedCacheGenerationMixin
 from fla.models.gla.configuration_gla import GLAConfig
 from fla.models.modeling_utils import FLAForCausalLM, FLAModel, FLAPreTrainedModel, get_attention
 from fla.modules import GatedMLP as GLAMLP
-from fla.modules.residuals import BaseResidual, get_residual_class
+from fla.modules.residuals import AttentionResidual, StandardResidual
+from fla.modules.residuals.attnres import AttentionResidualState
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
     from fla.models.cache_utils import Cache
+    from fla.modules.residuals.standard import StandardResidualState
 
 
 _RESIDUAL_KEY_MAPPING = {
     rf'layers\.(\d+)\.{sublayer}_{old}\.': rf'layers.\1.residual_{sublayer}.{new}.'
     for sublayer in ('attn', 'mlp')
-    for old, new in (('norm', 'norm'), ('res_proj', 'query'), ('res_norm', 'key_norm'))
+    for old, new in (('norm', 'norm'), ('res_proj', 'query'), ('res_norm', 'attnres_norm'))
 } | {
     r'^(model\.|)norm\.': r'\1residual_output.norm.',
     r'^(model\.|)res_proj\.': r'\1residual_output.query.',
-    r'^(model\.|)res_norm\.': r'\1residual_output.key_norm.',
+    r'^(model\.|)res_norm\.': r'\1residual_output.attnres_norm.',
 }
 
 
-def checkpoint_residual_state(function, *args, checkpoint_func):
+def _checkpoint_residual_state(function, *args, checkpoint_func):
     """Expose tensors inside residual state to reentrant checkpointing."""
     flat_args, input_spec = tree_flatten(args)
     output_spec = None
@@ -92,19 +94,38 @@ class GLABlock(GradientCheckpointingLayer):
             fuse_swiglu=config.fuse_swiglu,
         )
 
-        residual_cls = get_residual_class(config.residual_mode)
-        self.residual_attn = residual_cls(**config.get_residual_kwargs(sub_layer_idx=layer_idx * 2))
-        self.residual_mlp = residual_cls(**config.get_residual_kwargs(sub_layer_idx=layer_idx * 2 + 1))
+        residual_kwargs = dict(hidden_size=config.hidden_size, norm_eps=config.norm_eps, fuse_norm=config.fuse_norm)
+        if config.attnres_block_size is None:
+            # fuse only attention -> MLP; materialize the residual sum at each layer boundary.
+            self.residual_attn = StandardResidual(**residual_kwargs, fuse_residual=config.fuse_norm)
+            self.residual_mlp = StandardResidual(**residual_kwargs)
+        else:
+            self.residual_attn = AttentionResidual(**residual_kwargs, block_size=config.attnres_block_size)
+            self.residual_mlp = AttentionResidual(**residual_kwargs, block_size=config.attnres_block_size)
 
     def forward(
         self,
-        state: Any,
+        hidden_states: torch.Tensor | StandardResidualState | AttentionResidualState,
         attention_mask: torch.Tensor | None = None,
         past_key_values: Cache | list[torch.FloatTensor] | None = None,
         use_cache: bool | None = False,
         output_attentions: bool | None = False,
+        attnres_states: list[torch.Tensor] | None = None,
         **kwargs: Unpack[dict],
-    ) -> tuple[Any, torch.Tensor | None, Cache | None]:
+    ) -> tuple:
+        """Apply attention and MLP residual updates.
+
+        A residual state returns `(state, attentions, cache)`. Tensor inputs retain the legacy
+        `(hidden_states, attentions, cache, attnres_states)` interface, including partial AttnRes block sums.
+        """
+        legacy_input = isinstance(hidden_states, torch.Tensor)
+        if legacy_input:
+            if attnres_states is None:
+                state = self.residual_attn.initialize(hidden_states)
+            else:
+                state = AttentionResidualState([*attnres_states, hidden_states], 2 * self.layer_idx)
+        else:
+            state = hidden_states
         hidden_states, context = self.residual_attn.pre(state)
         hidden_states, attentions, past_key_values = self.attn(
             hidden_states=hidden_states,
@@ -114,11 +135,15 @@ class GLABlock(GradientCheckpointingLayer):
             output_attentions=output_attentions,
             **kwargs,
         )
-        state = self.residual_attn.post(state, hidden_states, context)
+        state = self.residual_attn.post(hidden_states, context)
 
         hidden_states, context = self.residual_mlp.pre(state)
         hidden_states = self.mlp(hidden_states, **kwargs)
-        state = self.residual_mlp.post(state, hidden_states, context)
+        state = self.residual_mlp.post(hidden_states, context)
+        if legacy_input:
+            if isinstance(state, AttentionResidualState):
+                return state.blocks[-1], attentions, past_key_values, state.blocks[:-1]
+            return self.residual_mlp.readout(state), attentions, past_key_values, None
         return state, attentions, past_key_values
 
 
@@ -142,29 +167,16 @@ class GLAPreTrainedModel(FLAPreTrainedModel):
         checkpoint_kwargs = {'use_reentrant': False, **(gradient_checkpointing_kwargs or {})}
         if checkpoint_kwargs['use_reentrant'] is None:
             checkpoint_kwargs['use_reentrant'] = False
-        residual_cls = get_residual_class(self.config.residual_mode)
-        if checkpoint_kwargs['use_reentrant'] and not residual_cls.supports_reentrant_checkpointing:
-            raise ValueError(f'{residual_cls.__name__} requires gradient checkpointing with use_reentrant=False')
+        if checkpoint_kwargs['use_reentrant'] and self.config.attnres_block_size is not None:
+            raise ValueError('AttentionResidual requires gradient checkpointing with use_reentrant=False')
         super().gradient_checkpointing_enable(gradient_checkpointing_kwargs=checkpoint_kwargs)
         if checkpoint_kwargs['use_reentrant']:
             for module in self.modules():
                 if isinstance(module, GLABlock):
                     module._gradient_checkpointing_func = partial(
-                        checkpoint_residual_state,
+                        _checkpoint_residual_state,
                         checkpoint_func=module._gradient_checkpointing_func,
                     )
-
-    def _initialize_weights(self, module: nn.Module, *args, **kwargs):
-        if getattr(module, '_is_residual_child', False):
-            return
-        if isinstance(module, BaseResidual):
-            # a residual owns initialization of descendants even when its direct parameters were loaded.
-            if not all(getattr(child, '_is_hf_initialized', False) for child in module.modules()):
-                self._init_weights(module)
-                for child in module.modules():
-                    child._is_hf_initialized = True
-            return
-        super()._initialize_weights(module, *args, **kwargs)
 
 
 class GLAModel(GLAPreTrainedModel, FLAModel):
@@ -176,14 +188,11 @@ class GLAModel(GLAPreTrainedModel, FLAModel):
 
         self.embeddings = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
         self.layers = nn.ModuleList([GLABlock(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
-        residual_cls = get_residual_class(config.residual_mode)
-        output_kwargs = config.get_residual_kwargs(sub_layer_idx=2 * config.num_hidden_layers, is_output=True)
-        self.residual_output = residual_cls(**output_kwargs)
-        for residual in self.modules():
-            if isinstance(residual, BaseResidual):
-                for child in residual.modules():
-                    if child is not residual:
-                        child._is_residual_child = True
+        residual_kwargs = dict(hidden_size=config.hidden_size, norm_eps=config.norm_eps, fuse_norm=config.fuse_norm)
+        if config.attnres_block_size is None:
+            self.residual_output = StandardResidual(**residual_kwargs)
+        else:
+            self.residual_output = AttentionResidual(**residual_kwargs, block_size=config.attnres_block_size)
 
         self.gradient_checkpointing = False
 
@@ -197,8 +206,8 @@ class GLAModel(GLAPreTrainedModel, FLAModel):
             for pattern, replacement in _RESIDUAL_KEY_MAPPING.items():
                 converted = re.sub(pattern, replacement, converted)
             converted = prefix + converted
-            if converted != key and converted not in state_dict:
-                state_dict[converted] = state_dict.pop(key)
+            if converted != key:
+                state_dict.setdefault(converted, state_dict.pop(key))
         super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
 
     def _forward_layers(
@@ -217,7 +226,9 @@ class GLAModel(GLAPreTrainedModel, FLAModel):
         all_attns = () if output_attentions else None
         for layer in self.layers:
             if output_hidden_states:
-                all_hidden_states += (self.residual_output.get_hidden_state(state),)
+                # preserve the existing hidden_states output: AttnRes exposes its current partial block sum.
+                hidden_states = state.blocks[-1] if isinstance(state, AttentionResidualState) else state.residual
+                all_hidden_states += (hidden_states,)
             state, attentions, past_key_values = layer(
                 state,
                 attention_mask=attention_mask,
@@ -230,7 +241,7 @@ class GLAModel(GLAPreTrainedModel, FLAModel):
             if output_attentions:
                 all_attns += (attentions,)
 
-        hidden_states, _ = self.residual_output.pre(state)
+        hidden_states = self.residual_output(state)
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
 
