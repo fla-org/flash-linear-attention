@@ -234,14 +234,10 @@ def test_decoder_fwd(config_class, training, use_cache, return_dict, make_model)
     torch.manual_seed(42)
     model = make_model(config_class).model.train(training)
     model.layers = nn.ModuleList([nn.Module(), nn.Module()])
+    state_key = 'residual_state' if config_class is models.GLAConfig else 'attnres_states'
     for layer in model.layers:
-        if config_class is models.GLAConfig:
-            layer.forward = Mock(side_effect=lambda state, **kwargs: (
-                type(state)(state.residual + state.residual.tanh(), None), None, kwargs['past_key_values'],
-            ))
-            continue
         layer.forward = Mock(side_effect=lambda hidden_states, **kwargs: (
-            hidden_states + hidden_states.tanh(), None, kwargs['past_key_values'], kwargs['attnres_states'],
+            hidden_states + hidden_states.tanh(), None, kwargs['past_key_values'], kwargs[state_key],
         ))
     input_ids = torch.randint(0, 64, (2, 7))
     attention_mask = torch.ones_like(input_ids)
@@ -267,16 +263,16 @@ def test_decoder_fwd(config_class, training, use_cache, return_dict, make_model)
         torch.testing.assert_close(hidden_states[index], reference)
         layer.forward.assert_called_once()
         args, kwargs = layer.forward.call_args
-        layer_input = args[0].residual if config_class is models.GLAConfig else args[0]
-        torch.testing.assert_close(layer_input, reference)
+        torch.testing.assert_close(args[0], reference)
         assert kwargs['attention_mask'] is attention_mask
         assert kwargs['past_key_values'] is cache
         assert kwargs['use_cache'] is expected_cache
         assert kwargs['output_attentions'] is False
-        assert kwargs.get('attnres_states') is None
+        if config_class is not models.GLAConfig:
+            assert kwargs['attnres_states'] is None
         assert kwargs['cu_seqlens'] is cu_seqlens
         reference = reference + reference.tanh()
-    norm = model.residual_output.norm if config_class is models.GLAConfig else model.norm
+    norm = model.output_residual.norm if config_class is models.GLAConfig else model.norm
     reference = norm(reference)
     torch.testing.assert_close(outputs[0], reference)
     torch.testing.assert_close(hidden_states[-1], reference)

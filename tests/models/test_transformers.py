@@ -160,12 +160,12 @@ def test_gla_checkpoint(model_class, block_size, fuse_norm, save_original_format
     state = {name: torch.randn_like(value) for name, value in model.state_dict().items()}
     saved = {}
     for name, value in state.items():
-        name = re.sub(r'residual_(attn|mlp)\.norm\.', r'\1_norm.', name)
-        name = re.sub(r'residual_(attn|mlp)\.query\.', r'\1_res_proj.', name)
-        name = re.sub(r'residual_(attn|mlp)\.attnres_norm\.', r'\1_res_norm.', name)
-        name = name.replace('residual_output.norm.', 'norm.')
-        name = name.replace('residual_output.query.', 'res_proj.')
-        name = name.replace('residual_output.attnres_norm.', 'res_norm.')
+        name = re.sub(r'(attn|mlp)_residual\.norm\.', r'\1_norm.', name)
+        name = re.sub(r'(attn|mlp)_residual\.query\.', r'\1_res_proj.', name)
+        name = re.sub(r'(attn|mlp)_residual\.attnres_norm\.', r'\1_res_norm.', name)
+        name = name.replace('output_residual.norm.', 'norm.')
+        name = name.replace('output_residual.query.', 'res_proj.')
+        name = name.replace('output_residual.attnres_norm.', 'res_norm.')
         saved[name] = value
     model.load_state_dict(saved, strict=True)
     config.save_pretrained(tmp_path)

@@ -7,49 +7,46 @@
 
 from __future__ import annotations
 
-import re
 import warnings
 from functools import partial
 from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
-from torch.utils._pytree import tree_flatten, tree_unflatten
 from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast
 
 from fla.layers.gla import GatedLinearAttention
 from fla.models.cache_utils import Cache
 from fla.models.generation_utils import FLAUnsupportedCacheGenerationMixin
+from fla.models.gla.checkpoint import load_legacy_checkpoint
 from fla.models.gla.configuration_gla import GLAConfig
-from fla.models.modeling_utils import FLAForCausalLM, FLAPreTrainedModel, get_attention, get_residual
+from fla.models.modeling_utils import FLAForCausalLM, FLAPreTrainedModel, get_attention
 from fla.modules import GatedMLP as GLAMLP
-from fla.modules.residuals import BaseResidual
-from fla.modules.residuals.attnres import AttentionResidualState
+from fla.modules.residuals import AttentionResidual, StandardResidual
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
-    from fla.modules.residuals.base import StateT
+    from fla.modules.residuals import BaseResidual
+    from fla.modules.residuals.base import ResidualState
 
 
-def _checkpoint_residual_state(function, *args, checkpoint_func):
-    """Expose tensors inside residual state to reentrant checkpointing."""
-    flat_args, input_spec = tree_flatten(args)
-    output_spec = None
-
-    def forward(*flat_args):
-        nonlocal output_spec
-        outputs = function(*tree_unflatten(flat_args, input_spec))
-        flat_outputs, output_spec = tree_flatten(outputs)
-        return tuple(flat_outputs)
-
-    outputs = checkpoint_func(forward, *flat_args)
-    return tree_unflatten(outputs, output_spec)
+def _create_residual(config: GLAConfig, *, fuse_residual: bool = False) -> BaseResidual:
+    constructors = {
+        'standard': partial(StandardResidual, fuse_residual=fuse_residual),
+        'attnres': partial(AttentionResidual, block_size=config.attnres_block_size),
+    }
+    residual_type = 'standard' if config.attnres_block_size is None else 'attnres'
+    return constructors[residual_type](hidden_size=config.hidden_size, norm_eps=config.norm_eps, fuse_norm=config.fuse_norm)
 
 
 class GLABlock(GradientCheckpointingLayer):
-    """Run attention and MLP branches; residual modules own their inputs and state updates."""
+    """Run attention and MLP branches with residual aggregation before and state updates after each branch.
+
+    The current hidden tensor is passed explicitly for gradient checkpointing.
+    Residual state retains the depth history; the block does not inspect its representation.
+    """
 
     def __init__(self, config: GLAConfig, layer_idx: int):
         super().__init__()
@@ -86,19 +83,25 @@ class GLABlock(GradientCheckpointingLayer):
             fuse_swiglu=config.fuse_swiglu,
         )
 
-        self.residual_attn = get_residual(config, fuse_residual=config.fuse_norm)
-        self.residual_mlp = get_residual(config)
+        # materialize the MLP residual at the layer boundary to preserve low-precision rounding.
+        self.attn_residual = _create_residual(config, fuse_residual=True)
+        self.mlp_residual = _create_residual(config)
 
     def forward(
         self,
-        state: StateT,
+        hidden_states: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
         past_key_values: Cache | list[torch.FloatTensor] | None = None,
         use_cache: bool | None = False,
         output_attentions: bool | None = False,
+        residual_state: ResidualState | None = None,
         **kwargs: Unpack[dict],
-    ) -> tuple[StateT, torch.Tensor | None, Cache | None]:
-        hidden_states, context = self.residual_attn.pre(state)
+    ) -> tuple:
+        if residual_state is None:
+            state = self.attn_residual.initialize(hidden_states)
+        else:
+            state = residual_state.with_hidden_states(hidden_states)
+        hidden_states, context = self.attn_residual.pre(state)
         hidden_states, attentions, past_key_values = self.attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
@@ -107,12 +110,12 @@ class GLABlock(GradientCheckpointingLayer):
             output_attentions=output_attentions,
             **kwargs,
         )
-        state = self.residual_attn.post(hidden_states, context)
+        state = self.attn_residual.post(hidden_states, context)
 
-        hidden_states, context = self.residual_mlp.pre(state)
+        hidden_states, context = self.mlp_residual.pre(state)
         hidden_states = self.mlp(hidden_states, **kwargs)
-        state = self.residual_mlp.post(hidden_states, context)
-        return state, attentions, past_key_values
+        state = self.mlp_residual.post(hidden_states, context)
+        return state.hidden_states, attentions, past_key_values, state
 
 
 class GLAPreTrainedModel(FLAPreTrainedModel):
@@ -123,58 +126,9 @@ class GLAPreTrainedModel(FLAPreTrainedModel):
     _no_split_modules = ['GLABlock']
     _supports_cache_class = True
 
-    _checkpoint_conversion_mapping = {
-        r'layers\.(\d+)\.attn_norm\.': r'layers.\1.residual_attn.norm.',
-        r'layers\.(\d+)\.attn_res_proj\.': r'layers.\1.residual_attn.query.',
-        r'layers\.(\d+)\.attn_res_norm\.': r'layers.\1.residual_attn.attnres_norm.',
-        r'layers\.(\d+)\.mlp_norm\.': r'layers.\1.residual_mlp.norm.',
-        r'layers\.(\d+)\.mlp_res_proj\.': r'layers.\1.residual_mlp.query.',
-        r'layers\.(\d+)\.mlp_res_norm\.': r'layers.\1.residual_mlp.attnres_norm.',
-        r'^(model\.|)norm\.': r'\1residual_output.norm.',
-        r'^(model\.|)res_proj\.': r'\1residual_output.query.',
-        r'^(model\.|)res_norm\.': r'\1residual_output.attnres_norm.',
-    }
-
-    @classmethod
-    def from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
-        if cls._checkpoint_conversion_mapping:
-            # transformers loads meta parameters without invoking module load hooks.
-            kwargs['key_mapping'] = dict(kwargs.get('key_mapping') or {})
-            for source, target in cls._checkpoint_conversion_mapping.items():
-                kwargs['key_mapping'].setdefault(source, target)
-        return super().from_pretrained(pretrained_model_name_or_path, *args, **kwargs)
-
-    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
-        if self._checkpoint_conversion_mapping:
-            for key in list(state_dict):
-                if not key.startswith(prefix):
-                    continue
-                converted = key[len(prefix):]
-                for pattern, replacement in self._checkpoint_conversion_mapping.items():
-                    converted = re.sub(pattern, replacement, converted)
-                converted = prefix + converted
-                if converted != key:
-                    state_dict.setdefault(converted, state_dict.pop(key))
-        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
-
-    def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
-        residual = getattr(self.base_model, 'residual_output', None)
-        if not isinstance(residual, BaseResidual):
-            return super().gradient_checkpointing_enable(gradient_checkpointing_kwargs)
-
-        checkpoint_kwargs = {'use_reentrant': False, **(gradient_checkpointing_kwargs or {})}
-        if checkpoint_kwargs['use_reentrant'] is None:
-            checkpoint_kwargs['use_reentrant'] = False
-        if checkpoint_kwargs['use_reentrant'] and not residual.supports_reentrant_checkpointing:
-            raise ValueError(f'{type(residual).__name__} requires gradient checkpointing with use_reentrant=False')
-        super().gradient_checkpointing_enable(gradient_checkpointing_kwargs=checkpoint_kwargs)
-        if checkpoint_kwargs['use_reentrant']:
-            for module in self.modules():
-                if isinstance(module, GradientCheckpointingLayer):
-                    module._gradient_checkpointing_func = partial(
-                        _checkpoint_residual_state,
-                        checkpoint_func=module._gradient_checkpointing_func,
-                    )
+    def __init__(self, config: GLAConfig):
+        super().__init__(config)
+        self.register_load_state_dict_pre_hook(load_legacy_checkpoint)
 
 
 class GLAModel(GLAPreTrainedModel):
@@ -185,8 +139,11 @@ class GLAModel(GLAPreTrainedModel):
         self.vocab_size = config.vocab_size
 
         self.embeddings = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
-        self.layers = nn.ModuleList([GLABlock(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
-        self.residual_output = get_residual(config)
+        self.layers = nn.ModuleList([
+            GLABlock(config=config, layer_idx=layer_idx)
+            for layer_idx in range(config.num_hidden_layers)
+        ])
+        self.output_residual = _create_residual(config)
 
         self.gradient_checkpointing = False
 
@@ -224,28 +181,28 @@ class GLAModel(GLAPreTrainedModel):
         if use_cache and not isinstance(past_key_values, Cache):
             past_key_values = Cache.from_legacy_cache(past_key_values)
 
-        state = self.residual_output.initialize(hidden_states)
+        residual_state = self.output_residual.initialize(hidden_states)
 
         all_hidden_states = () if output_hidden_states else None
         all_attns = () if output_attentions else None
         for layer in self.layers:
             if output_hidden_states:
-                # preserve the existing hidden_states output: AttnRes exposes its current partial block sum.
-                hidden_states = state.blocks[-1] if isinstance(state, AttentionResidualState) else state.residual
                 all_hidden_states += (hidden_states,)
-            state, attentions, past_key_values = layer(
-                state,
+            hidden_states, attentions, past_key_values, residual_state = layer(
+                hidden_states,
                 attention_mask=attention_mask,
                 past_key_values=past_key_values,
                 use_cache=use_cache,
                 output_attentions=output_attentions,
+                residual_state=residual_state,
                 **kwargs,
             )
 
             if output_attentions:
                 all_attns += (attentions,)
 
-        hidden_states = self.residual_output(state)
+        residual_state = residual_state.with_hidden_states(hidden_states)
+        hidden_states = self.output_residual(residual_state)
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
 

@@ -19,6 +19,13 @@ class AttentionResidualState(NamedTuple):
     blocks: list[torch.Tensor]
     num_branches: int
 
+    @property
+    def hidden_states(self) -> torch.Tensor:
+        return self.blocks[-1]
+
+    def with_hidden_states(self, hidden_states: torch.Tensor) -> 'AttentionResidualState':
+        return AttentionResidualState([*self.blocks[:-1], hidden_states], self.num_branches)
+
 
 class AttentionResidualQuery(nn.Module):
     """Depth query with zero initialization, giving equal initial weights to all residual sources."""

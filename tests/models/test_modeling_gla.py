@@ -107,14 +107,14 @@ def test_standard_residual(fuse_norm: bool, dtype: torch.dtype):
     hidden_states, ref_hidden_states = x, []
     for layer in model.layers:
         ref_hidden_states.append(hidden_states)
-        branch_output = layer.attn(layer.residual_attn.norm(hidden_states))[0]
+        branch_output = layer.attn(layer.attn_residual.norm(hidden_states))[0]
         if fuse_norm:
-            mlp_input, residual = layer.residual_mlp.norm(branch_output, hidden_states, prenorm=True)
+            mlp_input, residual = layer.mlp_residual.norm(branch_output, hidden_states, prenorm=True)
         else:
             residual = hidden_states + branch_output
-            mlp_input = layer.residual_mlp.norm(residual)
+            mlp_input = layer.mlp_residual.norm(residual)
         hidden_states = residual + layer.mlp(mlp_input)
-    ref_hidden_states.append(model.residual_output.norm(hidden_states))
+    ref_hidden_states.append(model.output_residual.norm(hidden_states))
 
     for i, (ref, out) in enumerate(zip(ref_hidden_states, tri.hidden_states, strict=True)):
         assert_close(f'layer_{i}', ref, out, 1e-3)
@@ -127,7 +127,7 @@ def test_standard_residual(fuse_norm: bool, dtype: torch.dtype):
     pytest.param(4, torch.float16, id='block-fp16'),
 ])
 def test_attention_residual(block_size: int, dtype: torch.dtype):
-    """Match six GLA branches with explicit completed blocks and a partial sum, including gradients."""
+    """Compare three GLA layers against block sums formed directly from their six branch outputs."""
     torch.manual_seed(42)
     model = GLAModel(GLAConfig(
         hidden_size=128,
@@ -135,8 +135,7 @@ def test_attention_residual(block_size: int, dtype: torch.dtype):
         num_heads=2,
         intermediate_size=256,
         vocab_size=128,
-        residual_type='attnres',
-        residual_kwargs={'block_size': block_size},
+        attnres_block_size=block_size,
         use_cache=False,
     )).to(device=device, dtype=dtype)
     with torch.no_grad():
@@ -146,35 +145,26 @@ def test_attention_residual(block_size: int, dtype: torch.dtype):
     x = torch.randn(2, 65, 128, device=device, dtype=dtype, requires_grad=True)
     tri = model(inputs_embeds=x, output_hidden_states=True)
 
-    blocks, partial, ref_hidden_states = [x], None, []
-    for layer_idx, layer in enumerate(model.layers):
-        ref_hidden_states.append(x if partial is None else partial)
-        for branch_idx, (residual, branch) in enumerate([
-            (layer.residual_attn, layer.attn),
-            (layer.residual_mlp, layer.mlp),
-        ]):
-            index = 2 * layer_idx + branch_idx
-            if index == 0:
-                branch_input = residual.norm(x)
-            else:
-                sources = [*blocks, partial]
-                branch_input = fused_attnres(
-                    query=residual.query.weight,
-                    residuals=sources,
-                    rms_weight=residual.attnres_norm.weight,
-                    output_rms_weight=residual.norm.weight,
-                    rms_eps=residual.norm.eps,
-                )
-                if index % block_size == 0:
-                    blocks, partial = sources, None
-            branch_output = branch(branch_input)
-            if branch_idx == 0:
-                branch_output = branch_output[0]
-            partial = branch_output if partial is None else partial + branch_output
-    output = model.residual_output
+    branches = [branch for layer in model.layers for branch in (layer.attn, layer.mlp)]
+    residuals = [residual for layer in model.layers for residual in (layer.attn_residual, layer.mlp_residual)]
+    outputs, ref_hidden_states = [], [x]
+    for i, (branch, residual) in enumerate(zip(branches, residuals, strict=True)):
+        sources = [x] + [sum(outputs[start:start + block_size]) for start in range(0, i, block_size)]
+        branch_input = residual.norm(x) if i == 0 else fused_attnres(
+            query=residual.query.weight,
+            residuals=sources,
+            rms_weight=residual.attnres_norm.weight,
+            output_rms_weight=residual.norm.weight,
+            rms_eps=residual.norm.eps,
+        )
+        branch_output = branch(branch_input)
+        outputs.append(branch_output[0] if i % 2 == 0 else branch_output)
+        if i % 2 == 1 and i + 1 < len(branches):
+            ref_hidden_states.append(sum(outputs[(i // block_size) * block_size:]))
+    output = model.output_residual
     ref_hidden_states.append(fused_attnres(
         query=output.query.weight,
-        residuals=[*blocks, partial],
+        residuals=[x] + [sum(outputs[start:start + block_size]) for start in range(0, len(outputs), block_size)],
         rms_weight=output.attnres_norm.weight,
         output_rms_weight=output.norm.weight,
         rms_eps=output.norm.eps,

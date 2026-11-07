@@ -10,7 +10,6 @@ from __future__ import annotations
 import math
 import warnings
 from copy import copy
-from functools import partial
 
 import torch
 from torch import nn
@@ -25,7 +24,6 @@ from fla.models.cache_utils import Cache
 from fla.models.configuration_utils import get_attention_spec
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
 from fla.modules.l2warp import l2_warp
-from fla.modules.residuals import AttentionResidual, BaseResidual, StandardResidual
 from fla.ops.attnres import fused_attnres
 
 
@@ -44,26 +42,6 @@ def get_attention(config: PretrainedConfig, layer_idx: int) -> Attention | None:
         max_position_embeddings=config.max_position_embeddings,
         layer_idx=layer_idx,
     )
-
-
-def get_residual(config: PretrainedConfig, *, fuse_residual: bool = False) -> BaseResidual:
-    """Construct the configured residual; translate the legacy AttnRes option only at this boundary."""
-    residual_type = config.residual_type
-    kwargs = dict(hidden_size=config.hidden_size, norm_eps=config.norm_eps, fuse_norm=config.fuse_norm)
-    kwargs.update(config.residual_kwargs)
-    if residual_type is None:
-        residual_type = 'standard' if config.attnres_block_size is None else 'attnres'
-    if config.attnres_block_size is not None:
-        if residual_type != 'attnres' or kwargs.get('block_size', config.attnres_block_size) != config.attnres_block_size:
-            raise ValueError('attnres_block_size conflicts with residual_type or residual_kwargs')
-        kwargs['block_size'] = config.attnres_block_size
-    constructors = {
-        'standard': partial(StandardResidual, fuse_residual=fuse_residual),
-        'attnres': AttentionResidual,
-    }
-    if residual_type not in constructors:
-        raise ValueError(f'Unknown residual type: {residual_type!r}; expected one of {tuple(constructors)}')
-    return constructors[residual_type](**kwargs)
 
 
 class FLAPreTrainedModel(PreTrainedModel):
