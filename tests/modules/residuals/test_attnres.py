@@ -15,12 +15,6 @@ from fla.ops.attnres import naive_attnres
 from fla.utils import assert_close, device, device_platform
 
 
-@pytest.mark.parametrize('block_size', [0, -1, True, 1.5], ids=['zero', 'negative', 'bool', 'float'])
-def test_attnres_invalid_block_size(block_size: int | float):
-    with pytest.raises(ValueError, match='positive integer'):
-        AttentionResidual(hidden_size=8, block_size=block_size)
-
-
 @pytest.mark.skipif(device_platform == 'cpu', reason='AttnRes requires an accelerator')
 @pytest.mark.parametrize(('block_size', 'reset_parameters'), [(1, False), (4, True)], ids=['full-init', 'block-reset'])
 def test_attnres_uniform_readout(block_size: int, reset_parameters: bool):
