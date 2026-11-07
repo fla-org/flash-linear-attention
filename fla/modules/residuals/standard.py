@@ -20,14 +20,15 @@ class StandardResidualState(NamedTuple):
 class StandardResidual(BaseResidual[StandardResidualState, torch.Tensor]):
     r"""Standard residual accumulation, optionally fusing addition with the next normalization.
 
-    With h_1 as the embedding and f_l including branch normalization, the update is
+    All depth mixing weights are M_{i->l} = 1, so state only needs the running sum h_l.
+    With v_l = f_l(h_l) as the branch output, the update is
 
     .. math::
-        h_{l+1} = h_l + f_l(h_l).
+        h_{l+1} = h_l + v_l.
 
     State stores two summands `(residual, branch_output)` of h_l; `None` means the sum is already materialized.
-    `readout` returns their sum, and `pre` normalizes it while retaining h_l as writeback context.
-    `post` stores `(h_l + f_l(h_l), None)` when fusion is disabled, or `(h_l, f_l(h_l))` when enabled.
+    `readout` returns their sum, and `pre` normalizes it while returning h_l as the context for `post`.
+    `post` stores `(h_l + v_l, None)` when fusion is disabled, or `(h_l, v_l)` when enabled.
     The latter lets the next `pre` fuse addition and normalization without changing the residual rule.
 
     Unfused addition follows PyTorch dtype promotion.

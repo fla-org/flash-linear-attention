@@ -20,28 +20,35 @@ class AttentionResidualState(NamedTuple):
 
 
 class AttentionResidual(BaseResidual[AttentionResidualState, AttentionResidualState]):
-    r"""Attention over completed residual blocks and the current block's partial sum.
+    r"""Residual aggregation with softmax weights over branch outputs or block sums.
 
-    Following Attention Residuals, b_0 = h_1 is the embedding, b_n is the sum of branch outputs in block n,
-    and b_n^i is its partial sum after i branches. State stores these sources and the completed branch count.
-    Each attention or MLP counts as one branch; block_size=1 gives Full AttnRes.
-
-    For the sources v_j available to layer l, the learned query w_l and key normalization define
+    In Full AttnRes, state retains the embedding v_0 = h_1 and all preceding branch outputs v_i = f_i(h_i).
+    The learned query w_l defines the depth mixing weights:
 
     .. math::
-        \alpha_{j\to l}
-        = \operatorname{softmax}_j\!\left(w_l^\top\operatorname{RMSNorm}(v_j)\right),
-        \qquad h_l = \sum_j \alpha_{j\to l} v_j.
+        M_{i\to l} = \alpha_{i\to l}
+        = \operatorname{softmax}_i\!\left(w_l^\top\operatorname{RMSNorm}(v_i)\right),
+        \qquad h_l = \sum_{i=0}^{l-1} \alpha_{i\to l} v_i.
 
-    `readout` returns h_l; `pre` additionally applies the branch norm, separate from the key norm above.
-    At a new block, `post` starts its sum with f_l(h_l); within the block, it applies
+    `readout` computes h_l; `pre` additionally applies the branch norm and returns the existing state as context.
+    Key normalization only affects the attention weights; the values v_i remain unnormalized.
+    `post` appends the new branch output v_l, making it available to the next residual module's query.
+
+    Block AttnRes stores b_0 = h_1, completed block sums b_n, and the nonempty current partial sum b_n^j.
+    Each attention branch and each MLP branch contributes one output; `block_size` counts these outputs.
+    The same attention rule operates over these stored sources.
+    All outputs in a source block share its mixing weight: M_{i->l} = alpha_{n->l} for i in block n.
+    With v_l as the j-th output in block n, `post` updates the partial sum:
 
     .. math::
-        b_n^i = b_n^{i-1} + f_l(h_l).
+        b_n = \sum_{i\in\mathcal{B}_n} v_i,
+        \qquad b_n^j = b_n^{j-1} + v_l, \quad b_n^0 = 0.
 
-    Completed blocks remain unchanged. The output residual uses its own query to aggregate all sources,
-    followed by output normalization. Gradient checkpointing requires `use_reentrant=False`.
-    See `Attention Residuals <https://arxiv.org/abs/2603.15031>`_.
+    At a block boundary, `post` starts a new block with v_l; completed blocks remain unchanged.
+    State also records the completed branch count to determine these boundaries.
+    `block_size=1` gives Full AttnRes. The output residual aggregates all sources with its own query,
+    then applies output normalization. Gradient checkpointing requires `use_reentrant=False`.
+    See Sections 3 and 6.2 of `Attention Residuals <https://arxiv.org/abs/2603.15031>`_.
     """
 
     supports_reentrant_checkpointing = False

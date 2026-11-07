@@ -18,16 +18,32 @@ ContextT = TypeVar('ContextT')
 
 
 class BaseResidual(nn.Module, ABC, Generic[StateT, ContextT]):
-    r"""Own residual parameters, residual state transitions, and branch/output normalization.
+    r"""Residual aggregation, normalization, and state updates.
 
-    Following Attention Residuals, each attention or MLP is a layer l, h_l is its input before normalization,
-    and f_l(h_l) includes the branch's PreNorm. The caller owns the attention/MLP computation and layer order.
+    Let v_0 = h_1 be the embedding and v_i = f_i(h_i) be a branch output.
+    The depth mixing weights M_{i->l} determine the input h_l to branch l:
 
-    `initialize(h_1)` creates residual state from embeddings.
-    `readout(state)` returns h_l; `pre(state)` returns Norm_l(h_l) and the context needed for writeback.
-    The caller computes the branch output f_l(h_l), which `post(branch_output, context)` writes into new state.
-    Calling the output residual module performs its final readout and output normalization.
+    .. math::
+        h_l = \sum_{i=0}^{l-1} M_{i\to l} v_i,
+        \qquad h_{l+1} = \sum_{i=0}^{l} M_{i\to l+1} v_i.
+
+    Each implementation defines these weights and the state needed to evaluate the sums.
+    State may retain individual outputs, block sums, or a recurrent summary.
+    The module owns three operations:
+
+    * `readout(state)` computes h_l without branch normalization.
+    * `pre(state)` returns the normalized h_l and the context needed to update state.
+    * `post(branch_output, context)` incorporates v_l into the state used by the next branch.
+
+    The model executes its branch between `pre` and `post` to produce v_l = f_l(h_l).
+    Here f_l includes the normalization performed by `pre`; the model owns the remaining branch computation.
+    Context carries the old state and any update coefficients needed after that computation.
+    The next residual module reads the updated state using its own mixing weights.
+
+    `initialize(x)` creates the initial state from embeddings.
+    Calling the output residual module applies output normalization to its readout.
     State and context retain autograd connections and must not be mutated or cached on the module.
+    See Section 6.2 of `Attention Residuals <https://arxiv.org/abs/2603.15031>`_.
     """
 
     supports_reentrant_checkpointing = True
