@@ -7,6 +7,10 @@
 
 </div>
 
+<p align="center">
+  <b>English</b> · <a href="https://github.com/fla-org/flash-linear-attention/blob/main/README.zh.md">简体中文</a>
+</p>
+
 <p>
   💥 Flash Linear Attention brings together hardware-efficient building blocks, training-ready layers, and components for modern sequence models, spanning linear attention, sparse attention, state space models, and hybrid LLM architectures. All implementations are platform-agnostic and verified on NVIDIA, AMD, and Intel hardware. Pull requests are welcome!
 </p>
