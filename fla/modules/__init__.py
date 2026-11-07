@@ -34,6 +34,7 @@ from fla.modules.norm import (
     RMSNorm,
     RMSNormLinear,
 )
+from fla.modules.residuals import AttentionResidual, StandardResidual
 from fla.modules.rotary import RotaryEmbedding
 from fla.modules.token_shift import TokenShift
 
@@ -108,6 +109,7 @@ for _name, _aliases in _SYMBOL_ALIASES.items():
         setattr(_module, _old, getattr(_source, _symbol))
 
 __all__ = [
+    'AttentionResidual',
     'BitLinear',
     'DynamicShortConvolution',
     'FusedBitLinear',
@@ -133,5 +135,6 @@ __all__ = [
     'RMSNormLinear',
     'RotaryEmbedding',
     'ShortConvolution',
+    'StandardResidual',
     'TokenShift',
 ]
