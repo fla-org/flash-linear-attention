@@ -34,6 +34,10 @@ def chunk_kda_bwd_wy_dqkg_fused_verifier(
     chunk_indices: torch.LongTensor | None = None,
     chunk_offsets: torch.LongTensor | None = None,
     use_graph: bool = False,
+    compact_h: bool = False,
+    compact_dh: bool = False,
+    dht: torch.Tensor | None = None,
+    last_sequence_idx: torch.Tensor | None = None,
 ) -> tuple[bool, str | None]:
     if v.shape[2] != k.shape[2]:
         return False, (
@@ -42,6 +46,8 @@ def chunk_kda_bwd_wy_dqkg_fused_verifier(
         )
     if use_graph:
         return False, "TileLang backend does not support graph capture (use_graph=True); fall back to Triton"
+    if compact_h or compact_dh:
+        return False, "TileLang backend does not support compact state layouts; fall back to Triton"
     return True, None
 
 

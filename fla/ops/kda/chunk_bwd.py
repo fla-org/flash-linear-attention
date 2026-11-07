@@ -221,7 +221,7 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
             read_dht = i_t == NT - 1
             if USE_LAST_FINAL_STATE_GRADIENT:
                 dht += i_hv.to(tl.int64) * K*V
-                read_dht = read_dht & (i_n == last_sequence_idx)
+                read_dht = read_dht & (i_n == tl.load(last_sequence_idx))
             else:
                 dht += (i_n.to(tl.int64) * HV + i_hv) * K*V
     else:
@@ -436,7 +436,7 @@ def chunk_kda_bwd_wy_dqkg_fused(
     compact_h: bool = False,
     compact_dh: bool = False,
     dht: torch.Tensor | None = None,
-    last_sequence_idx: int | None = None,
+    last_sequence_idx: torch.Tensor | None = None,
 ):
     B, T, H, K, HV, V = *k.shape, v.shape[2], v.shape[-1]
     BT = chunk_size
@@ -486,7 +486,7 @@ def chunk_kda_bwd_wy_dqkg_fused(
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         dht=dht,
-        last_sequence_idx=-1 if last_sequence_idx is None else last_sequence_idx,
+        last_sequence_idx=last_sequence_idx,
         scale=scale,
         T=T,
         H=H,
@@ -548,7 +548,11 @@ def chunk_kda_bwd(
         and cp_context.layout == 'contiguous'
         and cu_seqlens is not None
     )
-    last_sequence_idx = len(cu_seqlens) - 2 if use_singleton_cp_state else None
+    # Resolved on device: host values are frozen at capture time, so a captured call must derive
+    # the last non-empty sequence from the live cu_seqlens.
+    last_sequence_idx = None
+    if use_singleton_cp_state:
+        last_sequence_idx = torch.searchsorted(cu_seqlens, cu_seqlens[-1]) - 1
     compact_forward_kwargs = {}
     compact_backward_kwargs = {}
     compact_fused_kwargs = {}

@@ -153,3 +153,80 @@ def test_compact_h_rejects_zigzag_cp():
             cp_context=SimpleNamespace(layout="zigzag"),
             compact_h=True,
         )
+
+
+def _fused_bwd_inputs():
+    """Smallest arguments that reach every fused-backward backend verifier and kernel."""
+    keys, values, block, total = 64, 64, 64, 128
+    q = torch.randn(1, total, 2, keys, device=device, dtype=torch.bfloat16)
+    v = torch.randn(1, total, 2, values, device=device, dtype=torch.bfloat16)
+    args = dict(
+        q=q,
+        k=q.clone(),
+        v=v,
+        v_new=v.clone(),
+        g=torch.randn(1, total, 2, keys, device=device, dtype=torch.bfloat16),
+        beta=torch.rand(1, total, 2, device=device, dtype=torch.bfloat16),
+        A=torch.randn(1, total, 2, block, device=device, dtype=torch.bfloat16),
+        h=torch.zeros(2, 2, keys, values, device=device, dtype=torch.bfloat16),
+        do=torch.randn(1, total, 2, values, device=device, dtype=torch.bfloat16),
+        dh=torch.zeros(2, 2, keys, values, device=device, dtype=torch.bfloat16),
+        dv=torch.randn(1, total, 2, values, device=device, dtype=torch.bfloat16),
+        scale=keys**-0.5,
+    )
+    compact = dict(
+        cu_seqlens=torch.tensor([0, total], dtype=torch.long, device=device),
+        compact_h=True,
+        compact_dh=True,
+        dht=torch.zeros(1, 2, keys, values, device=device, dtype=torch.float32),
+        last_sequence_idx=torch.tensor(0, dtype=torch.long, device=device),
+    )
+    return args, compact
+
+
+def test_fused_bwd_verifiers_decline_compact_layouts():
+    """`BackendRegistry.verify` swallows a verifier signature error as a rejection, so a verifier
+    that omits the compact arguments would hide behind `TypeError` instead of declining them."""
+    from fla.ops.kda.backends.tilelang import (
+        chunk_kda_bwd_wy_dqkg_fused_verifier as tilelang_verifier,
+    )
+    from fla.ops.kda.backends.triton_ascend.chunk_bwd import (
+        chunk_kda_bwd_wy_dqkg_fused_verifier as ascend_verifier,
+    )
+
+    args, compact = _fused_bwd_inputs()
+    for verifier in (tilelang_verifier, ascend_verifier):
+        assert verifier(**args) == (True, None)
+        accepted, reason = verifier(**args, **compact)
+        assert not accepted
+        assert "compact" in reason.lower(), reason
+
+
+def test_cp_ascend_verifier_declines_singleton_state():
+    """The NPU pre-process does not take `use_singleton_state`, so it must be rejected when
+    dispatch asks rather than forwarded into the implementation."""
+    from fla.ops.cp.backends.triton_ascend import TritonAscendCPBackend
+
+    npu_tensor = SimpleNamespace(device=SimpleNamespace(type="npu"))
+    backend = TritonAscendCPBackend()
+    verifier = backend.chunk_gated_delta_rule_fwd_h_pre_process_verifier
+    assert verifier(k=npu_tensor) == (True, None)
+    accepted, reason = verifier(k=npu_tensor, use_singleton_state=True)
+    assert not accepted
+    assert "singleton" in reason, reason
+
+
+def test_compact_layout_routes_away_from_tilelang(monkeypatch):
+    from fla.backends import TileLangBackend
+    from fla.ops.kda.backends import tilelang  # noqa: F401  registers the adapter
+    from fla.ops.kda.chunk_bwd import chunk_kda_bwd_wy_dqkg_fused
+
+    args, compact = _fused_bwd_inputs()
+    expected = chunk_kda_bwd_wy_dqkg_fused(**args, **compact)
+
+    monkeypatch.setattr(TileLangBackend, "is_available", classmethod(lambda cls: True))
+    monkeypatch.setattr(TileLangBackend, "is_enabled", lambda self: True)
+    routed = chunk_kda_bwd_wy_dqkg_fused(**args, **compact)
+
+    for actual, reference in zip(routed, expected, strict=True):
+        _assert_bitwise(actual, reference)

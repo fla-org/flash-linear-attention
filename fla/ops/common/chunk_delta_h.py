@@ -377,7 +377,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     'USE_GK': lambda args: args['gk'] is not None,
     'USE_INITIAL_STATE': lambda args: args['dh0'] is not None,
     'USE_FINAL_STATE_GRADIENT': lambda args: args['dht'] is not None,
-    'USE_LAST_FINAL_STATE_GRADIENT': lambda args: args['last_sequence_idx'] >= 0,
+    'USE_LAST_FINAL_STATE_GRADIENT': lambda args: args['last_sequence_idx'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @fla_cache_autotune(
@@ -477,7 +477,7 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
     if USE_FINAL_STATE_GRADIENT:
         if USE_LAST_FINAL_STATE_GRADIENT:
             dht += i_h * K*V
-            read_dht = i_n == last_sequence_idx
+            read_dht = i_n == tl.load(last_sequence_idx)
         else:
             dht += i_nh * K*V
             read_dht = True
@@ -825,7 +825,7 @@ def chunk_gated_delta_rule_bwd_dhu(
     chunk_indices: torch.LongTensor | None = None,
     chunk_offsets: torch.LongTensor | None = None,
     use_graph: bool = False,
-    last_sequence_idx: int | None = None,
+    last_sequence_idx: torch.Tensor | None = None,
     use_first_initial_state: bool = False,
     compact_dh: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -836,8 +836,6 @@ def chunk_gated_delta_rule_bwd_dhu(
     if last_sequence_idx is not None:
         if cu_seqlens is None or dht is None or dht.shape[0] != 1:
             raise ValueError("last_sequence_idx requires varlen metadata and a singleton dht buffer.")
-        if not 0 <= last_sequence_idx < len(cu_seqlens) - 1:
-            raise ValueError("last_sequence_idx must identify a sequence in cu_seqlens.")
     if compact_dh:
         assert cu_seqlens is not None
 
@@ -881,7 +879,7 @@ def chunk_gated_delta_rule_bwd_dhu(
         dv2=dv2,
         cu_seqlens=cu_seqlens,
         chunk_offsets=chunk_offsets,
-        last_sequence_idx=-1 if last_sequence_idx is None else last_sequence_idx,
+        last_sequence_idx=last_sequence_idx,
         scale=scale,
         T=T,
         H=H,
