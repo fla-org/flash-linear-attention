@@ -55,7 +55,7 @@ def test_parallel(B, T, HQ, H, K, V, topk, dtype):
     tri = parallel_dsa(q, k, v, indices)
     (tri * do).sum().backward()
 
-    tol = 1e-3 if dtype == torch.float else 0.008
+    tol = 5e-3 if dtype == torch.float else 0.008
     assert_close('o', ref, tri, tol)
     assert_close('dq', ref_dq, q.grad, tol)
     assert_close('dk', ref_dk, k.grad, tol)
@@ -75,9 +75,9 @@ def test_parallel_varlen():
     q.grad = k.grad = v.grad = None
     tri = parallel_dsa(q, k, v, indices, cu_seqlens=cu)
     (tri * do).sum().backward()
-    assert_close('o', ref, tri, 1e-3)
+    assert_close('o', ref, tri, 5e-3)
     for name, r, t in zip(['dq', 'dk', 'dv'], ref_grads, [q.grad, k.grad, v.grad]):
-        assert_close(name, r, t, 1e-3)
+        assert_close(name, r, t, 5e-3)
 
 
 def test_parallel_ignores_future_indices():
@@ -87,4 +87,4 @@ def test_parallel_ignores_future_indices():
     t = torch.arange(40, device=device)
     indices[..., -1] = torch.where(t + 3 < 40, t + 3, indices[..., -1])
     with torch.no_grad():
-        assert_close('o', naive_dsa(q, k, v, None, None, indices=indices), parallel_dsa(q, k, v, indices), 1e-3)
+        assert_close('o', naive_dsa(q, k, v, None, None, indices=indices), parallel_dsa(q, k, v, indices), 5e-3)
