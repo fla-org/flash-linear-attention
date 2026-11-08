@@ -6,6 +6,7 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import os
+import site
 import subprocess
 import sys
 import textwrap
@@ -135,6 +136,19 @@ def test_split_wheels_match_release_contract(tmp_path: Path) -> None:
     assert not any(name.startswith("fla/modules/") for name in ext_names)
     assert not any(name.startswith("fla/utils/") for name in ext_names)
     assert "fla/utils.py" not in ext_names
+
+    swila_sources = {
+        path.relative_to(ROOT).as_posix()
+        for package in ('ops', 'modules', 'models')
+        for path in (ROOT / 'fla' / package / 'swila').rglob('*')
+        if path.is_file() and (path.suffix == '.py' or path.name in ('LICENSE', 'README.md'))
+    } | {'fla/layers/swila.py'}
+    with zipfile.ZipFile(core_wheel) as core, zipfile.ZipFile(ext_wheel) as extension:
+        for name in swila_sources:
+            owner, other = (core, extension) if name.startswith(('fla/ops/', 'fla/modules/')) else (extension, core)
+            assert name in owner.namelist()
+            assert name not in other.namelist()
+            assert owner.read(name) == (ROOT / name).read_bytes()
 
     assert read_wheel_metadata(core_wheel)["Version"] == version
     assert read_wheel_metadata(ext_wheel)["Version"] == version
@@ -272,25 +286,44 @@ def test_split_namespace_across_sys_path_entries_without_runtime_deps(tmp_path: 
 
 def test_full_split_import_contract_when_runtime_dependencies_available(tmp_path: Path) -> None:
     torch = pytest.importorskip("torch")
-    pytest.importorskip("triton")
-    pytest.importorskip("transformers")
-    pytest.importorskip("einops")
+    triton = pytest.importorskip("triton")
+    transformers = pytest.importorskip("transformers")
+    einops = pytest.importorskip("einops")
     if parse_version(torch.__version__.split("+", maxsplit=1)[0]) < parse_version("2.7.0"):
         pytest.skip("full split import smoke requires torch>=2.7.0")
 
     core_wheel, ext_wheel, version = _build_split_wheels(tmp_path)
-    python = _create_venv(tmp_path, system_site_packages=True)
+    python = _create_venv(tmp_path)
 
     _run([str(python), "-m", "pip", "install", "--no-index", "--no-deps", str(core_wheel)], cwd=tmp_path)
     site_packages = subprocess.check_output(
         [str(python), '-c', 'import site; print(site.getsitepackages())'], cwd=tmp_path, text=True,
     ).strip()
-    core_check = textwrap.dedent(
+    runtime_versions = {module.__name__: module.__version__ for module in (torch, triton, transformers, einops)}
+    runtime_setup = textwrap.dedent(
         f"""
+        import importlib
         import sys
+        from pathlib import Path
 
-        # use runtime dependencies without activating editable extension installs.
-        sys.path[:0] = {site_packages}
+        # system-site inheritance in a nested venv skips the invoking venv's dependencies.
+        # add them explicitly under -S without activating editable installs.
+        sys.path[:0] = {site_packages} + {site.getsitepackages()!r}
+        for name, expected_version in {runtime_versions!r}.items():
+            assert importlib.import_module(name).__version__ == expected_version, name
+        """
+    )
+    installed_origins = textwrap.dedent(
+        f"""
+        for name, module in sys.modules.items():
+            if name == "fla" or name.startswith("fla."):
+                filename = getattr(module, "__file__", None)
+                if filename is not None:
+                    assert any(Path(filename).resolve().is_relative_to(Path(path).resolve()) for path in {site_packages}), name
+        """
+    )
+    core_check = runtime_setup + textwrap.dedent(
+        """
         import fla
         from fla.modules import BitLinear, RMSNorm, ShortConvolution
         from fla.modules.convolution import causal_conv1d
@@ -300,10 +333,10 @@ def test_full_split_import_contract_when_runtime_dependencies_available(tmp_path
         assert all(callable(symbol) for symbol in (RMSNorm, ShortConvolution, causal_conv1d, l2norm_fwd))
         assert isinstance(BitLinear(4, 4).norm, RMSNorm)
         """
-    )
+    ) + installed_origins
     _run([str(python), '-S', '-c', core_check], cwd=tmp_path)
     _run([str(python), "-m", "pip", "install", "--no-index", "--no-deps", str(ext_wheel)], cwd=tmp_path)
-    full_check = textwrap.dedent(
+    full_check = runtime_setup + textwrap.dedent(
         f"""
         import fla
         import fla.layers
@@ -329,5 +362,5 @@ def test_full_split_import_contract_when_runtime_dependencies_available(tmp_path
         assert isinstance(AutoModel.from_config(config), ModelsGLAModel)
         assert isinstance(AutoModelForCausalLM.from_config(config), GLAForCausalLM)
         """
-    )
-    _run([str(python), "-c", full_check], cwd=tmp_path)
+    ) + installed_origins
+    _run([str(python), "-S", "-c", full_check], cwd=tmp_path)

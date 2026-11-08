@@ -61,6 +61,7 @@ from fla.models.stickbreaking_attn import (
     StickBreakingAttentionForCausalLM,
     StickBreakingAttentionModel,
 )
+from fla.models.swila import SwiLAConfig, SwiLAForCausalLM, SwiLAModel
 from fla.models.transformer import TransformerConfig, TransformerForCausalLM, TransformerModel
 from fla.models.wall_transformer import WallTransformerConfig, WallTransformerForCausalLM, WallTransformerModel
 from fla.models.yoco import YOCOConfig, YOCOForCausalLM, YOCOModel
@@ -186,6 +187,9 @@ __all__ = [
     'StickBreakingAttentionConfig',
     'StickBreakingAttentionForCausalLM',
     'StickBreakingAttentionModel',
+    'SwiLAConfig',
+    'SwiLAForCausalLM',
+    'SwiLAModel',
     'TransformerConfig',
     'TransformerForCausalLM',
     'TransformerModel',
