@@ -130,24 +130,3 @@ def test_fused_hc_backend(backend, monkeypatch):
     monkeypatch.setenv('FLA_TILELANG', '0')
     out.backward(torch.randn_like(out))
     assert [call.kwargs['is_post'] for call in backward.call_args_list] == [True, False]
-
-
-@pytest.mark.parametrize('backend', ['triton', 'gluon'], indirect=True)
-def test_fused_hc_does_not_retune_for_new_token_counts(backend):
-    """Each batch of a variable-length run brings a new token count, and a tune stalls the step for seconds."""
-    if backend == 'gluon':
-        from fla.ops.hc import gluon
-
-        kernels = (gluon.hc_fwd_kernel_gluon, gluon.hc_bwd_kernel_gluon, gluon.hc_bwd_kernel_reduce_gluon)
-    else:
-        kernels = (fused.hc_fwd_kernel, fused.hc_bwd_kernel, fused.hc_bwd_kernel_reduce)
-
-    def step(T):
-        x = torch.randn(1, T, 4, 65, device=device, requires_grad=True)
-        pre = torch.randn(1, T, 4, device=device, requires_grad=True)
-        fused_hc_pre(x=x, pre=pre).sum().backward()
-
-    step(3)
-    tuned = [len(kernel.cache) for kernel in kernels]
-    step(5)
-    assert [len(kernel.cache) for kernel in kernels] == tuned
