@@ -7,25 +7,29 @@
 
 from __future__ import annotations
 
-import warnings
 from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
 from transformers.modeling_layers import GradientCheckpointingLayer
-from transformers.modeling_outputs import BaseModelOutputWithPast
 
 from fla.layers.gla import GatedLinearAttention
-from fla.models.cache_utils import Cache
 from fla.models.generation_utils import FLAUnsupportedCacheGenerationMixin
 from fla.models.gla.configuration_gla import GLAConfig
-from fla.models.modeling_utils import FLAForCausalLM, FLAPreTrainedModel, get_attention
+from fla.models.modeling_utils import (
+    LEGACY_RESIDUAL_KEY_MAPPING,
+    FLAForCausalLM,
+    FLAModel,
+    FLAPreTrainedModel,
+    get_attention,
+)
 from fla.modules import GatedMLP as GLAMLP
 from fla.modules.residuals import BaseResidual
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
+    from fla.models.cache_utils import Cache
     from fla.modules.residuals.base import ResidualState
 
 
@@ -108,9 +112,11 @@ class GLAPreTrainedModel(FLAPreTrainedModel):
     supports_gradient_checkpointing = True
     _no_split_modules = ['GLABlock']
     _supports_cache_class = True
+    _residual_block_types = (GLABlock,)
+    _residual_key_mapping = LEGACY_RESIDUAL_KEY_MAPPING
 
 
-class GLAModel(GLAPreTrainedModel):
+class GLAModel(GLAPreTrainedModel, FLAModel):
 
     def __init__(self, config: GLAConfig):
         super().__init__(config)
@@ -127,72 +133,6 @@ class GLAModel(GLAPreTrainedModel):
         self.gradient_checkpointing = False
 
         self.post_init()
-
-    def forward(
-        self,
-        input_ids: torch.LongTensor | None = None,
-        attention_mask: torch.Tensor | None = None,
-        inputs_embeds: torch.FloatTensor | None = None,
-        past_key_values: Cache | list[torch.FloatTensor] | None = None,
-        use_cache: bool | None = None,
-        output_attentions: bool | None = None,
-        output_hidden_states: bool | None = None,
-        return_dict: bool | None = None,
-        **kwargs: Unpack[dict],
-    ) -> tuple | BaseModelOutputWithPast:
-        if output_attentions:
-            warnings.warn(f"`{self.__class__.__name__}` does not `output_attentions` now, setting it to `False`.")
-            output_attentions = False
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        use_cache = use_cache if use_cache is not None else (self.config.use_cache if not self.training else False)
-        return_dict = return_dict if return_dict is not None else self.config.return_dict
-
-        if input_ids is not None and inputs_embeds is not None:
-            raise ValueError("You cannot specify both input_ids and inputs_embeds at the same time")
-        if input_ids is None and inputs_embeds is None:
-            raise ValueError("You have to specify either input_ids or inputs_embeds")
-
-        if inputs_embeds is None:
-            inputs_embeds = self.embeddings(input_ids)
-        hidden_states = inputs_embeds
-
-        if use_cache and not isinstance(past_key_values, Cache):
-            past_key_values = Cache.from_legacy_cache(past_key_values)
-
-        residual_state = self.output_residual.initialize(hidden_states)
-
-        all_hidden_states = () if output_hidden_states else None
-        all_attns = () if output_attentions else None
-        for layer in self.layers:
-            if output_hidden_states:
-                all_hidden_states += (hidden_states,)
-            hidden_states, attentions, past_key_values, residual_state = layer(
-                hidden_states,
-                attention_mask=attention_mask,
-                past_key_values=past_key_values,
-                use_cache=use_cache,
-                output_attentions=output_attentions,
-                residual_state=residual_state,
-                **kwargs,
-            )
-
-            if output_attentions:
-                all_attns += (attentions,)
-
-        residual_state = residual_state.with_hidden_states(hidden_states)
-        hidden_states = self.output_residual(residual_state)
-        if output_hidden_states:
-            all_hidden_states += (hidden_states,)
-
-        if not return_dict:
-            return tuple(i for i in [hidden_states, past_key_values, all_hidden_states, all_attns] if i is not None)
-        return BaseModelOutputWithPast(
-            last_hidden_state=hidden_states,
-            past_key_values=past_key_values,
-            hidden_states=all_hidden_states,
-            attentions=all_attns,
-        )
 
 
 class GLAForCausalLM(GLAPreTrainedModel, FLAForCausalLM, FLAUnsupportedCacheGenerationMixin):

@@ -16,6 +16,9 @@ from torch import nn
 from fla import models
 from fla.models import GLAConfig, KDAConfig, MemoryAttnConfig, MomConfig, TransformerConfig
 from fla.models.cache_utils import Cache
+from fla.models.gla import modeling_gla
+from fla.modules.residuals import attnres
+from fla.ops.attnres import naive_attnres
 from fla.utils import assert_close, device_name
 
 CAUSAL_LM_CONFIGS = [
@@ -51,6 +54,46 @@ def full_precision_matmul():
         yield
     finally:
         torch.set_float32_matmul_precision(precision)
+
+
+@pytest.mark.parametrize(('block_size', 'use_reentrant'), [(None, True), (None, False), (4, False)])
+def test_decoder_checkpointing(block_size, use_reentrant, make_model, monkeypatch):
+    """Preserve residual history and gradients through checkpointed layers with PyTorch branch computations."""
+
+    def attention_forward(self, hidden_states, past_key_values=None, **kwargs):
+        return self.o_proj(self.v_proj(hidden_states).tanh()), None, past_key_values
+
+    def mlp_forward(self, x, **kwargs):
+        return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
+
+    monkeypatch.setattr(modeling_gla.GatedLinearAttention, 'forward', attention_forward)
+    monkeypatch.setattr(modeling_gla.GLAMLP, 'forward', mlp_forward)
+    monkeypatch.setattr(attnres, 'fused_attnres', naive_attnres)
+    torch.manual_seed(42)
+    model = make_model(GLAConfig, num_hidden_layers=3, attnres_block_size=block_size, use_cache=False).train()
+    with torch.no_grad():
+        for name, parameter in model.named_parameters():
+            if name.endswith('query.weight'):
+                parameter.normal_(std=0.03)
+    reference = deepcopy(model)
+    model.gradient_checkpointing_enable({'use_reentrant': use_reentrant})
+    x = torch.randn(2, 7, 64, requires_grad=True)
+    ref_x = x.detach().clone().requires_grad_()
+    labels = torch.randint(0, 64, (2, 7))
+    actual = model(inputs_embeds=x, labels=labels, output_hidden_states=True)
+    expected = reference(inputs_embeds=ref_x, labels=labels, output_hidden_states=True)
+    torch.testing.assert_close(actual.loss, expected.loss, rtol=0, atol=0)
+    torch.testing.assert_close(actual.logits, expected.logits, rtol=0, atol=0)
+    for hidden, ref_hidden in zip(actual.hidden_states, expected.hidden_states, strict=True):
+        torch.testing.assert_close(hidden, ref_hidden, rtol=0, atol=0)
+    actual.loss.backward()
+    expected.loss.backward()
+    torch.testing.assert_close(x.grad, ref_x.grad, rtol=0, atol=0)
+    for (name, parameter), (_, ref_parameter) in zip(model.named_parameters(), reference.named_parameters(), strict=True):
+        if ref_parameter.grad is None:
+            assert parameter.grad is None, name
+        else:
+            torch.testing.assert_close(parameter.grad, ref_parameter.grad, rtol=0, atol=0, msg=name)
 
 
 @pytest.mark.parametrize('config_class', [GLAConfig, models.GSA2Config, KDAConfig, MemoryAttnConfig, TransformerConfig])

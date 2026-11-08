@@ -9,10 +9,12 @@ from transformers import AutoConfig, AutoModel, AutoModelForCausalLM
 
 from fla.models.gla.configuration_gla import GLAConfig
 from fla.models.gla.modeling_gla import GLAForCausalLM, GLAModel
+from fla.models.modeling_utils import register_residual_key_mapping
 
 AutoConfig.register(GLAConfig.model_type, GLAConfig, exist_ok=True)
 AutoModel.register(GLAConfig, GLAModel, exist_ok=True)
 AutoModelForCausalLM.register(GLAConfig, GLAForCausalLM, exist_ok=True)
+register_residual_key_mapping(GLAConfig.model_type, GLAForCausalLM._residual_key_mapping)
 
 
 __all__ = ['GLAConfig', 'GLAForCausalLM', 'GLAModel']
