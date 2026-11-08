@@ -5,8 +5,11 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from .naive import naive_dsa
+from .indexer import dsa_indexer
+from .naive import naive_dsa, naive_dsa_indexer
 
 __all__ = [
+    'dsa_indexer',
     'naive_dsa',
+    'naive_dsa_indexer',
 ]
