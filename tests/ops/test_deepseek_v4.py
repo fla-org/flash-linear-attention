@@ -9,7 +9,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from fla.ops.deepseek_v4 import naive_compress, naive_v4_attention, naive_v4_indexer
+from fla.ops.deepseek_v4 import naive_compress, naive_v4_attention, naive_v4_indexer, parallel_v4_attention
 from fla.utils import assert_close, device
 
 # Transcriptions of the DeepSeek-V4 modules of transformers (no cache, before `kv_norm` and rotary embeddings), in their
@@ -163,3 +163,76 @@ def test_attention_ignores_future_indices():
     ref = naive_v4_attention(q, kv, compressed_kv, sinks, 8, ratio)
     tri = naive_v4_attention(q, kv, compressed_kv, sinks, 8, ratio, indices)
     assert_close('o', ref, tri, 1e-6)
+
+
+def random_csa_indices(B, T, N, S, ratio):
+    """Random unique selections among the visible entries, padded with -1."""
+    visible = (torch.arange(T, device=device) + 1) // ratio
+    scores = torch.rand(B, T, N, device=device).masked_fill(torch.arange(N, device=device) >= visible[:, None], -1.)
+    values, indices = scores.topk(min(S, N), dim=-1)
+    return indices.masked_fill(values < 0, -1)
+
+
+@pytest.mark.parametrize(('B', 'T', 'H', 'D', 'window_size', 'ratio', 'S', 'mode', 'dtype'), [
+    pytest.param(*test, id="B{}-T{}-H{}-D{}-W{}-m{}-S{}-{}-{}".format(*test))
+    for test in [
+        (2, 64, 4, 32, 16, 4, 5, 'csa', torch.float),
+        (1, 100, 20, 48, 40, 4, 40, 'csa', torch.float),
+        (2, 300, 4, 16, 128, 128, None, 'hca', torch.float),
+        (1, 200, 3, 32, 8, 2, None, 'hca', torch.float),
+        (2, 50, 3, 16, 7, None, None, 'swa', torch.float),
+        (2, 256, 16, 64, 128, 4, 32, 'csa', torch.bfloat16),
+    ]
+])
+def test_parallel(B, T, H, D, window_size, ratio, S, mode, dtype):
+    torch.manual_seed(42)
+    q = torch.randn(B, T, H, D, device=device, dtype=dtype).requires_grad_()
+    kv = torch.randn(B, T, D, device=device, dtype=dtype).requires_grad_()
+    sinks = torch.randn(H, device=device, dtype=dtype).requires_grad_()
+    ckv, indices = None, None
+    if mode != 'swa':
+        ckv = torch.randn(B, T // ratio, D, device=device, dtype=dtype).requires_grad_()
+    if mode == 'csa':
+        indices = random_csa_indices(B, T, T // ratio, S, ratio)
+    do = torch.randn(B, T, H, D, device=device, dtype=dtype)
+    inputs = [x for x in (q, kv, ckv, sinks) if x is not None]
+
+    ref = naive_v4_attention(q, kv, ckv, sinks, window_size, ratio, indices)
+    ref_grads = torch.autograd.grad((ref * do).sum(), inputs)
+    tri = parallel_v4_attention(q, kv, ckv, sinks, window_size, ratio, indices)
+    tri_grads = torch.autograd.grad((tri * do).sum(), inputs)
+
+    tol = 1e-4 if dtype == torch.float else 1e-2
+    assert_close('o', ref, tri, tol)
+    for name, r, t in zip(('dq', 'dkv', 'dckv', 'dsinks') if ckv is not None else ('dq', 'dkv', 'dsinks'),
+                          ref_grads, tri_grads):
+        assert_close(name, r, t, tol)
+
+
+def test_parallel_matches_reference_layer():
+    """The kernel against the transcription of the transformers eager path, with indices from the indexer."""
+    torch.manual_seed(42)
+    B, T, H, D, ratio, window_size = 1, 96, 4, 32, 4, 16
+    q = torch.randn(B, T, H, D, device=device)
+    kv = torch.randn(B, T, D, device=device)
+    ckv = torch.randn(B, T // ratio, D, device=device)
+    sinks = torch.randn(H, device=device)
+    indices = reference_indexer(
+        torch.randn(B, T, 2, 16, device=device), torch.randn(B, T // ratio, 16, device=device),
+        torch.randn(B, T, 2, device=device), 6, ratio, 0.25,
+    )
+    ref = reference_attention(q, kv, ckv, sinks, window_size, ratio, indices, D ** -0.5)
+    assert_close('o', ref, parallel_v4_attention(q, kv, ckv, sinks, window_size, ratio, indices), 1e-4)
+
+
+def test_parallel_ignores_future_indices():
+    torch.manual_seed(42)
+    B, T, H, D, ratio = 2, 64, 4, 32, 4
+    q = torch.randn(B, T, H, D, device=device)
+    kv = torch.randn(B, T, D, device=device)
+    ckv = torch.randn(B, T // ratio, D, device=device)
+    sinks = torch.randn(H, device=device)
+    # every entry is selected, including those the query cannot see yet
+    indices = torch.arange(T // ratio, device=device).flip(0).expand(B, T, -1).contiguous()
+    ref = naive_v4_attention(q, kv, ckv, sinks, 8, ratio)
+    assert_close('o', ref, parallel_v4_attention(q, kv, ckv, sinks, 8, ratio, indices), 1e-4)
