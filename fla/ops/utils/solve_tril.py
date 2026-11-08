@@ -14,7 +14,7 @@ import triton.language as tl
 from fla.backends import dispatch
 from fla.ops.utils.index import prepare_chunk_indices
 from fla.ops.utils.op import make_tensor_descriptor
-from fla.utils import IS_TF32_SUPPORTED, IS_TMA_SUPPORTED, autotune_cache_kwargs, input_guard
+from fla.utils import IS_NVIDIA_SM120, IS_TF32_SUPPORTED, IS_TMA_SUPPORTED, autotune_cache_kwargs, input_guard
 
 FLA_TRIL_PRECISION = os.environ.get('FLA_TRIL_PRECISION', 'ieee')
 assert FLA_TRIL_PRECISION in ['ieee', 'tf32', 'tf32x3'], \
@@ -193,7 +193,9 @@ def merge_16x16_to_32x32_inverse_kernel(
 @triton.autotune(
     configs=[
         triton.Config({'DOT_PRECISION': DOT_PRECISION}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [2, 4, 8]
+        # Different warp layouts can cross BF16 rounding boundaries on SM120,
+        # breaking dense/packed equivalence in downstream models.
+        for num_warps in ([2] if IS_NVIDIA_SM120 else [2, 4, 8])
         for num_stages in [2, 3, 4, 5]
         for DOT_PRECISION in DOT_PRECISION_AUTOTUNE_LIST
     ],
