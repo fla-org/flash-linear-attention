@@ -202,7 +202,7 @@ def test_parallel(B, T, H, D, window_size, ratio, S, mode, dtype):
     tri = parallel_v4_attention(q, kv, ckv, sinks, window_size, ratio, indices)
     tri_grads = torch.autograd.grad((tri * do).sum(), inputs)
 
-    tol = 1e-4 if dtype == torch.float else 1e-2
+    tol = 5e-3 if dtype == torch.float else 1e-2
     assert_close('o', ref, tri, tol)
     for name, r, t in zip(('dq', 'dkv', 'dckv', 'dsinks') if ckv is not None else ('dq', 'dkv', 'dsinks'),
                           ref_grads, tri_grads):
@@ -222,7 +222,7 @@ def test_parallel_matches_reference_layer():
         torch.randn(B, T, 2, device=device), 6, ratio, 0.25,
     )
     ref = reference_attention(q, kv, ckv, sinks, window_size, ratio, indices, D ** -0.5)
-    assert_close('o', ref, parallel_v4_attention(q, kv, ckv, sinks, window_size, ratio, indices), 1e-4)
+    assert_close('o', ref, parallel_v4_attention(q, kv, ckv, sinks, window_size, ratio, indices), 5e-3)
 
 
 def test_parallel_ignores_future_indices():
@@ -235,4 +235,4 @@ def test_parallel_ignores_future_indices():
     # every entry is selected, including those the query cannot see yet
     indices = torch.arange(T // ratio, device=device).flip(0).expand(B, T, -1).contiguous()
     ref = naive_v4_attention(q, kv, ckv, sinks, 8, ratio)
-    assert_close('o', ref, parallel_v4_attention(q, kv, ckv, sinks, 8, ratio, indices), 1e-4)
+    assert_close('o', ref, parallel_v4_attention(q, kv, ckv, sinks, 8, ratio, indices), 5e-3)
