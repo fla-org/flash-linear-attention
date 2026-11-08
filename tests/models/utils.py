@@ -16,7 +16,7 @@ from transformers import AutoModelForCausalLM, PretrainedConfig
 from fla.utils import IS_INTEL_ALCHEMIST, IS_NVIDIA_HOPPER, assert_close, device
 
 MODELING_UNSUPPORTED_VARLEN = [
-    "ABCConfig", "CATConfig", "ForgettingTransformerConfig", "LinearAttentionConfig", "LoLCATsConfig",
+    "ABCConfig", "CATConfig", "ForgettingTransformerConfig", "LoLCATsConfig",
     "Mamba2Config", "MambaConfig", "MesaNetConfig", "SambaConfig",
     "RodimusConfig", "WallTransformerConfig",
 ]

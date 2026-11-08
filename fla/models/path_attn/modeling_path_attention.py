@@ -8,20 +8,18 @@
 from __future__ import annotations
 
 import math
-import warnings
 from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn as nn
 from transformers.modeling_layers import GradientCheckpointingLayer
-from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
+from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.utils import logging
 from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.path_attn import PaTHAttention
-from fla.models.cache_utils import Cache
 from fla.models.generation_utils import FLAGenerationMixin
-from fla.models.modeling_utils import FLAForCausalLM, FLAPreTrainedModel
+from fla.models.modeling_utils import FLAForCausalLM, FLAModel, FLAPreTrainedModel
 from fla.models.path_attn.configuration_path_attention import PaTHAttentionConfig
 from fla.modules import GatedMLP as PaTHAttentionMLP
 from fla.modules import RMSNorm
@@ -29,6 +27,8 @@ from fla.ops.attnres import fused_attnres
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
+
+    from fla.models.cache_utils import Cache
 
 
 logger = logging.get_logger(__name__)
@@ -218,7 +218,7 @@ class PaTHAttentionPreTrainedModel(FLAPreTrainedModel):
                     p /= math.sqrt(num_residuals_per_layer * self.config.num_hidden_layers)
 
 
-class PaTHAttentionModel(PaTHAttentionPreTrainedModel):
+class PaTHAttentionModel(PaTHAttentionPreTrainedModel, FLAModel):
 
     def __init__(
         self,
@@ -258,84 +258,16 @@ class PaTHAttentionModel(PaTHAttentionPreTrainedModel):
         return_dict: bool | None = None,
         **kwargs: Unpack[Any],
     ) -> tuple | CausalLMOutputWithPast:
-        if output_attentions:
-            warnings.warn(
-                "`PaTHAttentionModel` does not support output attention weights now, "
-                "so `output_attentions` is set to `False`.",
-            )
-            output_attentions = False
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        use_cache = use_cache if use_cache is not None else (self.config.use_cache if not self.training else False)
-        return_dict = return_dict if return_dict is not None else self.config.return_dict
-
-        # retrieve input_ids and inputs_embeds
-        if input_ids is not None and inputs_embeds is not None:
-            raise ValueError("You cannot specify both input_ids and inputs_embeds at the same time")
-        elif input_ids is None and inputs_embeds is None:
-            raise ValueError("You have to specify either input_ids or inputs_embeds")
-
-        if use_cache and not isinstance(past_key_values, Cache):
-            past_key_values = Cache.from_legacy_cache(past_key_values)
-
-        if inputs_embeds is None:
-            inputs_embeds = self.embeddings(input_ids)
-
-        # embed positions
-        hidden_states = inputs_embeds
-
-        # list of completed block summaries (kept as separate tensors so
-        # `fused_attnres` can ingest them via its pointer-table API
-        # without an upstream `torch.cat`); the running `prefix_sum`
-        # rides on `hidden_states` itself.
-        attnres_states: list[torch.Tensor] | None = None
-
-        all_hidden_states = () if output_hidden_states else None
-        all_attns = () if output_attentions else None
-
-        for layer in self.layers:
-            if output_hidden_states:
-                all_hidden_states += (hidden_states,)
-
-            hidden_states, attentions, past_key_values, attnres_states = layer(
-                hidden_states,
-                attention_mask=attention_mask,
-                past_key_values=past_key_values,
-                output_attentions=output_attentions,
-                use_cache=use_cache,
-                attnres_states=attnres_states,
-                **kwargs,
-            )
-
-            if output_attentions:
-                all_attns += (attentions,)
-
-        if self.use_attnres:
-            # top-level attnres aggregation; `self.norm` is folded into the
-            # kernel via `output_rms_weight` so we don't double-norm.
-            residuals = [*attnres_states, hidden_states]
-            hidden_states = fused_attnres(
-                query=self.res_proj.weight,
-                residuals=residuals,
-                rms_weight=self.res_norm.weight,
-                output_rms_weight=self.norm.weight,
-                rms_eps=self.res_norm.eps,
-            )
-        else:
-            hidden_states = self.norm(hidden_states)
-
-        # add hidden states from the last decoder layer
-        if output_hidden_states:
-            all_hidden_states += (hidden_states,)
-
-        if not return_dict:
-            return tuple(v for v in [hidden_states, past_key_values, all_hidden_states, all_attns] if v is not None)
-
-        return BaseModelOutputWithPast(
-            last_hidden_state=hidden_states,
+        return super().forward(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            inputs_embeds=inputs_embeds,
             past_key_values=past_key_values,
-            hidden_states=all_hidden_states,
-            attentions=all_attns,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+            **kwargs,
         )
 
 
