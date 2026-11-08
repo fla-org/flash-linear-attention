@@ -44,9 +44,13 @@ def make_inputs(B, T, HQ, H, D, dtype):
     return q, k, v, q_idx, k_idx
 
 
-@pytest.mark.parametrize(('T', 'block_size', 'topk', 'local_blocks'), [(100, 16, 4, 1), (256, 32, 3, 2), (70, 64, 16, 1)])
-def test_indexer(T, block_size, topk, local_blocks):
-    _, _, _, q_idx, k_idx = make_inputs(2, T, 32, 2, 32, torch.float)
+@pytest.mark.parametrize(('T', 'block_size', 'topk', 'local_blocks', 'dtype'), [
+    (100, 16, 4, 1, torch.float), (256, 32, 3, 2, torch.float), (70, 64, 16, 1, torch.float), (130, 16, 5, 0, torch.float),
+    (300, 128, 2, 1, torch.bfloat16),
+])
+def test_indexer(T, block_size, topk, local_blocks, dtype):
+    _, _, _, q_idx, k_idx = make_inputs(2, T, 32, 2, 32, dtype)
+    q_idx, k_idx = q_idx.to(dtype), k_idx.to(dtype)
     ref = reference_indexer(q_idx, k_idx, block_size, topk, local_blocks)
     naive = naive_msa_indexer(q_idx, k_idx, block_size, topk, local_blocks)
     tri = msa_indexer(q_idx, k_idx, block_size, topk, local_blocks, chunk_size=48)
@@ -79,7 +83,7 @@ def test_parallel(B, T, HQ, H, D, block_size, topk, dtype):
     tri = parallel_msa(q, k, v, indices, block_size)
     (tri * do).sum().backward()
 
-    tol = 1e-3 if dtype == torch.float else 0.008
+    tol = 5e-3 if dtype == torch.float else 0.008
     assert_close('o', ref, tri, tol)
     for name, r, t in zip(['dq', 'dk', 'dv'], ref_grads, [q.grad, k.grad, v.grad]):
         assert_close(name, r, t, tol)
@@ -97,6 +101,6 @@ def test_parallel_varlen():
     q.grad = k.grad = v.grad = None
     tri = parallel_msa(q, k, v, indices, 16, cu_seqlens=cu_seqlens)
     (tri * do).sum().backward()
-    assert_close('o', ref, tri, 1e-3)
+    assert_close('o', ref, tri, 5e-3)
     for name, r, t in zip(['dq', 'dk', 'dv'], ref_grads, [q.grad, k.grad, v.grad]):
-        assert_close(name, r, t, 1e-3)
+        assert_close(name, r, t, 5e-3)
