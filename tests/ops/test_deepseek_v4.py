@@ -104,7 +104,7 @@ def test_compress(B, T, D, ratio, overlap):
     ref = reference_compress(kv, gate, position_bias, ratio, overlap)
     tri = naive_compress(kv, gate, position_bias, ratio, overlap)
     assert tri.shape == ref.shape == (B, T // ratio, D)
-    if T >= ratio:
+    if ratio <= T:
         assert_close('compressed', ref, tri, 1e-5)
 
 
