@@ -21,7 +21,7 @@ from fla.utils import assert_close, device_name
 CAUSAL_LM_CONFIGS = [
     models.ABCConfig, models.BitNetConfig, models.CombaConfig, models.DeltaFormerConfig, models.DeltaNetConfig,
     models.ForgettingTransformerConfig, models.GatedDeltaNetConfig, models.GatedDeltaProductConfig,
-    models.GLAConfig, models.GSA2Config, models.GSAConfig, models.HGRNConfig, models.HGRN2Config,
+    models.GLAConfig, models.GriffinConfig, models.GSA2Config, models.GSAConfig, models.HGRNConfig, models.HGRN2Config,
     models.KDAConfig, models.LightNetConfig, models.LinearAttentionConfig,
     models.MesaNetConfig, models.MLAConfig, models.MoBAConfig, models.NSAConfig, models.ParallaxConfig,
     models.PaTHAttentionConfig, models.PrecondGatedDeltaNetConfig, models.RavenConfig, models.RetNetConfig,
@@ -31,7 +31,7 @@ CAUSAL_LM_CONFIGS = [
 DECODER_CONFIGS = [
     models.ABCConfig, models.BitNetConfig, models.CombaConfig, models.DeltaFormerConfig, models.DeltaNetConfig,
     models.ForgettingTransformerConfig,
-    models.GatedDeltaNetConfig, models.GatedDeltaProductConfig, models.GLAConfig, models.GSA2Config, models.GSAConfig,
+    models.GatedDeltaNetConfig, models.GatedDeltaProductConfig, models.GLAConfig, models.GriffinConfig, models.GSA2Config, models.GSAConfig,
     models.KDAConfig, models.LightNetConfig, models.LinearAttentionConfig, models.MesaNetConfig, models.MLAConfig,
     models.MoBAConfig, models.NSAConfig, models.ParallaxConfig, models.PaTHAttentionConfig, models.RavenConfig,
     models.RetNetConfig, models.TransformerConfig, models.WallTransformerConfig,
