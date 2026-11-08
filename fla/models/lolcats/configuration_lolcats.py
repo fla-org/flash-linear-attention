@@ -7,7 +7,10 @@
 
 from transformers.configuration_utils import PreTrainedConfig
 
-from fla.models.configuration_utils import validate_loss_config
+from fla.models.configuration_utils import (
+    validate_attnres_config,
+    validate_loss_config,
+)
 
 
 class LoLCATsConfig(PreTrainedConfig):
@@ -49,6 +52,7 @@ class LoLCATsConfig(PreTrainedConfig):
         fuse_cross_entropy: bool = True,
         fuse_linear_cross_entropy: bool = False,
         use_l2warp: bool = False,
+        attnres_block_size: int | None = None,
         vocab_size: int = 32000,
         **kwargs,
     ):
@@ -74,9 +78,11 @@ class LoLCATsConfig(PreTrainedConfig):
         self.fuse_cross_entropy = fuse_cross_entropy
         self.fuse_linear_cross_entropy = fuse_linear_cross_entropy
         self.use_l2warp = use_l2warp
+        self.attnres_block_size = attnres_block_size
         self.vocab_size = vocab_size
 
         validate_loss_config(fuse_cross_entropy=fuse_cross_entropy, fuse_linear_cross_entropy=fuse_linear_cross_entropy)
+        validate_attnres_config(attnres_block_size=attnres_block_size)
 
         super().__init__(
             pad_token_id=pad_token_id,

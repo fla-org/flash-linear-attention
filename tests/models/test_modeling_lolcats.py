@@ -15,16 +15,20 @@ from .utils import check_forward, check_generation, create_model_and_config
 
 
 @pytest.mark.parametrize(
-    ['L', 'B', 'T', 'H', 'D', 'dtype'],
+    ['L', 'B', 'T', 'H', 'D', 'attnres_block_size', 'dtype'],
     [
-        pytest.param(*test, id="L{}-B{}-T{}-H{}-D{}-{}".format(*test))
+        pytest.param(*test, id="L{}-B{}-T{}-H{}-D{}-bs{}-{}".format(*test))
         for test in [
-            (4, 4, 1024, 4, 64, torch.bfloat16),
+            (4, 4, 1024, 4, 64, None, torch.bfloat16),
+            (4, 4, 1024, 4, 64, 4, torch.bfloat16),
         ]
     ],
 )
-def test_modeling(L: int, B: int, T: int, H: int, D: int, dtype: torch.dtype):
-    check_forward(L, B, T, H, D, LoLCATsConfig, use_l2warp=False, dtype=dtype, varlen=False, feature_dim=16)
+def test_modeling(L: int, B: int, T: int, H: int, D: int, attnres_block_size: int | None, dtype: torch.dtype):
+    check_forward(
+        L, B, T, H, D, LoLCATsConfig, use_l2warp=False, attnres_block_size=attnres_block_size, dtype=dtype, varlen=False,
+        feature_dim=16,
+    )
 
 
 @pytest.mark.parametrize(
