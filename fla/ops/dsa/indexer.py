@@ -69,7 +69,7 @@ def dsa_indexer_score_kernel(
     for i_h in range(HI):
         # [BT, BD]
         b_q = tl.load(q + ((i_b * T + o_t[:, None]) * HI + i_h) * DI + o_d[None, :], mask=m_t[:, None] & m_d[None, :], other=0.)
-        b_x = tl.dot(b_q, b_k) * scale
+        b_x = tl.dot(b_q, b_k, allow_tf32=False) * scale
         if RELU:
             b_x = tl.maximum(b_x, 0.)
         if USE_WEIGHTS:
