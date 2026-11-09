@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+from functools import cache
+
 import torch
 import triton
 import triton.language as tl
@@ -22,6 +24,7 @@ from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 from fla.utils.ascend_ub_manager import (
     ASCEND_MAX_GRID_DIM,
     compute_row_tile_block_size,
+    get_ub_manager,
     max_grid_axis_chunks,
 )
 
@@ -62,7 +65,9 @@ def get_gate_bwd_bt(T: int, K: int) -> int:
     )
 
 
-def get_chunk_cumsum_bs(BT: int, S: int) -> int:
+@cache
+def get_chunk_cumsum_bs(BT: int, S: int, *, ub_capacity_bits: int) -> int:
+    # the budget keys the cache; the shared helper still owns the resource calculation.
     return compute_row_tile_block_size(
         row_dim=BT,
         fixed_dim=S,
@@ -646,7 +651,7 @@ def kda_gate_chunk_cumsum_npu(
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     assert chunk_size == 2 ** (chunk_size.bit_length() - 1), "chunk_size must be a power of 2"
 
-    BS = get_chunk_cumsum_bs(BT, S)
+    BS = get_chunk_cumsum_bs(BT, S, ub_capacity_bits=get_ub_manager().ub_capacity_bits)
     g_org, o = g, (torch.zeros_like if use_graph else torch.empty_like)(g, dtype=output_dtype or g.dtype)
     launch_gate_chunk_cumsum(
         s=g_org,
