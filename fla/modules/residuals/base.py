@@ -64,8 +64,8 @@ class BaseResidual(nn.Module, ABC, Generic[StateT, ContextT]):
         num_sublayers: int,
     ):
         super().__init__()
-        if isinstance(num_sublayers, bool) or not isinstance(num_sublayers, int) or num_sublayers < 0:
-            raise ValueError('num_sublayers must be a non-negative integer')
+        if isinstance(num_sublayers, bool) or not isinstance(num_sublayers, int) or num_sublayers < 1:
+            raise ValueError('num_sublayers must be a positive integer')
         if isinstance(sub_layer_idx, bool) or not isinstance(sub_layer_idx, int) or not 0 <= sub_layer_idx <= num_sublayers:
             raise ValueError('sub_layer_idx must be an integer between 0 and num_sublayers')
         self.hidden_size = hidden_size
