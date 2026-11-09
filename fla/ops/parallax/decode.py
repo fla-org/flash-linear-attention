@@ -9,6 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.backends import dispatch
 from fla.ops.parallax.parallel import _block_size
 from fla.ops.utils.op import exp2
 
@@ -283,6 +284,7 @@ def parallax_decode_one_step_kernel(
     tl.store(p_o, out.to(p_o.dtype.element_ty), mask=m_k)
 
 
+@dispatch('parallax')
 def parallax_decode_one_step(
     q: torch.Tensor,
     r: torch.Tensor,

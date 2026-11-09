@@ -229,7 +229,7 @@ jobs:
             --custom-shapes "$PRECOND_KDA_SHAPES" --json benchmark_chunk_precond_kda.json
           echo "Benchmark chunk_precond_kda prewarm: elapsed=$((SECONDS - precond_started))s"
 
-      - name: Benchmark chunk_gdn, fused_recurrent_gdn2, chunk_gdn2, chunk_kda, KDA graph, fused_attnres, conv1d, chunk_precond_gdn, parallel_wall_attn, fused_recurrent_oja, chunk_precond_kda, and chunk_ttt
+      - name: Benchmark chunk_gdn, fused_recurrent_gdn2, chunk_gdn2, chunk_kda, KDA graph, fused_attnres, conv1d, chunk_precond_gdn, parallel_wall_attn, fused_recurrent_oja, chunk_precond_kda, chunk_ttt, and parallel_parallax
         id: benchmark
         if: github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
         shell: bash
@@ -328,10 +328,16 @@ jobs:
           ) &
           pid_precond_gdn=$!
 
+          ASCEND_RT_VISIBLE_DEVICES=3 python -m benchmarks.ops.run \
+            --op parallel_parallax --base '' --json benchmark_parallel_parallax.json \
+            > parallel_parallax.log 2>&1 &
+          pid_parallel_parallax=$!
+
           wait "$pid_gdn" || status=1
           wait "$pid_kda" || status=1
           wait "$pid_attnres" || status=1
           wait "$pid_precond_gdn" || status=1
+          wait "$pid_parallel_parallax" || status=1
 
           # The runner exposes devices 0-3. Reuse device 0 only after the
           # parallel benchmarks finish so graph latency is not affected by
@@ -369,6 +375,8 @@ jobs:
           cat parallel_wall_attn.log
           echo "========== chunk_ttt =========="
           cat chunk_ttt.log
+          echo "========== parallel_parallax =========="
+          cat parallel_parallax.log
           exit "$status"
 
       - name: Validate chunk_kda benchmark results
@@ -507,6 +515,7 @@ jobs:
             benchmark_kda_graph.json
             benchmark_parallel_wall_attn.json
             benchmark_chunk_ttt.json
+            benchmark_parallel_parallax.json
             conv_benchmark/
           if-no-files-found: ignore
           retention-days: 10
