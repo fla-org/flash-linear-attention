@@ -2,6 +2,8 @@
 #
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 """Triton backend for the decay-max scan: chunked forward with block-carry
 composition, and a reverse BPTT backward over coefficients recomputed in torch
