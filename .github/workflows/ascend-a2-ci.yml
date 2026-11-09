@@ -216,9 +216,20 @@ jobs:
             tests/ops/test_simple_gla.py::test_retention_ascend_registration_import_order \
             tests/ops/test_kda_graph.py
 
+      - name: Run CP tests serially
+        id: pytest-cp
+        if: github.event_name != 'schedule' || steps.triton-cache.outputs.cache-hit != 'true'
+        shell: bash
+        env:
+          FLA_NPU_XDIST: "0"
+        run: |
+          source /usr/local/Ascend/ascend-toolkit/set_env.sh
+          pytest -s -v --exitfirst tests/cp
+
       - name: Save A2 pytest Triton-Ascend kernel cache
         if: |
           steps.pytest.outcome == 'success' &&
+          steps.pytest-cp.outcome == 'success' &&
           steps.triton-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
