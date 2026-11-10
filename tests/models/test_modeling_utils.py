@@ -19,19 +19,28 @@ from fla.models.cache_utils import Cache
 from fla.utils import assert_close, device_name
 
 CAUSAL_LM_CONFIGS = [
-    models.ABCConfig, models.BitNetConfig, models.CombaConfig, models.DeltaNetConfig,
+    models.ABCConfig, models.BitNetConfig, models.CombaConfig, models.DeltaFormerConfig, models.DeltaNetConfig,
     models.ForgettingTransformerConfig, models.GatedDeltaNetConfig, models.GatedDeltaProductConfig,
-    models.GLAConfig, models.GSAConfig, models.HGRNConfig, models.HGRN2Config, models.KDAConfig, models.LightNetConfig,
+    models.GLAConfig, models.GSA2Config, models.GSAConfig, models.HGRNConfig, models.HGRN2Config,
+    models.KDAConfig, models.LightNetConfig, models.LinearAttentionConfig,
     models.MesaNetConfig, models.MLAConfig, models.MoBAConfig, models.NSAConfig, models.ParallaxConfig,
     models.PaTHAttentionConfig, models.PrecondGatedDeltaNetConfig, models.RavenConfig, models.RetNetConfig,
     models.RodimusConfig, models.RWKV6Config, models.TransformerConfig, models.WallTransformerConfig,
 ]
 
 DECODER_CONFIGS = [
-    models.ABCConfig, models.CombaConfig, models.DeltaNetConfig, models.GatedDeltaNetConfig,
-    models.GatedDeltaProductConfig, models.GLAConfig, models.GSAConfig, models.KDAConfig,
-    models.MesaNetConfig, models.MLAConfig, models.MoBAConfig, models.NSAConfig, models.RavenConfig,
+    models.ABCConfig, models.BitNetConfig, models.CombaConfig, models.DeltaFormerConfig, models.DeltaNetConfig,
+    models.ForgettingTransformerConfig,
+    models.GatedDeltaNetConfig, models.GatedDeltaProductConfig, models.GLAConfig, models.GSA2Config, models.GSAConfig,
+    models.KDAConfig, models.LightNetConfig, models.LinearAttentionConfig, models.MesaNetConfig, models.MLAConfig,
+    models.MoBAConfig, models.NSAConfig, models.ParallaxConfig, models.PaTHAttentionConfig, models.RavenConfig,
+    models.RetNetConfig, models.TransformerConfig, models.WallTransformerConfig,
 ]
+
+CACHE_FIRST_CONFIGS = (
+    models.BitNetConfig, models.ForgettingTransformerConfig, models.ParallaxConfig,
+    models.PaTHAttentionConfig, models.TransformerConfig, models.WallTransformerConfig,
+)
 
 
 @pytest.fixture
@@ -44,7 +53,7 @@ def full_precision_matmul():
         torch.set_float32_matmul_precision(precision)
 
 
-@pytest.mark.parametrize('config_class', [GLAConfig, KDAConfig, MemoryAttnConfig, TransformerConfig])
+@pytest.mark.parametrize('config_class', [GLAConfig, models.GSA2Config, KDAConfig, MemoryAttnConfig, TransformerConfig])
 @pytest.mark.parametrize('num_items', [None, 11, torch.tensor(11)])
 @pytest.mark.parametrize('custom_criterion', [None, 'mean', 'sum'])
 def test_causal_lm_loss(config_class, num_items, custom_criterion, make_model):
@@ -74,6 +83,43 @@ def test_causal_lm_loss(config_class, num_items, custom_criterion, make_model):
         torch.testing.assert_close(actual, expected)
     if custom_criterion:
         assert model.criterion.reduction == custom_criterion
+
+
+@pytest.mark.parametrize('num_items', [None, 10])
+@pytest.mark.parametrize('custom_criterion', [False, True])
+@pytest.mark.parametrize('cu_seqlens', [[0, 7, 14], [0, 0, 7, 7, 14, 14]], ids=['packed', 'empty-sequences'])
+def test_causal_lm_packed_loss(num_items, custom_criterion, cu_seqlens, make_model):
+    torch.manual_seed(42)
+    model = make_model(models.GSA2Config)
+    if custom_criterion:
+        model.criterion = nn.CrossEntropyLoss(ignore_index=-7, label_smoothing=0.1)
+    ignore_index = -7 if custom_criterion else -100
+    input_ids = torch.randint(0, 64, (1, 14))
+    labels = input_ids.clone()
+    labels[:, 2] = ignore_index
+    original_labels = labels.clone()
+    output = model(
+        input_ids=input_ids,
+        labels=labels,
+        num_items_in_batch=num_items,
+        cu_seqlens=torch.tensor(cu_seqlens, dtype=torch.int32),
+    )
+    expected = F.cross_entropy(
+        input=output.logits.reshape(2, 7, 64)[:, :-1].reshape(-1, 64),
+        target=labels.reshape(2, 7)[:, 1:].reshape(-1),
+        ignore_index=ignore_index,
+        label_smoothing=0.1 if custom_criterion else 0.0,
+        reduction='sum' if num_items is not None else 'mean',
+    )
+    if num_items is not None:
+        expected = expected / num_items
+    torch.testing.assert_close(output.loss, expected)
+    assert torch.equal(labels, original_labels)
+    parameters = tuple(model.parameters())
+    actual_gradients = torch.autograd.grad(output.loss, parameters, retain_graph=True)
+    expected_gradients = torch.autograd.grad(expected, parameters)
+    for actual, reference in zip(actual_gradients, expected_gradients, strict=True):
+        torch.testing.assert_close(actual, reference)
 
 
 @pytest.mark.skipif(device_name == 'cpu', reason='Fused cross entropy requires an accelerator.')
@@ -166,11 +212,10 @@ def test_causal_lm_fwd_args(config_class, return_dict, make_model):
     with torch.no_grad():
         expected = model(input_ids=input_ids, labels=labels, use_cache=False)
         embeddings = model.get_input_embeddings()(input_ids)
-        if config_class in (
-            models.BitNetConfig, models.TransformerConfig, models.WallTransformerConfig,
-            models.ForgettingTransformerConfig, models.ParallaxConfig, models.PaTHAttentionConfig,
-        ):
+        if config_class in CACHE_FIRST_CONFIGS:
             actual = model(None, None, None, embeddings, labels, False, False, True, return_dict)
+        elif config_class is models.DeltaFormerConfig:
+            actual = model(None, None, embeddings, None, False, False, True, return_dict, labels)
         else:
             actual = model(None, None, embeddings, None, labels, False, False, True, return_dict)
         torch.testing.assert_close(actual.logits if return_dict else actual[1], expected.logits)
@@ -196,7 +241,7 @@ def test_decoder_fwd(config_class, training, use_cache, return_dict, make_model)
     input_ids = torch.randint(0, 64, (2, 7))
     attention_mask = torch.ones_like(input_ids)
     cu_seqlens = torch.tensor([0, 7, 14], dtype=torch.int32)
-    expected_cache = not training if use_cache is None else use_cache
+    expected_cache = (model.config.use_cache and not training) if use_cache is None else use_cache
     outputs = model(
         input_ids=input_ids,
         attention_mask=attention_mask,
@@ -245,7 +290,10 @@ def test_decoder_inputs(config_class, return_dict, make_model):
     cache = Cache()
     expected = model(input_ids=input_ids, use_cache=True, output_hidden_states=True)
     embeddings = model.embeddings(input_ids)
-    outputs = model(None, attention_mask, embeddings, cache, True, False, True, return_dict)
+    if config_class in CACHE_FIRST_CONFIGS:
+        outputs = model(None, attention_mask, cache, embeddings, True, False, True, return_dict)
+    else:
+        outputs = model(None, attention_mask, embeddings, cache, True, False, True, return_dict)
     torch.testing.assert_close(outputs[0], expected.last_hidden_state)
     assert (outputs.past_key_values if return_dict else outputs[1]) is cache
     torch.testing.assert_close(outputs.hidden_states if return_dict else outputs[2], expected.hidden_states)
@@ -253,3 +301,21 @@ def test_decoder_inputs(config_class, return_dict, make_model):
         model(input_ids=input_ids, inputs_embeds=embeddings)
     with pytest.raises(ValueError, match='either input_ids or inputs_embeds'):
         model()
+
+
+@pytest.mark.parametrize('return_dict', [False, True], ids=['tuple', 'dict'])
+def test_linear_attention_lm_kwargs(return_dict, make_model):
+    model = make_model(models.LinearAttentionConfig).eval()
+    layer = nn.Module()
+    layer.forward = Mock(side_effect=lambda hidden_states, **kwargs: (
+        hidden_states, None, kwargs['past_key_values'], kwargs['attnres_states'],
+    ))
+    model.model.layers = nn.ModuleList([layer])
+    input_ids = torch.randint(0, 64, (1, 7))
+    cu_seqlens = torch.tensor([0, 3, 7], dtype=torch.int32)
+    outputs = model(input_ids=input_ids, use_cache=False, return_dict=return_dict, cu_seqlens=cu_seqlens)
+    layer.forward.assert_called_once()
+    assert layer.forward.call_args.kwargs['cu_seqlens'] is cu_seqlens
+    logits = outputs.logits if return_dict else outputs[0]
+    expected = model.lm_head(model.model.norm(model.model.embeddings(input_ids)))
+    torch.testing.assert_close(logits, expected)

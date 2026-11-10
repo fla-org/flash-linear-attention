@@ -891,3 +891,25 @@ def test_chunk_varlen_empty_A_state(with_initial_A_state: bool):
     for name, ref_grad, tri_grad in zip(names, ref_grads, tri_grads, strict=True):
         tolerance = 0.008 if name in ('dq', 'dk', 'dv', 'dh0') else 0.02
         assert_close(name, ref_grad, tri_grad, tolerance)
+
+
+def test_fused_recurrent_default_beta_gva():
+    """`beta=None` must default to ones over the HV value heads; sizing it from
+    q ([B, T, H]) makes the kernel read out of bounds under GVA (HV > H)."""
+    torch.manual_seed(42)
+    B, T, H, HV, D = 2, 64, 2, 4, 64
+    q = torch.randn(B, T, H, D, dtype=torch.float32, device=device)
+    k = torch.randn(B, T, H, D, dtype=torch.float32, device=device)
+    v = torch.randn(B, T, HV, D, dtype=torch.float32, device=device)
+    g = F.logsigmoid(torch.randn(B, T, HV, dtype=torch.float32, device=device))
+    g_atk = F.logsigmoid(torch.randn(B, T, H, dtype=torch.float32, device=device))
+    beta_atk = torch.rand(B, T, H, dtype=torch.float32, device=device).sigmoid()
+    log_atk_scale = torch.rand(H, dtype=torch.float32, device=device) - 1.0
+    kwargs = dict(q=q, k=k, v=v, g=g, g_atk=g_atk, beta_atk=beta_atk, log_atk_scale=log_atk_scale, output_final_state=True)
+
+    o_default, ht_default, _ = fused_recurrent_precond_gated_delta_rule(beta=None, **kwargs)
+    o_ones, ht_ones, _ = fused_recurrent_precond_gated_delta_rule(
+        beta=torch.ones(B, T, HV, dtype=torch.float32, device=device), **kwargs,
+    )
+    assert torch.equal(o_default, o_ones)
+    assert torch.equal(ht_default, ht_ones)

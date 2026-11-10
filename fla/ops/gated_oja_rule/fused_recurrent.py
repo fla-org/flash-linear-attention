@@ -253,7 +253,9 @@ def fused_recurrent_gated_oja_rule(
     if scale is None:
         scale = k.shape[-1] ** -0.5
     if beta is None:
-        beta = torch.ones_like(q[..., 0])
+        # beta is headwise over the HV value heads; sizing it from q would give
+        # [B, T, H] and read out of bounds in the kernel under GVA (HV > H)
+        beta = torch.ones_like(v[..., 0])
 
     o, final_state = FusedRecurrentFunction.apply(
         q,

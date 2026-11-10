@@ -127,8 +127,9 @@ def l2norm_fwd(x: torch.Tensor, eps: float = 1e-6, output_dtype: torch.dtype | N
 
     rstd = torch.empty((T,), dtype=torch.float32, device=x.device)
     if D <= 512:
-        # bucket token counts to limit autotuning across sequence lengths.
-        NB = triton.cdiv(T, 2048 * 32)
+        # bucket token counts to limit autotuning across sequence lengths; a power of two
+        # bounds the number of compiled and tuned variants to log2 of the row count.
+        NB = triton.next_power_of_2(triton.cdiv(T, 2048 * 32))
 
         def grid(meta):
             return (triton.cdiv(T, meta["BT"]),)
@@ -155,8 +156,9 @@ def l2norm_bwd(y: torch.Tensor, rstd: torch.Tensor, dy: torch.Tensor, eps: float
         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
 
     if D <= 512:
-        # bucket token counts to limit autotuning across sequence lengths.
-        NB = triton.cdiv(T, 2048 * 32)
+        # bucket token counts to limit autotuning across sequence lengths; a power of two
+        # bounds the number of compiled and tuned variants to log2 of the row count.
+        NB = triton.next_power_of_2(triton.cdiv(T, 2048 * 32))
 
         def grid(meta):
             return (triton.cdiv(T, meta["BT"]),)

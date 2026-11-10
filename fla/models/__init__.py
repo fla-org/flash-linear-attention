@@ -19,8 +19,10 @@ from fla.models.forgetting_transformer import (
 )
 from fla.models.gated_deltanet import GatedDeltaNetConfig, GatedDeltaNetForCausalLM, GatedDeltaNetModel
 from fla.models.gated_deltaproduct import GatedDeltaProductConfig, GatedDeltaProductForCausalLM, GatedDeltaProductModel
+from fla.models.gka import GKAConfig, GKAForCausalLM, GKAModel
 from fla.models.gla import GLAConfig, GLAForCausalLM, GLAModel
 from fla.models.gsa import GSAConfig, GSAForCausalLM, GSAModel
+from fla.models.gsa2 import GSA2Config, GSA2ForCausalLM, GSA2Model
 from fla.models.hgrn import HGRNConfig, HGRNForCausalLM, HGRNModel
 from fla.models.hgrn2 import HGRN2Config, HGRN2ForCausalLM, HGRN2Model
 from fla.models.kda import KDAConfig, KDAForCausalLM, KDAModel
@@ -88,9 +90,15 @@ __all__ = [
     'ForgettingTransformerConfig',
     'ForgettingTransformerForCausalLM',
     'ForgettingTransformerModel',
+    'GKAConfig',
+    'GKAForCausalLM',
+    'GKAModel',
     'GLAConfig',
     'GLAForCausalLM',
     'GLAModel',
+    'GSA2Config',
+    'GSA2ForCausalLM',
+    'GSA2Model',
     'GSAConfig',
     'GSAForCausalLM',
     'GSAModel',

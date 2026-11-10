@@ -23,7 +23,10 @@ from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.cumsum import chunk_global_cumsum, chunk_local_cumsum
 from fla.ops.utils.op import exp2
 from fla.utils import (
+    IS_NVIDIA,
+    IS_NVIDIA_BLACKWELL,
     IS_NVIDIA_HOPPER,
+    IS_NVIDIA_SM100,
     autocast_custom_bwd,
     autocast_custom_fwd,
     autotune_cache_kwargs,
@@ -47,6 +50,14 @@ from .utils import (
 )
 
 _CHUNK_SIZE = 64
+
+# The fused dqk/dv backward keeps two [BT, BK] FP32 accumulators live across
+# the V loop. Triton keeps the dot operands in registers on SM8x (mma.sync), so
+# the accumulators spill to local memory and the kernel ends up ~20x slower
+# than the separate dqk/dv kernels. Hopper and Blackwell use WGMMA/tcgen05 with
+# shared-memory or TMEM operands, so keep the fusion there. Non-NVIDIA backends
+# keep their existing path.
+USE_FUSED_DQK_DV = not IS_NVIDIA or IS_NVIDIA_HOPPER or IS_NVIDIA_BLACKWELL
 _READOUT_BWD_AUTOTUNE_CONFIGS = [
     triton.Config({'BT': bt}, num_warps=num_warps, num_stages=num_stages)
     for bt in [16, 32, 64]
@@ -562,9 +573,9 @@ def _scalar_decay_bwd_dqk_dv_single_k(
     dv = torch.empty_like(do)
     dg_force = torch.empty(bsz, seq_len, n_heads, device=q.device, dtype=torch.float32)
     block_k = max(triton.next_power_of_2(d_k), 16)
-    is_hopper_fp32 = IS_NVIDIA_HOPPER and q.dtype == torch.float32
-    # Keep the fused FP32 kernel below the SM90 per-block shared-memory limit.
-    block_v = min(max(triton.next_power_of_2(d_v), 16), 32 if is_hopper_fp32 else 64)
+    limit_fp32_shared_memory = q.dtype == torch.float32 and (IS_NVIDIA_HOPPER or (IS_NVIDIA_SM100 and block_k == 128))
+    # bound FP32 shared memory on SM90 and for 128-wide fused states on SM100.
+    block_v = min(max(triton.next_power_of_2(d_v), 16), 32 if limit_fp32_shared_memory else 64)
 
     _chunk_cyfa_bwd_dqk_dv_kernel[(nt, bsz * n_heads)](
         q,
@@ -589,7 +600,7 @@ def _scalar_decay_bwd_dqk_dv_single_k(
         BK=block_k,
         BV=block_v,
         num_warps=4,
-        num_stages=1 if is_hopper_fp32 else 2,
+        num_stages=1 if limit_fp32_shared_memory else 2,
     )
     return dq, dk, dv, dg_force
 
@@ -1055,10 +1066,14 @@ def _scalar_decay_fused_readout_fwd(
 
 @fla_cache_autotune(
     configs=_READOUT_BWD_AUTOTUNE_CONFIGS,
-    key=['M', 'C'],
+    # The grid is `cdiv(N, BT) x H`: with few tokens a small `BT` exposes more
+    # blocks, while long sequences prefer one block per 32 tokens. Bucketing the
+    # token count keys the tile on its size class, so a new sequence length
+    # reuses the tile instead of re-benchmarking every config.
+    key=['M', 'C', 'N_BUCKET', 'H'],
     **autotune_cache_kwargs,
 )
-@triton.jit(do_not_specialize=['N'])
+@triton.jit(do_not_specialize=['N', 'N_BUCKET'])
 def _chunk_cyfa_fused_readout_bwd_kernel(
     lambdas,
     table,
@@ -1069,6 +1084,7 @@ def _chunk_cyfa_fused_readout_bwd_kernel(
     draw_logits,
     dlambda,
     N,
+    N_BUCKET,
     H: tl.constexpr,
     M: tl.constexpr,
     C: tl.constexpr,
@@ -1179,6 +1195,8 @@ def _readout_backward(
         draw_logits,
         dlambda,
         N=n_tokens,
+        # the bucket selects an autotune config; `N` remains the runtime bound
+        N_BUCKET=triton.next_power_of_2(n_tokens),
         H=n_heads,
         M=num_slots,
         C=readout_slots,
@@ -1190,26 +1208,29 @@ def _readout_backward(
 def _prune_table_grad_configs(configs, nargs, **kwargs):
     args = {**(nargs or {}), **kwargs}
     right_a = args.get('right_a')
-    if not IS_NVIDIA_HOPPER or right_a is None or right_a.dtype != torch.float32:
+    if not (IS_NVIDIA_HOPPER or IS_NVIDIA_SM100) or right_a is None or right_a.dtype != torch.float32:
         return configs
-    # Triton 3.4 rejects this four-warp FP32 dot layout on SM90 during compilation.
+    # this FP32 dot layout fails with four warps on SM90 and four/eight warps on SM100.
     return [
         config for config in configs
         if not (
             config.kwargs['BR'] == 64
             and config.kwargs['BC'] == 64
-            and config.num_warps == 4
+            and (config.num_warps == 4 or (IS_NVIDIA_SM100 and config.num_warps == 8))
         )
     ]
 
 
 @fla_cache_autotune(
     configs=_TABLE_GRAD_AUTOTUNE_CONFIGS,
-    key=['M', 'C'],
+    # `n_splits` and hence the grid are derived from `T`; larger outputs favor
+    # 64x64 tiles, while short sequences only fill the smaller ones. Bucket `T`
+    # so a new token count reuses the tile instead of re-benchmarking.
+    key=['M', 'C', 'T_BUCKET', 'H'],
     prune_configs_by={'early_config_prune': _prune_table_grad_configs},
     **autotune_cache_kwargs,
 )
-@triton.jit(do_not_specialize=['T'])
+@triton.jit(do_not_specialize=['T', 'T_BUCKET'])
 def _chunk_cyfa_readout_table_grad_kernel(
     lambdas,
     left_a,
@@ -1218,6 +1239,7 @@ def _chunk_cyfa_readout_table_grad_kernel(
     right_b,
     dtable,
     T,
+    T_BUCKET,
     H: tl.constexpr,
     M: tl.constexpr,
     C: tl.constexpr,
@@ -1307,6 +1329,8 @@ def _readout_table_grad_dual(
         right_b.contiguous(),
         partials,
         T=n_tokens,
+        # the bucket selects an autotune config; `T` remains the runtime bound
+        T_BUCKET=triton.next_power_of_2(n_tokens),
         H=n_heads,
         M=num_slots,
         C=readout_slots,
@@ -1504,7 +1528,7 @@ class ChunkCyFAFunction(torch.autograd.Function):
             cu_seqlens=cu_seqlens,
             chunk_size=chunk_size,
             chunk_indices=chunk_indices,
-            fuse_dv_single_k=True,
+            fuse_dv_single_k=USE_FUSED_DQK_DV,
         )
 
         if raw_logits is None:

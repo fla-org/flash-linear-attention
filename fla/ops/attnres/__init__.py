@@ -5,6 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+from fla.backends import GluonBackend, TritonAscendBackend
 from fla.ops.attnres.fused import fused_attnres
 from fla.ops.attnres.naive import naive_attnres
 
@@ -12,3 +13,10 @@ __all__ = [
     'fused_attnres',
     'naive_attnres',
 ]
+
+
+if GluonBackend.is_available():
+    from fla.ops.attnres.backends import gluon  # noqa: F401
+
+if TritonAscendBackend.is_available():
+    from fla.ops.attnres.backends import triton_ascend  # noqa: F401

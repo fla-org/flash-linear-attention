@@ -4,10 +4,3 @@
 # LICENSE file in the root directory of this source tree.
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
-
-"""GDR backends."""
-
-from fla.ops.gated_delta_rule.backends.flash_qla import FlashQLABackend
-from fla.ops.gated_delta_rule.backends.triton_ascend import TritonAscendGDNBackend
-
-__all__ = ['FlashQLABackend', 'TritonAscendGDNBackend']

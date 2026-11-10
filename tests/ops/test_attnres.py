@@ -5,9 +5,12 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+import inspect
+
 import pytest
 import torch
 
+from fla import backends
 from fla.ops.attnres import fused_attnres, naive_attnres
 from fla.utils import IS_NPU, assert_close, device
 
@@ -102,48 +105,37 @@ def test_attnres(
         assert_close('dow', output_rms_weight_ref.grad, tri_dow, 0.005)
 
 
-_TRITON_ASCEND_ATTNRES_OPS = ('fused_attnres',)
-
-
-def _spy_on_triton_ascend_attnres_backend():
-    """Patch every op of the Triton-Ascend AttnRes backend to record dispatched calls."""
-    from fla import backends
-
-    backend = backends._load_operation_registry('attnres')._backends.get('triton_ascend')
-    assert backend is not None, 'Triton-Ascend AttnRes backend is not registered'
-
-    calls = []
-    for name in _TRITON_ASCEND_ATTNRES_OPS:
-        original = getattr(backend, name)
-
-        def make_spy(name, original):
-            def spy(*args, **kwargs):
-                calls.append(name)
-                return original(*args, **kwargs)
-            return spy
-
-        setattr(backend, name, make_spy(name, original))
-    return backend, calls
-
-
 @pytest.mark.skipif(not IS_NPU, reason='Triton-Ascend AttnRes backend routing is only exercised on NPU')
-def test_triton_ascend_backend_routing():
-    """Verify fused_attnres dispatches to Triton-Ascend on NPU.
+def test_triton_ascend_backend_routing(monkeypatch):
+    candidate = backends._function_registries[inspect.unwrap(fused_attnres)]._backends['triton_ascend']
+    implementation = candidate.implementation
+    calls = []
 
-    Numerical parity can pass through the fallback, so record which implementation actually runs.
-    """
-    backend, calls = _spy_on_triton_ascend_attnres_backend()
-    try:
-        L, B, T, D = 3, 1, 64, 128
-        dtype = torch.float16
-        residuals = [torch.randn(B, T, D, dtype=dtype, device=device).requires_grad_(True) for _ in range(L)]
-        query = torch.randn(D, dtype=dtype, device=device).requires_grad_(True)
-        rms_weight = torch.randn(D, dtype=dtype, device=device).requires_grad_(True)
+    def spy(*args, **kwargs):
+        calls.append('fused_attnres')
+        return implementation(*args, **kwargs)
 
-        calls.clear()
-        o = fused_attnres(query=query, residuals=residuals, rms_weight=rms_weight, scale=D ** -0.5, checkpoint_level=1)
-        (o * torch.randn_like(o)).sum().backward()
-        assert calls == ['fused_attnres'], (f'fused_attnres not routed to the Triton-Ascend backend (dispatched: {calls})')
-    finally:
-        for name in _TRITON_ASCEND_ATTNRES_OPS:
-            delattr(backend, name)
+    monkeypatch.setattr(candidate, 'implementation', spy)
+    torch.manual_seed(42)
+    L, B, T, D = 3, 1, 64, 128
+    dtype = torch.float16
+    residuals = [torch.randn(B, T, D, dtype=dtype, device=device).requires_grad_(True) for _ in range(L)]
+    query = torch.randn(D, dtype=dtype, device=device).requires_grad_(True)
+    rms_weight = torch.randn(D, dtype=dtype, device=device).requires_grad_(True)
+
+    o = fused_attnres(query=query, residuals=residuals, rms_weight=rms_weight, scale=D ** -0.5, checkpoint_level=1)
+    (o * torch.randn_like(o)).sum().backward()
+    assert calls == ['fused_attnres']
+
+
+@pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
+def test_attnres_gluon_backend():
+    if not backends.GluonBackend.is_available():
+        pytest.skip('Gluon is unavailable')
+    from fla.ops.attnres.backends.gluon import fused_attnres_gluon
+
+    candidate = backends._function_registries[inspect.unwrap(fused_attnres)]._backends['gluon']
+    assert candidate.implementation is fused_attnres_gluon
+    assert candidate.default_enable is False
+    assert candidate.env_var == 'FLA_ATTNRES_GLUON'
+    assert candidate.priority == 3

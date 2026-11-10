@@ -43,7 +43,7 @@ jobs:
               const files = await github.paginate(github.rest.pulls.listFiles, {
                 owner, repo, pull_number: context.payload.pull_request.number, per_page: 100,
               });
-              const npuSafe = /^fla\/(.+\/)?backends\/triton_ascend\/(?!.*__init__\.py$)|^\.github\/workflows\/ascend-|^\.agents\/skills\/fla-ascend-performance\//;
+              const npuSafe = /^fla\/(.+\/)?backends\/triton_ascend(\/(?!.*__init__\.py$)|\.py$)|^\.github\/workflows\/ascend-|^\.agents\/skills\/fla-ascend-performance\//;
               const names = files.map(f => f.filename);
               skip = names.length > 0 && names.every(n => npuSafe.test(n));
             }
