@@ -63,22 +63,30 @@ def _get_l2norm_tiles(D: int, is_forward: bool) -> tuple[int, int]:
 
 
 @triton.jit(do_not_specialize=['T'])
-def l2norm_fwd_kernel(x, y, rstd, eps, T, T_OFFSET, D: tl.constexpr, BD: tl.constexpr, BT: tl.constexpr):
+def l2norm_fwd_kernel(x, y, rstd, eps, T, T_OFFSET, D: tl.constexpr, BD: tl.constexpr, BT: tl.constexpr, LOWP: tl.constexpr):
     i_t = tl.program_id(0) + T_OFFSET
     rows = tl.cast(i_t, tl.int64) * BT + tl.arange(0, BT)
     cols = tl.arange(0, BD)
     mask = (rows[:, None] < T) & (cols[None, :] < D)
 
     b_x = tl.load(x + rows[:, None] * D + cols[None, :], mask=mask, other=0.0).to(tl.float32)
-    b_rstd = 1 / tl.sqrt(tl.sum(b_x * b_x, 1) + eps)
-    b_y = b_x * b_rstd[:, None]
+    b_var = tl.sum(b_x * b_x, 1) + eps
+    b_rstd = 1 / tl.sqrt(b_var)
+    if LOWP:
+        # bf16 F.normalize rounds the fp32 norm, then divides. Rounding the
+        # product instead disagrees by ~0.3% and the gated recurrence turns
+        # that into about 1% on dq.
+        b_n = tl.sqrt(b_var).to(y.dtype.element_ty).to(tl.float32)
+        b_y = b_x / b_n[:, None]
+    else:
+        b_y = b_x * b_rstd[:, None]
 
     tl.store(y + rows[:, None] * D + cols[None, :], b_y.to(y.dtype.element_ty), mask=mask)
     tl.store(rstd + rows, b_rstd.to(rstd.dtype.element_ty), mask=rows < T)
 
 
 @triton.jit(do_not_specialize=['T'])
-def l2norm_bwd_kernel(y, rstd, dy, dx, T, T_OFFSET, D: tl.constexpr, BD: tl.constexpr, BT: tl.constexpr):
+def l2norm_bwd_kernel(y, rstd, dy, dx, T, T_OFFSET, D: tl.constexpr, BD: tl.constexpr, BT: tl.constexpr, LOWP: tl.constexpr):
     i_t = tl.program_id(0) + T_OFFSET
     rows = tl.cast(i_t, tl.int64) * BT + tl.arange(0, BT)
     cols = tl.arange(0, BD)
@@ -87,7 +95,21 @@ def l2norm_bwd_kernel(y, rstd, dy, dx, T, T_OFFSET, D: tl.constexpr, BD: tl.cons
     b_y = tl.load(y + rows[:, None] * D + cols[None, :], mask=mask, other=0.0).to(tl.float32)
     b_rstd = tl.load(rstd + rows, mask=rows < T, other=0.0).to(tl.float32)
     b_dy = tl.load(dy + rows[:, None] * D + cols[None, :], mask=mask, other=0.0).to(tl.float32)
-    b_dx = b_dy * b_rstd[:, None] - tl.sum(b_dy * b_y, 1)[:, None] * b_y * b_rstd[:, None]
+    if LOWP:
+        # Each bf16 op rounds. Folding them into one fp32 expression misses the
+        # reference VJP by another ~0.2%.
+        b_n = (1 / b_rstd).to(y.dtype.element_ty)
+        b_dy = b_dy.to(y.dtype.element_ty)
+        b_q = (b_y * b_n.to(tl.float32)[:, None]).to(y.dtype.element_ty)
+        b_dot = tl.sum(b_dy.to(tl.float32) * b_q.to(tl.float32), 1).to(y.dtype.element_ty)
+        b_n3 = b_n * b_n * b_n
+        b_div = (b_dy.to(tl.float32) / b_n.to(tl.float32)[:, None]).to(y.dtype.element_ty)
+        b_term = (
+            b_q.to(tl.float32) * b_dot.to(tl.float32)[:, None] / b_n3.to(tl.float32)[:, None]
+        ).to(y.dtype.element_ty)
+        b_dx = (b_div.to(tl.float32) - b_term.to(tl.float32)).to(y.dtype.element_ty).to(tl.float32)
+    else:
+        b_dx = b_dy * b_rstd[:, None] - tl.sum(b_dy * b_y, 1)[:, None] * b_y * b_rstd[:, None]
     tl.store(dx + rows[:, None] * D + cols[None, :], b_dx.to(dx.dtype.element_ty), mask=mask)
 
 
@@ -102,8 +124,11 @@ def _launch_l2norm_fwd_kernel(
     BT: int,
 ):
     NT = triton.cdiv(T, BT)
+    lowp = y.dtype != torch.float32
     for nt_off, nt_len in iter_axis_launch_chunks(axis_size=NT, other_grid_product=1, max_grid=ASCEND_MAX_GRID_DIM):
-        l2norm_fwd_kernel[(nt_len,)](x=x, y=y, rstd=rstd, eps=eps, T=T, T_OFFSET=nt_off, D=D, BD=BD, BT=BT)
+        l2norm_fwd_kernel[(nt_len,)](
+            x=x, y=y, rstd=rstd, eps=eps, T=T, T_OFFSET=nt_off, D=D, BD=BD, BT=BT, LOWP=lowp,
+        )
 
 
 def _launch_l2norm_bwd_kernel(
@@ -117,8 +142,11 @@ def _launch_l2norm_bwd_kernel(
     BT: int,
 ):
     NT = triton.cdiv(T, BT)
+    lowp = y.dtype != torch.float32
     for nt_off, nt_len in iter_axis_launch_chunks(axis_size=NT, other_grid_product=1, max_grid=ASCEND_MAX_GRID_DIM):
-        l2norm_bwd_kernel[(nt_len,)](y=y, rstd=rstd, dy=dy, dx=dx, T=T, T_OFFSET=nt_off, D=D, BD=BD, BT=BT)
+        l2norm_bwd_kernel[(nt_len,)](
+            y=y, rstd=rstd, dy=dy, dx=dx, T=T, T_OFFSET=nt_off, D=D, BD=BD, BT=BT, LOWP=lowp,
+        )
 
 
 @register(l2norm_fwd, backend=TritonAscendBackend)

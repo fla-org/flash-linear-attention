@@ -26,6 +26,7 @@ from fla.ops.kda.fused_recurrent import fused_recurrent_kda_fwd
 from fla.ops.kda.gate import fused_kda_gate, naive_kda_gate, naive_kda_lowerbound_gate
 from fla.ops.kda.naive import naive_chunk_kda, naive_recurrent_kda
 from fla.ops.utils.cache import FLA_CACHE_MODE
+from fla.ops.utils.index import partition_chunk_indices_full_tail
 from fla.utils import IS_INTEL_ALCHEMIST, IS_NPU, IS_NVIDIA, assert_close, device
 
 
@@ -1871,6 +1872,37 @@ def _spy_on_triton_ascend_kda_backend():
 
         backend.implementation = make_spy(name, original)
     return candidates, calls
+
+
+def test_partition_chunk_indices_full_tail_uses_host_metadata():
+    cu_seqlens_cpu = torch.tensor([0, 65, 128, 128, 200], dtype=torch.int32)
+    chunk_indices = torch.empty((5, 2), dtype=torch.int32)
+
+    full, tail = partition_chunk_indices_full_tail(chunk_indices, cu_seqlens_cpu, 64)
+
+    assert full.tolist() == [[0, 0], [3, 0]]
+    assert tail.tolist() == [[0, 1], [1, 0], [3, 1]]
+
+
+@pytest.mark.skipif(not IS_NPU, reason='Triton-Ascend strided tail gather requires NPU')
+@pytest.mark.parametrize('rank', [2, 3, 4])
+def test_ascend_tail_padding_strided_gather(rank):
+    from fla.ops.common.backends.triton_ascend.chunk_delta_h import _pad_recurrence_tokens
+
+    if rank == 2:
+        x = torch.arange(20, device=device, dtype=torch.float32).reshape(2, 10)[:, ::2]
+    elif rank == 3:
+        x = torch.arange(30, device=device, dtype=torch.float32).reshape(2, 5, 3).transpose(1, 2)
+    else:
+        x = torch.arange(120, device=device, dtype=torch.float32).reshape(2, 5, 3, 4).transpose(-1, -2)
+    indices = torch.tensor([0, 2, 1, 2], device=device, dtype=torch.int64)
+    valid = torch.tensor([True, True, False, True], device=device)
+
+    actual = _pad_recurrence_tokens(x, indices, valid)
+    expected = x.index_select(1, indices)
+    expected = expected.masked_fill(~valid.view(1, -1, *([1] * (x.ndim - 2))), 0)
+
+    torch.testing.assert_close(actual, expected)
 
 
 def _run_chunk_kda(safe_gate: bool, chunk_size: int = 64, use_gate_in_kernel: bool = True):
