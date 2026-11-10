@@ -1000,7 +1000,7 @@ def test_chunk_causality(T: int, P: int, H: int, D: int, chunk_size: int, use_ga
 
 
 @pytest.mark.parametrize(
-    ("lower_bound", "dtype", "use_gate_in_kernel", "cu_seqlens", "gate_pattern"),
+    ("lower_bound", "dtype", "use_gate_in_kernel", "cu_seqlens", "gate_pattern", "D"),
     [
         pytest.param(
             lower_bound,
@@ -1008,8 +1008,10 @@ def test_chunk_causality(T: int, P: int, H: int, D: int, chunk_size: int, use_ga
             use_gate_in_kernel,
             cu_seqlens,
             gate_pattern,
-            id=f"lower_bound{lower_bound}-{dtype}-use_gate{use_gate_in_kernel}-cu_seqlens{cu_seqlens}-{gate_pattern}",
+            D,
+            id=f"lower_bound{lower_bound}-{dtype}-use_gate{use_gate_in_kernel}-cu_seqlens{cu_seqlens}-{gate_pattern}-D{D}",
         )
+        for D in [64, 128]
         for cu_seqlens in [None, [0, 1, 17, 38]]
         for use_gate_in_kernel in [False, True]
         for dtype in [torch.bfloat16, torch.float16]
@@ -1026,9 +1028,10 @@ def test_chunk_lower_bound(
     use_gate_in_kernel: bool,
     cu_seqlens: list[int] | None,
     gate_pattern: str,
+    D: int,
 ):
     torch.manual_seed(42)
-    B, T, H, D = 1, 38, 2, 64
+    B, T, H = 1, 38, 2
     shape = (B, T, H, D)
     q, k = (F.normalize(torch.randn(shape), dim=-1).to(dtype) for _ in range(2))
     v = torch.randn(shape, dtype=dtype)
