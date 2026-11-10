@@ -243,18 +243,14 @@ jobs:
            (github.event_name == 'schedule' && steps.gdn-cache.outputs.cache-hit != 'true'))
         shell: bash
         env:
-          ASCEND_RT_VISIBLE_DEVICES: "0"
           TRITON_CACHE_DIR: ${{ env.GDN_TRITON_CACHE_DIR }}
           FLA_BENCH_WARMUP_MS: "25"
           FLA_BENCH_REP_MS: "100"
           FLA_BENCH_OP_WARMUP_ITERS: "3"
         run: |
           source /usr/local/Ascend/ascend-toolkit/set_env.sh
-          python -m benchmarks.ops.run --op chunk_gdn --base '' --json benchmark_chunk_gdn.json
-          python -m benchmarks.ops.run --graph \
-            --op chunk_gdn --no-base --modes fwd fwdbwd \
-            --measure-graph-safe --report-memory \
-            --warmup 3 --iterations 10 --json benchmark_gdn_graph.json
+          python -m benchmarks.ops.prewarm_gdn --devices 0 1 2 3 --output-dir gdn-prewarm
+          cp gdn-prewarm/benchmark_chunk_gdn.json gdn-prewarm/benchmark_gdn_graph.json .
 
       - name: Benchmark chunk_gdn, fused_recurrent_gdn2, chunk_gdn2, chunk_kda, KDA graph, fused_attnres, conv1d, chunk_momentum_delta, chunk_precond_gdn, parallel_wall_attn, fused_recurrent_oja, chunk_precond_kda, and chunk_ttt
         id: benchmark
@@ -708,6 +704,7 @@ jobs:
         with:
           name: ascend-a2-gdn-cache-evidence
           path: |
+            gdn-prewarm/
             benchmark_chunk_gdn.json
             benchmark_gdn_graph.json
             chunk_gdn.log

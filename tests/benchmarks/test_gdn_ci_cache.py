@@ -5,7 +5,6 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-import copy
 import json
 import sys
 from pathlib import Path
@@ -13,15 +12,12 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
+from benchmarks.ops import prewarm_gdn
 from benchmarks.ops.graph_registry import get_graph_op, normalize_gdn_shape
 
 
-@pytest.mark.parametrize(
-    'failure',
-    ['none', 'ordinary-missing', 'ordinary-duplicate', 'ordinary-op', 'ordinary-nan',
-     'graph-missing', 'graph-duplicate', 'graph-dtype', 'graph-validation', 'graph-timing', 'graph-memory'],
-)
-def test_gdn_cache_rejects_incomplete_or_invalid_results(tmp_path, monkeypatch, failure):
+@pytest.fixture
+def validate_results(tmp_path, monkeypatch):
     root = Path(__file__).resolve().parents[2]
     workflow = (root / '.github/workflows/ascend-a2-benchmark-ci.yml').read_text()
     validation = workflow.split('      - name: Validate GDN benchmark cache inputs\n', 1)[1]
@@ -32,7 +28,20 @@ def test_gdn_cache_rejects_incomplete_or_invalid_results(tmp_path, monkeypatch, 
     registry.SHAPE_CONFIGS = {'smoke': dict(B=1, T=128, H=2, D=64)}
     registry.get_op = lambda _: SimpleNamespace(default_shapes=None)
     monkeypatch.setitem(sys.modules, 'benchmarks.ops.registry', registry)
-    ordinary = [dict(op='chunk_gdn', mode=mode, **registry.SHAPE_CONFIGS['smoke'],
+    monkeypatch.chdir(tmp_path)
+    validator = compile(script, '<GDN cache validator>', 'exec')
+
+    def validate(ordinary, graph):
+        Path('benchmark_chunk_gdn.json').write_text(json.dumps(dict(results=ordinary)))
+        Path('benchmark_gdn_graph.json').write_text(json.dumps(dict(current=dict(results=graph))))
+        exec(validator, {})
+
+    return validate
+
+
+@pytest.fixture
+def benchmark_results():
+    ordinary = [dict(op='chunk_gdn', mode=mode, B=1, T=128, H=2, D=64,
                      median_ms=1.0, p20_ms=0.9, p80_ms=1.1) for mode in ('fwd', 'fwdbwd')]
     config = get_graph_op('chunk_gdn')
     graph = []
@@ -45,36 +54,58 @@ def test_gdn_cache_rejects_incomplete_or_invalid_results(tmp_path, monkeypatch, 
                    for engine in ('eager', 'graph', 'graph_safe')},
                 memory=dict(baseline_allocated_bytes=100, peak_allocated_bytes=200, peak_reserved_bytes=300),
             ))
-    if failure.endswith('-missing'):
-        (ordinary if failure.startswith('ordinary') else graph).pop()
-    elif failure.endswith('-duplicate'):
-        rows = ordinary if failure.startswith('ordinary') else graph
-        rows.append(copy.deepcopy(rows[0]))
-    elif failure == 'ordinary-op':
-        ordinary[0]['op'] = 'chunk_kda'
-    elif failure == 'ordinary-nan':
-        ordinary[0]['median_ms'] = float('nan')
-    elif failure == 'graph-dtype':
-        graph[0]['dtype'] = 'float32'
-    elif failure == 'graph-validation':
-        graph[0]['validation'] = 'not-run'
-    elif failure == 'graph-timing':
-        graph[0]['graph_safe']['p50_ms'] = 0
-    elif failure == 'graph-memory':
-        graph[0]['memory']['peak_allocated_bytes'] = 0
-    monkeypatch.chdir(tmp_path)
-    Path('benchmark_chunk_gdn.json').write_text(json.dumps(dict(results=ordinary)))
-    Path('benchmark_gdn_graph.json').write_text(json.dumps(dict(current=dict(results=graph))))
-    if failure == 'none':
-        exec(compile(script, '<GDN cache validator>', 'exec'), {})
-    else:
-        with pytest.raises(AssertionError):
-            exec(compile(script, '<GDN cache validator>', 'exec'), {})
+    return ordinary, graph
 
 
-@pytest.mark.parametrize('event', ['schedule', 'pull_request', 'push', 'workflow_dispatch'])
-@pytest.mark.parametrize('kda_hit,gdn_hit', [(True, True), (True, False), (False, True), (False, False)])
-def test_gdn_cache_prepares_environment_on_partial_hit(event, kda_hit, gdn_hit):
+def test_gdn_cache_accepts_complete_results(validate_results, benchmark_results):
+    validate_results(*benchmark_results)
+
+
+@pytest.mark.parametrize('mutate', [
+    pytest.param(lambda rows: rows.pop(), id='missing-case'),
+    pytest.param(lambda rows: rows.append(rows[0]), id='duplicate-case'),
+    pytest.param(lambda rows: rows[0].update(op='chunk_kda'), id='wrong-op'),
+    pytest.param(lambda rows: rows[0].update(median_ms=float('nan')), id='nonfinite-timing'),
+])
+def test_gdn_cache_rejects_invalid_ordinary_results(validate_results, benchmark_results, mutate):
+    ordinary, graph = benchmark_results
+    mutate(ordinary)
+    with pytest.raises(AssertionError):
+        validate_results(ordinary, graph)
+
+
+@pytest.mark.parametrize('mutate', [
+    pytest.param(lambda rows: rows.pop(), id='missing-case'),
+    pytest.param(lambda rows: rows.append(rows[0]), id='duplicate-case'),
+    pytest.param(lambda rows: rows[0].update(dtype='float32'), id='wrong-dtype'),
+])
+def test_gdn_cache_rejects_invalid_graph_structure(validate_results, benchmark_results, mutate):
+    ordinary, graph = benchmark_results
+    mutate(graph)
+    with pytest.raises(AssertionError):
+        validate_results(ordinary, graph)
+
+
+@pytest.mark.parametrize('mutate', [
+    pytest.param(lambda row: row.update(validation='not-run'), id='validation-not-run'),
+    pytest.param(lambda row: row['graph_safe'].update(p50_ms=0), id='zero-timing'),
+    pytest.param(lambda row: row['memory'].update(peak_allocated_bytes=0), id='peak-below-baseline'),
+])
+def test_gdn_cache_rejects_invalid_graph_metrics(validate_results, benchmark_results, mutate):
+    ordinary, graph = benchmark_results
+    mutate(graph[0])
+    with pytest.raises(AssertionError):
+        validate_results(ordinary, graph)
+
+
+@pytest.mark.parametrize('event,kda_hit,gdn_hit,prepare', [
+    pytest.param('schedule', True, True, False, id='scheduled-both-hit'),
+    pytest.param('schedule', True, False, True, id='scheduled-gdn-miss'),
+    pytest.param('schedule', False, True, True, id='scheduled-kda-miss'),
+    pytest.param('schedule', False, False, True, id='scheduled-both-miss'),
+    pytest.param('pull_request', True, True, True, id='pr-both-hit'),
+])
+def test_gdn_cache_prepares_environment_on_partial_hit(event, kda_hit, gdn_hit, prepare):
     root = Path(__file__).resolve().parents[2]
     workflow = (root / '.github/workflows/ascend-a2-benchmark-ci.yml').read_text()
     step = workflow.split('      - name: Install dependencies\n', 1)[1].split('\n        run:', 1)[0]
@@ -87,4 +118,53 @@ def test_gdn_cache_prepares_environment_on_partial_hit(event, kda_hit, gdn_hit):
     for name, value in values.items():
         condition = condition.replace(name, repr(value))
     condition = condition.replace('||', 'or')
-    assert eval(condition, {'__builtins__': {}}) == (event != 'schedule' or not (kda_hit and gdn_hit))
+    assert eval(condition, {'__builtins__': {}}) == prepare
+
+
+@pytest.fixture
+def prewarm_shapes():
+    return {'d128': {'D': 128}, 'd64': {'D': 64}}, get_graph_op('chunk_gdn').default_shapes
+
+
+def test_gdn_prewarm_merges_distinct_shards(tmp_path, monkeypatch, prewarm_shapes):
+    ordinary, graph = prewarm_shapes
+    visited = {}
+
+    def worker(device, workloads, output_dir):
+        assert len(workloads) == 1
+        workload = workloads[0]
+        visited[device] = workload
+        rows = [dict(shape=name, mode=mode) for name in workload.shapes for mode in ('fwd', 'fwdbwd')]
+        result = {'current': {'results': rows}} if workload.graph else {'results': rows}
+        (output_dir / f'{workload.name}.json').write_text(json.dumps(result))
+
+    monkeypatch.setattr(prewarm_gdn, '_prewarm_worker', worker)
+    output_dir = tmp_path / 'prewarm'
+    prewarm_gdn.prewarm(ordinary, graph, ['0', '1', '2', '3'], output_dir)
+    assert sorted(visited) == ['0', '1', '2', '3']
+    assert set(visited['0'].shapes) == {'d128'}
+    assert set(visited['1'].shapes) == {'d64'}
+    assert {s['dtype'] for s in visited['2'].shapes.values()} == {'float16'}
+    assert {s['dtype'] for s in visited['3'].shapes.values()} == {'bfloat16'}
+    ordinary_result = json.loads((output_dir / 'benchmark_chunk_gdn.json').read_text())
+    graph_result = json.loads((output_dir / 'benchmark_gdn_graph.json').read_text())
+    for rows, expected in ((ordinary_result['results'], ordinary), (graph_result['current']['results'], graph)):
+        assert sorted((row['shape'], row['mode']) for row in rows) == sorted(
+            (name, mode) for name in expected for mode in ('fwd', 'fwdbwd')
+        )
+
+
+def test_gdn_prewarm_waits_for_all_workers_on_failure(tmp_path, monkeypatch, prewarm_shapes):
+    visited = []
+
+    def worker(device, workloads, output_dir):
+        visited.append(device)
+        if device == '0':
+            raise RuntimeError('worker failed')
+
+    monkeypatch.setattr(prewarm_gdn, '_prewarm_worker', worker)
+    output_dir = tmp_path / 'prewarm'
+    with pytest.raises(RuntimeError, match='worker failed'):
+        prewarm_gdn.prewarm(*prewarm_shapes, ['0', '1', '2', '3'], output_dir)
+    assert sorted(visited) == ['0', '1', '2', '3']
+    assert not list(output_dir.glob('benchmark_*.json'))
