@@ -144,8 +144,12 @@ def _recompute_w_u_fwd_gdn2_fp32_npu(
     """
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = A.shape[-1]
-    BK = 64
-    BV = 64
+    BK = BV = 64
+    if (
+        cu_seqlens is None and BT == 64 and T % BT == 0
+        and K in (32, 64, 128) and V in (32, 64, 128)
+    ):
+        BK, BV = _get_fwd_tiles(BT, K, V, store_qg=q is not None, ub_capacity_bits=get_ub_manager().ub_capacity_bits)
 
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
