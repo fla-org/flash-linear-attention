@@ -1586,6 +1586,84 @@ def _launch_fwd_core(
     return y
 
 
+@triton.heuristics({
+    'HAS_BIAS': lambda args: args['bias'] is not None,
+    'HAS_RESIDUAL': lambda args: args['residual'] is not None,
+    'HAS_Y_LINEAR': lambda args: args['y_linear'] is not None,
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
+})
+@triton.jit(do_not_specialize=['T', 'N'])
+def causal_conv1d_fwd_head_kernel(
+    x, y, y_linear, weight, bias, residual, initial_state, cu_seqlens,
+    T, N, D: tl.constexpr, W: tl.constexpr, BD: tl.constexpr,
+    ACTIVATION: tl.constexpr, HAS_BIAS: tl.constexpr, HAS_RESIDUAL: tl.constexpr,
+    HAS_Y_LINEAR: tl.constexpr, IS_VARLEN: tl.constexpr,
+):
+    # isolate the short history boundary from the bulk convolution tiles.
+    ND = tl.cdiv(D, BD)
+    for task in range(tl.program_id(0), N * ND, tl.num_programs(0)):
+        n = tl.cast(task // ND, tl.int64)
+        d = tl.cast(task % ND, tl.int64) * BD + tl.arange(0, BD)
+        if IS_VARLEN:
+            bos = tl.load(cu_seqlens + n).to(tl.int64)
+            length = tl.load(cu_seqlens + n + 1).to(tl.int64) - bos
+        else:
+            bos = n * T
+            length = T
+        for t in tl.static_range(0, W - 1):
+            value = tl.full((BD,), 0, tl.float32)
+            for w in tl.static_range(0, W):
+                token = t + w - W + 1
+                if token < 0:
+                    xi = tl.load(initial_state + n * D * W + d * W + token + W, d < D, other=0).to(tl.float32)
+                else:
+                    xi = tl.load(x + (bos + token) * D + d, (d < D) & (token < length), other=0).to(tl.float32)
+                wi = tl.load(weight + d * W + w, d < D, other=0).to(tl.float32)
+                value += xi * wi
+            if HAS_BIAS:
+                value += tl.load(bias + d, d < D, other=0).to(tl.float32)
+            offset = (bos + t) * D + d
+            mask = (d < D) & (t < length)
+            if HAS_Y_LINEAR:
+                tl.store(y_linear + offset, value.to(y_linear.dtype.element_ty, fp_downcast_rounding='rtne'), mask)
+            if ACTIVATION == 'silu' or ACTIVATION == 'swish':
+                value *= tl.sigmoid(value)
+            if HAS_RESIDUAL:
+                value += tl.load(residual + offset, mask, other=0).to(tl.float32)
+            tl.store(y + offset, value.to(y.dtype.element_ty, fp_downcast_rounding='rtne'), mask)
+
+
+@triton.heuristics({'IS_VARLEN': lambda args: args['cu_seqlens'] is not None})
+@triton.jit(do_not_specialize=['T', 'N', 'PARTIAL_OFFSET'])
+def causal_conv1d_bwd_head_dw_kernel(
+    dy, y_linear, initial_state, dw, cu_seqlens, T, N, PARTIAL_OFFSET,
+    D: tl.constexpr, W: tl.constexpr, BD: tl.constexpr,
+    ACTIVATION: tl.constexpr, IS_VARLEN: tl.constexpr,
+):
+    ND = tl.cdiv(D, BD)
+    for task in range(tl.program_id(0), N * ND, tl.num_programs(0)):
+        n = tl.cast(task // ND, tl.int64)
+        d = tl.cast(task % ND, tl.int64) * BD + tl.arange(0, BD)
+        if IS_VARLEN:
+            bos = tl.load(cu_seqlens + n).to(tl.int64)
+            length = tl.load(cu_seqlens + n + 1).to(tl.int64) - bos
+        else:
+            bos = n * T
+            length = T
+        for w in tl.static_range(0, W):
+            value = tl.full((BD,), 0, tl.float32)
+            for t in tl.static_range(0, W - w - 1):
+                mask = (d < D) & (t < length)
+                grad = tl.load(dy + (bos + t) * D + d, mask, other=0).to(tl.float32)
+                if ACTIVATION == 'silu' or ACTIVATION == 'swish':
+                    yi = tl.load(y_linear + (bos + t) * D + d, mask, other=0).to(tl.float32)
+                    sigmoid = tl.sigmoid(yi)
+                    grad = grad * sigmoid * (1 + yi * (1 - sigmoid))
+                history = tl.load(initial_state + n * D * W + d * W + t + w + 1, d < D, other=0).to(tl.float32)
+                value += grad * history
+            tl.store(dw + (tl.cast(PARTIAL_OFFSET, tl.int64) + n) * W * D + w * D + d, value, d < D)
+
+
 def _launch_fwd_coregrid(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -1595,6 +1673,7 @@ def _launch_fwd_coregrid(
     cu_seqlens: torch.Tensor | None,
     cu_seqlens_cpu: torch.Tensor | None,
     save_linear: bool = False,
+    initial_state: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """1D core-grid forward. Public weight is [D, W]; load as contiguous [W, D].
 
@@ -1641,6 +1720,23 @@ def _launch_fwd_coregrid(
         NUM_BLKS_D=NUM_BLKS_D,
         NT_STRIDE=nt_stride,
     )
+    if initial_state is not None:
+        causal_conv1d_fwd_head_kernel[(NUM_CORES,)](
+            x=x,
+            y=y,
+            y_linear=y_linear,
+            weight=weight,
+            bias=bias,
+            residual=residual,
+            initial_state=initial_state,
+            cu_seqlens=cu_seqlens,
+            T=T,
+            N=initial_state.shape[0],
+            D=D,
+            W=W,
+            BD=128,
+            ACTIVATION=activation,
+        )
     return y, y_linear
 
 
@@ -1654,7 +1750,8 @@ def _launch_bwd_coregrid(
     cu_seqlens: torch.Tensor | None,
     cu_seqlens_cpu: torch.Tensor | None,
     y_linear: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
+    initial_state: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
     """Unified 1D core-grid backward. Public weight is [D, W]; load as contiguous [W, D]."""
     B, T, D = x.shape
     W = weight.shape[1] if weight is not None else None
@@ -1679,6 +1776,9 @@ def _launch_bwd_coregrid(
         raise RuntimeError(f'coregrid bwd: no aligned BD for D={D}')
     NUM_BLKS_D = triton.cdiv(D, BD)
 
+    # different histories can share x; its tensor-local cache cannot identify this call's pre-activation.
+    if initial_state is not None:
+        y_linear = None
     if y_linear is None and activation is not None:
         y_linear, _ = _launch_fwd_coregrid(
             x=x,
@@ -1688,9 +1788,11 @@ def _launch_bwd_coregrid(
             activation=None,
             cu_seqlens=cu_seqlens,
             cu_seqlens_cpu=cu_seqlens_cpu,
+            initial_state=initial_state,
         )
     dx = torch.empty_like(x)
-    dw = weight.new_empty(B * NT, W, D, dtype=torch.float) if weight is not None else None
+    N = initial_state.shape[0] if initial_state is not None else 0
+    dw = weight.new_empty(B * NT + N, W, D, dtype=torch.float) if weight is not None else None
     db = bias.new_empty(B * NT, *bias.shape, dtype=torch.float) if bias is not None else None
     dr = dy if residual is not None else None
 
@@ -1718,11 +1820,35 @@ def _launch_bwd_coregrid(
         NUM_CHKS=NUM_CHKS,
         NT_STRIDE=NT if cu_seqlens is None else 1,
     )
+    dh0 = None
+    if initial_state is not None:
+        causal_conv1d_bwd_head_dw_kernel[(NUM_CORES,)](
+            dy=dy,
+            y_linear=y_linear,
+            initial_state=initial_state,
+            dw=dw,
+            cu_seqlens=cu_seqlens,
+            T=T,
+            N=N,
+            PARTIAL_OFFSET=B * NT,
+            D=D,
+            W=W,
+            BD=128,
+            ACTIVATION=activation,
+        )
+        dh0 = compute_dh0_npu(
+            dy=dy,
+            y=y_linear,
+            weight=weight,
+            initial_state=initial_state,
+            activation=activation,
+            cu_seqlens=cu_seqlens,
+        )
     if weight is not None:
         dw = dw.sum(0).to(weight).transpose(0, 1)
     if bias is not None:
         db = db.sum(0).to(bias)
-    return dx, dw, db, dr
+    return dx, dw, db, dr, dh0
 
 
 def _can_use_coregrid(
@@ -1732,8 +1858,10 @@ def _can_use_coregrid(
     dht: torch.Tensor | None = None,
     layout_fallback: bool = False,
 ) -> bool:
-    """Whether the 1D core-grid kernels can run for this layout and channel width."""
-    if layout_fallback or initial_state is not None or dht is not None:
+    """Whether core-grid bulk and the optional short-history boundary fit this layout."""
+    if layout_fallback or dht is not None:
+        return False
+    if initial_state is not None and (not initial_state.is_contiguous() or initial_state.shape[-1] > 4):
         return False
     if not x.is_contiguous() or x.stride(-1) != 1:
         return False
@@ -1769,7 +1897,7 @@ def causal_conv1d_fwd_npu(
         x = rearrange(x, 'b t ... -> b t (...)')
     # 1D core-grid fast path (large BD + extract_slice).
     if _can_use_coregrid(x=x, residual=residual, initial_state=initial_state, layout_fallback=layout_fallback):
-        save_linear = activation in ('swish', 'silu')
+        save_linear = initial_state is None and activation in ('swish', 'silu')
         y, y_linear = _launch_fwd_coregrid(
             x=x,
             weight=weight,
@@ -1779,6 +1907,7 @@ def causal_conv1d_fwd_npu(
             cu_seqlens=cu_seqlens,
             cu_seqlens_cpu=cu_seqlens_cpu,
             save_linear=save_linear,
+            initial_state=initial_state,
         )
         if y_linear is not None:
             x_saved._fla_causal_conv_y_linear = y_linear
@@ -1870,7 +1999,7 @@ def causal_conv1d_bwd_npu(
         # core-grid assumes packed BTD; cheap-copy strided dy from cat/split views.
         if dy is not None and not dy.is_contiguous():
             dy = dy.contiguous()
-        dx, dw, db, dr = _launch_bwd_coregrid(
+        dx, dw, db, dr, dh0 = _launch_bwd_coregrid(
             x=x,
             dy=dy,
             weight=weight,
@@ -1880,8 +2009,9 @@ def causal_conv1d_bwd_npu(
             cu_seqlens=cu_seqlens,
             cu_seqlens_cpu=cu_seqlens_cpu,
             y_linear=y_linear,
+            initial_state=initial_state,
         )
-        return dx.view(shape), dw, db, dr, None
+        return dx.view(shape), dw, db, dr, dh0
 
     del layout_fallback
     B, T, D = x.shape

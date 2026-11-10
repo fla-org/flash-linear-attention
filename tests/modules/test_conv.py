@@ -1415,3 +1415,74 @@ def test_conv_backend_dispatch(
     y, _ = causal_conv1d(x=x, weight=weight, activation='silu')
     y.sum().backward()
     assert not conv_backend_calls
+
+
+@pytest.mark.parametrize(
+    ('lengths', 'D', 'dtype', 'activation', 'varlen'),
+    [
+        pytest.param([16384], 12288, torch.bfloat16, 'silu', True, id='kimi_local_256k_cp16'),
+        pytest.param([1, 2, 5, 65], 128, torch.bfloat16, 'silu', True, id='short_varlen_bf16'),
+        pytest.param([1, 3, 65], 128, torch.float32, None, True, id='short_varlen_fp32'),
+        pytest.param([129, 129], 256, torch.float16, 'silu', False, id='dense_fp16_tail'),
+    ],
+)
+def test_conv_initial_state_boundary(lengths, D, dtype, activation, varlen):
+    torch.manual_seed(42)
+    W = 4
+    shape = (1, sum(lengths), D) if varlen else (len(lengths), lengths[0], D)
+    x = torch.randn(shape, dtype=dtype, device='cpu').requires_grad_()
+    w = torch.randn(D, W, dtype=torch.float32, device='cpu').requires_grad_()
+    h = torch.randn(len(lengths), D, W, dtype=dtype, device='cpu').requires_grad_()
+    dy = torch.randn_like(x)
+    # native CPU convolution avoids oneDNN's Xbyak range error at the production shape.
+    with torch.backends.mkldnn.flags(enabled=False):
+        outputs, offset = [], 0
+        for n, length in enumerate(lengths):
+            xi = x[:, offset:offset + length] if varlen else x[n:n + 1]
+            history = torch.cat((h[n:n + 1, :, 1:], xi.transpose(1, 2)), dim=-1).float()
+            yi = F.conv1d(history, w[:, None], groups=D).transpose(1, 2)
+            outputs.append((F.silu(yi) if activation else yi).to(dtype))
+            offset += length
+        reference = torch.cat(outputs, dim=1 if varlen else 0)
+        expected = torch.autograd.grad(reference, (x, w, h), dy)
+    values = [v.detach().to(device).requires_grad_() for v in (x, w, h)]
+    cu_cpu = torch.tensor([0, *torch.tensor(lengths).cumsum(0).tolist()], dtype=torch.int32) if varlen else None
+    actual, _ = causal_conv1d(
+        x=values[0], weight=values[1], initial_state=values[2], activation=activation,
+        cu_seqlens=cu_cpu.to(device) if varlen else None, cu_seqlens_cpu=cu_cpu,
+    )
+    gradients = torch.autograd.grad(actual, values, dy.to(device))
+    assert torch.isfinite(actual).all()
+    assert_close('output', reference.detach(), actual.detach().cpu(), 1e-3)
+    tolerance = 5e-3 if dtype == torch.bfloat16 else 1e-3
+    for name, ref, grad in zip(('dx', 'dw', 'dh0'), expected, gradients):
+        assert torch.isfinite(grad).all(), name
+        assert_close(name, ref, grad.cpu(), tolerance)
+        if name == 'dh0':
+            assert torch.count_nonzero(grad[..., 0]) == 0
+
+
+@pytest.mark.parametrize('dtype', [torch.float32, torch.bfloat16])
+def test_conv_initial_state_reused_input(dtype):
+    torch.manual_seed(42)
+    D, W, T = 128, 4, 7
+    x = torch.randn(1, T, D, dtype=dtype, device='cpu').requires_grad_()
+    w = torch.randn(D, W, dtype=torch.float32, device='cpu').requires_grad_()
+    states = [torch.randn(1, D, W, dtype=dtype, device='cpu').requires_grad_() for _ in range(2)]
+    values = (x, w, *states)
+    dys = [torch.randn_like(x) for _ in states]
+    with torch.backends.mkldnn.flags(enabled=False):
+        refs = [F.silu(F.conv1d(torch.cat((h[..., 1:], x.transpose(1, 2)), dim=-1).float(),
+                                w[:, None], groups=D)).transpose(1, 2).to(dtype) for h in states]
+        expected = [torch.autograd.grad(ref, (x, w, h), dy) for ref, h, dy in zip(refs, states, dys)]
+    actual_values = [v.detach().to(device).requires_grad_() for v in values]
+    tx, tw, *histories = actual_values
+    actuals = [causal_conv1d(x=tx, weight=tw, initial_state=h, activation='silu')[0] for h in histories]
+    # forward order differs from the reverse traversal of a combined backward.
+    gradients = [torch.autograd.grad(out, (tx, tw, h), dy.to(device)) for out, h, dy in zip(actuals, histories, dys)]
+    for ref, actual in zip(refs, actuals):
+        assert_close('output', ref.detach(), actual.detach().cpu(), 1e-3)
+    for expected_call, actual_call in zip(expected, gradients):
+        for name, ref, actual in zip(('dx', 'dw', 'dh0'), expected_call, actual_call):
+            assert torch.isfinite(actual).all()
+            assert_close(name, ref, actual.cpu(), 5e-3 if dtype == torch.bfloat16 else 1e-3)
