@@ -1355,6 +1355,7 @@ def _postprocess_update(y: torch.Tensor, residual: torch.Tensor | None, activati
 @triton.heuristics({
     'HAS_WEIGHT': lambda args: args['weight'] is not None,
     'HAS_BIAS': lambda args: args['bias'] is not None,
+    'HAS_RESIDUAL': lambda args: args['residual'] is not None,
     'USE_INITIAL_STATE': lambda args: args['initial_state'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
@@ -1364,6 +1365,7 @@ def causal_conv1d_fwd_kernel_scalar(
     y,
     weight,
     bias,
+    residual,
     cu_seqlens,
     initial_state,
     chunk_indices,
@@ -1380,8 +1382,10 @@ def causal_conv1d_fwd_kernel_scalar(
     BT: tl.constexpr,
     BW: tl.constexpr,
     BD: tl.constexpr,
+    ACTIVATION: tl.constexpr,
     HAS_WEIGHT: tl.constexpr,
     HAS_BIAS: tl.constexpr,
+    HAS_RESIDUAL: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     CHUNK_OFFSET: tl.constexpr,
@@ -1434,6 +1438,15 @@ def causal_conv1d_fwd_kernel_scalar(
     if HAS_BIAS:
         b_y += tl.load(bias + o_d, mask=m_d).to(tl.float32)[None, :]
 
+    if ACTIVATION == 'swish' or ACTIVATION == 'silu':
+        b_y = b_y * tl.sigmoid(b_y)
+    if HAS_RESIDUAL:
+        b_y += tl.load(
+            residual + bos * D + o_t[:, None] * D + o_d[None, :],
+            mask=m_t[:, None] & m_d[None, :],
+            other=0,
+        ).to(tl.float32)
+
     tl.store(
         p_y + o_t[:, None] * stride_y_t + o_d[None, :] * stride_y_d,
         tl.cast(b_y, dtype=y.dtype.element_ty, fp_downcast_rounding='rtne'),
@@ -1453,9 +1466,10 @@ def _launch_fwd_core_scalar(
     D: int,
     W: int,
     BT: int,
+    activation: str | None = None,
+    residual: torch.Tensor | None = None,
 ) -> torch.Tensor:
     # small tiles keep the scalar masked-load path within Ascend UB, including bf16 multi-buffering.
-    # the caller applies activation and residual via _postprocess_fwd.
     BD, BT = _npu_tile_config(T=T, BT=BT, D=D, dtype=torch.float32, initial_state=initial_state)
     # rebuild chunk_indices for the reduced BT; a BT mismatch corrupts the varlen (n, t) lookup.
     if cu_seqlens is not None:
@@ -1469,6 +1483,8 @@ def _launch_fwd_core_scalar(
     stride_x_n, stride_x_t, stride_x_d = x.stride()
     y = torch.zeros_like(x, memory_format=torch.contiguous_format)
     stride_y_n, stride_y_t, stride_y_d = y.stride()
+    if residual is not None:
+        residual = residual.contiguous()
 
     max_nt = _npu_max_axis_chunks(triton.cdiv(D, BD), B)
     kernel_kwargs = dict(
@@ -1476,6 +1492,8 @@ def _launch_fwd_core_scalar(
         y=y,
         weight=weight,
         bias=bias,
+        residual=residual,
+        ACTIVATION=activation,
         cu_seqlens=cu_seqlens,
         initial_state=initial_state,
         B=B,
@@ -1799,8 +1817,8 @@ def causal_conv1d_fwd_npu(
             activation=activation,
         )
     else:
-        # the block-pointer initial_state head-edge branch faults the Ascend vector core;
-        # use scalar convolution and apply activation/residual afterwards.
+        # unsupported core-grid layouts use scalar convolution.
+        # fuse activation/residual to preserve the core-grid path's rounding.
         y = _launch_fwd_core_scalar(
             x=x,
             weight=weight,
@@ -1813,8 +1831,9 @@ def causal_conv1d_fwd_npu(
             D=D,
             W=W,
             BT=BT,
+            activation=activation,
+            residual=residual,
         )
-        y = _postprocess_fwd(y=y, residual=residual, activation=activation)
 
     final_state = None
     if output_final_state:

@@ -460,6 +460,58 @@ def test_conv_initial_state(
 
 
 @pytest.mark.parametrize(
+    ('is_varlen', 'has_residual'),
+    [
+        pytest.param(False, False, id='dense'),
+        pytest.param(False, True, id='dense_residual'),
+        pytest.param(True, False, id='varlen'),
+        pytest.param(True, True, id='varlen_residual'),
+    ],
+)
+def test_conv_initial_state_bf16_activation(is_varlen: bool, has_residual: bool):
+    torch.manual_seed(42)
+    D, W = 128, 4
+    lengths = [37, 93] if is_varlen else [65, 65]
+    B, T = (1, sum(lengths)) if is_varlen else (2, lengths[0])
+    x = torch.randn(B, T, D, dtype=torch.bfloat16).requires_grad_()
+    weight = torch.randn(D, W, dtype=torch.float32).requires_grad_()
+    bias = torch.randn(D, dtype=torch.float32).requires_grad_()
+    h0 = torch.randn(2, D, W, dtype=torch.bfloat16).requires_grad_()
+    residual = torch.randn_like(x).requires_grad_() if has_residual else None
+    dy = torch.randn_like(x)
+    inputs = (x, weight, bias, h0) + ((residual,) if has_residual else ())
+    refs = []
+    offset = 0
+    for i, length in enumerate(lengths):
+        xi = x[:, offset:offset + length] if is_varlen else x[i:i + 1]
+        history = torch.cat((h0[i:i + 1, :, 1:], xi.transpose(1, 2)), dim=-1).float()
+        yi = F.silu(F.conv1d(history, weight[:, None], bias, groups=D)).transpose(1, 2)
+        if has_residual:
+            ri = residual[:, offset:offset + length] if is_varlen else residual[i:i + 1]
+            yi = yi + ri.float()
+        refs.append(yi.to(x.dtype))
+        offset += length
+    ref = torch.cat(refs, dim=1 if is_varlen else 0)
+    ref_grads = torch.autograd.grad(ref, inputs, dy)
+
+    values = [value.detach().to(device).requires_grad_() for value in inputs]
+    tx, tw, tb, th = values[:4]
+    tr = values[4] if has_residual else None
+    if tr is not None:
+        tr = torch.stack((tr, torch.zeros_like(tr)), dim=-1)[..., 0]
+    cu_cpu = torch.tensor([0, *torch.tensor(lengths).cumsum(0).tolist()], dtype=torch.int32) if is_varlen else None
+    tri, _ = causal_conv1d(
+        x=tx, weight=tw, bias=tb, initial_state=th, residual=tr, activation='silu',
+        cu_seqlens=cu_cpu.to(device) if is_varlen else None, cu_seqlens_cpu=cu_cpu,
+    )
+    tri_grads = torch.autograd.grad(tri, values, dy.to(device))
+    assert_close('y', ref.detach(), tri.detach().cpu(), 1e-3)
+    for name, expected, actual in zip(('dx', 'dw', 'db', 'dh0', 'dr'), ref_grads, tri_grads):
+        assert torch.isfinite(actual).all(), name
+        assert_close(name, expected, actual.cpu(), 5e-3)
+
+
+@pytest.mark.parametrize(
     ('T', 'D', 'lengths'),
     [
         pytest.param(256, 128, None, id='random_split_T256'),
