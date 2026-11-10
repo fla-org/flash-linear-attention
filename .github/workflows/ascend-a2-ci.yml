@@ -216,15 +216,39 @@ jobs:
             tests/ops/test_simple_gla.py::test_retention_ascend_registration_import_order \
             tests/ops/test_kda_graph.py
 
-      - name: Run CP tests serially
+      # Phases run in order. Each pytest in a phase sees a disjoint device set.
+      - name: Run CP tests on disjoint device groups
         id: pytest-cp
         if: github.event_name != 'schedule' || steps.triton-cache.outputs.cache-hit != 'true'
         shell: bash
         env:
           FLA_NPU_XDIST: "0"
+          PYTHONUNBUFFERED: "1"
         run: |
           source /usr/local/Ascend/ascend-toolkit/set_env.sh
-          pytest -s -v --exitfirst tests/cp
+          phase() {
+            local selector=$1 status=0 pid lane devices
+            shift
+            local pids=()
+            for lane in "$@"; do
+              devices=${lane%%:*}
+              ASCEND_RT_VISIBLE_DEVICES=$devices pytest -s -v --exitfirst -k "$selector" ${lane#*:} &
+              pids+=("$!")
+            done
+            for pid in "${pids[@]}"; do
+              wait "$pid" || status=$?
+            done
+            (( status == 0 )) || exit "$status"
+          }
+          phase 'not (cp4 or cp8)' \
+            0,1:tests/cp/test_dplr.py \
+            '2,3:tests/cp/test_gdn.py tests/cp/test_token_shift.py tests/cp/test_state.py' \
+            '4,5:tests/cp/test_kda.py tests/cp/test_conv.py' \
+            '6,7:tests/cp/test_gdp.py tests/cp/test_intracard.py tests/cp/test_context.py tests/cp/test_graph.py tests/cp/test_gdn2.py'
+          phase cp4 \
+            '0,1,2,3:tests/cp/test_kda.py tests/cp/test_conv.py' \
+            '4,5,6,7:tests/cp/test_dplr.py tests/cp/test_gdn.py tests/cp/test_token_shift.py tests/cp/test_gdn2.py'
+          phase cp8 '0,1,2,3,4,5,6,7:tests/cp/test_gdn.py tests/cp/test_kda.py tests/cp/test_gdn2.py'
 
       - name: Save A2 pytest Triton-Ascend kernel cache
         if: |
