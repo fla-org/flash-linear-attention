@@ -104,17 +104,23 @@ def test_standard_residual(fuse_norm: bool, dtype: torch.dtype):
     x = torch.randn(2, 65, 128, device=device, dtype=dtype, requires_grad=True)
     tri = model(inputs_embeds=x, output_hidden_states=True)
 
-    hidden_states, ref_hidden_states = x, []
+    residual, branch_output, ref_hidden_states = x, None, []
     for layer in model.layers:
+        hidden_states = residual if branch_output is None else residual + branch_output
         ref_hidden_states.append(hidden_states)
-        branch_output = layer.attn(layer.attn_residual.norm(hidden_states))[0]
-        if fuse_norm:
-            mlp_input, residual = layer.mlp_residual.norm(branch_output, hidden_states, prenorm=True)
+        if fuse_norm and branch_output is not None:
+            attn_input, residual = layer.attn_residual.norm(branch_output, residual, prenorm=True)
         else:
-            residual = hidden_states + branch_output
+            residual = hidden_states
+            attn_input = layer.attn_residual.norm(hidden_states)
+        branch_output = layer.attn(attn_input)[0]
+        if fuse_norm:
+            mlp_input, residual = layer.mlp_residual.norm(branch_output, residual, prenorm=True)
+        else:
+            residual = residual + branch_output
             mlp_input = layer.mlp_residual.norm(residual)
-        hidden_states = residual + layer.mlp(mlp_input)
-    ref_hidden_states.append(model.output_residual.norm(hidden_states))
+        branch_output = layer.mlp(mlp_input)
+    ref_hidden_states.append(model.output_residual.norm(residual + branch_output))
 
     for i, (ref, out) in enumerate(zip(ref_hidden_states, tri.hidden_states, strict=True)):
         assert_close(f'layer_{i}', ref, out, 1e-3)

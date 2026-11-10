@@ -26,9 +26,6 @@ class AttentionResidualState(NamedTuple):
     def hidden_states(self) -> torch.Tensor:
         return self.blocks[-1]
 
-    def with_hidden_states(self, hidden_states: torch.Tensor) -> 'AttentionResidualState':
-        return AttentionResidualState([*self.blocks[:-1], hidden_states], self.num_branches)
-
 
 class AttentionResidualQuery(nn.Module):
     """Depth query with zero initialization, giving equal initial weights to all residual sources."""
@@ -56,7 +53,7 @@ class AttentionResidual(BaseResidual[AttentionResidualState, AttentionResidualSt
         = \operatorname{softmax}_i\!\left(w_l^\top\operatorname{RMSNorm}(v_i)\right),
         \qquad h_l = \sum_{i=0}^{l-1} \alpha_{i\to l} v_i.
 
-    `readout` computes h_l; `pre` additionally applies the branch norm and returns the existing state as context.
+    `pre` computes the normalized h_l and returns the existing state as context.
     `attnres_norm` normalizes keys to compute attention weights; the values v_i remain unnormalized.
     `post` appends the new branch output v_l, making it available to the next residual module's query.
 
@@ -116,16 +113,6 @@ class AttentionResidual(BaseResidual[AttentionResidualState, AttentionResidualSt
         else:
             blocks = [*blocks[:-1], blocks[-1] + branch_output]
         return AttentionResidualState(blocks, num_branches + 1)
-
-    def readout(self, state: AttentionResidualState) -> torch.Tensor:
-        if state.num_branches == 0:
-            return state.blocks[0]
-        return fused_attnres(
-            query=self.query.weight.squeeze(0),
-            residuals=state.blocks,
-            rms_weight=self.attnres_norm.weight,
-            rms_eps=self.norm.eps,
-        )
 
     def forward(self, state: AttentionResidualState) -> torch.Tensor:
         return fused_attnres(

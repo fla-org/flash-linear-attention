@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, ClassVar, Generic, Protocol, TypeVar
 
 import torch
 from torch import nn
-from typing_extensions import Self
 
 from fla.modules.norm import RMSNorm
 
@@ -23,11 +22,7 @@ class ResidualState(Protocol):
 
     @property
     def hidden_states(self) -> torch.Tensor:
-        """Current sum exposed by the model, before residual readout and normalization."""
-        ...
-
-    def with_hidden_states(self, hidden_states: torch.Tensor) -> Self:
-        """Replace the current tensor while retaining completed residual history."""
+        """Current tensor exposed by the model, before branch or output normalization."""
         ...
 
 
@@ -49,9 +44,9 @@ class BaseResidual(nn.Module, ABC, Generic[StateT, ContextT]):
     State may retain individual outputs, block sums, or a recurrent summary.
     The module owns three operations:
 
-    * `readout(state)` computes h_l without branch normalization.
     * `pre(state)` returns the normalized h_l and the context needed to update state.
     * `post(branch_output, context)` incorporates v_l into the state used by the next branch.
+    * `forward(state)` aggregates the final state and applies output normalization.
 
     The model executes its branch between `pre` and `post` to produce v_l = f_l(h_l).
     Here f_l includes the normalization performed by `pre`; the model owns the remaining branch computation.
@@ -59,7 +54,7 @@ class BaseResidual(nn.Module, ABC, Generic[StateT, ContextT]):
     The next residual module reads the updated state using its own mixing weights.
 
     `initialize(x)` creates the initial state from embeddings.
-    Calling the output residual module applies output normalization to its readout.
+    The model records intermediate outputs through `state.hidden_states`.
     State and context retain autograd connections and must not be mutated or cached on the module.
     See Section 6.2 of `Attention Residuals <https://arxiv.org/abs/2603.15031>`_.
     """
@@ -115,9 +110,6 @@ class BaseResidual(nn.Module, ABC, Generic[StateT, ContextT]):
         raise NotImplementedError
 
     @abstractmethod
-    def readout(self, state: StateT) -> torch.Tensor:
-        raise NotImplementedError
-
     def forward(self, state: StateT) -> torch.Tensor:
-        """Normalize the final readout; implementations may fuse aggregation and normalization."""
-        return self.norm(self.readout(state))
+        """Aggregate the final state and normalize the output, optionally fusing both operations."""
+        raise NotImplementedError

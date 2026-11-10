@@ -18,6 +18,7 @@ from fla.models import GLAConfig, KDAConfig, MemoryAttnConfig, MomConfig, Transf
 from fla.models.cache_utils import Cache
 from fla.models.gla import modeling_gla
 from fla.modules.residuals import attnres
+from fla.modules.residuals.standard import StandardResidualState
 from fla.ops.attnres import naive_attnres
 from fla.utils import assert_close, device_name
 
@@ -81,9 +82,18 @@ def test_decoder_checkpointing(block_size, use_reentrant, make_model, monkeypatc
     ref_x = x.detach().clone().requires_grad_()
     labels = torch.randint(0, 64, (2, 7))
     actual = model(inputs_embeds=x, labels=labels, output_hidden_states=True)
+    layer_states = [ref_x]
+    handles = [
+        layer.register_forward_hook(lambda module, inputs, outputs: layer_states.append(outputs[0].hidden_states))
+        for layer in reference.model.layers
+    ]
     expected = reference(inputs_embeds=ref_x, labels=labels, output_hidden_states=True)
+    for handle in handles:
+        handle.remove()
     torch.testing.assert_close(actual.loss, expected.loss, rtol=0, atol=0)
     torch.testing.assert_close(actual.logits, expected.logits, rtol=0, atol=0)
+    for hidden, layer_hidden in zip(actual.hidden_states[:-1], layer_states[:-1], strict=True):
+        torch.testing.assert_close(hidden, layer_hidden, rtol=0, atol=0)
     for hidden, ref_hidden in zip(actual.hidden_states, expected.hidden_states, strict=True):
         torch.testing.assert_close(hidden, ref_hidden, rtol=0, atol=0)
     actual.loss.backward()
@@ -277,11 +287,16 @@ def test_decoder_fwd(config_class, training, use_cache, return_dict, make_model)
     torch.manual_seed(42)
     model = make_model(config_class).model.train(training)
     model.layers = nn.ModuleList([nn.Module(), nn.Module()])
-    state_key = 'residual_state' if config_class is models.GLAConfig else 'attnres_states'
+
+    def layer_forward(hidden_states, **kwargs):
+        if config_class is models.GLAConfig:
+            hidden_states = hidden_states.hidden_states
+            state = StandardResidualState(hidden_states + hidden_states.tanh(), None)
+            return state, None, kwargs['past_key_values']
+        return hidden_states + hidden_states.tanh(), None, kwargs['past_key_values'], kwargs['attnres_states']
+
     for layer in model.layers:
-        layer.forward = Mock(side_effect=lambda hidden_states, **kwargs: (
-            hidden_states + hidden_states.tanh(), None, kwargs['past_key_values'], kwargs[state_key],
-        ))
+        layer.forward = Mock(side_effect=layer_forward)
     input_ids = torch.randint(0, 64, (2, 7))
     attention_mask = torch.ones_like(input_ids)
     cu_seqlens = torch.tensor([0, 7, 14], dtype=torch.int32)
@@ -306,7 +321,8 @@ def test_decoder_fwd(config_class, training, use_cache, return_dict, make_model)
         torch.testing.assert_close(hidden_states[index], reference)
         layer.forward.assert_called_once()
         args, kwargs = layer.forward.call_args
-        torch.testing.assert_close(args[0], reference)
+        layer_input = args[0].hidden_states if config_class is models.GLAConfig else args[0]
+        torch.testing.assert_close(layer_input, reference)
         assert kwargs['attention_mask'] is attention_mask
         assert kwargs['past_key_values'] is cache
         assert kwargs['use_cache'] is expected_cache

@@ -22,8 +22,8 @@ from fla.utils import assert_close, device, device_platform
         pytest.param(torch.float16, torch.float16, True, False, True, id='fp16-fused-norm'),
         pytest.param(torch.bfloat16, torch.bfloat16, False, True, True, id='bf16-unfused-norm'),
         pytest.param(torch.bfloat16, torch.bfloat16, True, True, True, id='bf16-fused-add-norm'),
-        pytest.param(torch.float16, torch.float16, True, True, False, id='fp16-readout'),
-        pytest.param(torch.bfloat16, torch.float32, True, False, False, id='mixed-bf16-readout'),
+        pytest.param(torch.float16, torch.float16, True, True, False, id='fp16-state'),
+        pytest.param(torch.bfloat16, torch.float32, True, False, False, id='mixed-bf16-state'),
         pytest.param(torch.bfloat16, torch.float32, True, True, True, id='mixed-bf16-fused-add-norm'),
         pytest.param(torch.float16, torch.float32, True, True, True, id='mixed-fp16-fused-add-norm'),
     ],
@@ -54,14 +54,14 @@ def test_standard(dtype: torch.dtype, input_dtype: torch.dtype, fuse_norm: bool,
         ref = F.rms_norm(ref.float(), (128,), modules[-1].norm.weight.float(), modules[-1].norm.eps).to(input_dtype)
 
     state = modules[0].initialize(x=x)
-    inputs, contexts, states = [], [], [modules[0].readout(state=state)]
+    inputs, contexts, states = [], [], [state.hidden_states]
     for module in modules[:-1]:
         branch_input, context = module.pre(state=state)
         inputs.append(branch_input)
         contexts.append(context)
         state = module.post(branch_output=F.silu(branch_input).to(dtype), context=context)
-        states.append(module.readout(state=state))
-    out = modules[-1](state=state) if output_norm else modules[-1].readout(state=state)
+        states.append(state.hidden_states)
+    out = modules[-1](state=state) if output_norm else state.hidden_states
 
     for i, (expected, branch_input, context) in enumerate(zip(ref_inputs, inputs, contexts)):
         assert branch_input.dtype == expected.dtype

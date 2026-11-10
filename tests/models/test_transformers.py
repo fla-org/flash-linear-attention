@@ -12,9 +12,11 @@ import torch
 from safetensors.torch import load_file, save_file
 from torch import nn
 from transformers import AutoConfig, AutoModelForCausalLM
+from transformers.conversion_mapping import get_checkpoint_conversion_mapping
 
 from fla import models
 from fla.models.gla.modeling_gla import GLAForCausalLM, GLAModel
+from fla.models.modeling_utils import FLAPreTrainedModel
 from fla.modules.residuals import AttentionResidual, BaseResidual
 from fla.utils import find_spec_cached
 
@@ -201,6 +203,30 @@ def test_gla_checkpoint(model_class, block_size, fuse_norm, save_original_format
     reloaded.load_state_dict(reloaded.state_dict(), strict=True)
     for name, value in reloaded.state_dict().items():
         torch.testing.assert_close(value, state[name], rtol=0, atol=0)
+
+
+def test_residual_key_mapping_registration():
+    """Register subclass mappings automatically and preserve them across inheritance and repeated registration."""
+    class CustomConfig(models.GLAConfig):
+        model_type = 'fla-test-residual-key-mapping'
+
+    class CustomModel(FLAPreTrainedModel):
+        config_class = CustomConfig
+        _residual_key_mapping = {'old.weight': 'new.weight'}
+
+    registered = get_checkpoint_conversion_mapping(CustomConfig.model_type)
+    assert registered is not None
+    expected = [(item.source_patterns, item.target_patterns) for item in registered]
+    assert expected == [(['old.weight'], ['new.weight'])]
+
+    class InheritedModel(CustomModel):
+        pass
+
+    class OverrideModel(CustomModel):
+        _residual_key_mapping = {'custom.weight': 'converted.weight'}
+
+    actual = get_checkpoint_conversion_mapping(CustomConfig.model_type)
+    assert [(item.source_patterns, item.target_patterns) for item in actual] == expected
 
 
 def test_gla_key_mapping(make_model, tmp_path):

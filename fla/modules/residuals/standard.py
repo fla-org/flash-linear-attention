@@ -23,9 +23,6 @@ class StandardResidualState(NamedTuple):
     def hidden_states(self) -> torch.Tensor:
         return self.residual if self.branch_output is None else self.residual + self.branch_output
 
-    def with_hidden_states(self, hidden_states: torch.Tensor) -> 'StandardResidualState':
-        return StandardResidualState(hidden_states, None)
-
 
 class StandardResidual(BaseResidual[StandardResidualState, torch.Tensor]):
     r"""Standard residual accumulation, optionally fusing addition with the next normalization.
@@ -37,13 +34,13 @@ class StandardResidual(BaseResidual[StandardResidualState, torch.Tensor]):
         h_{l+1} = h_l + v_l.
 
     State stores two summands `(residual, branch_output)` of h_l; `None` means the sum is already materialized.
-    `readout` returns their sum, and `pre` normalizes it while returning h_l as the context for `post`.
+    `pre` normalizes their sum while returning h_l as the context for `post`.
     `post` stores `(h_l + v_l, None)` when fusion is disabled, or `(h_l, v_l)` when enabled.
     The latter lets the next `pre` fuse addition and normalization without changing the residual rule.
 
     Unfused addition follows PyTorch dtype promotion.
     Fused addition retains the residual dtype and returns the normalized input in the branch dtype.
-    The final readout always adds before normalizing.
+    The final output always adds before normalizing.
 
     Args:
         fuse_residual (bool, Optional):
@@ -82,7 +79,5 @@ class StandardResidual(BaseResidual[StandardResidualState, torch.Tensor]):
             return StandardResidualState(context, branch_output)
         return StandardResidualState(context + branch_output, None)
 
-    def readout(self, state: StandardResidualState) -> torch.Tensor:
-        if state.branch_output is None:
-            return state.residual
-        return state.residual + state.branch_output
+    def forward(self, state: StandardResidualState) -> torch.Tensor:
+        return self.norm(state.hidden_states)

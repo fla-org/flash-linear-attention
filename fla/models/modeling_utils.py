@@ -11,10 +11,12 @@ import math
 import re
 import warnings
 from copy import copy
+from functools import partial
 from inspect import signature
 
 import torch
 from torch import nn
+from torch.utils._pytree import tree_flatten, tree_unflatten
 from transformers.configuration_utils import PretrainedConfig
 from transformers.conversion_mapping import get_checkpoint_conversion_mapping, register_checkpoint_conversion_mapping
 from transformers.core_model_loading import WeightRenaming
@@ -68,6 +70,21 @@ def get_attention(config: PretrainedConfig, layer_idx: int) -> Attention | None:
     )
 
 
+def checkpoint_residual_state(function, *args, checkpoint_func):
+    """Expose tensors inside residual state to reentrant checkpointing."""
+    flat_args, input_spec = tree_flatten(args)
+    output_spec = None
+
+    def forward(*flat_args):
+        nonlocal output_spec
+        outputs = function(*tree_unflatten(flat_args, input_spec))
+        flat_outputs, output_spec = tree_flatten(outputs)
+        return tuple(flat_outputs)
+
+    outputs = checkpoint_func(forward, *flat_args)
+    return tree_unflatten(outputs, output_spec)
+
+
 class FLAPreTrainedModel(PreTrainedModel):
     """Shared Transformers integration without changing model parameter paths."""
 
@@ -75,6 +92,32 @@ class FLAPreTrainedModel(PreTrainedModel):
     _input_embed_layer = "embeddings"
     _residual_block_types: tuple[type[nn.Module], ...] = ()
     _residual_key_mapping: dict[str, str] = {}
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        if cls._residual_key_mapping:
+            register_residual_key_mapping(cls.config_class.model_type, cls._residual_key_mapping)
+
+    def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None, *args, **kwargs):
+        if not self._residual_block_types:
+            return super().gradient_checkpointing_enable(gradient_checkpointing_kwargs, *args, **kwargs)
+
+        checkpoint_kwargs = {'use_reentrant': False, **(gradient_checkpointing_kwargs or {})}
+        if checkpoint_kwargs['use_reentrant'] is None:
+            checkpoint_kwargs['use_reentrant'] = False
+
+        residual = self.base_model.output_residual
+        if checkpoint_kwargs['use_reentrant'] and not residual.supports_reentrant_checkpointing:
+            raise ValueError(f'{type(residual).__name__} requires gradient checkpointing with use_reentrant=False')
+
+        super().gradient_checkpointing_enable(checkpoint_kwargs, *args, **kwargs)
+        if checkpoint_kwargs['use_reentrant']:
+            for module in self.modules():
+                if isinstance(module, self._residual_block_types):
+                    module._gradient_checkpointing_func = partial(
+                        checkpoint_residual_state,
+                        checkpoint_func=module._gradient_checkpointing_func,
+                    )
 
     def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
         if self._residual_key_mapping:
@@ -238,22 +281,20 @@ class FLAModel(FLAPreTrainedModel):
             all_attns = () if output_attentions else None
             for layer in self.layers:
                 if output_hidden_states:
-                    all_hidden_states += (hidden_states,)
+                    all_hidden_states += (residual_state.hidden_states,)
 
-                hidden_states, attentions, past_key_values, residual_state = layer(
-                    hidden_states,
+                residual_state, attentions, past_key_values = layer(
+                    residual_state,
                     attention_mask=attention_mask,
                     past_key_values=past_key_values,
                     use_cache=use_cache,
                     output_attentions=output_attentions,
-                    residual_state=residual_state,
                     **kwargs,
                 )
 
                 if output_attentions:
                     all_attns += (attentions,)
 
-            residual_state = residual_state.with_hidden_states(hidden_states)
             hidden_states = self.output_residual(residual_state)
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)

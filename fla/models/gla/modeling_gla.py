@@ -75,18 +75,13 @@ class GLABlock(GradientCheckpointingLayer):
 
     def forward(
         self,
-        hidden_states: torch.Tensor,
+        state: ResidualState,
         attention_mask: torch.Tensor | None = None,
         past_key_values: Cache | list[torch.FloatTensor] | None = None,
         use_cache: bool | None = False,
         output_attentions: bool | None = False,
-        residual_state: ResidualState | None = None,
         **kwargs: Unpack[dict],
     ) -> tuple:
-        if residual_state is None:
-            state = self.attn_residual.initialize(hidden_states)
-        else:
-            state = residual_state.with_hidden_states(hidden_states)
         hidden_states, context = self.attn_residual.pre(state)
         hidden_states, attentions, past_key_values = self.attn(
             hidden_states=hidden_states,
@@ -101,8 +96,7 @@ class GLABlock(GradientCheckpointingLayer):
         hidden_states, context = self.mlp_residual.pre(state)
         hidden_states = self.mlp(hidden_states, **kwargs)
         state = self.mlp_residual.post(hidden_states, context)
-        hidden_states = state.hidden_states
-        return hidden_states, attentions, past_key_values, state.with_hidden_states(hidden_states)
+        return state, attentions, past_key_values
 
 
 class GLAPreTrainedModel(FLAPreTrainedModel):
@@ -113,7 +107,7 @@ class GLAPreTrainedModel(FLAPreTrainedModel):
     _no_split_modules = ['GLABlock']
     _supports_cache_class = True
     _residual_block_types = (GLABlock,)
-    _residual_key_mapping = LEGACY_RESIDUAL_KEY_MAPPING
+    _residual_key_mapping = LEGACY_RESIDUAL_KEY_MAPPING.copy()
 
 
 class GLAModel(GLAPreTrainedModel, FLAModel):
