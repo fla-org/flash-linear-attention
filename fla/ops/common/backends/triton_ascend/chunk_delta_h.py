@@ -1283,6 +1283,7 @@ def chunk_gated_delta_rule_fwd_h_npu(
     assert K <= 256, "current kernel does not support head dimension larger than 256."
 
     # blockdim64 keeps T/K/V masks (and inline exp2 when T % BT != 0).
+    # replayed lengths can acquire tails after an aligned warmup.
     masked = use_graph or time_axis_needs_mask(T, BT, cu_seqlens, cu_seqlens_cpu)
     dense_tail = T % BT != 0 and _dense_single_slab_tail(K, V, state_v_first, g, cu_seqlens)
     BK, BV = _select_fwd_h_tiles(K, V, state_v_first, masked=masked and not dense_tail)
@@ -1312,10 +1313,10 @@ def chunk_gated_delta_rule_fwd_h_npu(
 
     k, w, u = k.contiguous(), w.contiguous(), u.contiguous()
     if state_v_first:
-        h = (k.new_zeros if use_graph else k.new_empty)(B, NT, HV, V, K)
+        h = k.new_empty(B, NT, HV, V, K)
         final_state = k.new_zeros(N, HV, V, K, dtype=torch.float32) if output_final_state else None
     else:
-        h = (k.new_zeros if use_graph else k.new_empty)(B, NT, HV, K, V)
+        h = k.new_empty(B, NT, HV, K, V)
         final_state = k.new_zeros(N, HV, K, V, dtype=torch.float32) if output_final_state else None
 
     v_new = (torch.zeros_like if use_graph else torch.empty_like)(u) if save_new_value else None
