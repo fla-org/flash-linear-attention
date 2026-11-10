@@ -130,9 +130,9 @@ def test_swila_mi_gradient_formula_fp64():
 
 @requires_cuda
 @pytest.mark.parametrize(("shape", "r_dtype", "rho_dtype", "seeds", "atol", "rtol"), [
-    ((2, 17, 3, 5, 4), torch.float32, torch.float32, (505, 606), 1e-5, 2e-5),
+    pytest.param((2, 17, 3, 5, 4), torch.float32, torch.float32, (505, 606), 1e-5, 2e-5, marks=pytest.mark.smoke),
     ((1, 65, 2, 64, 4), torch.float16, torch.float16, (505, 606), 5e-4, 5e-3),
-    ((2, 17, 3, 5, 4), torch.bfloat16, torch.bfloat16, (505, 606), 2e-3, 2e-2),
+    pytest.param((2, 17, 3, 5, 4), torch.bfloat16, torch.bfloat16, (505, 606), 2e-3, 2e-2, marks=pytest.mark.smoke),
     ((1, 17, 2, 64, 4), torch.float32, torch.bfloat16, (909, 1001), 2e-3, 2e-2),
 ])
 def test_swila_mi_fused_cuda(shape, r_dtype, rho_dtype, seeds, atol, rtol):

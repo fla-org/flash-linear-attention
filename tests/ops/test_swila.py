@@ -41,10 +41,14 @@ CASES = [
     pytest.param("gated", torch.float32, 1, 5, 1, 5, 3, 3, True, id="gated-fp32-odd-initial"),
     pytest.param("temporal", torch.float32, 1, 5, 1, 5, 3, 3, False, id="temporal-fp32-odd-default-priors"),
     pytest.param("temporal_gated", torch.float32, 1, 5, 1, 5, 3, 3, True, id="temporal-gated-fp32-odd-initial"),
-    pytest.param("plain", torch.bfloat16, 2, 7, 2, 8, 4, 4, True, id="plain-bf16-batch-head-initial"),
-    pytest.param("gated", torch.bfloat16, 2, 7, 2, 8, 4, 4, False, id="gated-bf16-batch-head-zero"),
-    pytest.param("temporal", torch.bfloat16, 2, 7, 2, 8, 4, 4, True, id="temporal-bf16-batch-head-initial"),
-    pytest.param("temporal_gated", torch.bfloat16, 2, 7, 2, 8, 4, 4, False, id="temporal-gated-bf16-default-priors"),
+    pytest.param("plain", torch.bfloat16, 2, 7, 2, 8, 4, 4, True,
+                 marks=pytest.mark.smoke, id="plain-bf16-batch-head-initial"),
+    pytest.param("gated", torch.bfloat16, 2, 7, 2, 8, 4, 4, False,
+                 marks=pytest.mark.smoke, id="gated-bf16-batch-head-zero"),
+    pytest.param("temporal", torch.bfloat16, 2, 7, 2, 8, 4, 4, True,
+                 marks=pytest.mark.smoke, id="temporal-bf16-batch-head-initial"),
+    pytest.param("temporal_gated", torch.bfloat16, 2, 7, 2, 8, 4, 4, False,
+                 marks=pytest.mark.smoke, id="temporal-gated-bf16-default-priors"),
     pytest.param("plain", torch.float16, 1, 5, 1, 5, 3, 3, True, id="plain-fp16-initial"),
     pytest.param("gated", torch.float16, 1, 5, 1, 5, 3, 3, True, id="gated-fp16-initial"),
 ]
@@ -82,6 +86,7 @@ def test_fused_isolated_vjps(family):
     compare_gradients(shared_grad, fresh_grad, prefix="retained-versus-fresh/")
 
 
+@pytest.mark.smoke
 @pytest.mark.parametrize("family", FAMILIES)
 def test_fused_packed_boundaries(family):
     lengths = (1, 4, 2)

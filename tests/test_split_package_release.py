@@ -107,6 +107,53 @@ def _create_venv(tmp_path: Path, *, system_site_packages: bool = False) -> Path:
     return venv_python(venv_dir)
 
 
+def _runtime_dependency_paths(tmp_path: Path, site_paths: list[str]) -> list[str]:
+    paths = []
+    for index, site_path in enumerate(site_paths):
+        source = Path(site_path)
+        if not source.is_dir():
+            continue
+        target = tmp_path / "runtime-dependencies" / str(index)
+        target.mkdir(parents=True)
+        for entry in source.iterdir():
+            if entry.name in ("fla", "fla.py") or entry.name.startswith(("fla_core-", "flash_linear_attention-")):
+                continue
+            (target / entry.name).symlink_to(entry.resolve(), target_is_directory=entry.is_dir())
+        paths.append(str(target))
+    return paths
+
+
+def test_runtime_dependencies_exclude_host_fla(tmp_path: Path) -> None:
+    core = tmp_path / "core" / "fla"
+    core.mkdir(parents=True)
+    (core / "__init__.py").write_bytes((ROOT / "fla" / "__init__.py").read_bytes())
+    host = tmp_path / "host"
+    for package in ("layers", "models"):
+        extension = host / "fla" / package
+        extension.mkdir(parents=True)
+        (extension / "__init__.py").write_text("raise AssertionError('host FLA extension imported')\n")
+    (host / "fla" / "__init__.py").write_text("raise AssertionError('host FLA imported')\n")
+    (host / "runtime_dependency.py").write_text("__version__ = '1.2.3'\n")
+    dependency_paths = _runtime_dependency_paths(tmp_path=tmp_path, site_paths=[str(host)])
+    check = textwrap.dedent(
+        f"""
+        import sys
+        from pathlib import Path
+
+        sys.path[:0] = [{str(core.parent)!r}] + {dependency_paths!r}
+        import fla
+        import runtime_dependency
+
+        assert fla.__all__ == []
+        assert [Path(path).resolve() for path in fla.__path__] == [Path({str(core)!r})]
+        assert Path(fla.__file__).resolve() == Path({str(core / '__init__.py')!r})
+        assert runtime_dependency.__version__ == '1.2.3'
+        assert Path(runtime_dependency.__file__).resolve() == Path({str(host / 'runtime_dependency.py')!r})
+        """
+    )
+    _run([sys.executable, "-S", "-c", check], cwd=tmp_path)
+
+
 def test_split_wheels_match_release_contract(tmp_path: Path) -> None:
     core_wheel, ext_wheel, version = _build_split_wheels(tmp_path)
 
@@ -299,6 +346,7 @@ def test_full_split_import_contract_when_runtime_dependencies_available(tmp_path
     site_packages = subprocess.check_output(
         [str(python), '-c', 'import site; print(site.getsitepackages())'], cwd=tmp_path, text=True,
     ).strip()
+    dependency_paths = _runtime_dependency_paths(tmp_path=tmp_path, site_paths=site.getsitepackages())
     runtime_versions = {module.__name__: module.__version__ for module in (torch, triton, transformers, einops)}
     runtime_setup = textwrap.dedent(
         f"""
@@ -306,9 +354,8 @@ def test_full_split_import_contract_when_runtime_dependencies_available(tmp_path
         import sys
         from pathlib import Path
 
-        # system-site inheritance in a nested venv skips the invoking venv's dependencies.
-        # add them explicitly under -S without activating editable installs.
-        sys.path[:0] = {site_packages} + {site.getsitepackages()!r}
+        # borrow runtime dependencies without exposing the host's FLA namespace or editable installs.
+        sys.path[:0] = {site_packages} + {dependency_paths!r}
         for name, expected_version in {runtime_versions!r}.items():
             assert importlib.import_module(name).__version__ == expected_version, name
         """
