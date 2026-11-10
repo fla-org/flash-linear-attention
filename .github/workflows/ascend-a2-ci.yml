@@ -310,6 +310,7 @@ jobs:
         if: |
           steps.pytest.outcome == 'success' &&
           steps.pytest-cp.outcome == 'success' &&
+          steps.pytest-graph.outcome == 'success' &&
           steps.triton-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
