@@ -37,7 +37,6 @@ SAFETY_MARGIN = 0.80
 FALLBACK_BK = 16
 MAX_INTER_BK = 64
 LAUNCH_BLOCK_BUDGET = 4096
-# Disable auto-multi-buffer and AutoBlockify on the inter kernels for CANN 9.1.
 INTER_COMPILE_KWARGS = ascend_compile_kwargs(blacklist_auto_blockify=True)
 
 
@@ -194,8 +193,12 @@ def chunk_gdn2_fwd_kernel_intra_grouped_npu(
     b_g = mload(p_g, m_rk, MASK_DMA).to(tl.float32)
     b_b = mload(p_b, m_rk, MASK_DMA).to(tl.float32)
     b_k *= b_b
+    o_j = tl.arange(0, BC)
+    row_in_subchunk = ROW_GROUP * BR + o_r
+    b_Aqk_rows = tl.zeros((BR, BC), dtype=tl.float32)
+    b_Akk_rows = tl.zeros((BR, BC), dtype=tl.float32)
 
-    for j in tl.static_range(0, (ROW_GROUP + 1) * BR):
+    for j in range(0, (ROW_GROUP + 1) * BR):
         i_j = i_ts + j
         m_j = i_j < T
         p_kj = k + i_j * input_stride + o_k
@@ -205,12 +208,22 @@ def chunk_gdn2_fwd_kernel_intra_grouped_npu(
         b_kgj = tl.where(m_k[None, :], b_kj[None, :] * exp2(b_g - b_gj[None, :]), 0.0)
         b_Aqk = tl.sum(b_q * b_kgj, axis=1) * scale
         b_Akk = tl.sum(b_k * b_kgj, axis=1)
-        row_in_subchunk = ROW_GROUP * BR + o_r
-        p_Aqk = dma_rows(Aqk, i_ti, o_r, H * BT, MASK_DMA) + i_i * BC + j
-        p_Akk = dma_rows(Akk, i_ti, o_r, H * BC, MASK_DMA) + j
-        m_store = m_r & m_j & (j <= row_in_subchunk)
-        mstore(p_Aqk, b_Aqk.to(Aqk.dtype.element_ty), m_store, MASK_DMA)
-        mstore(p_Akk, b_Akk.to(Akk.dtype.element_ty), m_r & m_j & (j < row_in_subchunk), MASK_DMA)
+        b_Aqk_rows = tl.where(
+            (o_j[None, :] == j) & (j <= row_in_subchunk[:, None]) & m_j,
+            b_Aqk[:, None],
+            b_Aqk_rows,
+        )
+        b_Akk_rows = tl.where(
+            (o_j[None, :] == j) & (j < row_in_subchunk[:, None]) & m_j,
+            b_Akk[:, None],
+            b_Akk_rows,
+        )
+
+    # contiguous score rows avoid the cross-block locks used by column stores.
+    p_Aqk = dma_rows(Aqk, i_ti, o_r[:, None], H * BT, MASK_DMA) + tl.cast(i_i, tl.int64) * BC + o_j[None, :]
+    p_Akk = dma_rows(Akk, i_ti, o_r[:, None], H * BC, MASK_DMA) + o_j[None, :]
+    mstore(p_Aqk, b_Aqk_rows.to(Aqk.dtype.element_ty), m_r[:, None], MASK_DMA)
+    mstore(p_Akk, b_Akk_rows.to(Akk.dtype.element_ty), m_r[:, None], MASK_DMA)
 
 
 @triton.jit(do_not_specialize=['T', 'NT_OFFSET', 'NC_OFFSET', 'BH_OFFSET'])
