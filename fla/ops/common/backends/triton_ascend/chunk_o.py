@@ -271,7 +271,11 @@ def chunk_o_fwd_kernel(
                 ).to(tl.int32)
                 bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
                 T_cur = (eos - bos).to(tl.int32)
-                i_tg = tl.load(chunk_offsets + i_n).to(tl.int64) + tl.cast(i_t, tl.int64)
+                # graph states retain the original slots, including sentinel holes.
+                if USE_GRAPH:
+                    i_tg = global_t
+                else:
+                    i_tg = tl.load(chunk_offsets + i_n).to(tl.int64) + tl.cast(i_t, tl.int64)
             else:
                 NT = tl.cdiv(T, BT)
                 i_n = global_t // NT
@@ -346,12 +350,7 @@ def chunk_o_fwd_kernel(
                 b_gamma = tl.load(g_gamma + i_h)
                 b_g = b_gamma * (tl.arange(0, BT) + 1)
                 b_o = b_o * exp2(b_g)[:, None]
-                if USE_GRAPH:
-                    valid = (rows[:, None] >= rows[None, :]) & (m_rows[:, None] & m_rows)
-                    diff = tl.where(valid, b_g[:, None] - b_g[None, :], 0)
-                    b_A = b_A * exp2(diff)
-                else:
-                    b_A = b_A * exp2(b_g[:, None] - b_g[None, :])
+                b_A = b_A * exp2(b_g[:, None] - b_g[None, :])
 
             m_A = (rows[:, None] >= rows[None, :]) & (m_rows[:, None] & m_rows)
             b_A = tl.where(m_A, b_A, 0)
@@ -1204,6 +1203,7 @@ def chunk_dqkwg_bwd_kernel_full(
             i_tg = i_t
             if IS_VARLEN:
                 i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+                # eager full/tail passes renumber chunks; graph slots retain state addresses.
                 if not USE_GRAPH:
                     i_tg = tl.load(chunk_offsets + i_n).to(tl.int64) + tl.cast(i_t, tl.int64)
                 bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
@@ -1829,7 +1829,12 @@ def chunk_bwd_dqkwg_npu(
         g_t_contig = False
     dq = (q.new_zeros if use_graph else q.new_empty)(B, T, HV, K)
     dk = (k.new_zeros if use_graph else k.new_empty)(B, T, HV, K)
-    dg = (torch.zeros if use_graph else torch.empty)(NK, *g.shape, dtype=torch.float32, device=g.device) if g is not None else None
+    dg = (torch.zeros if use_graph else torch.empty)(
+        NK,
+        *g.shape,
+        dtype=torch.float32,
+        device=g.device,
+    ) if g is not None else None
     dw = (torch.zeros_like if use_graph else torch.empty_like)(w) if use_dw else None
 
     dqkwg_kwargs = {
@@ -1931,7 +1936,7 @@ def chunk_bwd_dqkwg_npu(
                 'G_T_CONTIG': g_t_contig,
                 'STATE_V_FIRST': state_v_first,
                 'IS_VARLEN': cu_seqlens is not None,
-        'USE_GRAPH': use_graph,
+                'USE_GRAPH': use_graph,
                 'K_OFFSET': 0,
                 'NT_OFFSET': 0,
                 'BH_OFFSET': 0,

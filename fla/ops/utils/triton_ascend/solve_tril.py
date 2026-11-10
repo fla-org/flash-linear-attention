@@ -28,7 +28,9 @@ def _launch_solve_tril_kernel(kernel, *, NT: int, bh_total: int, kernel_kwargs: 
     cu_seqlens = kernel_kwargs.get('cu_seqlens')
     for nt_off in range(0, NT, max_nt):
         nt_len = min(max_nt, NT - nt_off)
-        if cu_seqlens is not None and chunk_indices is not None:
+        if kernel_kwargs.get('USE_GRAPH', False):
+            kernel_kwargs['NT_OFFSET'] = nt_off
+        elif cu_seqlens is not None and chunk_indices is not None:
             kernel_kwargs['chunk_indices'] = chunk_indices[nt_off:nt_off + nt_len]
             kernel_kwargs['NT_OFFSET'] = 0
         else:
