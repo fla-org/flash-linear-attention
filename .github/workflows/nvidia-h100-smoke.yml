@@ -68,7 +68,7 @@ jobs:
           echo "test_files=$TEST_FILES" >> $GITHUB_OUTPUT
 
       - name: Fail on empty dependent test selection
-        if: steps.find-tests.outputs.test_files == ''
+        if: steps.find-tests.outputs.test_files == '' && steps.setup.outputs.skip_tests == 'false'
         shell: bash
         run: |
           echo "::error::No dependent tests were selected for this smoke run"

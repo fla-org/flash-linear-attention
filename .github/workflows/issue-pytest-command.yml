@@ -49,6 +49,15 @@ permissions:
   contents: read
 
 jobs:
+  reject-manual-noop:
+    if: github.event_name == 'workflow_dispatch' && !inputs.agent_mode
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reject a no-op dispatch
+        run: |
+          echo "::error::agent_mode=false is not a valid manual test dispatch"
+          exit 1
+
   parse:
     if: |
       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&

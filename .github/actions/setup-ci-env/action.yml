@@ -36,11 +36,16 @@ inputs:
     required: false
     type: string
     default: 'false'
+  ignore_skip_tests:
+    description: 'Provision the environment even when the latest commit contains [skip test]'
+    required: false
+    type: string
+    default: 'false'
 
 outputs:
   skip_tests:
     description: 'Whether tests should be skipped'
-    value: ${{ steps.check_skip.outputs.skip_tests }}
+    value: ${{ inputs.ignore_skip_tests == 'true' && 'false' || steps.check_skip.outputs.skip_tests }}
   all_changed_files:
     description: 'Space-separated list of changed files'
     value: ${{ steps.changed-files.outputs.all_changed_files }}
@@ -50,6 +55,7 @@ runs:
   steps:
     - name: Check skip keyword in LATEST commit
       id: check_skip
+      if: inputs.ignore_skip_tests != 'true'
       shell: bash
       run: |
         if [ -n "$GITHUB_HEAD_REF" ]; then

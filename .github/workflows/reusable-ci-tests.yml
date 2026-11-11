@@ -132,7 +132,7 @@ jobs:
           fi
 
       - name: Fail on empty ops-only selection
-        if: steps.find-ops-tests.outputs.test_files == '' && inputs.skip_models_tests == true
+        if: steps.find-ops-tests.outputs.test_files == '' && inputs.skip_models_tests == true && steps.setup.outputs.skip_tests == 'false'
         shell: bash
         run: |
           echo "::error::No dependent tests were selected for this run"
@@ -209,7 +209,7 @@ jobs:
           $CONDA_BIN_PATH/pytest -s -v --exitfirst ${{ steps.find-models-tests.outputs.test_files }}
 
       - name: Fail on empty dependent test selection
-        if: needs.test-ops.outputs.test_files == '' && steps.find-models-tests.outputs.test_files == ''
+        if: needs.test-ops.outputs.test_files == '' && steps.find-models-tests.outputs.test_files == '' && steps.setup.outputs.skip_tests == 'false'
         shell: bash
         run: |
           echo "::error::No dependent tests were selected for this run"

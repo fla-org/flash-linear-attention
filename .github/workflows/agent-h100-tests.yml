@@ -87,6 +87,7 @@ jobs:
           gpu_type: 'nvidia'
           install_tilelang: 'true'
           skip_gpu_check: true
+          ignore_skip_tests: 'true'
 
       - name: Stage trusted test runner
         shell: bash
