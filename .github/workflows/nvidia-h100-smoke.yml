@@ -31,13 +31,14 @@ jobs:
       # Triton baseline only; dispatch/tilelang coverage stays in the full pipeline.
       FLA_DISABLE_BACKEND_DISPATCH: "1"
     steps:
-      # NPU-only PRs have nothing for the GPU smoke to cover.
+      # A2 checks Ascend kernel bodies; shared entry points and registration stay in GPU smoke.
       - name: Skip NPU-only PRs
         id: detect
         uses: actions/github-script@v9.0.0
         with:
           script: |
             let skip = false;
+            let gpuChangedFiles = '';
             if (context.eventName === 'pull_request') {
               const { owner, repo } = context.repo;
               const files = await github.paginate(github.rest.pulls.listFiles, {
@@ -45,9 +46,12 @@ jobs:
               });
               const npuSafe = /^fla\/(.+\/)?backends\/triton_ascend(\/(?!.*__init__\.py$)|\.py$)|^\.github\/workflows\/ascend-|^\.agents\/skills\/fla-ascend-performance\//;
               const names = files.map(f => f.filename);
-              skip = names.length > 0 && names.every(n => npuSafe.test(n));
+              const gpuFiles = names.filter(n => !npuSafe.test(n));
+              skip = names.length > 0 && gpuFiles.length === 0;
+              gpuChangedFiles = gpuFiles.join(' ');
             }
             core.setOutput('skip', skip ? 'true' : 'false');
+            core.setOutput('gpu_changed_files', gpuChangedFiles);
 
       - name: Check out repo
         if: steps.detect.outputs.skip != 'true'
@@ -68,9 +72,11 @@ jobs:
         if: steps.detect.outputs.skip != 'true' && steps.setup.outputs.skip_tests == 'false'
         id: find-tests
         shell: bash
+        env:
+          GPU_CHANGED_FILES: ${{ steps.detect.outputs.gpu_changed_files || steps.setup.outputs.all_changed_files }}
         run: |
           export TEST_SCOPE="EXCLUDE_MODELS"
-          TEST_FILES=$($CONDA_BIN_PATH/python scripts/find_dependent_tests.py "${{ steps.setup.outputs.all_changed_files }}")
+          TEST_FILES=$($CONDA_BIN_PATH/python scripts/find_dependent_tests.py "$GPU_CHANGED_FILES")
           echo "Found dependent test files: $TEST_FILES"
           echo "test_files=$TEST_FILES" >> $GITHUB_OUTPUT
 
