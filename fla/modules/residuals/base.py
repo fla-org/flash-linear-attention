@@ -11,8 +11,6 @@ from typing import TYPE_CHECKING, ClassVar, Generic, Protocol, TypeVar
 import torch
 from torch import nn
 
-from fla.modules.norm import RMSNorm
-
 if TYPE_CHECKING:
     from transformers.configuration_utils import PretrainedConfig
 
@@ -31,7 +29,7 @@ ContextT = TypeVar('ContextT')
 
 
 class BaseResidual(nn.Module, ABC, Generic[StateT, ContextT]):
-    r"""Residual aggregation, normalization, and state updates.
+    r"""Residual aggregation, branch input preparation, and state updates.
 
     Let v_0 = h_1 be the embedding and v_i = f_i(h_i) be a branch output.
     The depth mixing weights M_{i->l} determine the input h_l to branch l:
@@ -44,13 +42,13 @@ class BaseResidual(nn.Module, ABC, Generic[StateT, ContextT]):
     State may retain individual outputs, block sums, or a recurrent summary.
     The module owns three operations:
 
-    * `pre(state)` returns the normalized h_l and the context needed to update state.
+    * `pre(state)` prepares h_l for the branch and returns the context needed to update state.
     * `post(branch_output, context)` incorporates v_l into the state used by the next branch.
-    * `forward(state)` aggregates the final state and applies output normalization.
+    * `forward(state)` prepares the final model output from the state.
 
-    The model executes its branch between `pre` and `post` to produce v_l = f_l(h_l).
-    Here f_l includes the normalization performed by `pre`; the model owns the remaining branch computation.
-    Context carries the old state and any update coefficients needed after that computation.
+    The model executes its branch between `pre` and `post`, using the input returned by `pre`.
+    For pre-norm architectures, normalization typically occurs in `pre`.
+    Context carries the old state and any update coefficients needed after the branch computation.
     The next residual module reads the updated state using its own mixing weights.
 
     `initialize(x)` creates the initial state from embeddings.
@@ -62,16 +60,9 @@ class BaseResidual(nn.Module, ABC, Generic[StateT, ContextT]):
     supports_reentrant_checkpointing = True
     _registry: ClassVar[dict[str, type['BaseResidual']]] = {}
 
-    def __init__(
-        self,
-        hidden_size: int,
-        norm_eps: float = 1e-6,
-        fuse_norm: bool = True,
-    ):
+    def __init__(self, hidden_size: int):
         super().__init__()
         self.hidden_size = hidden_size
-        self.fuse_norm = fuse_norm
-        self.norm = (RMSNorm if fuse_norm else nn.RMSNorm)(hidden_size, eps=norm_eps)
 
     @classmethod
     def register(cls, residual_type: str, residual_class: type['BaseResidual']) -> None:
@@ -91,11 +82,7 @@ class BaseResidual(nn.Module, ABC, Generic[StateT, ContextT]):
             if residual_class is None:
                 raise ValueError(f'Unknown residual type: {config.residual_type}')
             return residual_class.from_config(config, **kwargs)
-        return cls(hidden_size=config.hidden_size, norm_eps=config.norm_eps, fuse_norm=config.fuse_norm, **kwargs)
-
-    def reset_parameters(self) -> None:
-        """Initialize owned parameters; custom implementations may override this method."""
-        self.norm.reset_parameters()
+        return cls(hidden_size=config.hidden_size, **kwargs)
 
     @abstractmethod
     def initialize(self, x: torch.Tensor) -> StateT:
@@ -111,5 +98,5 @@ class BaseResidual(nn.Module, ABC, Generic[StateT, ContextT]):
 
     @abstractmethod
     def forward(self, state: StateT) -> torch.Tensor:
-        """Aggregate the final state and normalize the output, optionally fusing both operations."""
+        """Prepare the final model output, including any implementation-specific normalization."""
         raise NotImplementedError

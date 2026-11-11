@@ -8,7 +8,9 @@
 from typing import TYPE_CHECKING, NamedTuple
 
 import torch
+from torch import nn
 
+from fla.modules.norm import RMSNorm
 from fla.modules.residuals.base import BaseResidual
 
 if TYPE_CHECKING:
@@ -44,7 +46,7 @@ class StandardResidual(BaseResidual[StandardResidualState, torch.Tensor]):
 
     Args:
         fuse_residual (bool, Optional):
-            Keep the branch output for addition during the next `pre` call. Default: `False`.
+            Keep the branch output for addition during the next `pre` call when `fuse_norm=True`. Default: `False`.
     """
 
     def __init__(
@@ -54,13 +56,19 @@ class StandardResidual(BaseResidual[StandardResidualState, torch.Tensor]):
         fuse_norm: bool = True,
         fuse_residual: bool = False,
     ):
-        super().__init__(hidden_size=hidden_size, norm_eps=norm_eps, fuse_norm=fuse_norm)
-        self.fuse_residual = fuse_residual
+        super().__init__(hidden_size=hidden_size)
+        self.fuse_norm = fuse_norm
+        self.norm = (RMSNorm if fuse_norm else nn.RMSNorm)(hidden_size, eps=norm_eps)
+        # delaying addition only benefits the fused add-norm path.
+        self.fuse_residual = fuse_residual and fuse_norm
 
     @classmethod
     def from_config(cls, config: 'PretrainedConfig', **kwargs) -> 'StandardResidual':
         kwargs.setdefault('fuse_residual', True)
-        return super().from_config(config, **kwargs)
+        return cls(hidden_size=config.hidden_size, norm_eps=config.norm_eps, fuse_norm=config.fuse_norm, **kwargs)
+
+    def reset_parameters(self) -> None:
+        self.norm.reset_parameters()
 
     def initialize(self, x: torch.Tensor) -> StandardResidualState:
         return StandardResidualState(x, None)

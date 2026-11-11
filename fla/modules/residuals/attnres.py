@@ -76,8 +76,9 @@ class AttentionResidual(BaseResidual[AttentionResidualState, AttentionResidualSt
 
     supports_reentrant_checkpointing = False
 
-    def __init__(self, hidden_size: int, block_size: int = 1, norm_eps: float = 1e-6, fuse_norm: bool = True):
-        super().__init__(hidden_size=hidden_size, norm_eps=norm_eps, fuse_norm=fuse_norm)
+    def __init__(self, hidden_size: int, block_size: int = 1, norm_eps: float = 1e-6):
+        super().__init__(hidden_size=hidden_size)
+        self.norm = nn.RMSNorm(hidden_size, eps=norm_eps)
         if isinstance(block_size, bool) or not isinstance(block_size, int) or block_size < 1:
             raise ValueError('block_size must be a positive integer')
         self.block_size = block_size
@@ -88,10 +89,10 @@ class AttentionResidual(BaseResidual[AttentionResidualState, AttentionResidualSt
     @classmethod
     def from_config(cls, config: 'PretrainedConfig', **kwargs) -> 'AttentionResidual':
         kwargs.setdefault('block_size', config.attnres_block_size if config.attnres_block_size is not None else 1)
-        return super().from_config(config, **kwargs)
+        return cls(hidden_size=config.hidden_size, norm_eps=config.norm_eps, **kwargs)
 
     def reset_parameters(self) -> None:
-        super().reset_parameters()
+        self.norm.reset_parameters()
         self.query.reset_parameters()
         self.attnres_norm.reset_parameters()
 
