@@ -372,14 +372,12 @@ def _atk_backward_chunk_summary_npu(
         ga_val = tl.load(ga_ptr, mask=mask_D, other=0.0).to(tl.float32)
 
         k_sq = k_val * k_val
-        U = beta_val[:, None] * k_sq
+        # Both output gradients share the same feature reduction.
+        sum_ga_k_sq = tl.sum(ga_val[None, :] * k_sq, 1)
+        gdecays += beta_val * sum_ga_k_sq
+        gbeta_val += decays * sum_ga_k_sq
 
-        gdecays += tl.sum(ga_val[None, :] * U, 1)
-
-        gU = ga_val[None, :] * decays[:, None]
-        gbeta_val += tl.sum(gU * k_sq, 1)
-
-        gk_sq = gU * beta_val[:, None]
+        gk_sq = (ga_val[None, :] * decays[:, None]) * beta_val[:, None]
         gk_val = gk_sq * k_val * 2
 
         # Each chunk owns a disjoint tile, so a plain RMW keeps AutoBlockify on.
@@ -402,6 +400,177 @@ def _atk_backward_chunk_summary_npu(
 
     tl.store(gg_ptr, tl.load(gg_ptr, mask=mask_T, other=0.0) + glog_g_val, mask=mask_T)
     tl.store(gbeta_ptr, tl.load(gbeta_ptr, mask=mask_T, other=0.0) + gbeta_val, mask=mask_T)
+
+
+@triton.heuristics({'IS_VARLEN': lambda args: args['cu_seqlens'] is not None})
+@triton.jit(do_not_specialize=['T', 'TASK_OFFSET'])
+def _atk_backward_chunk_summary_weights_npu(
+    log_g, beta, decays_cache, beta_decays_cache,
+    cu_seqlens, chunk_indices,
+    B: tl.constexpr, T, H: tl.constexpr,
+    CHUNK_LEN: tl.constexpr, NT: tl.constexpr, NTASK: tl.constexpr,
+    lg_stride_b, lg_stride_t, lg_stride_h,
+    beta_stride_b, beta_stride_t, beta_stride_h,
+    IS_VARLEN: tl.constexpr, TASK_OFFSET,
+):
+    task_local = tl.cast(tl.program_id(0), tl.int64)
+    i_task = task_local + tl.cast(TASK_OFFSET, tl.int64)
+    h = tl.cast(tl.program_id(1), tl.int64)
+
+    if IS_VARLEN:
+        i_n = tl.load(chunk_indices + i_task * 2).to(tl.int64)
+        chunk_id = tl.load(chunk_indices + i_task * 2 + 1).to(tl.int64)
+        bos = tl.load(cu_seqlens + i_n).to(tl.int64)
+        eos = tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = (eos - bos).to(tl.int32)
+        b = i_n
+    else:
+        b = tl.cast(i_task // NT, tl.int64)
+        chunk_id = i_task % NT
+        bos = 0
+
+    if h >= H or chunk_id * CHUNK_LEN >= T:
+        return
+
+    C_range = tl.arange(0, CHUNK_LEN)
+    T_range = chunk_id * CHUNK_LEN + C_range
+    mask_T = T_range < T
+    if IS_VARLEN:
+        log_g_ptr = log_g + (bos + T_range) * lg_stride_t + h * lg_stride_h
+        beta_ptr = beta + (bos + T_range) * beta_stride_t + h * beta_stride_h
+    else:
+        log_g_ptr = log_g + b * lg_stride_b + T_range * lg_stride_t + h * lg_stride_h
+        beta_ptr = beta + b * beta_stride_b + T_range * beta_stride_t + h * beta_stride_h
+
+    log_g_val = tl.load(log_g_ptr, mask=mask_T, other=0.0).to(tl.float32)
+    beta_val = tl.load(beta_ptr, mask=mask_T, other=0.0).to(tl.float32)
+    decays = tl.exp(tl.sum(log_g_val) - tl.cumsum(log_g_val))
+    cache_ptr = (task_local * H + h) * CHUNK_LEN + C_range
+    tl.store(decays_cache + cache_ptr, decays, mask=mask_T)
+    tl.store(beta_decays_cache + cache_ptr, beta_val * decays, mask=mask_T)
+
+
+@triton.heuristics({'IS_VARLEN': lambda args: args['cu_seqlens'] is not None})
+@triton.jit(do_not_specialize=['T', 'TASK_OFFSET'])
+def _atk_backward_chunk_summary_split_d_npu(
+    k, ga, gk_out, partials, decays_cache, beta_decays_cache,
+    cu_seqlens, chunk_indices,
+    B: tl.constexpr, T, H: tl.constexpr, D: tl.constexpr,
+    CHUNK_LEN: tl.constexpr, NT: tl.constexpr, NTASK: tl.constexpr,
+    k_stride_b, k_stride_t, k_stride_h, k_stride_d,
+    ga_stride_b, ga_stride_c, ga_stride_h, ga_stride_d,
+    gk_stride_b, gk_stride_t, gk_stride_h, gk_stride_d,
+    BK: tl.constexpr, NK: tl.constexpr,
+    IS_VARLEN: tl.constexpr, TASK_OFFSET,
+):
+    i_k = tl.cast(tl.program_id(0), tl.int64)
+    task_local = tl.cast(tl.program_id(1), tl.int64)
+    i_task = task_local + tl.cast(TASK_OFFSET, tl.int64)
+    h = tl.cast(tl.program_id(2), tl.int64)
+
+    if IS_VARLEN:
+        i_n = tl.load(chunk_indices + i_task * 2).to(tl.int64)
+        chunk_id = tl.load(chunk_indices + i_task * 2 + 1).to(tl.int64)
+        bos = tl.load(cu_seqlens + i_n).to(tl.int64)
+        eos = tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = (eos - bos).to(tl.int32)
+        b = i_n
+    else:
+        b = tl.cast(i_task // NT, tl.int64)
+        i_n = b
+        chunk_id = i_task % NT
+        bos = 0
+
+    if h >= H or chunk_id * CHUNK_LEN >= T:
+        return
+
+    T_range = chunk_id * CHUNK_LEN + tl.arange(0, CHUNK_LEN)
+    mask_T = T_range < T
+    D_range = i_k * BK + tl.arange(0, BK)
+    mask_D = D_range < D
+
+    if IS_VARLEN:
+        k_ptr = k + (bos + T_range)[:, None] * k_stride_t + h * k_stride_h + D_range[None, :] * k_stride_d
+        gk_ptr = gk_out + (bos + T_range)[:, None] * gk_stride_t + h * gk_stride_h + D_range[None, :] * gk_stride_d
+    else:
+        k_ptr = k + b * k_stride_b + T_range[:, None] * k_stride_t + h * k_stride_h + D_range[None, :] * k_stride_d
+        gk_ptr = gk_out + b * gk_stride_b + T_range[:, None] * gk_stride_t + h * gk_stride_h + D_range[None, :] * gk_stride_d
+
+    cache_ptr = (task_local * H + h) * CHUNK_LEN + tl.arange(0, CHUNK_LEN)
+    beta_decays = tl.load(beta_decays_cache + cache_ptr, mask=mask_T, other=0.0)
+    ga_ptr = ga + i_n * ga_stride_b + h * ga_stride_h + chunk_id * ga_stride_c + ga_stride_d * D_range
+
+    k_val = tl.load(k_ptr, mask=mask_T[:, None] & mask_D[None, :], other=0.0).to(tl.float32)
+    ga_val = tl.load(ga_ptr, mask=mask_D, other=0.0).to(tl.float32)
+    sum_ga_k_sq = tl.sum(ga_val[None, :] * (k_val * k_val), 1)
+    gk_val = (ga_val[None, :] * beta_decays[:, None]) * k_val * 2.0
+    tl.store(gk_ptr, tl.load(gk_ptr, mask=mask_T[:, None] & mask_D[None, :], other=0.0) + gk_val,
+             mask=mask_T[:, None] & mask_D[None, :])
+
+    partial_ptr = partials + ((i_k * NTASK + task_local) * H + h) * CHUNK_LEN + tl.arange(0, CHUNK_LEN)
+    tl.store(partial_ptr, sum_ga_k_sq)
+
+
+@triton.heuristics({'IS_VARLEN': lambda args: args['cu_seqlens'] is not None})
+@triton.jit(do_not_specialize=['T', 'TASK_OFFSET'])
+def _atk_backward_chunk_summary_finalize_npu(
+    partials, decays_cache, beta_decays_cache, gsa, gg_out, gbeta_out,
+    cu_seqlens, chunk_indices,
+    B: tl.constexpr, T, H: tl.constexpr,
+    CHUNK_LEN: tl.constexpr, NT: tl.constexpr, NTASK: tl.constexpr,
+    NK: tl.constexpr, BLOCK_NK: tl.constexpr,
+    gsa_stride_b, gsa_stride_c, gsa_stride_h,
+    gg_stride_b, gg_stride_t, gg_stride_h,
+    gbeta_stride_b, gbeta_stride_t, gbeta_stride_h,
+    IS_VARLEN: tl.constexpr, TASK_OFFSET,
+):
+    task_local = tl.cast(tl.program_id(0), tl.int64)
+    i_task = task_local + tl.cast(TASK_OFFSET, tl.int64)
+    h = tl.cast(tl.program_id(1), tl.int64)
+
+    if IS_VARLEN:
+        i_n = tl.load(chunk_indices + i_task * 2).to(tl.int64)
+        chunk_id = tl.load(chunk_indices + i_task * 2 + 1).to(tl.int64)
+        bos = tl.load(cu_seqlens + i_n).to(tl.int64)
+        eos = tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = (eos - bos).to(tl.int32)
+        b = i_n
+    else:
+        b = tl.cast(i_task // NT, tl.int64)
+        i_n = b
+        chunk_id = i_task % NT
+        bos = 0
+
+    if h >= H or chunk_id * CHUNK_LEN >= T:
+        return
+
+    C_range = tl.arange(0, CHUNK_LEN)
+    T_range = chunk_id * CHUNK_LEN + C_range
+    mask_T = T_range < T
+    i_k = tl.arange(0, BLOCK_NK)
+    partial_ptr = partials + ((i_k[:, None] * NTASK + task_local) * H + h) * CHUNK_LEN + C_range[None, :]
+    partial = tl.load(partial_ptr, mask=(i_k[:, None] < NK) & mask_T[None, :], other=0.0)
+    sum_ga_k_sq = tl.sum(partial, 0)
+    cache_ptr = (task_local * H + h) * CHUNK_LEN + C_range
+    decays = tl.load(decays_cache + cache_ptr, mask=mask_T, other=0.0)
+    beta_decays = tl.load(beta_decays_cache + cache_ptr, mask=mask_T, other=0.0)
+
+    if IS_VARLEN:
+        gg_ptr = gg_out + (bos + T_range) * gg_stride_t + h * gg_stride_h
+        gbeta_ptr = gbeta_out + (bos + T_range) * gbeta_stride_t + h * gbeta_stride_h
+    else:
+        gg_ptr = gg_out + b * gg_stride_b + T_range * gg_stride_t + h * gg_stride_h
+        gbeta_ptr = gbeta_out + b * gbeta_stride_b + T_range * gbeta_stride_t + h * gbeta_stride_h
+
+    gsa_ptr = gsa + i_n * gsa_stride_b + h * gsa_stride_h + chunk_id * gsa_stride_c
+    gsa_val = tl.load(gsa_ptr).to(tl.float32)
+
+    gdecays_exp = beta_decays * sum_ga_k_sq
+    gsa_val += tl.sum(gdecays_exp)
+    glog_g_val = -_reverse_cumsum_chunk(gdecays_exp, CHUNK_LEN) + gsa_val
+    gbeta_val = decays * sum_ga_k_sq
+    tl.store(gg_ptr, tl.load(gg_ptr, mask=mask_T, other=0.0).to(tl.float32) + glog_g_val, mask=mask_T)
+    tl.store(gbeta_ptr, tl.load(gbeta_ptr, mask=mask_T, other=0.0).to(tl.float32) + gbeta_val, mask=mask_T)
 
 
 def _launch_chunk_grid(kernel, grid_b, grid_h, num_chunks, args):
@@ -444,10 +613,12 @@ def chunk_atk_bwd_npu(
     NT = triton.cdiv(T, CHUNK_LEN) if not is_varlen else len(chunk_indices)
     N = len(cu_seqlens) - 1 if is_varlen else B
 
-    # chunk_out keeps ac_hist[CHUNK_LEN, BK] live across the token loop.
-    # A full-K tile overflows UB and faults the vector pipe (aivec) on CANN 9.1.
-    BK = min(32, triton.next_power_of_2(K))
-    summary_bk = BK
+    BK = min(128, triton.next_power_of_2(K))
+    split_bk = min(128, triton.next_power_of_2(K))
+    num_d_splits = triton.cdiv(K, split_bk)
+    num_summary_tasks = NT if is_varlen else B * NT
+    max_summary_tasks = max(1, ASCEND_LAUNCH_BLOCK_BUDGET // max(num_d_splits * H, 1))
+    summary_task_capacity = min(num_summary_tasks, max_summary_tasks)
     BLOCK_D = triton.next_power_of_2(K)
 
     k = k.contiguous()
@@ -482,6 +653,11 @@ def chunk_atk_bwd_npu(
                 dh0 += dat.masked_fill(valid[:, None, None], 0)
     ga = torch.zeros_like(a, dtype=torch.float32)
     gsa = torch.zeros_like(sa, dtype=torch.float32)
+    summary_partials = torch.empty(
+        (num_d_splits, summary_task_capacity, H, CHUNK_LEN), device=k.device, dtype=torch.float32,
+    )
+    summary_decays = torch.empty((summary_task_capacity, H, CHUNK_LEN), device=k.device, dtype=torch.float32)
+    summary_beta_decays = torch.empty_like(summary_decays)
 
     if cu_seqlens is None:
         grid_b, grid_h, num_chunks = B, H, triton.cdiv(T, CHUNK_LEN)
@@ -509,21 +685,30 @@ def chunk_atk_bwd_npu(
         g_log_atk_scale_chunks.stride(0), g_log_atk_scale_chunks.stride(1), g_log_atk_scale_chunks.stride(2),
         BK,
     )
-    summary_args = (
-        k, g_raw, beta,
-        ga, gsa,
-        gk, gg, gbeta,
+    summary_weights_args = (
+        g_raw, beta, summary_decays, summary_beta_decays,
         cu_seqlens, chunk_indices,
-        B, T, H, K, CHUNK_LEN,
-        k.stride(0), k.stride(1), k.stride(2), k.stride(3),
+        B if not is_varlen else N, T, H, CHUNK_LEN, NT, summary_task_capacity,
         g_raw.stride(0), g_raw.stride(1), g_raw.stride(2),
         beta.stride(0), beta.stride(1), beta.stride(2),
+    )
+    split_summary_args = (
+        k, ga, gk, summary_partials, summary_decays, summary_beta_decays,
+        cu_seqlens, chunk_indices,
+        B if not is_varlen else N, T, H, K, CHUNK_LEN, NT, summary_task_capacity,
+        k.stride(0), k.stride(1), k.stride(2), k.stride(3),
         ga.stride(0), ga.stride(1), ga.stride(2), ga.stride(3),
-        gsa.stride(0), gsa.stride(1), gsa.stride(2),
         gk.stride(0), gk.stride(1), gk.stride(2), gk.stride(3),
+        split_bk, num_d_splits,
+    )
+    finalize_summary_args = (
+        summary_partials, summary_decays, summary_beta_decays, gsa, gg, gbeta,
+        cu_seqlens, chunk_indices,
+        B if not is_varlen else N, T, H, CHUNK_LEN, NT, summary_task_capacity,
+        num_d_splits, triton.next_power_of_2(num_d_splits),
+        gsa.stride(0), gsa.stride(1), gsa.stride(2),
         gg.stride(0), gg.stride(1), gg.stride(2),
         gbeta.stride(0), gbeta.stride(1), gbeta.stride(2),
-        summary_bk,
     )
 
     if is_varlen:
@@ -553,23 +738,18 @@ def chunk_atk_bwd_npu(
         # sequence cannot fill the device queue until the vector pipe times out.
         torch.npu.synchronize()
 
-    if is_varlen:
-        max_n = max(1, ASCEND_LAUNCH_BLOCK_BUDGET // max(H, 1))
-        for off in range(0, NT, max_n):
-            n = min(max_n, NT - off)
-            _atk_backward_chunk_summary_npu[(n, H, 1)](*summary_args, chunk_offset=0, t_offset=off)
-            torch.npu.synchronize()
-    else:
-        # Queuing every summary tile and then syncing once leaves the vector
-        # pipe on the first tile (sqHead frozen, later cumsum never starts).
-        # Drain each launch the same way as the reverse scan.
-        max_c = max(1, ASCEND_LAUNCH_BLOCK_BUDGET // max(grid_b * grid_h, 1))
-        for off in range(0, num_chunks, max_c):
-            n = min(max_c, num_chunks - off)
-            _atk_backward_chunk_summary_npu[(grid_b, grid_h, n)](
-                *summary_args, chunk_offset=off, t_offset=0,
-            )
-            torch.npu.synchronize()
+    for off in range(0, num_summary_tasks, max_summary_tasks):
+        n = min(max_summary_tasks, num_summary_tasks - off)
+        _atk_backward_chunk_summary_weights_npu[(n, H)](
+            *summary_weights_args, TASK_OFFSET=off,
+        )
+        _atk_backward_chunk_summary_split_d_npu[(num_d_splits, n, H)](
+            *split_summary_args, TASK_OFFSET=off,
+        )
+        _atk_backward_chunk_summary_finalize_npu[(n, H)](
+            *finalize_summary_args, TASK_OFFSET=off,
+        )
+        torch.npu.synchronize()
 
     g_log_atk_scale = g_log_atk_scale_chunks.sum(dim=(0, 1))
     return gk, gbeta, gg, g_log_atk_scale, dh0
