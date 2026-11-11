@@ -353,12 +353,18 @@ def test_fused_linear_cross_entropy(
     dtype: torch.dtype,
     gradient_mode: str,
     use_l2warp: bool,
-    monkeypatch,
+    request: pytest.FixtureRequest,
 ):
     """Match linear CE loss and input/parameter gradients against the reference implementations."""
     if IS_NVIDIA:
         # reduced-precision GEMM accumulation depends on the row chunk size
-        monkeypatch.setattr(torch.backends.cuda.matmul, 'allow_bf16_reduced_precision_reduction', False)
+        matmul = torch.backends.cuda.matmul
+        # On newer PyTorch, assigning a bool also sets the cuBLASLt split-K flag.
+        reduced = matmul.allow_bf16_reduced_precision_reduction
+        split_k = getattr(matmul, 'allow_bf16_reduced_precision_reduction_split_k', None)
+        previous = reduced if split_k is None else (reduced, split_k)
+        request.addfinalizer(lambda: setattr(matmul, 'allow_bf16_reduced_precision_reduction', previous))
+        matmul.allow_bf16_reduced_precision_reduction = False
     torch.manual_seed(42)
     if confident_target:
         x = torch.zeros(B * T, D, device=device, dtype=dtype)
@@ -453,7 +459,7 @@ def test_fused_linear_cross_entropy(
     ],
 )
 @pytest.mark.skipif(IS_INTEL, reason="Intel Triton Failure")
-def test_fused_linear_cross_entropy_gradient_demand(gradient_mode, use_l2warp, monkeypatch):
+def test_fused_linear_cross_entropy_gradient_demand(gradient_mode, use_l2warp, request):
     test_fused_linear_cross_entropy(
         B=2,
         T=63,
@@ -472,7 +478,7 @@ def test_fused_linear_cross_entropy_gradient_demand(gradient_mode, use_l2warp, m
         dtype=torch.bfloat16,
         gradient_mode=gradient_mode,
         use_l2warp=use_l2warp,
-        monkeypatch=monkeypatch,
+        request=request,
     )
 
 
@@ -487,7 +493,7 @@ def test_fused_linear_cross_entropy_gradient_demand(gradient_mode, use_l2warp, m
     ],
 )
 @pytest.mark.skipif(IS_NPU or IS_INTEL, reason="Covers transformed logits in the default GPU kernels")
-def test_fused_linear_cross_entropy_transformed_demand(gradient_mode, use_l2warp, reduction, dtype, monkeypatch):
+def test_fused_linear_cross_entropy_transformed_demand(gradient_mode, use_l2warp, reduction, dtype, request):
     test_fused_linear_cross_entropy(
         B=2,
         T=63,
@@ -506,7 +512,7 @@ def test_fused_linear_cross_entropy_transformed_demand(gradient_mode, use_l2warp
         dtype=dtype,
         gradient_mode=gradient_mode,
         use_l2warp=use_l2warp,
-        monkeypatch=monkeypatch,
+        request=request,
     )
 
 
