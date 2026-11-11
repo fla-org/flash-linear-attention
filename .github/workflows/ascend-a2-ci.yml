@@ -5,6 +5,40 @@ name: ascend-a2-ci
 
 on:
   workflow_dispatch:
+    inputs:
+      agent_mode:
+        description: Run the reusable agent-selected A2 workflow instead of the full suite
+        required: false
+        type: boolean
+        default: false
+      pr_number:
+        required: false
+        type: string
+      attempt_id:
+        required: false
+        type: string
+      base_sha:
+        required: false
+        type: string
+      head_sha:
+        required: false
+        type: string
+      suite:
+        required: false
+        type: string
+        default: ops
+      targets:
+        required: false
+        type: string
+        default: tests/ops/test_backends.py
+      dispatch:
+        required: false
+        type: string
+        default: both
+      source_ref:
+        required: false
+        type: string
+        default: main
 
 jobs:
   changes:
@@ -63,7 +97,7 @@ jobs:
     name: Test A2 NPU (PyTorch 2.10.0)
     needs: changes
     if: |
-      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'workflow_dispatch' && !inputs.agent_mode ||
       (github.event_name == 'schedule' && github.ref == 'refs/heads/main') ||
       (
         github.event_name == 'pull_request' &&
@@ -248,3 +282,18 @@ jobs:
         with:
           path: ${{ env.TRITON_CACHE_DIR }}
           key: ${{ steps.triton-cache.outputs.cache-primary-key }}
+
+  agent-a2:
+    if: github.event_name == 'workflow_dispatch' && inputs.agent_mode
+    permissions:
+      contents: read
+    uses: ./.github/workflows/agent-ascend-a2-tests.yml
+    with:
+      pr_number: ${{ inputs.pr_number }}
+      attempt_id: ${{ inputs.attempt_id }}
+      base_sha: ${{ inputs.base_sha }}
+      head_sha: ${{ inputs.head_sha }}
+      suite: ${{ inputs.suite }}
+      targets: ${{ inputs.targets }}
+      dispatch: ${{ inputs.dispatch }}
+      source_ref: ${{ inputs.source_ref }}

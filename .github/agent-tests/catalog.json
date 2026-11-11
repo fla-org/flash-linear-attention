@@ -25,6 +25,11 @@
       "root": "tests/cp",
       "platforms": ["ascend-a2"],
       "dispatch": ["off", "on", "both"]
+    },
+    "scripts": {
+      "root": "scripts/tests",
+      "platforms": ["h100"],
+      "dispatch": ["off"]
     }
   }
 }

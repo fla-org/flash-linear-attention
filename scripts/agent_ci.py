@@ -28,7 +28,7 @@ def load_catalog(path: Path) -> dict:
         raise AgentCIError("Invalid agent test catalog")
     for name, suite in catalog["suites"].items():
         root = PurePosixPath(suite["root"])
-        if root.is_absolute() or ".." in root.parts or not suite["root"].startswith("tests/"):
+        if root.is_absolute() or ".." in root.parts or not (suite["root"].startswith("tests/") or suite["root"] == "scripts/tests"):
             raise AgentCIError(f"Invalid root for suite {name}")
         if not suite.get("dispatch"):
             raise AgentCIError(f"Missing dispatch modes for suite {name}")

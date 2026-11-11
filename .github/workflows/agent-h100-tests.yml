@@ -8,7 +8,7 @@ concurrency:
 
 on:
   workflow_dispatch:
-    inputs:
+    inputs: &agent_test_inputs
       pr_number:
         description: Pull request number
         required: true
@@ -28,12 +28,7 @@ on:
       suite:
         description: Test suite from .github/agent-tests/catalog.json
         required: true
-        type: choice
-        options:
-          - ops
-          - modules
-          - layers
-          - models
+        type: string
       targets:
         description: Space-separated test files or nodeids inside the selected suite
         required: true
@@ -41,12 +36,15 @@ on:
       dispatch:
         description: Backend dispatch mode
         required: true
-        type: choice
-        options:
-          - off
-          - on
-          - both
+        type: string
         default: both
+      source_ref:
+        description: Trusted source ref for the runner and catalog
+        required: false
+        type: string
+        default: main
+  workflow_call:
+    inputs: *agent_test_inputs
 
 permissions:
   contents: read
@@ -66,7 +64,7 @@ jobs:
       - name: Check out trusted workflow sources
         uses: actions/checkout@v7.0.0
         with:
-          ref: main
+          ref: ${{ inputs.source_ref }}
           fetch-depth: 0
           persist-credentials: false
 
