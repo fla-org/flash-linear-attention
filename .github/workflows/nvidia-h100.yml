@@ -163,7 +163,7 @@ jobs:
         with:
           script: |
             const { owner, repo } = context.repo;
-            const ref = context.payload.pull_request.head.sha;
+            const ref = (eventName === 'pull_request' || eventName === 'pull_request_review') ? context.payload.pull_request.head.sha : context.sha;
             const eventName = context.eventName;
             let username, association;
             if (eventName === 'pull_request') {
@@ -285,4 +285,4 @@ jobs:
     with:
       runner: 'nvidia-h100-1'
       conda_env_name: 'pytorch_2_12'
-      base_ref: origin/${{ github.event.pull_request.base.ref }}
+      base_ref: origin/${{ github.event.pull_request.base.ref || 'main' }}

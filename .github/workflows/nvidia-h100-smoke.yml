@@ -67,6 +67,13 @@ jobs:
           echo "Found dependent test files: $TEST_FILES"
           echo "test_files=$TEST_FILES" >> $GITHUB_OUTPUT
 
+      - name: Fail on empty dependent test selection
+        if: steps.find-tests.outputs.test_files == ''
+        shell: bash
+        run: |
+          echo "::error::No dependent tests were selected for this smoke run"
+          exit 1
+
       - name: Run tests (smoke-marked ops subset, full other suites)
         if: steps.find-tests.outputs.test_files
         shell: bash

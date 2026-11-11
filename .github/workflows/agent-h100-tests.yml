@@ -95,7 +95,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/agent-ci" "$RUNNER_TEMP/agent-ci-results"
           cp scripts/agent_ci.py "$RUNNER_TEMP/agent-ci/agent_ci.py"
           cp .github/agent-tests/catalog.json "$RUNNER_TEMP/agent-ci/catalog.json"
-          printf '%s\n' "$GITHUB_SHA" > "$RUNNER_TEMP/agent-ci-results/source_revision.txt"
+          git rev-parse HEAD > "$RUNNER_TEMP/agent-ci-results/source_revision.txt"
 
       - name: Fetch and verify exact PR commits
         shell: bash

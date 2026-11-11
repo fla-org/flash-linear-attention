@@ -42,6 +42,11 @@
       "platforms": ["h100", "ascend-a2"],
       "dispatch": ["off", "on", "both"]
     },
+    "utils": {
+      "root": "tests/utils",
+      "platforms": ["h100", "ascend-a2"],
+      "dispatch": ["off", "on", "both"]
+    },
     "benchmarks": {
       "root": "tests/benchmarks",
       "platforms": ["h100", "ascend-a2"],

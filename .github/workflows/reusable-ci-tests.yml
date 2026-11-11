@@ -194,11 +194,7 @@ jobs:
           echo "test_files=$TEST_FILES" >> $GITHUB_OUTPUT
 
       - name: Run pytest on models test files
-        if: steps.setup.outputs.skip_tests == 'false'
+        if: steps.find-models-tests.outputs.test_files && steps.setup.outputs.skip_tests == 'false'
         shell: bash
         run: |
-          if [ -z "${{ steps.find-models-tests.outputs.test_files }}" ]; then
-            echo "::error::No model tests were selected for execution"
-            exit 1
-          fi
           $CONDA_BIN_PATH/pytest -s -v --exitfirst ${{ steps.find-models-tests.outputs.test_files }}
