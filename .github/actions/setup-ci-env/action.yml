@@ -78,7 +78,7 @@ runs:
         fi
 
     - name: Discover Conda Path and Set Env Vars
-      if: steps.check_skip.outputs.skip_tests == 'false'
+      if: (steps.check_skip.outputs.skip_tests == 'false' || inputs.ignore_skip_tests == 'true')
       id: find_conda
       shell: bash
       run: |
@@ -115,7 +115,7 @@ runs:
         echo "CONDA_BIN_PATH = ${CONDA_BASE}/envs/${TARGET_CONDA_ENV}/bin"
 
     - name: Reclaim H100 pip cache space
-      if: steps.check_skip.outputs.skip_tests == 'false' && startsWith(inputs.runner_name, 'nvidia-h100')
+      if: (steps.check_skip.outputs.skip_tests == 'false' || inputs.ignore_skip_tests == 'true') && startsWith(inputs.runner_name, 'nvidia-h100')
       shell: bash
       run: |
         # Persistent wheel/download caches can exhaust the runner during TileLang installation.
@@ -126,7 +126,7 @@ runs:
         echo "PIP_NO_CACHE_DIR=1" >> "$GITHUB_ENV"
 
     - name: Install/Update Dependencies
-      if: steps.check_skip.outputs.skip_tests == 'false'
+      if: (steps.check_skip.outputs.skip_tests == 'false' || inputs.ignore_skip_tests == 'true')
       shell: bash
       run: |
         $CONDA_BIN_PATH/pip uninstall -y flash-linear-attention
@@ -176,7 +176,7 @@ runs:
         fi
 
     - name: Verify Environment and GPU
-      if: steps.check_skip.outputs.skip_tests == 'false'
+      if: (steps.check_skip.outputs.skip_tests == 'false' || inputs.ignore_skip_tests == 'true')
       shell: bash
       run: |
         echo "Python executable path: $CONDA_BIN_PATH/python"
@@ -198,6 +198,6 @@ runs:
         fi
 
     - name: Get changed files
-      if: steps.check_skip.outputs.skip_tests == 'false'
+      if: (steps.check_skip.outputs.skip_tests == 'false' || inputs.ignore_skip_tests == 'true')
       id: changed-files
       uses: tj-actions/changed-files@v47.0.6
