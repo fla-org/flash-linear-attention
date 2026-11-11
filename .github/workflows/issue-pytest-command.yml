@@ -33,7 +33,7 @@ on:
       dispatch:
         required: false
         type: string
-        default: both
+        default: off
       source_ref:
         required: false
         type: string
@@ -225,6 +225,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && inputs.agent_mode
     permissions:
       contents: read
+      pull-requests: read
     uses: ./.github/workflows/agent-h100-tests.yml
     with:
       pr_number: ${{ inputs.pr_number }}

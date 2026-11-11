@@ -3,7 +3,7 @@ name: Agent-selected Ascend A2 tests
 run-name: agent-a2-${{ inputs.pr_number }}-${{ inputs.attempt_id }}-${{ inputs.suite }}
 
 concurrency:
-  group: agent-a2-${{ inputs.pr_number }}-${{ inputs.attempt_id }}-${{ inputs.suite }}
+  group: agent-a2-${{ inputs.pr_number }}-${{ inputs.attempt_id }}-${{ inputs.suite }}-${{ inputs.dispatch }}
   cancel-in-progress: true
 
 on:
@@ -37,7 +37,7 @@ on:
         description: Backend dispatch mode
         required: true
         type: string
-        default: both
+        default: off
       source_ref:
         description: Trusted source ref for the runner and catalog
         required: false
@@ -48,6 +48,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
   test:
@@ -70,6 +71,16 @@ jobs:
       FLA_AGENT_BASE_SHA: ${{ inputs.base_sha }}
       FLA_AGENT_HEAD_SHA: ${{ inputs.head_sha }}
     steps:
+      - name: Validate trusted source ref
+        shell: bash
+        env:
+          EXPECTED_SOURCE_REF: ${{ inputs.source_ref }}
+        run: |
+          if [[ "$EXPECTED_SOURCE_REF" != "main" && "$EXPECTED_SOURCE_REF" != "agent-dispatchable-ci" ]]; then
+            echo "::error::source_ref must be main or the reviewed agent-dispatchable-ci migration branch"
+            exit 1
+          fi
+
       - name: Check out trusted workflow sources
         uses: actions/checkout@v7.0.0
         with:
@@ -100,10 +111,26 @@ jobs:
           if ! git cat-file -e "${EXPECTED_BASE_SHA}^{commit}" 2>/dev/null; then
             git fetch origin "$EXPECTED_BASE_SHA"
           fi
-          git merge-base --is-ancestor "$EXPECTED_BASE_SHA" "$EXPECTED_HEAD_SHA"
-          git diff --name-only "$EXPECTED_BASE_SHA...$EXPECTED_HEAD_SHA" > "$RUNNER_TEMP/agent-ci-results/changed_files.txt"
+          MERGE_BASE_SHA=$(git merge-base "$EXPECTED_BASE_SHA" "$EXPECTED_HEAD_SHA")
+          git diff --name-only "$MERGE_BASE_SHA...$EXPECTED_HEAD_SHA" > "$RUNNER_TEMP/agent-ci-results/changed_files.txt"
           git checkout --detach "$EXPECTED_HEAD_SHA"
           test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD_SHA"
+
+      - name: Verify PR base and head revisions
+        uses: actions/github-script@v9.0.0
+        with:
+          script: |
+            const pr = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: Number('${{ inputs.pr_number }}'),
+            });
+            if (pr.data.base.sha !== '${{ inputs.base_sha }}') {
+              core.setFailed(`base_sha ${'${{ inputs.base_sha }}'} is not the PR base ${pr.data.base.sha}`);
+            }
+            if (pr.data.head.sha !== '${{ inputs.head_sha }}') {
+              core.setFailed(`head_sha ${'${{ inputs.head_sha }}'} is not the current PR head ${pr.data.head.sha}`);
+            }
 
       - name: Install PR revision and NPU dependencies
         shell: bash
@@ -134,14 +161,16 @@ jobs:
         shell: bash
         env:
           AGENT_TEST_TARGETS: ${{ inputs.targets }}
+          AGENT_TEST_SUITE: ${{ inputs.suite }}
+          AGENT_TEST_DISPATCH: ${{ inputs.dispatch }}
         run: |
           source /usr/local/Ascend/ascend-toolkit/set_env.sh
           python "$RUNNER_TEMP/agent-ci/agent_ci.py" \
             --catalog "$RUNNER_TEMP/agent-ci/catalog.json" \
             --platform ascend-a2 \
-            --suite '${{ inputs.suite }}' \
+            --suite "$AGENT_TEST_SUITE" \
             --targets "$AGENT_TEST_TARGETS" \
-            --dispatch '${{ inputs.dispatch }}' \
+            --dispatch "$AGENT_TEST_DISPATCH" \
             --results "$RUNNER_TEMP/agent-ci-results/junit" \
             --metadata "$RUNNER_TEMP/agent-ci-results/metadata.json"
 
@@ -149,7 +178,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7.0.1
         with:
-          name: agent-a2-${{ inputs.attempt_id }}-${{ inputs.suite }}
+          name: agent-a2-${{ inputs.attempt_id }}-${{ inputs.suite }}-${{ github.run_id }}
           path: ${{ runner.temp }}/agent-ci-results/
           if-no-files-found: error
           retention-days: 7
