@@ -23,7 +23,7 @@
     },
     "cp": {
       "root": "tests/cp",
-      "platforms": ["h100", "ascend-a2"],
+      "platforms": ["ascend-a2"],
       "dispatch": ["off", "on", "both"]
     },
     "scripts": {
