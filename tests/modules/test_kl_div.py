@@ -62,6 +62,7 @@ def test_fused(
     assert_close(" dw", ref_dw, tri_dw, 1e-2)
 
 
+@pytest.mark.parametrize('n', [1, 13])
 @pytest.mark.parametrize(
     ('x_grad', 'weight_grad', 'context'),
     [(True, False, torch.enable_grad), (False, True, torch.enable_grad), (False, False, torch.enable_grad),
@@ -69,9 +70,9 @@ def test_fused(
     ids=['input', 'weight', 'frozen', 'no_grad', 'inference'],
 )
 @pytest.mark.skipif(device_platform == 'intel', reason='Intel Triton Failure')
-def test_fused_grad_requirements(x_grad, weight_grad, context):
+def test_fused_grad_requirements(n, x_grad, weight_grad, context):
     torch.manual_seed(42)
-    x = torch.randn(13, 64, device=device)[:, ::2].requires_grad_(x_grad)
+    x = torch.randn(n, 64, device=device)[:, ::2].requires_grad_(x_grad)
     weight = torch.randn(128, 64, device=device)[:, ::2].requires_grad_(weight_grad)
     target_x, target_weight = torch.randn_like(x), torch.randn_like(weight)
     ref = F.kl_div(
