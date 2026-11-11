@@ -197,8 +197,8 @@ def test_causal_conv1d(
     layout: str,
     backend: str,
 ) -> None:
-    if device != 'cuda' or device_torch_lib.device_count() < world_size:
-        pytest.skip(f'Requires {world_size} CUDA or ROCm GPUs')
+    if device not in ('cuda', 'npu') or device_torch_lib.device_count() < world_size:
+        pytest.skip(f'Requires {world_size} CUDA, ROCm, or Ascend devices')
     if backend == 'cuda':
         if not IS_NVIDIA:
             pytest.skip('CUDA backend requires an NVIDIA GPU')
