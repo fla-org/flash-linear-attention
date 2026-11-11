@@ -184,8 +184,7 @@ def _recompute_w_u_fwd_gdn2_fp32_npu(
     return w, u, qg, kg
 
 
-# share A between both stages, while the channel-wise gates keep the V and K
-# slabs independent. The multipliers conservatively include the extra gate tile.
+# separate K/V budgets account for channel-wise gates and the optional query tile.
 _RECOMPUTE_FWD_U_MEM_MULT = 4.5
 _RECOMPUTE_FWD_W_MEM_MULT = 4.5
 _RECOMPUTE_FWD_W_MEM_MULT_QG = 6.5
@@ -359,7 +358,6 @@ def recompute_w_u_fwd_gdn2_kernel_npu(
             p_kg = kg + head_k + local_t64[:, None] * (H * K) + o_k64[None, :]
             tl.store(p_kg, b_kg.to(p_kg.dtype.element_ty), mask=m_k)
 
-            # reload A after every prior dot because it is reused as the next lhs.
             b_A = tl.load(p_A, mask=m_t[:, None], other=0.0)
             b_w = tl.dot(b_A, b_kb.to(b_k.dtype), allow_tf32=False)
             p_w = w + head_k + local_t64[:, None] * (H * K) + o_k64[None, :]

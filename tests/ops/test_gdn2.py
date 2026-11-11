@@ -22,7 +22,7 @@ from fla.ops.gdn2 import chunk_gdn2, fused_recurrent_gdn2, naive_recurrent_gdn2
 from fla.ops.gdn2.fused_recurrent import fused_recurrent_gdn2_fwd
 from fla.ops.gdn2.wy_fast import recompute_w_u_fwd_gdn2
 from fla.ops.kda.gate import naive_kda_gate, naive_kda_lowerbound_gate
-from fla.utils import IS_AMD, IS_NPU, IS_NVIDIA, assert_close, device, device_platform
+from fla.utils import IS_AMD, IS_NPU, IS_NVIDIA, assert_close, device, device_platform, testing
 
 
 def _unwrap_autotuner(fn):
@@ -372,14 +372,13 @@ def test_chunk_invalid_chunk_size(chunk_size):
             id='32k',
             marks=pytest.mark.skipif(
                 not IS_NPU,
-                reason='32K GDN-2 output/gradient reference check requires Ascend NPU',
+                reason='long-sequence Ascend regression coverage',
             ),
         ),
-        # q-absent WY uses BK=128/BV=64, a tile pair absent from the symmetric cases.
+        # aligned q-absent Ascend WY uses BK=128/BV=64, absent from the symmetric cases.
         pytest.param(
-            1, 100, 2, 128, 64, 1.0, True, False, False, torch.bfloat16,
-            id='npu-asymmetric-K128-V64-bfloat16',
-            marks=pytest.mark.skipif(not IS_NPU, reason='Ascend WY tile regression'),
+            1, 128, 2, 128, 64, 1.0, True, False, False, torch.bfloat16,
+            id='aligned-asymmetric-K128-V64-bfloat16',
         ),
     ],
 )
@@ -502,11 +501,10 @@ def test_chunk_state_v_first():
             [0, 15, 80, 145], 2, 48, 32, False, torch.float16, True, True,
             id='ragged-state-v-first-disable-recompute',
         ),
-        # the existing saved-state case fits in one V slab; this reaches the second with V-first states.
+        # expanded values exercise multiple value tiles with saved V-first states.
         pytest.param(
             [0, 15, 80, 145], 2, 128, 256, False, torch.bfloat16, True, True,
-            id='npu-saved-state-v-first-K128-V256',
-            marks=pytest.mark.skipif(not IS_NPU, reason='Ascend expanded-value WY regression'),
+            id='saved-state-v-first-K128-V256-bfloat16',
         ),
     ],
 )
@@ -675,10 +673,9 @@ def _wy_verifier_inputs():
     ],
 )
 def test_recompute_w_u_fwd_gdn2_npu_verifier_shapes(case, reason):
-    """Check WY shape boundaries without allocating accelerator tensors."""
+    """Check the WY verifier's shape and indexing boundaries."""
     from fla.ops.gdn2.backends.triton_ascend.wy_fast import recompute_w_u_fwd_gdn2_verifier
 
-    # the numerical leaf cases exercise accepted calls, not the verifier's rejection boundaries.
     inputs = _wy_verifier_inputs()
     if case == 'oversized_k':
         for name in ('q', 'k', 'b', 'gk'):
@@ -708,7 +705,7 @@ def test_recompute_w_u_fwd_gdn2_npu_verifier_shapes(case, reason):
     ],
 )
 def test_recompute_w_u_fwd_gdn2_npu_verifier_metadata(case, reason):
-    """Reject unsupported WY metadata on both GPU and NPU test hosts."""
+    """Reject WY calls with unsupported device, dtype, or gate metadata."""
     from fla.ops.gdn2.backends.triton_ascend.wy_fast import recompute_w_u_fwd_gdn2_verifier
 
     inputs = _wy_verifier_inputs()
@@ -1278,7 +1275,8 @@ def _wy_reference(
 )
 def test_recompute_w_u_fwd_gdn2_npu(layout, dtype, K, V, has_q, a_dtype, monkeypatch):
     """The Ascend WY leaf must match its channel-wise Torch definition."""
-    # public output/gradient comparisons do not isolate each WY auxiliary or prove this leaf was dispatched.
+    monkeypatch.setattr(testing, 'FLA_CI_ENV', False)
+    # assert native dispatch because numerical parity also permits the generic fallback.
     candidate = backends._function_registries[inspect.unwrap(recompute_w_u_fwd_gdn2)]._backends['triton_ascend']
     spy = Mock(wraps=candidate.implementation)
     monkeypatch.setattr(candidate, 'implementation', spy)
@@ -1382,8 +1380,8 @@ def test_recompute_w_u_fwd_gdn2_npu_large_offsets(dtype, has_q):
 
 @pytest.mark.skipif(not IS_NPU, reason='Ascend compiler options')
 def test_chunk_npu_compile_options():
-    """Only pass launch controls that the installed compiler applies."""
-    # output comparisons do not prove that the installed compiler applied each requested option.
+    """Validate launch-option values parsed by the installed Ascend compiler."""
+    # a dataclass field can exist without accepting a launch argument.
     from triton.backends.ascend.compiler import AscendBackend
     from triton.runtime import driver
 
@@ -1405,8 +1403,9 @@ def test_chunk_npu_compile_options():
         pytest.param(256, torch.bfloat16, False, id='dense-K256-bf16'),
     ],
 )
-def test_chunk_fwd_intra_grouped_npu(K, dtype, varlen):
+def test_chunk_fwd_intra_grouped_npu(K, dtype, varlen, monkeypatch):
     """Check causal score rows and structural zeros across dense and ragged chunk tails."""
+    monkeypatch.setattr(testing, 'FLA_CI_ENV', False)
     # causal consumers can mask missing upper-triangle stores, so inspect the score buffers directly.
     from fla.ops.gdn2.backends.triton_ascend.chunk_intra import (
         chunk_gdn2_fwd_kernel_intra_grouped_npu,
@@ -1484,7 +1483,6 @@ def test_chunk_fwd_intra_grouped_npu(K, dtype, varlen):
     assert_close('Akk', ref_kk, Akk.cpu(), 0.005)
 
 
-@pytest.mark.skipif(not IS_NPU, reason="Ascend WY tile planning")
 @pytest.mark.parametrize(
     ('store_qg', 'expected'),
     [
@@ -1493,8 +1491,7 @@ def test_chunk_fwd_intra_grouped_npu(K, dtype, varlen):
     ],
 )
 def test_recompute_w_u_fwd_gdn2_ub_budget(store_qg, expected, monkeypatch):
-    """Keep q-enabled W tiles conservative and cache plans separately by UB capacity."""
-    # numerical cases use the detected capacity; this checks cache isolation, not small-UB compilation.
+    """Check tile selection and cache isolation across simulated UB capacities."""
     from fla.ops.gdn2.backends.triton_ascend.wy_fast import _get_fwd_tiles
     from fla.utils import ascend_ub_manager
 
@@ -1503,5 +1500,3 @@ def test_recompute_w_u_fwd_gdn2_ub_budget(store_qg, expected, monkeypatch):
         monkeypatch.setattr(ascend_ub_manager, '_ub_manager', ascend_ub_manager.UBManager(capacity))
         plans.append(_get_fwd_tiles(64, 256, 512, store_qg=store_qg, ub_capacity_bits=capacity))
     assert plans == expected
-    assert plans[0] == plans[2]
-    assert all(small < large for small, large in zip(plans[1], plans[0]))
