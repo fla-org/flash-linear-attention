@@ -5,17 +5,6 @@ name: ascend-a2-ci
 
 on:
   workflow_dispatch:
-  schedule:
-    # Monday, Wednesday and Friday at 00:00 Asia/Shanghai (UTC+8).
-    - cron: "0 16 * * 0,2,4"
-  pull_request:
-    branches:
-      - main
-    types: [opened, synchronize, reopened, edited]
-    paths:
-      - "**/*.py"
-      - "pyproject.toml"
-      - ".github/workflows/*.yml"
 
 jobs:
   changes:

@@ -1,9 +1,7 @@
 name: nvidia-h100-ci
 
-# Full pipeline tier. Runs on maintainer PR pushes (maintainers cannot approve
-# their own PRs), on PR approval (external PRs), nightly on main, and manually.
-# Every push still gets the fast smoke tier from nvidia-h100-smoke.yml.
-# Once this pipeline has gone green for a PR, later approvals only need smoke.
+# Manual full pipeline tier. Focused tests use agent-h100-tests.yml;
+# automatic PR, review, and nightly triggers are intentionally disabled.
 
 concurrency:
   group: full-ci-${{ github.event.pull_request.number || github.ref }}
@@ -18,14 +16,6 @@ permissions:
   checks: read
 
 on:
-  pull_request:
-    branches: [ '*' ]
-    types: [opened, synchronize, reopened, closed]
-  pull_request_review:
-    types: [submitted]
-  schedule:
-    # Nightly full pipeline on main (03:00 +08:00).
-    - cron: '0 19 * * *'
   workflow_dispatch:
 
 jobs:

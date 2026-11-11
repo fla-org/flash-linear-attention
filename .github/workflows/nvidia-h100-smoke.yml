@@ -1,24 +1,17 @@
 name: nvidia-h100-smoke
 
-# Fast feedback tier: on every PR/main push, run the PR's dependent test files,
-# but only smoke-marked tests under tests/ops (small non-ops suites run in full,
-# tests/models excluded). The approval-gated full pipeline lives in nvidia-h100.yml.
+# Manual smoke pipeline. Agent-selected tests use agent-h100-tests.yml;
+# the manual full pipeline lives in nvidia-h100.yml.
 
 concurrency:
   group: smoke-ci-${{ github.event.pull_request.number || github.ref }}
-  # New pushes cancel only smoke; never the approval-triggered full pipeline.
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
 
 on:
-  pull_request:
-    branches: [ '*' ]
-    types: [opened, synchronize, reopened]
-  push:
-    branches:
-      - main
+  workflow_dispatch:
 
 jobs:
   smoke:

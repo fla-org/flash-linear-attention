@@ -1,0 +1,137 @@
+name: Agent-selected H100 tests
+
+run-name: agent-h100-${{ inputs.pr_number }}-${{ inputs.attempt_id }}-${{ inputs.suite }}
+
+concurrency:
+  group: agent-h100-${{ inputs.pr_number }}-${{ inputs.attempt_id }}-${{ inputs.suite }}
+  cancel-in-progress: true
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number
+        required: true
+        type: string
+      attempt_id:
+        description: Immutable review attempt ID
+        required: true
+        type: string
+      base_sha:
+        description: Exact base commit
+        required: true
+        type: string
+      head_sha:
+        description: Exact PR head commit
+        required: true
+        type: string
+      suite:
+        description: Test suite from .github/agent-tests/catalog.json
+        required: true
+        type: choice
+        options:
+          - ops
+          - modules
+          - layers
+          - models
+      targets:
+        description: Space-separated test files or nodeids inside the selected suite
+        required: true
+        type: string
+      dispatch:
+        description: Backend dispatch mode
+        required: true
+        type: choice
+        options:
+          - off
+          - on
+          - both
+        default: both
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Agent H100 / ${{ inputs.suite }} / ${{ inputs.dispatch }}
+    runs-on: nvidia-h100-1
+    timeout-minutes: 120
+    env:
+      FLA_CI_ENV: 1
+      FLA_AGENT_PR_NUMBER: ${{ inputs.pr_number }}
+      FLA_AGENT_ATTEMPT_ID: ${{ inputs.attempt_id }}
+      FLA_AGENT_BASE_SHA: ${{ inputs.base_sha }}
+      FLA_AGENT_HEAD_SHA: ${{ inputs.head_sha }}
+    steps:
+      - name: Check out trusted workflow sources
+        uses: actions/checkout@v7.0.0
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up trusted CI environment
+        uses: ./.github/actions/setup-ci-env
+        with:
+          runner_name: ${{ runner.name }}
+          conda_env_name: 'pytorch_2_12'
+          gpu_type: 'nvidia'
+          install_tilelang: 'true'
+          skip_gpu_check: true
+
+      - name: Stage trusted test runner
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/agent-ci" "$RUNNER_TEMP/agent-ci-results"
+          cp scripts/agent_ci.py "$RUNNER_TEMP/agent-ci/agent_ci.py"
+          cp .github/agent-tests/catalog.json "$RUNNER_TEMP/agent-ci/catalog.json"
+
+      - name: Fetch and verify exact PR commits
+        shell: bash
+        env:
+          EXPECTED_HEAD_SHA: ${{ inputs.head_sha }}
+          EXPECTED_BASE_SHA: ${{ inputs.base_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$FLA_AGENT_PR_NUMBER" =~ ^[0-9]+$ ]]
+          [[ "$FLA_AGENT_ATTEMPT_ID" =~ ^[A-Za-z0-9_-]+$ ]]
+          [[ "$EXPECTED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$EXPECTED_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          git fetch origin "refs/pull/${FLA_AGENT_PR_NUMBER}/head"
+          test "$(git rev-parse FETCH_HEAD)" = "$EXPECTED_HEAD_SHA"
+          if ! git cat-file -e "${EXPECTED_BASE_SHA}^{commit}" 2>/dev/null; then
+            git fetch origin "$EXPECTED_BASE_SHA"
+          fi
+          git merge-base --is-ancestor "$EXPECTED_BASE_SHA" "$EXPECTED_HEAD_SHA"
+          git diff --name-only "$EXPECTED_BASE_SHA...$EXPECTED_HEAD_SHA" > "$RUNNER_TEMP/agent-ci-results/changed_files.txt"
+          git checkout --detach "$EXPECTED_HEAD_SHA"
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD_SHA"
+
+      - name: Install PR revision
+        shell: bash
+        run: |
+          $CONDA_BIN_PATH/pip uninstall -y flash-linear-attention
+          $CONDA_BIN_PATH/pip install .
+
+      - name: Run selected tests
+        shell: bash
+        env:
+          AGENT_TEST_TARGETS: ${{ inputs.targets }}
+        run: |
+          $CONDA_BIN_PATH/python "$RUNNER_TEMP/agent-ci/agent_ci.py" \
+            --catalog "$RUNNER_TEMP/agent-ci/catalog.json" \
+            --platform h100 \
+            --suite '${{ inputs.suite }}' \
+            --targets "$AGENT_TEST_TARGETS" \
+            --dispatch '${{ inputs.dispatch }}' \
+            --results "$RUNNER_TEMP/agent-ci-results/junit" \
+            --metadata "$RUNNER_TEMP/agent-ci-results/metadata.json"
+
+      - name: Upload attempt evidence
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: agent-h100-${{ inputs.attempt_id }}-${{ inputs.suite }}
+          path: ${{ runner.temp }}/agent-ci-results/
+          if-no-files-found: error
+          retention-days: 7
