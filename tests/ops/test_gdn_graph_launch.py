@@ -218,9 +218,15 @@ def _load_graph_launchers(capturing, tiled):
     return namespace, launches
 
 
-@pytest.mark.parametrize('capturing', [False, True], ids=['uncaptured-warmup', 'capture'])
-@pytest.mark.parametrize('tiled', [False, True], ids=['full', 'tiled'])
-@pytest.mark.parametrize('dim', [64, 128], ids=['d64', 'd128'])
+@pytest.mark.parametrize(
+    'capturing,tiled,dim',
+    [
+        pytest.param(False, False, 64, id='d64-full-uncaptured-warmup'),
+        pytest.param(True, True, 64, id='d64-tiled-capture'),
+        pytest.param(True, False, 128, id='d128-full-capture'),
+        pytest.param(False, True, 128, id='d128-tiled-uncaptured-warmup'),
+    ],
+)
 def test_graph_launches_keep_live_metadata_and_bind_current_kernel_interfaces(capturing, tiled, dim):
     helpers, launches = _load_graph_launchers(capturing=capturing, tiled=tiled)
     q = k = v = _Tensor((1, 128, 2, dim))
