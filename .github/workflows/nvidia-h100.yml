@@ -151,7 +151,7 @@ jobs:
     if: >
       needs.changes.outputs.npu_only != 'true' &&
       needs.gate.outputs.run_full == 'true' &&
-      (github.event_name == 'pull_request' || github.event_name == 'pull_request_review')
+      (github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     timeout-minutes: 90
     outputs:
@@ -173,6 +173,9 @@ jobs:
             } else if (eventName === 'pull_request_review') {
               username = context.payload.review.user.login;
               association = context.payload.review.author_association;
+            } else if (eventName === 'workflow_dispatch') {
+              core.setOutput('allowed', 'true');
+              return;
             } else {
               core.setOutput('allowed', 'false');
               return;
@@ -277,7 +280,7 @@ jobs:
   benchmark-h100:
     name: Benchmark H100 (PyTorch 2.12)
     needs: test-h100-pytorch-2-12
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     uses: ./.github/workflows/reusable-ci-benchmarks.yml
     with:
       runner: 'nvidia-h100-1'

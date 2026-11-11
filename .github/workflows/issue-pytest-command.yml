@@ -9,7 +9,7 @@ on:
         description: Run the reusable agent-selected H100 workflow
         required: false
         type: boolean
-        default: false
+        default: true
       pr_number:
         required: false
         type: string

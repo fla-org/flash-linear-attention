@@ -57,6 +57,15 @@ class AgentCITest(unittest.TestCase):
     def test_both_dispatch_modes(self):
         self.assertEqual(agent_ci.validate_dispatch(self.catalog, "ops", "both"), ["off", "on"])
 
+    def test_top_level_suite_rejects_nested_tests(self):
+        catalog = {"suites": {"top-level": {"root": "tests",
+                                            "top_level_only": True, "platforms": ["h100"], "dispatch": ["off"]}}}
+        (self.repo / "tests/test_root.py").write_text("")
+        targets = agent_ci.validate_targets(catalog, "top-level", "tests/test_root.py", self.repo)
+        self.assertEqual(targets, ["tests/test_root.py"])
+        with self.assertRaises(agent_ci.AgentCIError):
+            agent_ci.validate_targets(catalog, "top-level", "tests/ops/test_ok.py", self.repo)
+
     def test_platform_must_support_suite(self):
         agent_ci.validate_platform(self.catalog, "ops", "h100")
         agent_ci.validate_platform(self.catalog, "ops", "ascend-a2")

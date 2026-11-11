@@ -99,9 +99,15 @@ jobs:
           # ~15GB RAM and gets OOM-killed (exit 137). One file per process
           # releases all memory between files. --exitfirst still stops a file at
           # its first failure.
+          executed=0
           for f in ${{ steps.find-ops-tests.outputs.test_files }}; do
             $CONDA_BIN_PATH/pytest -s -v --exitfirst "$f" || exit 1
+            executed=1
           done
+          if [ "$executed" -eq 0 ]; then
+            echo "::error::No tests were executed in the dispatch-disabled suite"
+            exit 1
+          fi
 
       - name: Run pytest on ops test files (dispatch ENABLED, backend coverage)
         if: steps.find-ops-tests.outputs.test_files && steps.setup.outputs.skip_tests == 'false' && steps.check-dispatch.outputs.dispatch_changed == 'true'
@@ -112,10 +118,16 @@ jobs:
           # Same per-file splitting as the baseline batch above (avoid runner OOM).
           # Append each file's output to the coverage log.
           : > /tmp/fla-dispatch-coverage.log
+          executed=0
           for f in ${{ steps.find-ops-tests.outputs.test_files }}; do
             $CONDA_BIN_PATH/pytest -s -v --exitfirst "$f" 2>&1 | tee -a /tmp/fla-dispatch-coverage.log
             test ${PIPESTATUS[0]} -eq 0 || exit 1
+            executed=1
           done
+          if [ "$executed" -eq 0 ]; then
+            echo "::error::No tests were executed in the dispatch-enabled suite"
+            exit 1
+          fi
 
       - name: Comment on PR when dispatch coverage fails
         if: steps.dispatch-coverage.outcome == 'failure' && github.event_name == 'pull_request'
@@ -182,7 +194,11 @@ jobs:
           echo "test_files=$TEST_FILES" >> $GITHUB_OUTPUT
 
       - name: Run pytest on models test files
-        if: steps.find-models-tests.outputs.test_files && steps.setup.outputs.skip_tests == 'false'
+        if: steps.setup.outputs.skip_tests == 'false'
         shell: bash
         run: |
+          if [ -z "${{ steps.find-models-tests.outputs.test_files }}" ]; then
+            echo "::error::No model tests were selected for execution"
+            exit 1
+          fi
           $CONDA_BIN_PATH/pytest -s -v --exitfirst ${{ steps.find-models-tests.outputs.test_files }}

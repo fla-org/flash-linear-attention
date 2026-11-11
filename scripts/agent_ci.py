@@ -28,7 +28,7 @@ def load_catalog(path: Path) -> dict:
         raise AgentCIError("Invalid agent test catalog")
     for name, suite in catalog["suites"].items():
         root = PurePosixPath(suite["root"])
-        if root.is_absolute() or ".." in root.parts or not (suite["root"].startswith("tests/") or suite["root"] == "scripts/tests"):
+        if root.is_absolute() or ".." in root.parts or not (suite["root"].startswith("tests/") or suite["root"] in {"tests", "scripts/tests"}):
             raise AgentCIError(f"Invalid root for suite {name}")
         if not suite.get("dispatch"):
             raise AgentCIError(f"Missing dispatch modes for suite {name}")
@@ -60,6 +60,8 @@ def validate_targets(catalog: dict, suite_name: str, raw_targets: str, repo: Pat
             raise AgentCIError(f"Invalid test target: {target}")
         if not file_part.startswith(f"{root}/"):
             raise AgentCIError(f"Test target is outside {root}: {target}")
+        if suite.get("top_level_only") and len(path.parts) != 2:
+            raise AgentCIError(f"Test target is not a top-level test: {target}")
         if not (repo / file_part).is_file():
             raise AgentCIError(f"Test target does not exist: {target}")
         if target.startswith("-"):

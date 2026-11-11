@@ -23,13 +23,29 @@
     },
     "cp": {
       "root": "tests/cp",
-      "platforms": ["ascend-a2"],
+      "platforms": ["h100", "ascend-a2"],
       "dispatch": ["off", "on", "both"]
     },
     "scripts": {
       "root": "scripts/tests",
       "platforms": ["h100"],
       "dispatch": ["off"]
+    },
+    "top-level": {
+      "root": "tests",
+      "top_level_only": true,
+      "platforms": ["h100", "ascend-a2"],
+      "dispatch": ["off", "on", "both"]
+    },
+    "op-utils": {
+      "root": "tests/ops/utils",
+      "platforms": ["h100", "ascend-a2"],
+      "dispatch": ["off", "on", "both"]
+    },
+    "benchmarks": {
+      "root": "tests/benchmarks",
+      "platforms": ["h100", "ascend-a2"],
+      "dispatch": ["off", "on", "both"]
     }
   }
 }
