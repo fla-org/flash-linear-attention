@@ -375,11 +375,11 @@ def chunk_gdn2_fwd_kernel_inter_products_npu(
         if USE_RAW_G:
             g_raw_ptr = g_raw + (bos * H + i_h) * K
             b_gp = gdn2_local_log_cumsum(g_raw_ptr, i_tc_dst.to(tl.int64), min(i_tc_dst + BC, T), o_k, H, K, BC)
-            b_ks = gdn2_local_log_cumsum(g_raw_ptr, i_tc_src.to(tl.int64), i_tc_src + BC, o_k, H, K, BC, True)
+            b_ks = gdn2_local_log_cumsum(g_raw_ptr, i_tc_src.to(tl.int64), min(i_tc_src + BC, T), o_k, H, K, BC, True)
             o_gap = i_t.to(tl.int64) * BT + tl.arange(0, BT)
             b_gap = tl.load(
                 g_raw_ptr + o_gap[:, None] * H * K + o_k[None, :],
-                (o_gap[:, None] >= i_tc_src + BC) & (o_gap[:, None] < i_tc_dst) & m_k[None, :], other=0,
+                (o_gap[:, None] >= i_tc_src + BC) & (o_gap[:, None] < min(i_tc_dst, T)) & m_k[None, :], other=0,
             ).to(tl.float32)
             b_ks += tl.sum(b_gap, axis=0)[None, :] * 1.4426950408889634
             b_gq = tl.where(m_dst[:, None], exp2(b_gp), 0.)
