@@ -15,7 +15,7 @@
 #
 # Difference vs KDA: the channel-wise erase gate ``b`` is folded into the key
 # tile before the dot product, instead of multiplying the row by a scalar
-# ``beta`` after the dot. The rest is identical.
+# ``beta`` after the dot. Decays use raw natural-log intervals.
 
 import torch
 import triton
@@ -100,24 +100,24 @@ def chunk_gdn2_fwd_kernel_intra_token_parallel(
 
     p_q = q + i_t * H * K + (i_hg * BH + o_h)[:, None] * K + o_k[None, :]
     p_k = k + i_t * H * K + (i_hg * BH + o_h)[:, None] * K + o_k[None, :]
-    p_g = g + i_t * H * K + (i_hg * BH + o_h)[:, None] * K + o_k[None, :]
     p_b = b + i_t * H * K + (i_hg * BH + o_h)[:, None] * K + o_k[None, :]
 
     b_q = tl.load(p_q, mask=m_h[:, None] & m_k[None, :], other=0.0).to(tl.float32)
     b_k = tl.load(p_k, mask=m_h[:, None] & m_k[None, :], other=0.0).to(tl.float32)
-    b_g = tl.load(p_g, mask=m_h[:, None] & m_k[None, :], other=0.0).to(tl.float32)
+    b_g = tl.zeros([BH, BK], dtype=tl.float32)
     b_b = tl.load(p_b, mask=m_h[:, None] & m_k[None, :], other=0.0).to(tl.float32)
 
     # Fold channel-wise erase gate into the key tile.
     b_k = b_k * b_b
 
-    for j in range(i_ts, min(i_t + 1, min(T, i_ts + BC))):
+    for j in range(i_t, i_ts - 1, -1):
         p_kj = k + j * H * K + (i_hg * BH + o_h)[:, None] * K + o_k[None, :]
         p_gj = g + j * H * K + (i_hg * BH + o_h)[:, None] * K + o_k[None, :]
         b_kj = tl.load(p_kj, mask=m_h[:, None] & m_k[None, :], other=0.0).to(tl.float32)
         b_gj = tl.load(p_gj, mask=m_h[:, None] & m_k[None, :], other=0.0).to(tl.float32)
 
-        b_kgj = b_kj * exp2(b_g - b_gj)
+        b_kgj = b_kj * exp2(b_g * 1.4426950408889634)
+        b_g += b_gj
         b_kgj = tl.where(m_k[None, :], b_kgj, 0.0)
         b_Aqk = tl.sum(b_q * b_kgj, axis=1) * scale
         b_Akk = tl.sum(b_k * b_kgj, axis=1) * tl.where(j < i_t, 1.0, 0.0)
@@ -135,7 +135,7 @@ def chunk_gdn2_fwd_kernel_intra_token_parallel(
 def chunk_gdn2_fwd_intra_token_parallel(
     q: torch.Tensor,
     k: torch.Tensor,
-    gk: torch.Tensor,
+    g: torch.Tensor,
     b: torch.Tensor,
     Aqk: torch.Tensor,
     Akk: torch.Tensor,
@@ -157,7 +157,7 @@ def chunk_gdn2_fwd_intra_token_parallel(
     chunk_gdn2_fwd_kernel_intra_token_parallel[grid](
         q=q,
         k=k,
-        g=gk,
+        g=g,
         b=b,
         Aqk=Aqk,
         Akk=Akk,

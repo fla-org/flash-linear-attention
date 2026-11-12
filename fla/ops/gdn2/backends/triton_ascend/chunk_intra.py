@@ -20,6 +20,7 @@ from fla.ops.common.backends.triton_ascend.chunk_delta_h import (
     time_axis_needs_mask,
 )
 from fla.ops.gdn2.chunk_intra import chunk_gdn2_fwd_intra
+from fla.ops.gdn2.gate import gdn2_local_log_cumsum
 from fla.ops.gdn2.wy_fast import recompute_w_u_fwd_gdn2
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp2
@@ -132,6 +133,7 @@ def chunk_gdn2_fwd_kernel_intra_grouped_npu(
     BR: tl.constexpr,
     ROW_GROUP: tl.constexpr,
     IS_HEAD_MAJOR: tl.constexpr,
+    USE_RAW_G: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     MASK_DMA: tl.constexpr,
     NT_OFFSET,
@@ -195,14 +197,19 @@ def chunk_gdn2_fwd_kernel_intra_grouped_npu(
     b_b = mload(p_b, m_rk, MASK_DMA).to(tl.float32)
     b_k *= b_b
 
-    for j in tl.static_range(0, (ROW_GROUP + 1) * BR):
+    b_interval = tl.zeros([BR, BK], tl.float32)
+    for j in tl.static_range((ROW_GROUP + 1) * BR - 1, -1, -1):
         i_j = i_ts + j
         m_j = i_j < T
         p_kj = k + i_j * input_stride + o_k
         p_gj = g + i_j * input_stride + o_k
         b_kj = tl.load(p_kj, mask=m_j & m_k, other=0.0).to(tl.float32)
         b_gj = tl.load(p_gj, mask=m_j & m_k, other=0.0).to(tl.float32)
-        b_kgj = tl.where(m_k[None, :], b_kj[None, :] * exp2(b_g - b_gj[None, :]), 0.0)
+        b_decay = exp2(b_g - b_gj[None, :])
+        if USE_RAW_G:
+            b_decay = exp2(b_interval * 1.4426950408889634)
+            b_interval += tl.where((ROW_GROUP * BR + o_r)[:, None] >= j, b_gj[None, :], 0.)
+        b_kgj = tl.where(m_k[None, :], b_kj[None, :] * b_decay, 0.0)
         b_Aqk = tl.sum(b_q * b_kgj, axis=1) * scale
         b_Akk = tl.sum(b_k * b_kgj, axis=1)
         row_in_subchunk = ROW_GROUP * BR + o_r
@@ -269,6 +276,7 @@ def chunk_gdn2_fwd_kernel_inter_products_npu(
     q,
     k,
     g,
+    g_raw,
     b,
     Aqk,
     Akkx,
@@ -286,6 +294,7 @@ def chunk_gdn2_fwd_kernel_inter_products_npu(
     IS_HEAD_MAJOR: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     MASK_DMA: tl.constexpr,
+    USE_RAW_G: tl.constexpr,
     NT_OFFSET,
     BH_OFFSET,
 ):
@@ -362,7 +371,19 @@ def chunk_gdn2_fwd_kernel_inter_products_npu(
             MASK_DMA,
         ).to(tl.float32)
         b_gq = tl.where(m_dst[:, None], exp2(b_g_dst - b_gn_dst[None, :]), 0.0)
-        b_kgt = tl.trans(b_k_src * exp2(b_gn_dst[None, :] - b_g_src))
+        b_ks = b_gn_dst[None, :] - b_g_src
+        if USE_RAW_G:
+            g_raw_ptr = g_raw + (bos * H + i_h) * K
+            b_gp = gdn2_local_log_cumsum(g_raw_ptr, i_tc_dst.to(tl.int64), min(i_tc_dst + BC, T), o_k, H, K, BC)
+            b_ks = gdn2_local_log_cumsum(g_raw_ptr, i_tc_src.to(tl.int64), i_tc_src + BC, o_k, H, K, BC, True)
+            o_gap = i_t.to(tl.int64) * BT + tl.arange(0, BT)
+            b_gap = tl.load(
+                g_raw_ptr + o_gap[:, None] * H * K + o_k[None, :],
+                (o_gap[:, None] >= i_tc_src + BC) & (o_gap[:, None] < i_tc_dst) & m_k[None, :], other=0,
+            ).to(tl.float32)
+            b_ks += tl.sum(b_gap, axis=0)[None, :] * 1.4426950408889634
+            b_gq = tl.where(m_dst[:, None], exp2(b_gp), 0.)
+        b_kgt = tl.trans(b_k_src * exp2(b_ks))
         b_Aqk += tl.dot(b_q_dst * b_gq, b_kgt, allow_tf32=False)
         b_Akk += tl.dot((b_b_dst * b_k_dst) * b_gq, b_kgt, allow_tf32=False)
 
@@ -572,6 +593,7 @@ def chunk_gdn2_fwd_intra_verifier(
     safe_gate: bool = False,
     lower_bound: float | None = None,
     disable_recompute: bool = False,
+    g_raw: torch.Tensor | None = None,
 ) -> tuple[bool, str | None]:
     if chunk_size != 64:
         return False, f"GDN-2 Ascend intra requires chunk_size=64, got {chunk_size}"
@@ -582,7 +604,7 @@ def chunk_gdn2_fwd_intra_verifier(
             f"GDN-2 Ascend intra requires next_power_of_2(K) <= {MAX_FWD_INTRA_BK} "
             f"for UB capacity, got K={K} (BK={BK})"
         )
-    float_tensors = (q, k, v, gk, b, w_gate)
+    float_tensors = (q, k, v, gk, b, w_gate) + ((g_raw,) if g_raw is not None else ())
     tensors = (*float_tensors, *(t for t in (cu_seqlens, chunk_indices) if t is not None))
     if any(t.device.type != "npu" for t in tensors):
         return False, "GDN-2 Ascend intra requires NPU tensors"
@@ -608,9 +630,8 @@ def chunk_gdn2_fwd_intra_npu(
     safe_gate: bool = False,
     lower_bound: float | None = None,
     disable_recompute: bool = False,
+    g_raw: torch.Tensor | None = None,
 ):
-    # gk is already activated and accumulated; pairwise gate differences serve both gate modes.
-
     B, T, H, K = k.shape
     BT = chunk_size
     if (
@@ -626,6 +647,7 @@ def chunk_gdn2_fwd_intra_npu(
             k=_pad_dense_tail_tokens(k, T_pad),
             v=_pad_dense_tail_tokens(v, T_pad),
             gk=_pad_dense_tail_tokens(gk, T_pad, repeat_last=True),
+            g_raw=_pad_dense_tail_tokens(g_raw, T_pad),
             b=_pad_dense_tail_tokens(b, T_pad),
             w_gate=_pad_dense_tail_tokens(w_gate, T_pad),
             scale=scale,
@@ -656,13 +678,14 @@ def chunk_gdn2_fwd_intra_npu(
     sync_each_launch = use_head_major_intra or NT * NC * B * H > LAUNCH_BLOCK_BUDGET
     bk_intra = triton.next_power_of_2(K)
     mask_grouped = time_axis_needs_mask(T, BT, cu_seqlens) or K % bk_intra != 0
+    g_diag = g_raw if g_raw is not None else gk
     if use_head_major_intra:
         q_intra = q.transpose(1, 2).contiguous()
         k_intra = k.transpose(1, 2).contiguous()
-        g_intra = gk.transpose(1, 2).contiguous()
+        g_intra = g_diag.transpose(1, 2).contiguous()
         b_intra = b.transpose(1, 2).contiguous()
     else:
-        q_intra, k_intra, g_intra, b_intra = q, k, gk, b
+        q_intra, k_intra, g_intra, b_intra = q, k, g_diag, b
     for row_group in range(BC // TOKEN_GROUP_SIZE):
         launch_diag_kernel(
             chunk_gdn2_fwd_kernel_intra_grouped_npu,
@@ -689,6 +712,7 @@ def chunk_gdn2_fwd_intra_npu(
                 BR=TOKEN_GROUP_SIZE,
                 ROW_GROUP=row_group,
                 IS_HEAD_MAJOR=use_head_major_intra,
+                USE_RAW_G=g_raw is not None,
                 IS_VARLEN=is_varlen,
                 MASK_DMA=mask_grouped,
                 NT_OFFSET=0,
@@ -724,8 +748,11 @@ def chunk_gdn2_fwd_intra_npu(
     product_kwargs = dict(
         q=q_intra if use_head_major_intra else q,
         k=k_intra if use_head_major_intra else k,
+        # with raw gates the product kernel reads `g_raw` and ignores `g`
         g=g_intra if use_head_major_intra else gk,
         b=b_intra if use_head_major_intra else b,
+        g_raw=g_raw,
+        USE_RAW_G=g_raw is not None,
         Aqk=Aqk,
         Akkx=Akkx,
         scale=scale,
@@ -779,6 +806,7 @@ def chunk_gdn2_fwd_intra_npu(
         A=Akk,
         q=q if disable_recompute else None,
         gk=gk,
+        g_raw=g_raw,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
     )
