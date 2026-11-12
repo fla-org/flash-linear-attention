@@ -235,6 +235,7 @@ jobs:
             tests/ops/test_wall_attn.py \
             tests/ops/test_precond_kda.py \
             tests/ops/test_ttt.py \
+            tests/ops/test_linear_attn.py \
             tests/ops/test_simple_gla.py::test_simple_gla_ascend_verifier \
             tests/ops/test_simple_gla.py::test_retention_ascend_registration_import_order \
             tests/ops/test_kda_graph.py
