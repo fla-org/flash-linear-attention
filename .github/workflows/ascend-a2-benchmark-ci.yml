@@ -133,9 +133,9 @@ jobs:
         with:
           path: ${{ env.GDN_TRITON_CACHE_DIR }}
           key: >-
-            triton-gdn-v1-${{ runner.os }}-${{ matrix.os }}-python-${{ matrix.python }}-cann-9.1.0-torch-2.10.0-torch-npu-2.10.0.post7-triton-ascend-3.6.0-${{ github.sha }}
+            triton-gdn-${{ runner.os }}-${{ matrix.os }}-python-${{ matrix.python }}-cann-9.1.0-torch-2.10.0-torch-npu-2.10.0.post7-triton-ascend-3.6.0-${{ github.sha }}
           restore-keys: |
-            triton-gdn-v1-${{ runner.os }}-${{ matrix.os }}-python-${{ matrix.python }}-cann-9.1.0-torch-2.10.0-torch-npu-2.10.0.post7-triton-ascend-3.6.0-
+            triton-gdn-${{ runner.os }}-${{ matrix.os }}-python-${{ matrix.python }}-cann-9.1.0-torch-2.10.0-torch-npu-2.10.0.post7-triton-ascend-3.6.0-
 
       - name: Check NPU and CANN info
         if: github.event_name != 'schedule' || steps.triton-cache.outputs.cache-hit != 'true' || steps.gdn-cache.outputs.cache-hit != 'true'

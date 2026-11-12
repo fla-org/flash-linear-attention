@@ -20,6 +20,11 @@ from fla.utils import IS_NPU, assert_close, device
 pytestmark = pytest.mark.skipif(not IS_NPU, reason="GDN graph replay requires Ascend NPU")
 
 
+@pytest.fixture(autouse=True)
+def strict_graph_numerics(monkeypatch):
+    monkeypatch.setattr('fla.utils.testing.FLA_CI_ENV', False)
+
+
 def _inputs(dtype=torch.bfloat16, dim=64, capacity=193, heads=2, n=4, seed=0):
     gen = torch.Generator(device).manual_seed(seed)
     shape = (1, capacity, heads, dim)
