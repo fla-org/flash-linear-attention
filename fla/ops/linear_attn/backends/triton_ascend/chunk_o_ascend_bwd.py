@@ -888,7 +888,8 @@ def chunk_bwd_kernel_dqkwg_npu(
     # Finalize dk: gated inter (v@dh) + fused intra from scratch.
     for c in range(n_sub):
         i_tc_c = i_t * BT + c * BC
-        m_c = (i_tc_c + o_i) < T
+        r_c = i_tc_c + o_i
+        m_c = r_c < T
         b_dk_c = tl.zeros([BC, BK], dtype=tl.float32)
         for i_v in range(tl.cdiv(V, BV)):
             o_v = i_v * BV + tl.arange(0, BV)
