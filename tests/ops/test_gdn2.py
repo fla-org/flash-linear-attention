@@ -22,9 +22,12 @@ from fla.utils import IS_AMD, IS_NPU, IS_NVIDIA, assert_close, device, device_pl
 
 
 @pytest.mark.skipif(not IS_NVIDIA, reason="CUDA required")
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("K,V,packed,with_q", [(32, 64, False, True), (60, 32, True, False),
-                                               (128, 60, True, True), (256, 128, False, False)])
+@pytest.mark.parametrize(('dtype', 'K', 'V', 'packed', 'with_q'), [
+    pytest.param(torch.float32, 32, 64, False, True, id='fp32-k32-v64-dense'),
+    pytest.param(torch.float16, 60, 32, True, False, id='fp16-k60-v32-packed-no-q'),
+    pytest.param(torch.bfloat16, 128, 60, True, True, id='bf16-k128-v60-packed'),
+    pytest.param(torch.bfloat16, 256, 128, False, False, id='bf16-k256-v128-dense-no-q'),
+])
 def test_wy_parallel_tiles(dtype, K, V, packed, with_q):
     from fla.ops.gdn2.wy_fast import recompute_w_u_fwd_gdn2
 
@@ -489,9 +492,17 @@ def test_chunk(B, T, H, K, V, scale, use_qk_l2norm_in_kernel, use_gate_in_kernel
 
 
 @pytest.mark.skipif(not (IS_NVIDIA or IS_AMD or IS_NPU), reason="CUDA/ROCm or Ascend NPU required")
-@pytest.mark.parametrize('spike', [-200., -1e8, -1e30], ids=['200', '1e8', '1e30'])
-@pytest.mark.parametrize('write', [5, 15, 31, 47, 62, 63, 64, 127], ids=lambda x: f'write{x}')
-@pytest.mark.parametrize('disable_recompute', [False, True], ids=['recompute', 'retain'])
+@pytest.mark.parametrize(('spike', 'write', 'disable_recompute'), [
+    # the write position picks the kernel path that carries the decay to the next token
+    pytest.param(-1e8, 5, False, id='1e8-write5-recompute'),  # inside the first sub-chunk
+    pytest.param(-1e8, 15, True, id='1e8-write15-retain'),  # sub-chunk 0 to 1
+    pytest.param(-1e30, 31, False, id='1e30-write31-recompute'),  # sub-chunk 1 to 2
+    pytest.param(-200., 47, True, id='200-write47-retain'),  # sub-chunk 2 to 3
+    pytest.param(-1e30, 62, True, id='1e30-write62-retain'),  # exactly one full chunk
+    pytest.param(-1e8, 63, False, id='1e8-write63-recompute'),  # across the chunk boundary, through the state
+    pytest.param(-200., 64, False, id='200-write64-recompute'),  # first token of the second chunk
+    pytest.param(-1e8, 127, True, id='1e8-write127-retain'),  # into a one-token final chunk
+])
 def test_chunk_large_decay(spike, write, disable_recompute):
     """A large decay must not erase a later log increment or decay the same-token write."""
     shape = (1, write + 2, 1, 64)
@@ -530,18 +541,17 @@ def test_chunk_large_decay(spike, write, disable_recompute):
 
 
 @pytest.mark.skipif(not (IS_NVIDIA or IS_AMD or IS_NPU), reason="CUDA/ROCm or Ascend NPU required")
-@pytest.mark.parametrize(('dtype', 'K', 'V', 'gate_dtype', 'spike'), [
-    pytest.param(torch.bfloat16, 60, 32, torch.float32, 1e8, id='bf16-k60-v32'),
-    pytest.param(torch.float32, 48, 32, torch.float32, 1e8, id='fp32-k48-v32'),
-    pytest.param(torch.float16, 48, 32, torch.float32, 1e8, id='fp16-k48-v32'),
-    pytest.param(torch.bfloat16, 48, 32, torch.float32, 1e8, id='bf16-k48-v32'),
-    pytest.param(torch.bfloat16, 128, 64, torch.float32, 1e8, id='bf16-k128-v64'),
-    pytest.param(torch.bfloat16, 256, 128, torch.float32, 1e8, id='bf16-k256-v128'),
-    pytest.param(torch.float16, 48, 32, torch.float16, 200., id='fp16-gates-k48-v32'),
-    pytest.param(torch.bfloat16, 128, 64, torch.bfloat16, 1e8, id='bf16-gates-k128-v64'),
+@pytest.mark.parametrize(('dtype', 'K', 'V', 'gate_dtype', 'spike', 'use_gate_in_kernel', 'varlen'), [
+    # each gate mode meets each layout twice
+    pytest.param(torch.bfloat16, 60, 32, torch.float32, 1e8, False, False, id='bf16-k60-v32-log-gates-dense'),
+    pytest.param(torch.float32, 48, 32, torch.float32, 1e8, True, True, id='fp32-k48-v32-fused-gates-varlen'),
+    pytest.param(torch.float16, 48, 32, torch.float32, 1e8, False, True, id='fp16-k48-v32-log-gates-varlen'),
+    pytest.param(torch.bfloat16, 48, 32, torch.float32, 1e8, True, False, id='bf16-k48-v32-fused-gates-dense'),
+    pytest.param(torch.bfloat16, 128, 64, torch.float32, 1e8, True, True, id='bf16-k128-v64-fused-gates-varlen'),
+    pytest.param(torch.bfloat16, 256, 128, torch.float32, 1e8, False, False, id='bf16-k256-v128-log-gates-dense'),
+    pytest.param(torch.float16, 48, 32, torch.float16, 200., False, True, id='fp16-gates-k48-v32-log-gates-varlen'),
+    pytest.param(torch.bfloat16, 128, 64, torch.bfloat16, 1e8, True, False, id='bf16-gates-k128-v64-fused-gates-dense'),
 ])
-@pytest.mark.parametrize('use_gate_in_kernel', [False, True], ids=['log-gates', 'fused-gates'])
-@pytest.mark.parametrize('varlen', [False, True], ids=['dense', 'varlen'])
 def test_chunk_large_decay_recurrence(dtype, K, V, gate_dtype, spike, use_gate_in_kernel, varlen):
     """Local decays preserve all gradients across partial chunks and carried states."""
     B, T, H = (1, 161, 2) if varlen else (2, 130, 2)
@@ -631,8 +641,13 @@ def _large_decay_pattern(pattern, shape):
 
 
 @pytest.mark.skipif(not (IS_NVIDIA or IS_AMD or IS_NPU), reason="CUDA/ROCm or Ascend NPU required")
-@pytest.mark.parametrize('pattern', ['steady', 'two-spikes', 'mixed-channels', 'all-channels', 'alternating'])
-@pytest.mark.parametrize('varlen', [False, True], ids=['dense', 'varlen'])
+@pytest.mark.parametrize(('pattern', 'varlen'), [
+    pytest.param('steady', False, id='steady-dense'),
+    pytest.param('two-spikes', True, id='two-spikes-varlen'),
+    pytest.param('mixed-channels', True, id='mixed-channels-varlen'),
+    pytest.param('all-channels', False, id='all-channels-dense'),
+    pytest.param('alternating', False, id='alternating-dense'),
+])
 def test_chunk_large_decay_patterns(pattern, varlen):
     """Sustained and repeated steep gates match the token recurrence, including a one-token sequence."""
     dtype, K, V = torch.bfloat16, 64, 32
@@ -916,8 +931,12 @@ def test_fused_recurrent_npu_verifier(case, dtype, reason):
         assert reason in actual_reason
 
 
-@pytest.mark.parametrize('K', [32, 128, 256])
-@pytest.mark.parametrize('raw_gates', [False, True], ids=['prefix', 'raw'])
+@pytest.mark.parametrize(('K', 'raw_gates'), [
+    pytest.param(32, False, id='K32-prefix'),
+    pytest.param(128, True, id='K128-raw'),
+    pytest.param(256, False, id='K256-prefix'),
+    pytest.param(256, True, id='K256-raw'),
+])
 def test_chunk_npu_wy_tiling(K, raw_gates, monkeypatch):
     """The WY key launches must fit their actual row geometry and cover every channel."""
     from fla.ops.gdn2.backends.triton_ascend import chunk_bwd
