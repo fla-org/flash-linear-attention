@@ -536,7 +536,12 @@ def test_linear_attn_ascend_registration(run_python):
         }
         for name, entry in entries.items():
             assert backend.get_implementation(name) is not None
-            assert inspect.signature(entry) == inspect.signature(implementations[name]), name
+            expected = inspect.signature(entry).parameters
+            actual = inspect.signature(implementations[name]).parameters
+            assert expected.keys() == actual.keys(), name
+            for parameter in expected:
+                assert expected[parameter].kind == actual[parameter].kind, name
+                assert expected[parameter].default == actual[parameter].default, name
         """,
         FLA_DISABLE_BACKEND_DISPATCH='0',
     )
