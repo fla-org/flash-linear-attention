@@ -40,10 +40,10 @@ from fla.backends import dispatch
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu, chunk_gated_delta_rule_fwd_h
 from fla.ops.cp.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu_pre_process, expand_h0
 from fla.ops.gdn2.chunk_intra import chunk_gdn2_bwd_intra
-from fla.ops.gdn2.gate import gdn2_chunk_gate, gdn2_local_log_cumsum
+from fla.ops.gdn2.gate import gdn2_chunk_gate, gdn2_local_log_cumsum, gdn2_raw_gate
 from fla.ops.gdn2.wy_fast import recompute_w_u_fwd_gdn2
 from fla.ops.kda.chunk_bwd import chunk_kda_bwd_dAv
-from fla.ops.kda.gate import kda_gate_bwd, kda_gate_chunk_cumsum, kda_gate_fwd
+from fla.ops.kda.gate import kda_gate_bwd, kda_gate_chunk_cumsum
 from fla.ops.utils import chunk_local_cumsum, prepare_chunk_indices
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.constant import RCP_LN2
@@ -377,9 +377,7 @@ def chunk_gdn2_bwd(
     shape [B, T, H, K] (channel-wise erase gate); ``dw`` has shape [B, T, H, V]
     (channel-wise write gate).
     """
-    g_raw = None
-    if not safe_gate:
-        g_raw = kda_gate_fwd(g=g_org, A_log=A_log, dt_bias=dt_bias, lower_bound=lower_bound) if use_gate_in_kernel else g_org
+    g_raw = gdn2_raw_gate(g_org, A_log, dt_bias, lower_bound, use_gate_in_kernel, safe_gate, chunk_size)
 
     if cp_context is not None:
         # If CP was used, the initial_state is guaranteed to have been populated in the fwd

@@ -9,8 +9,32 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.kda.gate import kda_gate_fwd
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp2
+
+# FP32 chunk prefixes of at most this many nats keep pairwise decays to about 1e-4
+MAX_PREFIX_NATS = 1024
+
+
+def gdn2_raw_gate(
+    g: torch.Tensor,
+    A_log: torch.Tensor | None,
+    dt_bias: torch.Tensor | None,
+    lower_bound: float | None,
+    use_gate_in_kernel: bool,
+    safe_gate: bool,
+    chunk_size: int,
+) -> torch.Tensor | None:
+    """Return token log gates when chunk-prefix differences could lose them, else ``None``."""
+    if safe_gate:
+        return None
+    if not use_gate_in_kernel:
+        return g
+    # a bounded activation cannot exceed the prefix range, so the prefix kernels stay exact enough
+    if lower_bound is not None and -lower_bound * chunk_size <= MAX_PREFIX_NATS:
+        return None
+    return kda_gate_fwd(g=g, A_log=A_log, dt_bias=dt_bias, lower_bound=lower_bound)
 
 
 @triton.jit
