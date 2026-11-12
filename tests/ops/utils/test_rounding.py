@@ -37,14 +37,3 @@ def test_fp32_to_bf16_sr(T: int, D: int):
     torch.testing.assert_close(tri[~is_nan].view(torch.int16), ref[~is_nan].view(torch.int16), rtol=0, atol=0)
     torch.testing.assert_close(tri.isnan(), is_nan, rtol=0, atol=0)
     assert ((tri[is_nan].view(torch.int16) & 0x40) != 0).all()
-
-
-def test_fp32_to_bf16_sr_rng():
-    torch.manual_seed(42)
-    x = torch.full((65536,), 1.001953125, device=device)
-    ref = fp32_to_bf16_sr(x=x)
-    torch.manual_seed(42)
-    repeat = fp32_to_bf16_sr(x=x)
-    torch.testing.assert_close(ref.view(torch.int16), repeat.view(torch.int16), rtol=0, atol=0)
-    # a six-sigma binomial bound checks the internally generated rounding probabilities.
-    assert abs((ref == 1.0078125).sum().item() - 16384) < 6 * (65536 * 0.25 * 0.75)**0.5

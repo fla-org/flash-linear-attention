@@ -9,10 +9,19 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.utils import input_guard
+from fla.utils import autotune_cache_kwargs, input_guard
 
 
 # algorithm reference: https://github.com/pytorch/ao/blob/a724e78/torchao/optim/quant_utils.py#L121
+@triton.autotune(
+    configs=[
+        triton.Config({'BT': BT}, num_warps=num_warps)
+        for BT in [256, 512, 1024, 2048, 4096]
+        for num_warps in [4, 8]
+    ],
+    key=['T'],
+    **autotune_cache_kwargs,
+)
 @triton.jit(do_not_specialize=['T'])
 def fp32_to_bf16_sr_kernel(x, rand, y, seed, T, BT: tl.constexpr):
     i_t = tl.program_id(0).to(tl.int64)
@@ -59,5 +68,5 @@ def fp32_to_bf16_sr(x: torch.Tensor, rand: torch.Tensor | None = None) -> torch.
     y = torch.empty_like(x, dtype=torch.bfloat16)
     T = x.numel()
     seed = torch.randint(0, 2**32, (), dtype=torch.int64, device=x.device) if rand is None else None
-    fp32_to_bf16_sr_kernel[(triton.cdiv(T, 256),)](x=x, rand=rand, y=y, seed=seed, T=T, BT=256)
+    fp32_to_bf16_sr_kernel[lambda meta: (triton.cdiv(T, meta['BT']),)](x=x, rand=rand, y=y, seed=seed, T=T)
     return y
