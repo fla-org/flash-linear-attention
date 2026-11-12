@@ -64,7 +64,7 @@ def chunk_gdn2_fwd(
     Returns ``(o, final_state, g_cumsum, Aqk, Akk, w_wy, u_wy, qg, kg, v_new,
     h, initial_state)``.
     """
-    g_raw = gdn2_raw_gate(g, A_log, dt_bias, lower_bound, use_gate_in_kernel, safe_gate, chunk_size)
+    g_raw = gdn2_raw_gate(g, A_log, dt_bias, lower_bound, use_gate_in_kernel, safe_gate)
     if use_gate_in_kernel:
         g = kda_gate_chunk_cumsum(
             g=g,
