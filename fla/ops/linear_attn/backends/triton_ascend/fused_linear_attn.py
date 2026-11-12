@@ -1,3 +1,10 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
 # Copyright © 2026 Huawei Technologies Co., Ltd.
 # Based on flash-linear-attention: https://github.com/fla-org/flash-linear-attention
 #
@@ -1217,7 +1224,6 @@ def fused_chunk_linear_attn(
     output_final_state: bool = False,
     normalize: bool = True,
     cu_seqlens: torch.LongTensor | None = None,
-    chunk_size: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | tuple | None]:
     if normalize and isinstance(initial_state, tuple):
         kv_init, z_init = initial_state
@@ -1233,10 +1239,9 @@ def fused_chunk_linear_attn(
 
     if scale is None:
         scale = q.shape[-1] ** -0.5
-    if chunk_size is None:
-        chunk_size = min(64, max(16, triton.next_power_of_2(q.shape[1])))
-    # Keep the on-chip tile within the 950 UB budget.  The public chunk_size
-    # remains accepted; 64 is the largest locally verified internal block.
+    chunk_size = min(64, max(16, triton.next_power_of_2(q.shape[1])))
+    # Keep the on-chip tile within the 950 UB budget. 64 is the largest
+    # locally verified internal block.
     chunk_size = normalize_chunk_size(chunk_size)
 
     if q.shape[1] == 0:

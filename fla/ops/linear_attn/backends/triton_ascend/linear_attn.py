@@ -1,3 +1,10 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
 # Copyright © 2026 Huawei Technologies Co., Ltd.
 # Based on flash-linear-attention: https://github.com/fla-org/flash-linear-attention
 #
@@ -341,7 +348,6 @@ def chunk_linear_attn(
     output_final_state: bool = False,
     normalize: bool = True,
     cu_seqlens: torch.LongTensor | None = None,
-    chunk_size: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | tuple | None]:
     """Chunked un-gated linear attention forward.
 
@@ -353,7 +359,6 @@ def chunk_linear_attn(
         output_final_state: return the final recurrent state.
         normalize: apply the running-denominator normalization.
         cu_seqlens: cumulative sequence lengths for packed varlen input.
-        chunk_size: optional power-of-two chunk length; default 64.
     """
     if normalize and isinstance(initial_state, tuple):
         kv_init, z_init = initial_state
@@ -381,8 +386,7 @@ def chunk_linear_attn(
 
     if scale is None:
         scale = k.shape[-1] ** -0.5
-    if chunk_size is None:
-        chunk_size = 64
+    chunk_size = 64
     # Ascend 950 has 216 KiB UB.  BT=128 together with the fp32 state/output
     # tiles exceeds it and also selects a numerically unstable fp16 dot path.
     # Chunk boundaries are an implementation detail, so use a finer internal

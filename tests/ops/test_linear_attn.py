@@ -5,9 +5,12 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
+from fla import backends
 from fla.layers.linear_attn import LinearAttention
 from fla.models.cache_utils import Cache
 from fla.ops.linear_attn import chunk_linear_attn, fused_chunk_linear_attn, fused_recurrent_linear_attn
@@ -452,3 +455,89 @@ def test_layer_padding_cache(dtype: torch.dtype, mode: str, lengths: tuple[int, 
                 assert torch.count_nonzero(state[i]) == 0
         ref = layer(next_x[i:i+1], past_key_values=ref_cache, use_cache=True)[0]
         assert_close('decode', ref, next_out[i:i+1], 1e-3)
+
+
+def _fake_attn_inputs(*, device_type: str = 'npu', dtype: torch.dtype = torch.float16,
+                      ndim: int = 4, shape: tuple = (1, 64, 2, 64)) -> dict:
+    tensor = SimpleNamespace(
+        device=SimpleNamespace(type=device_type),
+        dtype=dtype,
+        ndim=ndim,
+        shape=shape,
+    )
+    return {'q': tensor, 'k': tensor, 'v': tensor}
+
+
+@pytest.mark.parametrize(
+    ('inputs', 'expected'),
+    [
+        pytest.param(_fake_attn_inputs(), (True, None), id='npu-fp16'),
+        pytest.param(_fake_attn_inputs(dtype=torch.bfloat16), (True, None), id='npu-bf16'),
+        pytest.param(_fake_attn_inputs(dtype=torch.float32), (True, None), id='npu-fp32'),
+        pytest.param(_fake_attn_inputs(device_type='cpu'), (False, 'q, k, and v must be on NPU'), id='cpu'),
+        pytest.param(_fake_attn_inputs(dtype=torch.float64), (False, 'only fp16, bf16, and fp32 are supported'), id='fp64'),
+        pytest.param(_fake_attn_inputs(ndim=3), (False, 'q, k, and v must be rank-4 tensors'), id='rank-3'),
+    ],
+)
+def test_linear_attn_ascend_verifier(inputs, expected):
+    backend = backends._operation_registries['linear_attn']._backends['triton_ascend']
+    assert backend.chunk_linear_attn_verifier(**inputs) == expected
+
+
+def test_linear_attn_ascend_verifier_requires_all_inputs():
+    backend = backends._operation_registries['linear_attn']._backends['triton_ascend']
+    assert backend.fused_chunk_linear_attn_verifier(q=None, k=None, v=None) == (False, 'q, k, and v are required')
+
+
+def test_linear_attn_ascend_verifier_rejects_unpacked_varlen():
+    backend = backends._operation_registries['linear_attn']._backends['triton_ascend']
+    inputs = _fake_attn_inputs(shape=(2, 64, 2, 64))
+    inputs['cu_seqlens'] = torch.tensor([0, 32, 64])
+    assert backend.fused_recurrent_linear_attn_verifier(**inputs) == (
+        False, 'packed variable-length input requires B=1',
+    )
+
+
+def test_linear_attn_ascend_registration(run_python):
+    run_python(
+        """
+        import inspect
+
+        from fla import backends
+        from fla.ops.linear_attn import (
+            chunk_linear_attn,
+            fused_chunk_linear_attn,
+            fused_recurrent_linear_attn,
+        )
+        from fla.ops.linear_attn.backends import triton_ascend
+        from fla.ops.linear_attn.backends.triton_ascend import (
+            fused_linear_attn,
+            linear_attn,
+            naive_chunk,
+        )
+        from fla.ops.linear_attn.naive import naive_chunk_linear_attn
+
+        registry = backends._operation_registries['linear_attn']
+        assert len(registry._backends) == 1
+        backend = registry._backends['triton_ascend']
+        assert isinstance(backend, triton_ascend.TritonAscendLinearAttentionBackend)
+
+        entries = {
+            'chunk_linear_attn': chunk_linear_attn,
+            'fused_chunk_linear_attn': fused_chunk_linear_attn,
+            'fused_recurrent_linear_attn': fused_recurrent_linear_attn,
+            'naive_chunk_linear_attn': naive_chunk_linear_attn,
+        }
+        implementations = {
+            'chunk_linear_attn': linear_attn.chunk_linear_attn,
+            'fused_chunk_linear_attn': fused_linear_attn.fused_chunk_linear_attn,
+            'fused_recurrent_linear_attn': fused_linear_attn.fused_recurrent_linear_attn,
+            'naive_chunk_linear_attn': naive_chunk.naive_chunk_linear_attn,
+        }
+        for name, entry in entries.items():
+            assert backend.get_implementation(name) is not None
+            assert inspect.signature(entry) == inspect.signature(implementations[name]), name
+        """,
+        FLA_DISABLE_BACKEND_DISPATCH='0',
+    )
+
