@@ -56,18 +56,18 @@ def chunk_global_cumsum_scalar_kernel(
 
     for i_c in tl.range(NT):
         i_t = NT - 1 - i_c if REVERSE else i_c
-        p_s = tl.make_block_ptr(s + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
-        p_o = tl.make_block_ptr(
-            o_buf + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,)
-        )
-        b_s = tl.load(p_s, boundary_check=(0,)).to(tl.float32)
+        o_t = i_t * BT + tl.arange(0, BT)
+        m_t = o_t < T
+        p_s = s + bos * H + i_h + o_t * H
+        p_o = o_buf + bos * H + i_h + o_t * H
+        b_s = tl.load(p_s, mask=m_t, other=0).to(tl.float32)
         if REVERSE:
             b_o = b_z + tl.cumsum(b_s, axis=0, reverse=True)
         else:
             b_o = b_z + tl.cumsum(b_s, axis=0)
         if HAS_SCALE:
             b_o *= scale
-        tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0,))
+        tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=m_t)
         b_z += tl.sum(b_s, 0)
 
 
@@ -94,30 +94,19 @@ def chunk_global_cumsum_vector_kernel(
 
     for i_c in tl.range(NT):
         i_t = NT - 1 - i_c if REVERSE else i_c
-        p_s = tl.make_block_ptr(
-            s + (bos * H + i_h) * S,
-            (T, S),
-            (H * S, 1),
-            (i_t * BT, i_s * BS),
-            (BT, BS),
-            (1, 0),
-        )
-        p_o = tl.make_block_ptr(
-            o_buf + (bos * H + i_h) * S,
-            (T, S),
-            (H * S, 1),
-            (i_t * BT, i_s * BS),
-            (BT, BS),
-            (1, 0),
-        )
-        b_s = tl.load(p_s, boundary_check=(0, 1)).to(tl.float32)
+        o_t = i_t * BT + tl.arange(0, BT)
+        o_s = i_s * BS + tl.arange(0, BS)
+        m_ts = (o_t < T)[:, None] & (o_s < S)[None, :]
+        p_s = s + (bos * H + i_h) * S + o_t[:, None] * (H * S) + o_s[None, :]
+        p_o = o_buf + (bos * H + i_h) * S + o_t[:, None] * (H * S) + o_s[None, :]
+        b_s = tl.load(p_s, mask=m_ts, other=0).to(tl.float32)
         if REVERSE:
             b_o = b_z[None, :] + tl.cumsum(b_s, axis=0, reverse=True)
         else:
             b_o = b_z[None, :] + tl.cumsum(b_s, axis=0)
         if HAS_SCALE:
             b_o *= scale
-        tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
+        tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=m_ts)
         b_z += tl.sum(b_s, 0)
 
 
