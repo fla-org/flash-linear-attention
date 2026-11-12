@@ -8,6 +8,8 @@
 import torch
 from einops import rearrange
 
+from fla.backends import dispatch
+
 
 def naive_recurrent_linear_attn(
     q: torch.Tensor,
@@ -44,7 +46,7 @@ def naive_recurrent_linear_attn(
     return o.to(dtype), S if output_final_state else None
 
 
-def naive_chunk_linear_attn(
+def _naive_chunk_linear_attn(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -74,3 +76,14 @@ def naive_chunk_linear_attn(
         k_cum = k.cumsum(1)
         o = o / ((q * k_cum).sum(-1, keepdim=True) + 1e-10)
     return o
+
+
+@dispatch('linear_attn')
+def naive_chunk_linear_attn(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    scale: float | None = None,
+    normalize: bool = False,
+) -> torch.Tensor:
+    return _naive_chunk_linear_attn(q, k, v, scale=scale, normalize=normalize)

@@ -7,11 +7,12 @@
 
 import torch
 
+from fla.backends import dispatch
 from fla.ops.linear_attn.utils import normalize_with_z_state
 from fla.ops.simple_gla import fused_chunk_simple_gla
 
 
-@torch.compiler.disable
+@dispatch('linear_attn')
 def fused_chunk_linear_attn(
     q: torch.Tensor,
     k: torch.Tensor,
