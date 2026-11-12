@@ -101,7 +101,7 @@ def chunk_precond_kkt_fwd_kernel(
     tl.store(p_A, b_A.to(A.dtype.element_ty), mask=m_t[:, None] & (o_A[None, :] < BT))
 
 
-@dispatch('precond_gated_delta_rule')
+@dispatch
 def chunk_precond_kkt_fwd(
     k: torch.Tensor,
     k_precond: torch.Tensor,

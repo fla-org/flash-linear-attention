@@ -5,14 +5,40 @@ name: ascend-a2-ci
 
 on:
   workflow_dispatch:
-  pull_request:
-    branches:
-      - main
-    types: [opened, synchronize, reopened, edited]
-    paths:
-      - "**/*.py"
-      - "pyproject.toml"
-      - ".github/workflows/*.yml"
+    inputs:
+      agent_mode:
+        description: Run the reusable agent-selected A2 workflow instead of the full suite
+        required: false
+        type: boolean
+        default: false
+      pr_number:
+        required: false
+        type: string
+      attempt_id:
+        required: false
+        type: string
+      base_sha:
+        required: false
+        type: string
+      head_sha:
+        required: false
+        type: string
+      suite:
+        required: false
+        type: string
+        default: ops
+      targets:
+        required: false
+        type: string
+        default: tests/ops/test_backends.py
+      dispatch:
+        required: false
+        type: string
+        default: off
+      source_ref:
+        required: false
+        type: string
+        default: main
 
 jobs:
   changes:
@@ -21,6 +47,8 @@ jobs:
     timeout-minutes: 5
     outputs:
       npu_related: ${{ steps.detect.outputs.npu_related }}
+      changed_files: ${{ steps.detect.outputs.changed_files }}
+      all_modules: ${{ steps.detect.outputs.all_modules }}
     steps:
       - name: Detect NPU-related diff
         id: detect
@@ -36,17 +64,21 @@ jobs:
             const files = await github.paginate(github.rest.pulls.listFiles, {
               owner, repo, pull_number: pr.number, per_page: 100,
             });
+            core.setOutput('changed_files', files.map(f => f.filename).join(' '));
+            const shared = /^(pyproject\.toml|fla\/backends\.py|tests\/conftest\.py|scripts\/find_dependent_tests\.py)$|^fla\/utils\//;
+            core.setOutput('all_modules', files.some(f => shared.test(f.filename)) ? 'true' : 'false');
             // NPU-related set: triton-ascend backend files, Ascend workflow
             // definitions, and the files that define the NPU CI stack itself:
             //   pyproject.toml    - pins the [npu] extra (torch_npu / triton-ascend)
             //   fla/backends.py   - shared dispatch machinery
             //   fla/utils/        - IS_NPU / device_platform detection, ascend_ub_manager
-            //   fla/modules/      - pure-torch modules run on NPU in the A2 test suite
+            //   fla/modules/      - modules and their tests run on NPU in the A2 test suite
+            //   tests/modules/    - test-only module changes
             //   tests/conftest.py - FLA_NPU_XDIST xdist worker -> device mapping
             // Unlike the H100 'npu_only' detection, __init__.py is NOT excluded
             // here: a change to it affects the NPU backend too, so it should
             // trigger this CI.
-            const npuPattern = /^fla\/(.+\/)?backends\/triton_ascend\/|^\.github\/workflows\/ascend-|^pyproject\.toml$|^fla\/backends\.py$|^fla\/utils\/|^fla\/modules\/|^tests\/conftest\.py$/;
+            const npuPattern = /^fla\/(.+\/)?backends\/triton_ascend(\/|\.py$)|^\.github\/workflows\/ascend-|^pyproject\.toml$|^fla\/backends\.py$|^fla\/utils\/|^fla\/modules\/|^tests\/modules\/|^tests\/conftest\.py$|^scripts\/find_dependent_tests\.py$/;
             const graphPaths = new Set([
               'tests/ops/kda_graph.py',
               'tests/ops/test_kda_graph.py',
@@ -65,7 +97,8 @@ jobs:
     name: Test A2 NPU (PyTorch 2.10.0)
     needs: changes
     if: |
-      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'workflow_dispatch' && !inputs.agent_mode ||
+      (github.event_name == 'schedule' && github.ref == 'refs/heads/main') ||
       (
         github.event_name == 'pull_request' &&
         (
@@ -87,7 +120,7 @@ jobs:
 
     runs-on: ${{ matrix.os }}
 
-    timeout-minutes: 150
+    timeout-minutes: 180
 
     concurrency:
       group: ${{ github.workflow }}-${{ github.ref }}-${{ matrix.os }}-${{ matrix.python }}
@@ -103,17 +136,31 @@ jobs:
     env:
       FLA_CI_ENV: 1
       ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3,4,5,6,7"
+      TRITON_CACHE_DIR: ${{ github.workspace }}/.triton-a2-tests-cache
 
     steps:
       - name: Checkout
         uses: actions/checkout@v7.0.0
 
+      - name: Restore A2 pytest Triton-Ascend kernel cache
+        id: triton-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.TRITON_CACHE_DIR }}
+          key: >-
+            triton-a2-tests-${{ runner.os }}-${{ matrix.os }}-python-${{ matrix.python }}-cann-9.1.0-torch-2.10.0-torch-npu-2.10.0.post7-triton-ascend-3.6.0-${{ github.sha }}
+          restore-keys: |
+            triton-a2-tests-${{ runner.os }}-${{ matrix.os }}-python-${{ matrix.python }}-cann-9.1.0-torch-2.10.0-torch-npu-2.10.0.post7-triton-ascend-3.6.0-
+
       - name: Check NPU and CANN info
+        # prefix restores may lack kernels introduced by newer main commits.
+        if: github.event_name != 'schedule' || steps.triton-cache.outputs.cache-hit != 'true'
         run: |
           cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -m)"-linux/ascend_toolkit_install.info
           npu-smi info
 
       - name: Install dependencies
+        if: github.event_name != 'schedule' || steps.triton-cache.outputs.cache-hit != 'true'
         run: |
           python -m pip install -U pip setuptools wheel
           # triton-ascend runtime/build deps; install before resolving [npu] extra
@@ -124,6 +171,7 @@ jobs:
             --extra-index-url=https://triton-ascend.osinfra.cn/pypi/simple
 
       - name: Verify environment
+        if: github.event_name != 'schedule' || steps.triton-cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
           source /usr/local/Ascend/ascend-toolkit/set_env.sh
@@ -143,15 +191,32 @@ jobs:
           assert IS_NPU, "Expected NPU backend (IS_NPU=True)"
           PY
 
-      - name: Run benchmark unit tests, modules, ops/utils, gdn, gdn2, kda, gla, attnres, solve_tril, delta, pgdn
+      - name: Run benchmark unit tests, modules, ops/utils, gdn, gdn2, kda, gla, attnres, solve_tril, delta, pgdn, precond_kda, ttt, simple_gla, kda_graph
+        id: pytest
+        if: github.event_name != 'schedule' || steps.triton-cache.outputs.cache-hit != 'true'
         shell: bash
         env:
           FLA_NPU_XDIST: "1"
+          EVENT_NAME: ${{ github.event_name }}
+          CHANGED_FILES: ${{ needs.changes.outputs.changed_files }}
+          ALL_MODULES: ${{ needs.changes.outputs.all_modules }}
         run: |
           source /usr/local/Ascend/ascend-toolkit/set_env.sh
+          module_tests=(tests/modules)
+          if [[ "$EVENT_NAME" == "pull_request" && "$ALL_MODULES" != "true" ]]; then
+            dependent_tests=$(TEST_SCOPE=EXCLUDE_MODELS python scripts/find_dependent_tests.py "$CHANGED_FILES")
+            read -r -a candidates <<< "$dependent_tests"
+            module_tests=()
+            for path in "${candidates[@]}"; do
+              if [[ "$path" == "$PWD/tests/modules/"* ]]; then
+                module_tests+=("$path")
+              fi
+            done
+          fi
+          printf 'Selected module tests: %s\n' "${module_tests[*]}"
           pytest -s -v --exitfirst -n 8 --dist load \
             tests/benchmarks \
-            tests/modules \
+            "${module_tests[@]}" \
             tests/ops/test_backends.py \
             tests/test_dispatch.py \
             tests/test_public_api.py \
@@ -167,13 +232,69 @@ jobs:
             tests/ops/test_solve_tril.py \
             tests/ops/test_delta.py \
             tests/ops/test_precond_gated_delta.py \
-            tests/ops/test_wall_attn.py
+            tests/ops/test_wall_attn.py \
+            tests/ops/test_precond_kda.py \
+            tests/ops/test_ttt.py \
+            tests/ops/test_simple_gla.py::test_simple_gla_ascend_verifier \
+            tests/ops/test_simple_gla.py::test_retention_ascend_registration_import_order \
+            tests/ops/test_kda_graph.py
 
-      - name: Run NPU graph tests serially
+      # Phases run in order. Each pytest in a phase sees a disjoint device set.
+      - name: Run CP tests on disjoint device groups
+        id: pytest-cp
+        if: github.event_name != 'schedule' || steps.triton-cache.outputs.cache-hit != 'true'
         shell: bash
         env:
-          ASCEND_RT_VISIBLE_DEVICES: "0"
           FLA_NPU_XDIST: "0"
+          PYTHONUNBUFFERED: "1"
         run: |
           source /usr/local/Ascend/ascend-toolkit/set_env.sh
-          pytest -s -v --exitfirst tests/ops/test_kda_graph.py
+          phase() {
+            local selector=$1 status=0 pid lane devices
+            shift
+            local pids=()
+            for lane in "$@"; do
+              devices=${lane%%:*}
+              ASCEND_RT_VISIBLE_DEVICES=$devices pytest -s -v --exitfirst -k "$selector" ${lane#*:} &
+              pids+=("$!")
+            done
+            for pid in "${pids[@]}"; do
+              wait "$pid" || status=$?
+            done
+            (( status == 0 )) || exit "$status"
+          }
+          phase 'not (cp4 or cp8)' \
+            0,1:tests/cp/test_dplr.py \
+            '2,3:tests/cp/test_gdn.py tests/cp/test_token_shift.py tests/cp/test_state.py' \
+            '4,5:tests/cp/test_kda.py tests/cp/test_conv.py' \
+            '6,7:tests/cp/test_gdp.py tests/cp/test_intracard.py tests/cp/test_context.py tests/cp/test_graph.py tests/cp/test_gdn2.py'
+          phase cp4 \
+            '0,1,2,3:tests/cp/test_kda.py tests/cp/test_conv.py' \
+            '4,5,6,7:tests/cp/test_dplr.py tests/cp/test_gdn.py tests/cp/test_token_shift.py tests/cp/test_gdn2.py'
+          phase cp8 '0,1,2,3,4,5,6,7:tests/cp/test_gdn.py tests/cp/test_kda.py tests/cp/test_gdn2.py'
+
+      - name: Save A2 pytest Triton-Ascend kernel cache
+        if: |
+          steps.pytest.outcome == 'success' &&
+          steps.pytest-cp.outcome == 'success' &&
+          steps.triton-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.TRITON_CACHE_DIR }}
+          key: ${{ steps.triton-cache.outputs.cache-primary-key }}
+
+  agent-a2:
+    if: github.event_name == 'workflow_dispatch' && inputs.agent_mode
+    permissions:
+      contents: read
+      pull-requests: read
+    uses: ./.github/workflows/agent-ascend-a2-tests.yml
+    with:
+      pr_number: ${{ inputs.pr_number }}
+      attempt_id: ${{ inputs.attempt_id }}
+      base_sha: ${{ inputs.base_sha }}
+      head_sha: ${{ inputs.head_sha }}
+      suite: ${{ inputs.suite }}
+      targets: ${{ inputs.targets }}
+      dispatch: ${{ inputs.dispatch }}
+      source_ref: ${{ inputs.source_ref }}

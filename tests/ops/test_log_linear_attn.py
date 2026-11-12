@@ -115,6 +115,8 @@ def test_chunk_initial_state(varlen: bool, G: int, H: int):
             (2, 512, 1, 8, 64, torch.float32, 1.0),
             (2, 1024, 1, 8, 128, torch.float32, 1.0),
             (2050, 1, 2, 32, 64, torch.float32, 1.0),
+            (1, 64, 2, 4, 64, torch.bfloat16, 1.0),
+            (1, 65, 2, 4, 64, torch.float16, 1.0),
             (2, 70, 2, 4, 64, torch.float32, None),
             (1, 130, 4, 4, 128, torch.float32, 0.37),
             (1, 63, 2, 4, 64, torch.float32, 1.0),
@@ -154,7 +156,7 @@ def test_chunk_bwd(
     tri_dq, tri_dk, tri_dv, tri_dg, tri_dl = q.grad, k.grad, v.grad, g.grad, level_scales.grad
     q.grad = k.grad = v.grad = g.grad = level_scales.grad = None
 
-    ref = naive_log_linear_attn(q, k, v, g, level_scales, scale=scale)
+    ref = naive_log_linear_attn(q.float(), k.float(), v.float(), g, level_scales.float(), scale=scale)
     (ref * do).sum().backward()
     ref_dq, ref_dk, ref_dv, ref_dg, ref_dl = q.grad, k.grad, v.grad, g.grad, level_scales.grad
 

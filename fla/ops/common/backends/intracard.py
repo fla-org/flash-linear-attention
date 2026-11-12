@@ -20,12 +20,13 @@ import os
 import torch
 
 from fla.backends import BaseBackend, register
+from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_fwd_h
 
 # limit merge-chain depth to control precision loss
 MAX_SUBSEQS = int(os.environ.get('FLA_INTRACARD_MAX_SPLITS', 32))
 
 
-@register('common')
+@register(chunk_gated_delta_rule_fwd_h)
 class IntraCardCPBackend(BaseBackend):
     """Intra-card context parallel backend for chunk_gated_delta_rule_fwd_h."""
 

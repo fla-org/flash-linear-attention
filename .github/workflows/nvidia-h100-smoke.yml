@@ -1,24 +1,17 @@
 name: nvidia-h100-smoke
 
-# Fast feedback tier: on every PR/main push, run the PR's dependent test files,
-# but only smoke-marked tests under tests/ops (small non-ops suites run in full,
-# tests/models excluded). The approval-gated full pipeline lives in nvidia-h100.yml.
+# Manual smoke pipeline. Agent-selected tests use agent-h100-tests.yml;
+# the manual full pipeline lives in nvidia-h100.yml.
 
 concurrency:
   group: smoke-ci-${{ github.event.pull_request.number || github.ref }}
-  # New pushes cancel only smoke; never the approval-triggered full pipeline.
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
 
 on:
-  pull_request:
-    branches: [ '*' ]
-    types: [opened, synchronize, reopened]
-  push:
-    branches:
-      - main
+  workflow_dispatch:
 
 jobs:
   smoke:
@@ -43,7 +36,7 @@ jobs:
               const files = await github.paginate(github.rest.pulls.listFiles, {
                 owner, repo, pull_number: context.payload.pull_request.number, per_page: 100,
               });
-              const npuSafe = /^fla\/(.+\/)?backends\/triton_ascend\/(?!.*__init__\.py$)|^\.github\/workflows\/ascend-|^\.agents\/skills\/fla-ascend-performance\//;
+              const npuSafe = /^fla\/(.+\/)?backends\/triton_ascend(\/(?!.*__init__\.py$)|\.py$)|^\.github\/workflows\/ascend-|^\.agents\/skills\/fla-ascend-performance\//;
               const names = files.map(f => f.filename);
               skip = names.length > 0 && names.every(n => npuSafe.test(n));
             }
@@ -74,6 +67,13 @@ jobs:
           echo "Found dependent test files: $TEST_FILES"
           echo "test_files=$TEST_FILES" >> $GITHUB_OUTPUT
 
+      - name: Fail on empty dependent test selection
+        if: steps.find-tests.outputs.test_files == '' && steps.setup.outputs.skip_tests == 'false'
+        shell: bash
+        run: |
+          echo "::error::No dependent tests were selected for this smoke run"
+          exit 1
+
       - name: Run tests (smoke-marked ops subset, full other suites)
         if: steps.find-tests.outputs.test_files
         shell: bash
@@ -82,15 +82,23 @@ jobs:
           # find_dependent_tests.py prints absolute paths; match */tests/ops/*.
           # pytest exit 5 = no smoke-marked tests collected in this file, skip.
           rc=0
+          executed=0
           for f in ${{ steps.find-tests.outputs.test_files }}; do
             case "$f" in
               */tests/ops/*)
                 $CONDA_BIN_PATH/pytest -s -v --exitfirst -m smoke "$f" || rc=$?
+                if [ "$rc" -eq 0 ]; then executed=1; fi
                 if [ "$rc" -ne 0 ] && [ "$rc" -ne 5 ]; then exit 1; fi
                 rc=0 ;;
-              *) $CONDA_BIN_PATH/pytest -s -v --exitfirst "$f" || exit 1 ;;
+              *)
+                $CONDA_BIN_PATH/pytest -s -v --exitfirst "$f" || exit 1
+                executed=1 ;;
             esac
           done
+          if [ "$executed" -eq 0 ]; then
+            echo "::error::No tests were executed in this smoke run"
+            exit 1
+          fi
 
       # Shared self-hosted disk: trim caches only under pressure, keep them warm otherwise.
       - name: Trim caches under disk pressure

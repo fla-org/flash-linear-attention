@@ -185,6 +185,51 @@ def get_max_num_splits(
     return triton.cdiv(int(prepare_lens(cu_seqlens).max()), chunk_size)
 
 
+@tensor_cache
+def ensure_cu_seqlens_cpu(
+    cu_seqlens: torch.LongTensor | None,
+    cu_seqlens_cpu: torch.LongTensor | None = None,
+) -> torch.LongTensor | None:
+    """Prefer a CPU copy so host-side tail-chunk checks do not sync the device tensor."""
+    if cu_seqlens is None:
+        return None
+    if cu_seqlens_cpu is not None:
+        return cu_seqlens_cpu
+    if cu_seqlens.device.type == "cpu":
+        return cu_seqlens
+    return cu_seqlens.cpu()
+
+
+@tensor_cache
+def partition_chunk_indices_full_tail(
+    chunk_indices: torch.LongTensor,
+    cu_seqlens_cpu: torch.LongTensor,
+    chunk_size: int,
+) -> tuple[torch.LongTensor | None, torch.LongTensor | None]:
+    """Build full/tail chunk indices from host metadata without reading device indices."""
+    lens = cu_seqlens_cpu[1:] - cu_seqlens_cpu[:-1]
+    full: list[int] = []
+    tail: list[int] = []
+    for i_n, length in enumerate(lens.tolist()):
+        for i_t in range(triton.cdiv(length, chunk_size)):
+            pair = (i_n, i_t)
+            if length - i_t * chunk_size >= chunk_size:
+                full.extend(pair)
+            else:
+                tail.extend(pair)
+    expected = (len(full) + len(tail)) // 2
+    available = chunk_indices.numel() // 2
+    if available < expected:
+        raise ValueError(
+            f"chunk_indices must contain the complete packed chunk schedule: "
+            f"expected at least {expected} pairs, got {available}"
+        )
+    dev, dtype = chunk_indices.device, chunk_indices.dtype
+    full_t = torch.tensor(full, device=dev, dtype=dtype).reshape(-1, 2) if full else None
+    tail_t = torch.tensor(tail, device=dev, dtype=dtype).reshape(-1, 2) if tail else None
+    return full_t, tail_t
+
+
 def prepare_chunk_indices_static(
     cu_seqlens: torch.LongTensor,
     chunk_size: int,
