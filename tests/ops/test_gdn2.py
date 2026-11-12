@@ -17,6 +17,7 @@ import torch.nn.functional as F
 from fla import backends
 from fla.ops.gdn2 import chunk_gdn2, fused_recurrent_gdn2, naive_recurrent_gdn2
 from fla.ops.gdn2.fused_recurrent import fused_recurrent_gdn2_fwd
+from fla.ops.gdn2.gate import gdn2_raw_gate
 from fla.ops.kda.gate import naive_kda_gate, naive_kda_lowerbound_gate
 from fla.utils import IS_AMD, IS_NPU, IS_NVIDIA, assert_close, device, device_platform
 
@@ -610,6 +611,84 @@ def test_chunk_large_decay_recurrence(dtype, K, V, gate_dtype, spike, use_gate_i
             assert torch.isfinite(actual).all(), name
             assert_close(name, expected.float(), actual.float(), tolerance)
         assert torch.isfinite(tri).all() and torch.isfinite(tri_ht).all()
+
+
+def _large_decay_pattern(pattern, shape):
+    g = torch.full(shape, -0.02, device=device)
+    t = torch.arange(shape[1], device=device)
+    if pattern == 'steady':
+        g[:] = -6.
+    elif pattern == 'two-spikes':
+        g[:, (t % 16 == 3) | (t % 16 == 11), :, ::2] = -150.
+    elif pattern == 'mixed-channels':
+        g[..., 0], g[..., 1] = -1e4, -50.
+    elif pattern == 'all-channels':
+        g[:] = -12.
+    elif pattern == 'alternating':
+        g[:, (t // 32) % 2 == 1] = -12.
+    return g
+
+
+@pytest.mark.skipif(not (IS_NVIDIA or IS_AMD or IS_NPU), reason="CUDA/ROCm or Ascend NPU required")
+@pytest.mark.parametrize('pattern', ['steady', 'two-spikes', 'mixed-channels', 'all-channels', 'alternating'])
+@pytest.mark.parametrize('varlen', [False, True], ids=['dense', 'varlen'])
+def test_chunk_large_decay_patterns(pattern, varlen):
+    """Sustained and repeated steep gates match the token recurrence, including a one-token sequence."""
+    dtype, K, V = torch.bfloat16, 64, 32
+    B, T, H = (1, 161, 2) if varlen else (2, 130, 2)
+    q, k, v, _, b, w, _, _ = _rand_inputs(B, T, H, H, K, V, dtype)
+    q, k = F.normalize(q.float(), dim=-1).to(dtype), F.normalize(k.float(), dim=-1).to(dtype)
+    g = _large_decay_pattern(pattern, (B, T, H, K))
+    offsets = [0, 17, 82, 83, T] if varlen else [0, T]
+    cu = torch.tensor(offsets, dtype=torch.int32, device=device) if varlen else None
+    h0 = torch.randn(len(offsets) - 1 if varlen else B, H, K, V, device=device)
+    leaves = [q, k, v, g, b, w, h0]
+    for x in leaves:
+        x.requires_grad_()
+    refs, states = [], []
+    for n, (start, end) in enumerate(zip(offsets, offsets[1:])):
+        ref, state = naive_recurrent_gdn2(
+            q=q[:, start:end],
+            k=k[:, start:end],
+            v=v[:, start:end],
+            g=g[:, start:end],
+            b=b[:, start:end],
+            w=w[:, start:end],
+            initial_state=h0[n:n + 1] if varlen else h0,
+            output_final_state=True,
+        )
+        refs.append(ref)
+        states.append(state)
+    ref, ref_ht = torch.cat(refs, dim=1), torch.cat(states, dim=0)
+    do, dht = torch.randn_like(v), torch.randn_like(h0)
+    ref_grads = torch.autograd.grad((ref * do).sum() + (ref_ht * dht).sum(), leaves)
+    tri, tri_ht = chunk_gdn2(q=q, k=k, v=v, g=g, b=b, w=w, initial_state=h0, output_final_state=True, cu_seqlens=cu)
+    tri_grads = torch.autograd.grad((tri * do).sum() + (tri_ht * dht).sum(), leaves)
+    assert_close('o', ref, tri, 0.005)
+    assert_close('ht', ref_ht, tri_ht, 0.005)
+    for name, expected, actual, tolerance in zip(
+        ('dq', 'dk', 'dv', 'dg', 'db', 'dw', 'dh0'), ref_grads, tri_grads, (0.01, 0.01, 0.01, 0.02, 0.02, 0.02, 0.01),
+    ):
+        assert torch.isfinite(actual).all(), name
+        assert_close(name, expected.float(), actual.float(), tolerance)
+
+
+@pytest.mark.parametrize(('safe_gate', 'use_gate_in_kernel', 'lower_bound', 'raw'), [
+    pytest.param(True, True, -5., False, id='safe-gate'),
+    pytest.param(False, False, None, True, id='log-gates'),
+    pytest.param(False, True, None, True, id='unbounded-activation'),
+    pytest.param(False, True, -5., False, id='bounded-activation'),
+    pytest.param(False, True, -1e8, True, id='wide-bounded-activation'),
+])
+def test_large_decay_gate_selection(safe_gate, use_gate_in_kernel, lower_bound, raw, monkeypatch):
+    """Only gates that can exceed the FP32 prefix range take the local-log path."""
+    from fla.ops.gdn2 import gate
+
+    activated = object()
+    monkeypatch.setattr(gate, 'kda_gate_fwd', lambda **kwargs: activated)
+    g = object()
+    g_raw = gdn2_raw_gate(g, None, None, lower_bound, use_gate_in_kernel, safe_gate, 64)
+    assert g_raw is ((activated if use_gate_in_kernel else g) if raw else None)
 
 
 @pytest.mark.skipif(not (IS_NVIDIA or IS_AMD or IS_NPU), reason="CUDA/ROCm or Ascend NPU required")
