@@ -42,6 +42,10 @@ def _run_worker(rank, world_size, init_method, backend, worker, kwargs, destroy_
     logging.basicConfig(level=logging.INFO, format='%(message)s')
     os.environ.update(RANK=str(rank), LOCAL_RANK=str(rank), WORLD_SIZE=str(world_size))
     device_torch_lib.set_device(rank)
+    # 910B3's barrier is a socket AllReduce. Its default 120s connect limit expires while
+    # rank 0 is still compiling the reference. 910_93 uses SIO and does not need this.
+    if backend == 'hccl' and '910B3' in device_torch_lib.get_device_name(rank):
+        os.environ.setdefault('HCCL_CONNECT_TIMEOUT', '600')
     try:
         dist.init_process_group(
             backend=backend,

@@ -13,6 +13,8 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.backends import TritonAscendBackend, register
+from fla.ops.gated_delta_rule.gate import gdn_gate_bwd, gdn_gate_chunk_cumsum, gdn_gate_fwd
 from fla.ops.utils.index import prepare_chunk_indices
 from fla.ops.utils.op import exp
 from fla.ops.utils.softplus import softplus
@@ -23,35 +25,153 @@ from fla.utils.ascend_ub_manager import (
     max_grid_axis_chunks,
 )
 
-_NUM_WARPS = 4
+NUM_WARPS = 4
 # Peak live fp32 vectors: input + output (+ bias path).
-_GATE_FWD_MEM_MULT = 3.0
-_GATE_BWD_MEM_MULT = 5.0
-_SAFETY_MARGIN = 0.85
-_FALLBACK_BT = 32
-_FALLBACK_BT_FWD = 64
+GATE_FWD_MEM_MULT = 3.0
+GATE_BWD_MEM_MULT = 5.0
+SAFETY_MARGIN = 0.85
+FALLBACK_BT = 32
+FALLBACK_BT_FWD = 64
 
 
-def _get_gate_fwd_bt(T: int) -> int:
+def get_gate_fwd_bt(T: int) -> int:
     return compute_ub_block_size(
         T,
-        _GATE_FWD_MEM_MULT,
-        safety_margin=_SAFETY_MARGIN,
+        GATE_FWD_MEM_MULT,
+        safety_margin=SAFETY_MARGIN,
         dtype_size=4,
-        fallback=_FALLBACK_BT_FWD,
-        desired=min(triton.next_power_of_2(T), _FALLBACK_BT_FWD),
+        fallback=FALLBACK_BT_FWD,
+        desired=min(triton.next_power_of_2(T), FALLBACK_BT_FWD),
     )
 
 
-def _get_gate_bwd_bt(T: int) -> int:
+def get_gate_bwd_bt(T: int) -> int:
     return compute_ub_block_size(
         T,
-        _GATE_BWD_MEM_MULT,
-        safety_margin=_SAFETY_MARGIN,
+        GATE_BWD_MEM_MULT,
+        safety_margin=SAFETY_MARGIN,
         dtype_size=4,
-        fallback=_FALLBACK_BT,
-        desired=min(triton.next_power_of_2(T), _FALLBACK_BT),
+        fallback=FALLBACK_BT,
+        desired=min(triton.next_power_of_2(T), FALLBACK_BT),
     )
+
+
+def launch_gate_fwd(
+    *,
+    g: torch.Tensor,
+    A_log: torch.Tensor,
+    dt_bias: torch.Tensor | None,
+    yg: torch.Tensor,
+    T: int,
+    H: int,
+    BT: int,
+) -> None:
+    NT = triton.cdiv(T, BT)
+    kernel_kwargs = dict(
+        g=g,
+        A_log=A_log,
+        dt_bias=dt_bias,
+        yg=yg,
+        T=T,
+        H=H,
+        BT=BT,
+        num_warps=NUM_WARPS,
+    )
+    max_nt = max_grid_axis_chunks(NT, H, max_grid=ASCEND_MAX_GRID_DIM)
+    for nt_off in range(0, NT, max_nt):
+        nt_len = min(max_nt, NT - nt_off)
+        max_h = max_grid_axis_chunks(H, nt_len, max_grid=ASCEND_MAX_GRID_DIM)
+        for h_off in range(0, H, max_h):
+            h_len = min(max_h, H - h_off)
+            gdn_gate_fwd_kernel_npu[(nt_len, h_len)](
+                **kernel_kwargs,
+                NT_OFFSET=nt_off,
+                H_OFFSET=h_off,
+            )
+
+
+def launch_gate_chunk_cumsum(
+    *,
+    g: torch.Tensor,
+    A_log: torch.Tensor,
+    dt_bias: torch.Tensor | None,
+    o: torch.Tensor,
+    scale: float | None,
+    cu_seqlens: torch.LongTensor | None,
+    chunk_indices: torch.LongTensor | None,
+    T: int,
+    B: int,
+    H: int,
+    BT: int,
+    NT: int,
+    reverse: bool,
+) -> None:
+    bh_total = B * H
+    kernel_kwargs = dict(
+        g=g,
+        A_log=A_log,
+        dt_bias=dt_bias,
+        o=o,
+        scale=scale,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        T=T,
+        H=H,
+        BT=BT,
+        REVERSE=reverse,
+        num_warps=NUM_WARPS,
+    )
+    max_nt = max_grid_axis_chunks(NT, bh_total, max_grid=ASCEND_MAX_GRID_DIM)
+    for nt_off in range(0, NT, max_nt):
+        nt_len = min(max_nt, NT - nt_off)
+        max_bh = max_grid_axis_chunks(bh_total, nt_len, max_grid=ASCEND_MAX_GRID_DIM)
+        for bh_off in range(0, bh_total, max_bh):
+            bh_len = min(max_bh, bh_total - bh_off)
+            gdn_gate_chunk_cumsum_scalar_kernel_npu[(nt_len, bh_len)](
+                **kernel_kwargs,
+                NT_OFFSET=nt_off,
+                BH_OFFSET=bh_off,
+            )
+
+
+def launch_gate_bwd(
+    *,
+    g: torch.Tensor,
+    A_log: torch.Tensor,
+    dt_bias: torch.Tensor | None,
+    dyg: torch.Tensor,
+    dg: torch.Tensor,
+    dA: torch.Tensor,
+    dbias: torch.Tensor | None,
+    T: int,
+    H: int,
+    BT: int,
+) -> None:
+    NT = triton.cdiv(T, BT)
+    kernel_kwargs = dict(
+        g=g,
+        A_log=A_log,
+        dt_bias=dt_bias,
+        dyg=dyg,
+        dg=dg,
+        dA=dA,
+        dbias=dbias,
+        T=T,
+        H=H,
+        BT=BT,
+        num_warps=NUM_WARPS,
+    )
+    max_nt = max_grid_axis_chunks(NT, H, max_grid=ASCEND_MAX_GRID_DIM)
+    for nt_off in range(0, NT, max_nt):
+        nt_len = min(max_nt, NT - nt_off)
+        max_h = max_grid_axis_chunks(H, nt_len, max_grid=ASCEND_MAX_GRID_DIM)
+        for h_off in range(0, H, max_h):
+            h_len = min(max_h, H - h_off)
+            gdn_gate_bwd_kernel_npu[(nt_len, h_len)](
+                **kernel_kwargs,
+                NT_OFFSET=nt_off,
+                H_OFFSET=h_off,
+            )
 
 
 @triton.heuristics({
@@ -75,47 +195,15 @@ def gdn_gate_fwd_kernel_npu(
 
     b_A = tl.load(A_log + i_h).to(tl.float32)
 
-    p_g = tl.make_block_ptr(g + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
-    p_yg = tl.make_block_ptr(yg + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
-    b_g = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
+    o_t = tl.cast(i_t, tl.int64) * BT + tl.arange(0, BT)
+    m_t = (o_t >= 0) & (o_t < T)
+    p_g = g + i_h + o_t * H
+    p_yg = yg + i_h + o_t * H
+    b_g = tl.load(p_g, mask=m_t, other=0).to(tl.float32)
     if HAS_BIAS:
         b_g = b_g + tl.load(dt_bias + i_h).to(tl.float32)
     b_yg = -exp(b_A) * softplus(b_g)
-    tl.store(p_yg, b_yg.to(p_yg.dtype.element_ty), boundary_check=(0,))
-
-
-def _launch_gate_fwd(
-    *,
-    g: torch.Tensor,
-    A_log: torch.Tensor,
-    dt_bias: torch.Tensor | None,
-    yg: torch.Tensor,
-    T: int,
-    H: int,
-    BT: int,
-) -> None:
-    NT = triton.cdiv(T, BT)
-    kernel_kwargs = dict(
-        g=g,
-        A_log=A_log,
-        dt_bias=dt_bias,
-        yg=yg,
-        T=T,
-        H=H,
-        BT=BT,
-        num_warps=_NUM_WARPS,
-    )
-    max_nt = max_grid_axis_chunks(NT, H, max_grid=ASCEND_MAX_GRID_DIM)
-    for nt_off in range(0, NT, max_nt):
-        nt_len = min(max_nt, NT - nt_off)
-        max_h = max_grid_axis_chunks(H, nt_len, max_grid=ASCEND_MAX_GRID_DIM)
-        for h_off in range(0, H, max_h):
-            h_len = min(max_h, H - h_off)
-            gdn_gate_fwd_kernel_npu[(nt_len, h_len)](
-                **kernel_kwargs,
-                NT_OFFSET=nt_off,
-                H_OFFSET=h_off,
-            )
+    tl.store(p_yg, b_yg.to(p_yg.dtype.element_ty), mask=m_t)
 
 
 @triton.heuristics({
@@ -154,10 +242,12 @@ def gdn_gate_chunk_cumsum_scalar_kernel_npu(
         bos = tl.cast(i_b, tl.int64) * T
         eos = bos + T
 
-    p_g = tl.make_block_ptr(g + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
-    p_o = tl.make_block_ptr(o + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
+    o_t = tl.cast(i_t, tl.int64) * BT + tl.arange(0, BT)
+    m_t = (o_t >= 0) & (o_t < T)
+    p_g = g + bos * H + i_h + o_t * H
+    p_o = o + bos * H + i_h + o_t * H
 
-    b_g = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
+    b_g = tl.load(p_g, mask=m_t, other=0).to(tl.float32)
     if HAS_BIAS:
         b_g = b_g + tl.load(dt_bias + i_h).to(tl.float32)
     b_A = tl.load(A_log + i_h).to(tl.float32)
@@ -169,7 +259,7 @@ def gdn_gate_chunk_cumsum_scalar_kernel_npu(
         b_o = -b_o + b_z[None] + b_gate
     if HAS_SCALE:
         b_o *= scale
-    tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0,))
+    tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=m_t)
 
 
 def _launch_gate_chunk_cumsum(
@@ -201,7 +291,6 @@ def _launch_gate_chunk_cumsum(
         H=H,
         BT=BT,
         REVERSE=reverse,
-        num_warps=_NUM_WARPS,
     )
     max_nt = max_grid_axis_chunks(NT, bh_total, max_grid=ASCEND_MAX_GRID_DIM)
     for nt_off in range(0, NT, max_nt):
@@ -235,20 +324,20 @@ def gdn_gate_bwd_kernel_npu(
     NT_OFFSET: tl.constexpr,
     H_OFFSET: tl.constexpr,
 ):
-    i_t, i_h = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
+    i_t, i_h = tl.cast(tl.program_id(0), tl.int64), tl.cast(tl.program_id(1), tl.int64)
     i_t += NT_OFFSET
     i_h += H_OFFSET
 
     b_A = tl.load(A_log + i_h).to(tl.float32)
 
-    o_t = i_t * BT + tl.arange(0, BT)
-    m_t = o_t < T
+    o_t = tl.cast(i_t, tl.int64) * BT + tl.arange(0, BT)
+    m_t = (o_t >= 0) & (o_t < T)
     p_g = g + i_h + o_t * H
     p_dg = dg + i_h + o_t * H
     p_dyg = dyg + i_h + o_t * H
 
-    b_g = tl.load(p_g, mask=m_t, other=0.0).to(tl.float32)
-    b_dyg = tl.load(p_dyg, mask=m_t, other=0.0).to(tl.float32)
+    b_g = tl.load(p_g, mask=m_t, other=0).to(tl.float32)
+    b_dyg = tl.load(p_dyg, mask=m_t, other=0).to(tl.float32)
 
     if HAS_BIAS:
         b_g = b_g + tl.load(dt_bias + i_h).to(tl.float32)
@@ -290,7 +379,6 @@ def _launch_gate_bwd(
         T=T,
         H=H,
         BT=BT,
-        num_warps=_NUM_WARPS,
     )
     max_nt = max_grid_axis_chunks(NT, H, max_grid=ASCEND_MAX_GRID_DIM)
     for nt_off in range(0, NT, max_nt):
@@ -305,21 +393,7 @@ def _launch_gate_bwd(
             )
 
 
-@input_guard
-def gdn_gate_fwd_npu(
-    g: torch.Tensor,
-    A_log: torch.Tensor,
-    dt_bias: torch.Tensor | None = None,
-    output_dtype: torch.dtype = torch.float32,
-) -> torch.Tensor:
-    H = g.shape[-1]
-    T = g.numel() // H
-    BT = _get_gate_fwd_bt(T)
-    yg = torch.empty_like(g, dtype=output_dtype)
-    _launch_gate_fwd(g=g, A_log=A_log, dt_bias=dt_bias, yg=yg, T=T, H=H, BT=BT)
-    return yg
-
-
+@register(gdn_gate_chunk_cumsum, backend=TritonAscendBackend)
 @input_guard
 def gdn_gate_chunk_cumsum_npu(
     g: torch.Tensor,
@@ -338,7 +412,7 @@ def gdn_gate_chunk_cumsum_npu(
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     o = torch.empty_like(g, dtype=output_dtype or g.dtype)
-    _launch_gate_chunk_cumsum(
+    launch_gate_chunk_cumsum(
         g=g,
         A_log=A_log,
         dt_bias=dt_bias,
@@ -356,6 +430,7 @@ def gdn_gate_chunk_cumsum_npu(
     return o
 
 
+@register(gdn_gate_bwd, backend=TritonAscendBackend)
 def gdn_gate_bwd_npu(
     g: torch.Tensor,
     A_log: torch.Tensor,
@@ -364,14 +439,14 @@ def gdn_gate_bwd_npu(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     H = g.shape[-1]
     T = g.numel() // H
-    BT = _get_gate_bwd_bt(T)
+    BT = get_gate_bwd_bt(T)
     NT = triton.cdiv(T, BT)
 
     dg = torch.empty_like(g)
     dA = A_log.new_empty(NT, H, dtype=torch.float32)
     dbias = g.new_empty(NT, H, dtype=torch.float32) if dt_bias is not None else None
 
-    _launch_gate_bwd(
+    launch_gate_bwd(
         g=g,
         A_log=A_log,
         dt_bias=dt_bias,
@@ -388,3 +463,19 @@ def gdn_gate_bwd_npu(
     dbias = dbias.sum(0).to(dt_bias) if dt_bias is not None else None
 
     return dg, dA, dbias
+
+
+@register(gdn_gate_fwd, backend=TritonAscendBackend)
+@input_guard
+def gdn_gate_fwd_npu(
+    g: torch.Tensor,
+    A_log: torch.Tensor,
+    dt_bias: torch.Tensor | None = None,
+    output_dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    H = g.shape[-1]
+    T = g.numel() // H
+    BT = get_gate_fwd_bt(T)
+    yg = torch.empty_like(g, dtype=output_dtype)
+    launch_gate_fwd(g=g, A_log=A_log, dt_bias=dt_bias, yg=yg, T=T, H=H, BT=BT)
+    return yg
