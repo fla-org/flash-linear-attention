@@ -60,6 +60,24 @@ def logaddexp(a, b):
     return maximum + tldevice.log1p(exp(difference))
 
 
+# algorithm reference: https://github.com/pytorch/ao/blob/a724e78/torchao/optim/quant_utils.py#L121
+@triton.jit
+def fp32_to_bf16_sr(x, rand):
+    """Round FP32 to BF16 using uniform low 16 bits of an int32 or uint32 random tensor.
+
+    Signed zeros and infinities are preserved, subnormals are rounded, and NaNs are quieted.
+    Overflow may produce infinity; the result is unbiased only between finite BF16 neighbors.
+    """
+    tl.static_assert(x.dtype == tl.float32, "x must be float32")
+    tl.static_assert(rand.dtype == tl.int32 or rand.dtype == tl.uint32, "rand must be int32 or uint32")
+    x = x.to(tl.uint32, bitcast=True)
+    rand = rand.to(tl.uint32) & 0xFFFF
+    y = (x >> 16) + (rand < (x & 0xFFFF)).to(tl.uint32)
+    # preserve NaNs whose payload is confined to the discarded bits.
+    y = tl.where((x & 0x7FFFFFFF) > 0x7F800000, (x >> 16) | 0x40, y)
+    return y.to(tl.uint16).to(tl.bfloat16, bitcast=True)
+
+
 if IS_NVIDIA_BLACKWELL:
     """
     Compute tl.dot with Blackwell workaround.
