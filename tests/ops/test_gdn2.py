@@ -17,7 +17,6 @@ import torch.nn.functional as F
 from fla import backends
 from fla.ops.gdn2 import chunk_gdn2, fused_recurrent_gdn2, naive_recurrent_gdn2
 from fla.ops.gdn2.fused_recurrent import fused_recurrent_gdn2_fwd
-from fla.ops.gdn2.gate import gdn2_raw_gate
 from fla.ops.kda.gate import naive_kda_gate, naive_kda_lowerbound_gate
 from fla.utils import IS_AMD, IS_NPU, IS_NVIDIA, assert_close, device, device_platform
 
@@ -396,23 +395,26 @@ def test_chunk_invalid_chunk_size(chunk_size):
 
 @pytest.mark.skipif(not (IS_NVIDIA or IS_AMD or IS_NPU), reason="CUDA/ROCm or Ascend NPU required")
 @pytest.mark.parametrize(
-    ("B", "T", "H", "K", "V", "scale", "use_qk_l2norm_in_kernel", "use_gate_in_kernel", "safe_gate", "dtype"),
+    ("B", "T", "H", "K", "V", "scale", "use_qk_l2norm_in_kernel", "use_gate_in_kernel", "safe_gate", "lower_bound",
+     "dtype"),
     [
-        pytest.param(*p, id="B{}-T{}-H{}-K{}-V{}-scale{}-l2norm{}-gate{}-safe{}-{}".format(*p))
+        pytest.param(*p, id="B{}-T{}-H{}-K{}-V{}-scale{}-l2norm{}-gate{}-safe{}-lb{}-{}".format(*p))
         for p in [
-            (1, 64, 2, 32, 32, 1.0, False, False, False, torch.float32),
-            (2, 256, 2, 64, 64, 0.5, True, False, False, torch.float32),
-            (2, 100, 3, 64, 64, 1.0, True, False, False, torch.float16),
-            (1, 64, 1, 128, 128, 1.0, True, False, False, torch.bfloat16),
-            (1, 64, 1, 256, 256, 1.0, True, False, False, torch.bfloat16),
-            (1, 65, 2, 48, 32, 1.0, True, False, False, torch.float16),
-            (1, 65, 2, 32, 48, 1.0, True, False, False, torch.float16),
-            (2, 256, 2, 64, 64, 1.0, True, True, False, torch.float32),
-            (1, 128, 2, 64, 64, 1.0, True, True, True, torch.float32),
+            (1, 64, 2, 32, 32, 1.0, False, False, False, None, torch.float32),
+            (2, 256, 2, 64, 64, 0.5, True, False, False, None, torch.float32),
+            (2, 100, 3, 64, 64, 1.0, True, False, False, None, torch.float16),
+            (1, 64, 1, 128, 128, 1.0, True, False, False, None, torch.bfloat16),
+            (1, 64, 1, 256, 256, 1.0, True, False, False, None, torch.bfloat16),
+            (1, 65, 2, 48, 32, 1.0, True, False, False, None, torch.float16),
+            (1, 65, 2, 32, 48, 1.0, True, False, False, None, torch.float16),
+            (2, 256, 2, 64, 64, 1.0, True, True, False, None, torch.float32),
+            (1, 128, 2, 64, 64, 1.0, True, True, True, -5.0, torch.float32),
+            # a bounded activation without safe_gate takes the local-log kernels
+            (2, 100, 2, 64, 64, 1.0, True, True, False, -5.0, torch.bfloat16),
         ]
     ] + [
         pytest.param(
-            1, 32768, 1, 32, 32, 1.0, True, False, False, torch.float16,
+            1, 32768, 1, 32, 32, 1.0, True, False, False, None, torch.float16,
             id='32k',
             marks=pytest.mark.skipif(
                 not IS_NPU,
@@ -421,10 +423,9 @@ def test_chunk_invalid_chunk_size(chunk_size):
         ),
     ],
 )
-def test_chunk(B, T, H, K, V, scale, use_qk_l2norm_in_kernel, use_gate_in_kernel, safe_gate, dtype):
+def test_chunk(B, T, H, K, V, scale, use_qk_l2norm_in_kernel, use_gate_in_kernel, safe_gate, lower_bound, dtype):
     """Forward + gradient comparison: chunk kernel vs autograd through the naive reference."""
     q, k, v, g, b, w, A_log, dt_bias = _rand_inputs(B, T, H, H, K, V, dtype, gate_in_kernel=use_gate_in_kernel)
-    lower_bound = -5.0 if safe_gate else None
     h0 = torch.randn(B, H, K, V, dtype=torch.float32, device=device)
 
     names = ["q", "k", "v", "g", "b", "w", "h0"] + (["A_log", "dt_bias"] if use_gate_in_kernel else [])
@@ -434,7 +435,7 @@ def test_chunk(B, T, H, K, V, scale, use_qk_l2norm_in_kernel, use_gate_in_kernel
     do = torch.randn_like(v)
     dht = torch.randn_like(h0)
 
-    g_ref = _activate_g(g, A_log, dt_bias, safe_gate, lower_bound) if use_gate_in_kernel else g
+    g_ref = _activate_g(g, A_log, dt_bias, lower_bound is not None, lower_bound) if use_gate_in_kernel else g
     qn = F.normalize(q.float(), p=2, dim=-1).to(dtype)
     kn = F.normalize(k.float(), p=2, dim=-1).to(dtype)
     ref, ref_ht = naive_recurrent_gdn2(
@@ -671,24 +672,6 @@ def test_chunk_large_decay_patterns(pattern, varlen):
     ):
         assert torch.isfinite(actual).all(), name
         assert_close(name, expected.float(), actual.float(), tolerance)
-
-
-@pytest.mark.parametrize(('safe_gate', 'use_gate_in_kernel', 'lower_bound', 'raw'), [
-    pytest.param(True, True, -5., False, id='safe-gate'),
-    pytest.param(False, False, None, True, id='log-gates'),
-    pytest.param(False, True, None, True, id='unbounded-activation'),
-    pytest.param(False, True, -5., False, id='bounded-activation'),
-    pytest.param(False, True, -1e8, True, id='wide-bounded-activation'),
-])
-def test_large_decay_gate_selection(safe_gate, use_gate_in_kernel, lower_bound, raw, monkeypatch):
-    """Only gates that can exceed the FP32 prefix range take the local-log path."""
-    from fla.ops.gdn2 import gate
-
-    activated = object()
-    monkeypatch.setattr(gate, 'kda_gate_fwd', lambda **kwargs: activated)
-    g = object()
-    g_raw = gdn2_raw_gate(g, None, None, lower_bound, use_gate_in_kernel, safe_gate, 64)
-    assert g_raw is ((activated if use_gate_in_kernel else g) if raw else None)
 
 
 @pytest.mark.skipif(not (IS_NVIDIA or IS_AMD or IS_NPU), reason="CUDA/ROCm or Ascend NPU required")

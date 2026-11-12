@@ -377,7 +377,7 @@ def chunk_gdn2_bwd(
     shape [B, T, H, K] (channel-wise erase gate); ``dw`` has shape [B, T, H, V]
     (channel-wise write gate).
     """
-    g_raw = gdn2_raw_gate(g_org, A_log, dt_bias, lower_bound, use_gate_in_kernel, safe_gate, chunk_size)
+    g_raw = gdn2_raw_gate(g_org, A_log, dt_bias, lower_bound, use_gate_in_kernel, safe_gate)
 
     if cp_context is not None:
         # If CP was used, the initial_state is guaranteed to have been populated in the fwd
