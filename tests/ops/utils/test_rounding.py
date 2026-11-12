@@ -10,7 +10,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.utils.rounding import convert_rs_bf16
+from fla.ops.utils.rounding import fp32_to_bf16_sr
 from fla.utils import device
 
 
@@ -22,7 +22,7 @@ def rounding_fwd_kernel(x, rand, y, N, seed, BLOCK_SIZE: tl.constexpr):
         random_bits = tl.randint(seed, offsets)
     else:
         random_bits = tl.load(rand + offsets, mask=offsets < N, other=0)
-    tl.store(y + offsets, convert_rs_bf16(x=values, rand=random_bits), mask=offsets < N)
+    tl.store(y + offsets, fp32_to_bf16_sr(x=values, rand=random_bits), mask=offsets < N)
 
 
 def _rounding(x: torch.Tensor, rand: torch.Tensor | None = None, seed: int = 42, block_size: int = 256) -> torch.Tensor:
@@ -35,7 +35,7 @@ def _rounding(x: torch.Tensor, rand: torch.Tensor | None = None, seed: int = 42,
 
 
 @pytest.mark.parametrize('N', [pytest.param(N, id=f'N{N}') for N in [1, 1025, 65537]])
-def test_convert_rs_bf16(N: int):
+def test_fp32_to_bf16_sr(N: int):
     torch.manual_seed(42)
     bits = torch.randint(0, 0x7F7F0001, (N,), dtype=torch.int64)
     bits |= torch.randint(0, 2, (N,), dtype=torch.int64) << 31
@@ -58,7 +58,7 @@ def test_convert_rs_bf16(N: int):
     torch.testing.assert_close(tri.view(torch.int16), ref.view(torch.int16), rtol=0, atol=0)
 
 
-def test_convert_rs_bf16_exact():
+def test_fp32_to_bf16_sr_exact():
     bits = torch.arange(65536, dtype=torch.int32)
     bits = bits[(bits & 0x7FFF) <= 0x7F80]
     x = (bits << 16).view(torch.float32)
@@ -80,7 +80,7 @@ def test_convert_rs_bf16_exact():
         ]
     ],
 )
-def test_convert_rs_bf16_probability(bits: int, fraction: float):
+def test_fp32_to_bf16_sr_probability(bits: int, fraction: float):
     x = torch.full((65536,), bits, dtype=torch.int64).to(torch.int32).view(torch.float32)
     rand = torch.arange(65536, dtype=torch.int32)
     tri = _rounding(x=x, rand=rand)
@@ -89,7 +89,7 @@ def test_convert_rs_bf16_probability(bits: int, fraction: float):
     torch.testing.assert_close(tri.double().mean(), x[0].double(), rtol=0, atol=0)
 
 
-def test_convert_rs_bf16_special_values():
+def test_fp32_to_bf16_sr_special_values():
     bits = torch.tensor(
         [0x7F800001, 0xFF800001, 0x7FC12345, 0xFFFFFFFF, 0x7F7FFFFF, 0xFF7FFFFF],
         dtype=torch.int64,
@@ -103,7 +103,7 @@ def test_convert_rs_bf16_special_values():
     torch.testing.assert_close(tri[4:].float(), torch.tensor([float('inf'), -float('inf')]), rtol=0, atol=0)
 
 
-def test_convert_rs_bf16_reproducibility():
+def test_fp32_to_bf16_sr_reproducibility():
     torch.manual_seed(42)
     x = torch.randn(65537)
     ref = _rounding(x=x, seed=42, block_size=256)

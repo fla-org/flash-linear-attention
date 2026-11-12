@@ -11,7 +11,7 @@ import triton.language as tl
 
 # algorithm reference: https://github.com/pytorch/ao/blob/a724e78/torchao/optim/quant_utils.py#L121
 @triton.jit
-def convert_rs_bf16(x: tl.tensor, rand: tl.tensor) -> tl.tensor:
+def fp32_to_bf16_sr(x: tl.tensor, rand: tl.tensor) -> tl.tensor:
     """Round FP32 values to BF16 using the low 16 bits of each random integer.
 
     Uniform random bits give an unbiased result when both neighboring BF16 values are finite.
