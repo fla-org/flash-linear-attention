@@ -551,8 +551,8 @@ The PR checks include:
 - **PR metadata** — Title prefix, the first four completed checklist items, a justification for checked minor PRs, and the acknowledgement and justification for PRs above 500 changed lines. Editing the PR body re-runs this check; missing evidence may leave a draft red.
 - **Linting** — Ruff + autopep8 via pre-commit
 - **License header check** — Ensures copyright headers are present
-- **Accelerator tests** — H100 smoke tests give early feedback. The full H100 pipeline is gated by maintainer permissions or review approval for external contributions; other backends have their own workflows. Check the actual jobs and tested commit before claiming coverage.
-- **Benchmarks** — Eligible benchmark jobs compare performance and publish results as a PR comment. They do not replace measurements for workloads or backends outside their coverage.
+- **Accelerator tests** — H100 and Ascend A2 provide agent-selected, exact-revision test workflows for focused validation. Legacy smoke, full, and benchmark pipelines remain available through manual dispatch; they do not run automatically for every PR or main push. Check the actual jobs and tested commit before claiming coverage.
+- **Benchmarks** — Agent-selected or manually dispatched benchmark jobs compare performance and may publish results as a PR comment. They do not replace measurements for workloads or backends outside their coverage.
 
 See [.github/workflows](.github/workflows) for current triggers and supported runners. For documentation-only changes, `[skip test]` in the commit message skips tests in workflows using the shared CI setup; it does not skip every accelerator workflow or benchmark. Do not use it to avoid validation of code changes.
 

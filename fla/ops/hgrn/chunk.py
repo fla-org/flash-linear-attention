@@ -261,6 +261,10 @@ class ChunkHGRNFunction(torch.autograd.Function):
         B, T, D = do.shape
         BT, BD = 128, min(64, triton.next_power_of_2(D))
         num_warps = 8 if BD == 64 else 4
+        if dht is not None:
+            # the final state is o[:, -1], so its gradient flows in through the last output
+            do = do.to(torch.float, copy=True)
+            do[:, -1] += dht
 
         gc = torch.empty_like(g, dtype=torch.float)
         dx = torch.empty_like(o, dtype=torch.float)
@@ -278,10 +282,12 @@ class ChunkHGRNFunction(torch.autograd.Function):
             BD=BD,
             num_warps=num_warps,
         )
+        dh0 = None
         if initial_state is not None:
             dg[:, 0] = (initial_state * dx[:, 0] * g[:, 0].float().exp()).to(dg.dtype)
+            dh0 = (dx[:, 0] * g[:, 0].float().exp()).to(initial_state.dtype)
 
-        return dx.to(o.dtype), dg, None, None
+        return dx.to(o.dtype), dg, dh0, None
 
 
 @torch.compiler.disable
