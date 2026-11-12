@@ -540,4 +540,3 @@ def test_linear_attn_ascend_registration(run_python):
         """,
         FLA_DISABLE_BACKEND_DISPATCH='0',
     )
-
