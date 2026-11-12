@@ -133,8 +133,10 @@ class GluonBackend(BaseBackend):
 
     @classmethod
     def is_available(cls) -> bool:
-        from fla.utils import IS_NVIDIA
-        return IS_NVIDIA and super().is_available()
+        # Triton 3.4 ships an older Gluon without `gluon.language.extra` and
+        # `gluon.language.nvidia.ampere`, which the Gluon kernels import at load time.
+        from fla.utils import IS_NVIDIA, TRITON_ABOVE_3_5_0
+        return IS_NVIDIA and TRITON_ABOVE_3_5_0 and super().is_available()
 
 
 class BackendRegistry:

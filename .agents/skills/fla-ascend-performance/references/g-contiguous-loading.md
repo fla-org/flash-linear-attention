@@ -15,14 +15,14 @@ Pass the selected input and layout flag to the kernel. `HV == 1` is already cont
 
 ## Kernel addressing
 
-Save the total packed length before computing a local sequence length. Promote batch, head, and packed sequence offsets before multiplying them; see [address arithmetic](TRAPS.md#address-arithmetic).
+Save the total packed length before computing a local sequence length. Promote batch, head, and packed sequence offsets before multiplying them; keep time-block `tl.arange` lanes narrow unless a specific offset needs int64. See [address arithmetic](TRAPS.md#address-arithmetic).
 
 | Input mode              | Contiguous gate base                    |
 | ----------------------- | --------------------------------------- |
 | Fixed batch             | `g + batch * HV * T_seq + head * T_seq` |
 | Packed variable lengths | `g + bos + head * T_seq`                |
 
-Here `batch`, `head`, and `bos` are int64 values, `T_seq` is the host-passed storage length, and the block-pointer bound uses the local sequence length. Block offsets are relative to that sequence's start.
+Here `batch`, `head`, and `bos` are int64 values, and `T_seq` is the host-passed storage length. Mask the load with the local sequence length, and keep element offsets relative to that sequence's start.
 
 For a contiguous gate base, use stride 1 along time. The original-layout branch instead uses `g + bos * HV + head` with time stride `HV`. Apply the base offset once and keep every load in a branch consistent with that layout. Reusing the original stride or offset after transposing produces wrong values or alignment faults.
 

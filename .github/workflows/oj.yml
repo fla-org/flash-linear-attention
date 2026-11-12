@@ -11,7 +11,7 @@ name: oj
 # `tests/oj/` must be deleted before merging (enforced by check-no-oj.yml).
 #
 # env.yml:
-#   runner: npu-a2        # npu-a2 | h100 | b580
+#   runner: npu-a2        # npu-a2 | h100
 #   pytest_args: "-s -v"  # optional, forwarded to pytest
 
 on:
@@ -122,47 +122,16 @@ jobs:
         run: |
           $CONDA_BIN_PATH/pytest ${{ needs.read-config.outputs.pytest_args }} tests/oj
 
-  oj-b580:
-    name: OJ on Intel B580
-    needs: read-config
-    if: needs.read-config.outputs.has_oj == 'true' && needs.read-config.outputs.runner == 'b580'
-    runs-on: intel-b580
-    timeout-minutes: 60
-    env:
-      FLA_CI_ENV: 1
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7.0.0
-
-      - name: Setup CI environment
-        id: setup
-        uses: ./.github/actions/setup-ci-env
-        with:
-          runner_name: ${{ runner.name }}
-          conda_env_name: pytorch_2_7
-          pytorch_version: ""
-          gpu_type: intel
-          pytorch_cuda_version: ""
-          install_tilelang: "false"
-          skip_gpu_check: "false"
-
-      - name: Run OJ tests
-        shell: bash
-        if: steps.setup.outputs.skip_tests != 'true'
-        run: |
-          $CONDA_BIN_PATH/pytest ${{ needs.read-config.outputs.pytest_args }} tests/oj
-
   unknown-runner:
     name: Unknown runner guard
     needs: read-config
     if: |
       needs.read-config.outputs.has_oj == 'true' &&
       needs.read-config.outputs.runner != 'npu-a2' &&
-      needs.read-config.outputs.runner != 'h100' &&
-      needs.read-config.outputs.runner != 'b580'
+      needs.read-config.outputs.runner != 'h100'
     runs-on: ubuntu-latest
     steps:
       - name: Fail on unsupported runner
         run: |
-          echo "::error::tests/oj/env.yml runner='${{ needs.read-config.outputs.runner }}' is not supported. Use one of: npu-a2, h100, b580."
+          echo "::error::tests/oj/env.yml runner='${{ needs.read-config.outputs.runner }}' is not supported. Use one of: npu-a2, h100."
           exit 1

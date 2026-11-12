@@ -15,7 +15,7 @@ The contiguous packed training path uses a 1D Vector-core task loop when channel
 
 | Path                               | DMA policy                                                     |
 | ---------------------------------- | -------------------------------------------------------------- |
-| Full chunks in packed input        | Block-pointer loads, with the tail path compiled out.          |
+| Full chunks in packed input        | Explicit offset loads, with the tail path compiled out.        |
 | Final packed chunk                 | Masked loads/stores, including the halo bounds.                |
 | Variable lengths or a single chunk | Runtime bounds where a uniform bulk/tail split is unavailable. |
 
@@ -39,7 +39,7 @@ Forward combines inter- and intra-chunk contributions when their live tiles fit 
 
 Implementation: `fla/ops/kda/backends/triton_ascend/chunk_bwd.py`.
 
-Packed offsets multiplied by head and value dimensions can overflow int32 far before the token count reaches its limit. Load sequence boundaries as int64 and promote fixed-batch indices before multiplication. Only local lengths and block-pointer metadata should narrow to int32 when their bounds permit it.
+Packed offsets multiplied by head and value dimensions can overflow int32 far before the token count reaches its limit. Load sequence boundaries as int64 and promote fixed-batch indices before multiplication. Narrow only a local length whose range is known to fit in int32.
 
 ## `tl.dot` lhs clobber — repo-wide case catalog
 
