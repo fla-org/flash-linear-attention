@@ -16,6 +16,7 @@ import torch
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_fwd_h
 from fla.ops.cp.chunk_delta_h import chunk_gated_delta_rule_fwd_h_pre_process, compress_h0
 from fla.ops.gdn2.chunk_intra import chunk_gdn2_fwd_intra
+from fla.ops.gdn2.gate import gdn2_raw_gate
 from fla.ops.gla.chunk import chunk_gla_fwd_o_gk
 from fla.ops.kda.gate import kda_gate_chunk_cumsum
 from fla.ops.utils import chunk_local_cumsum
@@ -63,6 +64,7 @@ def chunk_gdn2_fwd(
     Returns ``(o, final_state, g_cumsum, Aqk, Akk, w_wy, u_wy, qg, kg, v_new,
     h, initial_state)``.
     """
+    g_raw = gdn2_raw_gate(g, A_log, dt_bias, lower_bound, use_gate_in_kernel, safe_gate)
     if use_gate_in_kernel:
         g = kda_gate_chunk_cumsum(
             g=g,
@@ -88,6 +90,7 @@ def chunk_gdn2_fwd(
         k=k,
         v=v,
         gk=g,
+        g_raw=g_raw,
         b=b,
         w_gate=w_gate,
         scale=scale,

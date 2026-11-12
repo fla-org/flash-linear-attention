@@ -16,6 +16,7 @@ import triton.language as tl
 from fla.backends import TritonAscendBackend, register
 from fla.ops.common.backends.triton_ascend.chunk_delta_h import _pad_dense_tail_tokens, need_dma_mask
 from fla.ops.gdn2.chunk_bwd import chunk_gdn2_bwd_wy_dqkg_fused
+from fla.ops.gdn2.gate import gdn2_chunk_gate
 from fla.ops.kda.backends.triton_ascend.chunk_bwd import chunk_kda_bwd_kernel_wy_k_part_npu
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 from fla.ops.utils.op import exp2
@@ -30,9 +31,9 @@ MAX_TILE = 128
 _BC = 16
 
 
-def get_bwd_tile(size: int) -> int:
+def get_bwd_tile(size: int, rows: int = SUB_CHUNK_SIZE) -> int:
     return compute_row_tile_block_size(
-        SUB_CHUNK_SIZE,
+        rows,
         size,
         BWD_MEM_MULT,
         tiling_row=False,
@@ -775,11 +776,12 @@ def chunk_gdn2_bwd_wy_dqkg_fused_verifier(
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
     state_v_first: bool = False,
+    g_raw: torch.Tensor | None = None,
 ) -> tuple[bool, str | None]:
     del scale, state_v_first
     if chunk_size != 64:
         return False, f"GDN-2 Ascend backward requires chunk_size=64, got {chunk_size}"
-    float_tensors = (q, k, v, v_new, g, b, w_gate, A, h, do, dh, dv)
+    float_tensors = (q, k, v, v_new, g, b, w_gate, A, h, do, dh, dv) + ((g_raw,) if g_raw is not None else ())
     tensors = (*float_tensors, *(t for t in (cu_seqlens, chunk_indices) if t is not None))
     if any(t.device.type != "npu" for t in tensors):
         return False, "GDN-2 Ascend backward requires NPU tensors"
@@ -809,6 +811,7 @@ def chunk_gdn2_bwd_wy_dqkg_fused_npu(
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
     state_v_first: bool = False,
+    g_raw: torch.Tensor | None = None,
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = chunk_size
@@ -831,6 +834,7 @@ def chunk_gdn2_bwd_wy_dqkg_fused_npu(
             v=_pad_dense_tail_tokens(v, T_pad),
             v_new=_pad_dense_tail_tokens(v_new, T_pad),
             g=_pad_dense_tail_tokens(g, T_pad, repeat_last=True),
+            g_raw=_pad_dense_tail_tokens(g_raw, T_pad),
             b=_pad_dense_tail_tokens(b, T_pad),
             w_gate=_pad_dense_tail_tokens(w_gate, T_pad),
             A=_pad_dense_tail_tokens(A, T_pad),
@@ -900,13 +904,17 @@ def chunk_gdn2_bwd_wy_dqkg_fused_npu(
         **ascend_compile_kwargs(),
     )
 
+    g_suffix = gdn2_chunk_gate(g_raw, cu_seqlens, chunk_indices, BT) if g_raw is not None else None
     bc_k = 32 if BT >= 32 else _BC
-    mask_dma = need_dma_mask(T, BT, K, BK, V, BV, is_varlen, cu_seqlens) or BT % bc_k != 0
+    # the key stage uses twice as many rows as the value and gate tile estimate
+    bk_k = get_bwd_tile(K, rows=bc_k)
+    mask_dma = need_dma_mask(T, BT, K, bk_k, V, BV, is_varlen, cu_seqlens) or BT % bc_k != 0
     k_part_kwargs = dict(
         q=q,
         k=k,
         v_new=v_new,
         g=g,
+        g_suffix=g_suffix,
         h=h,
         do=do,
         dh=dh,
@@ -927,14 +935,14 @@ def chunk_gdn2_bwd_wy_dqkg_fused_npu(
         V=V,
         BT=BT,
         BC=bc_k,
-        BK=BK,
+        BK=bk_k,
         BV=BV,
         STATE_V_FIRST=state_v_first,
         IS_VARLEN=is_varlen,
         MASK_DMA=mask_dma,
         FP32_H=h.dtype == torch.float32,
     )
-    for k_off in range(NK):
+    for k_off in range(triton.cdiv(K, bk_k)):
         k_part_kwargs['K_OFFSET'] = k_off
         chunk_kda_bwd_kernel_wy_k_part_npu[(num_core,)](**k_part_kwargs, **ascend_compile_kwargs())
 

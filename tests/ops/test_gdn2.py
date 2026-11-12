@@ -8,7 +8,7 @@
 import inspect
 import math
 from functools import partial
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock
 
 import pytest
 import torch
@@ -19,6 +19,56 @@ from fla.ops.gdn2 import chunk_gdn2, fused_recurrent_gdn2, naive_recurrent_gdn2
 from fla.ops.gdn2.fused_recurrent import fused_recurrent_gdn2_fwd
 from fla.ops.kda.gate import naive_kda_gate, naive_kda_lowerbound_gate
 from fla.utils import IS_AMD, IS_NPU, IS_NVIDIA, assert_close, device, device_platform
+
+
+@pytest.mark.skipif(not IS_NVIDIA, reason="CUDA required")
+@pytest.mark.parametrize(('dtype', 'K', 'V', 'packed', 'with_q'), [
+    pytest.param(torch.float32, 32, 64, False, True, id='fp32-k32-v64-dense'),
+    pytest.param(torch.float16, 60, 32, True, False, id='fp16-k60-v32-packed-no-q'),
+    pytest.param(torch.bfloat16, 128, 60, True, True, id='bf16-k128-v60-packed'),
+    pytest.param(torch.bfloat16, 256, 128, False, False, id='bf16-k256-v128-dense-no-q'),
+])
+def test_wy_parallel_tiles(dtype, K, V, packed, with_q):
+    from fla.ops.gdn2.wy_fast import recompute_w_u_fwd_gdn2
+
+    torch.manual_seed(42)
+    B, T, H, BT = 1 if packed else 2, 130, 2, 64
+    q, k = [torch.randn(B, T, H, K, device=device, dtype=dtype) for _ in range(2)]
+    b = torch.rand_like(k)
+    v = torch.randn(B, T, H, V, device=device, dtype=dtype)
+    wg = torch.rand_like(v)
+    raw = -torch.rand(B, T, H, K, device=device) * 0.1
+    raw[:, [0, 63, 64, 65, 129], :, 0] = -1e8
+    prefix = torch.empty_like(raw)
+    A = torch.zeros(B, T, H, BT, device=device, dtype=dtype)
+    refs = [torch.empty_like(k), torch.empty_like(v), torch.empty_like(q), torch.empty_like(k)]
+    offsets = [0, 65, 130] if packed else [0, T]
+    for start, end in zip(offsets, offsets[1:]):
+        for chunk in range(start, end, BT):
+            stop = min(chunk + BT, end)
+            n = stop - chunk
+            a = torch.tril(torch.randn(B, H, n, n, device=device) * 0.03, diagonal=-1)
+            a = (a + torch.eye(n, device=device)).to(dtype)
+            A[:, chunk:stop, :, :n] = a.transpose(1, 2)
+            prefix[:, chunk:stop] = raw[:, chunk:stop].cumsum(1) * math.log2(math.e)
+            decay = torch.exp2(prefix[:, chunk:stop])
+            kb = (k[:, chunk:stop].float() * b[:, chunk:stop].float() * decay).to(dtype)
+            vb = (v[:, chunk:stop].float() * wg[:, chunk:stop].float()).to(dtype)
+            refs[0][:, chunk:stop] = (a @ kb.transpose(1, 2)).transpose(1, 2)
+            refs[1][:, chunk:stop] = (a @ vb.transpose(1, 2)).transpose(1, 2)
+            refs[2][:, chunk:stop] = q[:, chunk:stop].float() * decay
+            shifted = torch.cat((raw[:, chunk+1:stop].double(), torch.zeros_like(raw[:, chunk:chunk+1]).double()), dim=1)
+            suffix = shifted.flip(1).cumsum(1).flip(1)
+            refs[3][:, chunk:stop] = k[:, chunk:stop].double() * suffix.exp()
+    cu = torch.tensor(offsets, device=device, dtype=torch.int64) if packed else None
+    values = recompute_w_u_fwd_gdn2(k, v, b, wg, A, q=q if with_q else None,
+                                    gk=prefix, g_raw=raw, cu_seqlens=cu)
+    for name, expected, actual in zip(('w', 'u', 'qg', 'kg'), refs, values):
+        if name == 'qg' and not with_q:
+            assert actual is None
+        else:
+            assert torch.isfinite(actual).all()
+            assert_close(name, expected.float(), actual.float(), 0.005)
 
 
 def _unwrap_autotuner(fn):
@@ -348,23 +398,26 @@ def test_chunk_invalid_chunk_size(chunk_size):
 
 @pytest.mark.skipif(not (IS_NVIDIA or IS_AMD or IS_NPU), reason="CUDA/ROCm or Ascend NPU required")
 @pytest.mark.parametrize(
-    ("B", "T", "H", "K", "V", "scale", "use_qk_l2norm_in_kernel", "use_gate_in_kernel", "safe_gate", "dtype"),
+    ("B", "T", "H", "K", "V", "scale", "use_qk_l2norm_in_kernel", "use_gate_in_kernel", "safe_gate", "lower_bound",
+     "dtype"),
     [
-        pytest.param(*p, id="B{}-T{}-H{}-K{}-V{}-scale{}-l2norm{}-gate{}-safe{}-{}".format(*p))
+        pytest.param(*p, id="B{}-T{}-H{}-K{}-V{}-scale{}-l2norm{}-gate{}-safe{}-lb{}-{}".format(*p))
         for p in [
-            (1, 64, 2, 32, 32, 1.0, False, False, False, torch.float32),
-            (2, 256, 2, 64, 64, 0.5, True, False, False, torch.float32),
-            (2, 100, 3, 64, 64, 1.0, True, False, False, torch.float16),
-            (1, 64, 1, 128, 128, 1.0, True, False, False, torch.bfloat16),
-            (1, 64, 1, 256, 256, 1.0, True, False, False, torch.bfloat16),
-            (1, 65, 2, 48, 32, 1.0, True, False, False, torch.float16),
-            (1, 65, 2, 32, 48, 1.0, True, False, False, torch.float16),
-            (2, 256, 2, 64, 64, 1.0, True, True, False, torch.float32),
-            (1, 128, 2, 64, 64, 1.0, True, True, True, torch.float32),
+            (1, 64, 2, 32, 32, 1.0, False, False, False, None, torch.float32),
+            (2, 256, 2, 64, 64, 0.5, True, False, False, None, torch.float32),
+            (2, 100, 3, 64, 64, 1.0, True, False, False, None, torch.float16),
+            (1, 64, 1, 128, 128, 1.0, True, False, False, None, torch.bfloat16),
+            (1, 64, 1, 256, 256, 1.0, True, False, False, None, torch.bfloat16),
+            (1, 65, 2, 48, 32, 1.0, True, False, False, None, torch.float16),
+            (1, 65, 2, 32, 48, 1.0, True, False, False, None, torch.float16),
+            (2, 256, 2, 64, 64, 1.0, True, True, False, None, torch.float32),
+            (1, 128, 2, 64, 64, 1.0, True, True, True, -5.0, torch.float32),
+            # a bounded activation without safe_gate takes the local-log kernels
+            (2, 100, 2, 64, 64, 1.0, True, True, False, -5.0, torch.bfloat16),
         ]
     ] + [
         pytest.param(
-            1, 32768, 1, 32, 32, 1.0, True, False, False, torch.float16,
+            1, 32768, 1, 32, 32, 1.0, True, False, False, None, torch.float16,
             id='32k',
             marks=pytest.mark.skipif(
                 not IS_NPU,
@@ -373,10 +426,9 @@ def test_chunk_invalid_chunk_size(chunk_size):
         ),
     ],
 )
-def test_chunk(B, T, H, K, V, scale, use_qk_l2norm_in_kernel, use_gate_in_kernel, safe_gate, dtype):
+def test_chunk(B, T, H, K, V, scale, use_qk_l2norm_in_kernel, use_gate_in_kernel, safe_gate, lower_bound, dtype):
     """Forward + gradient comparison: chunk kernel vs autograd through the naive reference."""
     q, k, v, g, b, w, A_log, dt_bias = _rand_inputs(B, T, H, H, K, V, dtype, gate_in_kernel=use_gate_in_kernel)
-    lower_bound = -5.0 if safe_gate else None
     h0 = torch.randn(B, H, K, V, dtype=torch.float32, device=device)
 
     names = ["q", "k", "v", "g", "b", "w", "h0"] + (["A_log", "dt_bias"] if use_gate_in_kernel else [])
@@ -386,7 +438,7 @@ def test_chunk(B, T, H, K, V, scale, use_qk_l2norm_in_kernel, use_gate_in_kernel
     do = torch.randn_like(v)
     dht = torch.randn_like(h0)
 
-    g_ref = _activate_g(g, A_log, dt_bias, safe_gate, lower_bound) if use_gate_in_kernel else g
+    g_ref = _activate_g(g, A_log, dt_bias, lower_bound is not None, lower_bound) if use_gate_in_kernel else g
     qn = F.normalize(q.float(), p=2, dim=-1).to(dtype)
     kn = F.normalize(k.float(), p=2, dim=-1).to(dtype)
     ref, ref_ht = naive_recurrent_gdn2(
@@ -437,6 +489,204 @@ def test_chunk(B, T, H, K, V, scale, use_qk_l2norm_in_kernel, use_gate_in_kernel
     if use_gate_in_kernel:
         assert_close("dA_log", ref_grads["A_log"], tri_grads["A_log"], 0.02, warning=True)
         assert_close("dt_bias", ref_grads["dt_bias"], tri_grads["dt_bias"], 0.02)
+
+
+@pytest.mark.skipif(not (IS_NVIDIA or IS_AMD or IS_NPU), reason="CUDA/ROCm or Ascend NPU required")
+@pytest.mark.parametrize(('spike', 'write', 'disable_recompute'), [
+    # the write position picks the kernel path that carries the decay to the next token
+    pytest.param(-1e8, 5, False, id='1e8-write5-recompute'),  # inside the first sub-chunk
+    pytest.param(-1e8, 15, True, id='1e8-write15-retain'),  # sub-chunk 0 to 1
+    pytest.param(-1e30, 31, False, id='1e30-write31-recompute'),  # sub-chunk 1 to 2
+    pytest.param(-200., 47, True, id='200-write47-retain'),  # sub-chunk 2 to 3
+    pytest.param(-1e30, 62, True, id='1e30-write62-retain'),  # exactly one full chunk
+    pytest.param(-1e8, 63, False, id='1e8-write63-recompute'),  # across the chunk boundary, through the state
+    pytest.param(-200., 64, False, id='200-write64-recompute'),  # first token of the second chunk
+    pytest.param(-1e8, 127, True, id='1e8-write127-retain'),  # into a one-token final chunk
+])
+def test_chunk_large_decay(spike, write, disable_recompute):
+    """A large decay must not erase a later log increment or decay the same-token write."""
+    shape = (1, write + 2, 1, 64)
+    q, k, v, b = [torch.zeros(shape, device=device, dtype=torch.bfloat16) for _ in range(4)]
+    w = torch.ones_like(v)
+    g = torch.full(shape, -1., device=device, dtype=torch.float32)
+    g[0, write, 0, 0] = spike
+    q[0, write + 1, 0, 0] = k[0, write, 0, 0] = v[0, write, 0, 0] = 1
+    inputs = (q, k, v, g, b, w)
+    for x in inputs:
+        x.requires_grad_()
+    o, ht = chunk_gdn2(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        b=b,
+        w=w,
+        scale=1.,
+        output_final_state=True,
+        disable_recompute=disable_recompute,
+    )
+    expected = torch.tensor([(-1.)], device=device).exp()
+    assert_close('o', expected, o[0, write + 1, 0, :1].float(), 0.005)
+    assert_close('ht', expected, ht[0, 0, 0, :1], 0.005)
+    for loss_index, loss in enumerate((o[0, write + 1, 0, 0], ht[0, 0, 0, 0])):
+        grads = torch.autograd.grad(loss, inputs, retain_graph=True)
+        for name, grad in zip(('dq', 'dk', 'dv', 'dg', 'db', 'dw'), grads):
+            assert torch.isfinite(grad).all(), name
+        expected_dq = expected if loss_index == 0 else torch.zeros_like(expected)
+        assert_close('dq', expected_dq, grads[0][0, write + 1, 0, :1].float(), 0.01)
+        for index, t in ((1, write), (2, write), (3, write + 1), (5, write)):
+            assert_close(f'grad{index}', expected, grads[index][0, t, 0, :1].float(), 0.01)
+        assert grads[3][0, write, 0, 0] == 0
+    assert torch.isfinite(o).all() and torch.isfinite(ht).all()
+
+
+@pytest.mark.skipif(not (IS_NVIDIA or IS_AMD or IS_NPU), reason="CUDA/ROCm or Ascend NPU required")
+@pytest.mark.parametrize(('dtype', 'K', 'V', 'gate_dtype', 'spike', 'use_gate_in_kernel', 'varlen'), [
+    # each gate mode meets each layout twice
+    pytest.param(torch.bfloat16, 60, 32, torch.float32, 1e8, False, False, id='bf16-k60-v32-log-gates-dense'),
+    pytest.param(torch.float32, 48, 32, torch.float32, 1e8, True, True, id='fp32-k48-v32-fused-gates-varlen'),
+    pytest.param(torch.float16, 48, 32, torch.float32, 1e8, False, True, id='fp16-k48-v32-log-gates-varlen'),
+    pytest.param(torch.bfloat16, 48, 32, torch.float32, 1e8, True, False, id='bf16-k48-v32-fused-gates-dense'),
+    pytest.param(torch.bfloat16, 128, 64, torch.float32, 1e8, True, True, id='bf16-k128-v64-fused-gates-varlen'),
+    pytest.param(torch.bfloat16, 256, 128, torch.float32, 1e8, False, False, id='bf16-k256-v128-log-gates-dense'),
+    pytest.param(torch.float16, 48, 32, torch.float16, 200., False, True, id='fp16-gates-k48-v32-log-gates-varlen'),
+    pytest.param(torch.bfloat16, 128, 64, torch.bfloat16, 1e8, True, False, id='bf16-gates-k128-v64-fused-gates-dense'),
+])
+def test_chunk_large_decay_recurrence(dtype, K, V, gate_dtype, spike, use_gate_in_kernel, varlen):
+    """Local decays preserve all gradients across partial chunks and carried states."""
+    B, T, H = (1, 161, 2) if varlen else (2, 130, 2)
+    q, k, v, g, b, w, A_log, dt_bias = _rand_inputs(B, T, H, H, K, V, dtype, gate_in_kernel=use_gate_in_kernel)
+    q, k = F.normalize(q.float(), dim=-1).to(dtype), F.normalize(k.float(), dim=-1).to(dtype)
+    g = g.to(gate_dtype)
+    g[:, [5, 15, 31, 47, 63, 64, 127], :, ::3] = spike if use_gate_in_kernel else -spike
+    offsets = [0, 17, 82, T] if varlen else [0, T]
+    cu = torch.tensor(offsets, dtype=torch.int32, device=device) if varlen else None
+    h0 = torch.randn(len(offsets) - 1 if varlen else B, H, K, V, device=device)
+    leaves = [q, k, v, g, b, w, h0] + ([A_log, dt_bias] if use_gate_in_kernel else [])
+    for x in leaves:
+        x.requires_grad_()
+    g_ref = _activate_g(g, A_log, dt_bias, False, None) if use_gate_in_kernel else g
+    refs, states = [], []
+    for n, (start, end) in enumerate(zip(offsets, offsets[1:])):
+        ref, state = naive_recurrent_gdn2(
+            q=q[:, start:end],
+            k=k[:, start:end],
+            v=v[:, start:end],
+            g=g_ref[:, start:end],
+            b=b[:, start:end],
+            w=w[:, start:end],
+            initial_state=h0[n:n + 1] if varlen else h0,
+            output_final_state=True,
+        )
+        refs.append(ref)
+        states.append(state)
+    ref, ref_ht = torch.cat(refs, dim=1), torch.cat(states, dim=0)
+    do, dht = torch.randn_like(v), torch.randn_like(h0)
+    ref_grads = torch.autograd.grad((ref * do).sum() + (ref_ht * dht).sum(), leaves)
+    modes = [(False, False, None), (True, True, None)]
+    if not varlen:
+        modes.append((False, False, 65))
+    for retain, v_first, split in modes:
+        tri_ht = h0.transpose(-1, -2).contiguous() if v_first else h0
+        outputs = []
+        start = 0
+        for end in ((split, T) if split is not None else (T,)):
+            output, tri_ht = chunk_gdn2(
+                q=q[:, start:end],
+                k=k[:, start:end],
+                v=v[:, start:end],
+                g=g[:, start:end],
+                b=b[:, start:end],
+                w=w[:, start:end],
+                initial_state=tri_ht,
+                output_final_state=True,
+                cu_seqlens=cu,
+                use_gate_in_kernel=use_gate_in_kernel,
+                A_log=A_log,
+                dt_bias=dt_bias,
+                disable_recompute=retain,
+                state_v_first=v_first,
+            )
+            outputs.append(output)
+            start = end
+        tri = torch.cat(outputs, dim=1)
+        if v_first:
+            tri_ht = tri_ht.transpose(-1, -2)
+        tri_grads = torch.autograd.grad((tri * do).sum() + (tri_ht * dht).sum(), leaves)
+        assert_close('o', ref, tri, 0.005)
+        assert_close('ht', ref_ht, tri_ht, 0.005)
+        for name, expected, actual, tolerance in zip(
+            ('dq', 'dk', 'dv', 'dg', 'db', 'dw', 'dh0', 'dA_log', 'dt_bias'), ref_grads, tri_grads,
+            (0.01, 0.01, 0.01, 0.02, 0.02, 0.02, 0.01, 0.02, 0.02),
+        ):
+            assert torch.isfinite(actual).all(), name
+            assert_close(name, expected.float(), actual.float(), tolerance)
+        assert torch.isfinite(tri).all() and torch.isfinite(tri_ht).all()
+
+
+def _large_decay_pattern(pattern, shape):
+    g = torch.full(shape, -0.02, device=device)
+    t = torch.arange(shape[1], device=device)
+    if pattern == 'steady':
+        g[:] = -6.
+    elif pattern == 'two-spikes':
+        g[:, (t % 16 == 3) | (t % 16 == 11), :, ::2] = -150.
+    elif pattern == 'mixed-channels':
+        g[..., 0], g[..., 1] = -1e4, -50.
+    elif pattern == 'all-channels':
+        g[:] = -12.
+    elif pattern == 'alternating':
+        g[:, (t // 32) % 2 == 1] = -12.
+    return g
+
+
+@pytest.mark.skipif(not (IS_NVIDIA or IS_AMD or IS_NPU), reason="CUDA/ROCm or Ascend NPU required")
+@pytest.mark.parametrize(('pattern', 'varlen'), [
+    pytest.param('steady', False, id='steady-dense'),
+    pytest.param('two-spikes', True, id='two-spikes-varlen'),
+    pytest.param('mixed-channels', True, id='mixed-channels-varlen'),
+    pytest.param('all-channels', False, id='all-channels-dense'),
+    pytest.param('alternating', False, id='alternating-dense'),
+])
+def test_chunk_large_decay_patterns(pattern, varlen):
+    """Sustained and repeated steep gates match the token recurrence, including a one-token sequence."""
+    dtype, K, V = torch.bfloat16, 64, 32
+    B, T, H = (1, 161, 2) if varlen else (2, 130, 2)
+    q, k, v, _, b, w, _, _ = _rand_inputs(B, T, H, H, K, V, dtype)
+    q, k = F.normalize(q.float(), dim=-1).to(dtype), F.normalize(k.float(), dim=-1).to(dtype)
+    g = _large_decay_pattern(pattern, (B, T, H, K))
+    offsets = [0, 17, 82, 83, T] if varlen else [0, T]
+    cu = torch.tensor(offsets, dtype=torch.int32, device=device) if varlen else None
+    h0 = torch.randn(len(offsets) - 1 if varlen else B, H, K, V, device=device)
+    leaves = [q, k, v, g, b, w, h0]
+    for x in leaves:
+        x.requires_grad_()
+    refs, states = [], []
+    for n, (start, end) in enumerate(zip(offsets, offsets[1:])):
+        ref, state = naive_recurrent_gdn2(
+            q=q[:, start:end],
+            k=k[:, start:end],
+            v=v[:, start:end],
+            g=g[:, start:end],
+            b=b[:, start:end],
+            w=w[:, start:end],
+            initial_state=h0[n:n + 1] if varlen else h0,
+            output_final_state=True,
+        )
+        refs.append(ref)
+        states.append(state)
+    ref, ref_ht = torch.cat(refs, dim=1), torch.cat(states, dim=0)
+    do, dht = torch.randn_like(v), torch.randn_like(h0)
+    ref_grads = torch.autograd.grad((ref * do).sum() + (ref_ht * dht).sum(), leaves)
+    tri, tri_ht = chunk_gdn2(q=q, k=k, v=v, g=g, b=b, w=w, initial_state=h0, output_final_state=True, cu_seqlens=cu)
+    tri_grads = torch.autograd.grad((tri * do).sum() + (tri_ht * dht).sum(), leaves)
+    assert_close('o', ref, tri, 0.005)
+    assert_close('ht', ref_ht, tri_ht, 0.005)
+    for name, expected, actual, tolerance in zip(
+        ('dq', 'dk', 'dv', 'dg', 'db', 'dw', 'dh0'), ref_grads, tri_grads, (0.01, 0.01, 0.01, 0.02, 0.02, 0.02, 0.01),
+    ):
+        assert torch.isfinite(actual).all(), name
+        assert_close(name, expected.float(), actual.float(), tolerance)
 
 
 @pytest.mark.skipif(not (IS_NVIDIA or IS_AMD or IS_NPU), reason="CUDA/ROCm or Ascend NPU required")
@@ -577,6 +827,9 @@ def test_chunk_varlen(cu_seqlens, H, K, V, use_gate_in_kernel, dtype, state_v_fi
             ('accept', torch.float16, None),
             ('accept', torch.bfloat16, None),
             ('accept', torch.float32, None),
+            ('raw_gates', torch.float32, None),
+            ('g_raw_device', torch.float32, 'NPU tensors'),
+            ('g_raw_dtype', torch.float32, 'unsupported dtype'),
             ('chunk_size', torch.float32, 'chunk_size=64'),
             ('q_device', torch.float32, 'NPU tensors'),
             ('q_dtype', torch.float32, 'unsupported dtype'),
@@ -595,8 +848,11 @@ def test_chunk_varlen(cu_seqlens, H, K, V, use_gate_in_kernel, dtype, state_v_fi
     ],
 )
 def test_chunk_npu_verifier(name, case, dtype, lower_bound, reason):
-    """Check dispatch metadata and the forward entry signature without requiring an NPU."""
-    from fla.ops.gdn2.backends.triton_ascend.chunk_bwd import chunk_gdn2_bwd_wy_dqkg_fused_verifier
+    """Check dispatch metadata and backend entry signatures without requiring an NPU."""
+    from fla.ops.gdn2.backends.triton_ascend.chunk_bwd import (
+        chunk_gdn2_bwd_wy_dqkg_fused_npu,
+        chunk_gdn2_bwd_wy_dqkg_fused_verifier,
+    )
     from fla.ops.gdn2.backends.triton_ascend.chunk_intra import chunk_gdn2_fwd_intra_npu, chunk_gdn2_fwd_intra_verifier
 
     shape = (1, 1, 1, 257) if case == 'oversized_k' else (1, 22, 2, 64) if case == 'lower_bound' else (1,)
@@ -612,6 +868,13 @@ def test_chunk_npu_verifier(name, case, dtype, lower_bound, reason):
         kwargs['lower_bound'] = lower_bound
     if case == 'lower_bound':
         kwargs['safe_gate'] = True
+    elif case == 'raw_gates':
+        kwargs['g_raw'] = tensor
+    elif case == 'g_raw_device':
+        kwargs['g_raw'] = torch.zeros(shape, dtype=dtype)
+    elif case == 'g_raw_dtype':
+        kwargs['g_raw'] = Mock(spec=torch.Tensor, dtype=torch.int32)
+        kwargs['g_raw'].device.type = 'npu'
     elif case == 'chunk_size':
         kwargs['chunk_size'] = 32
     elif case == 'q_device':
@@ -629,6 +892,8 @@ def test_chunk_npu_verifier(name, case, dtype, lower_bound, reason):
         assert actual_reason is None
         if name == 'chunk_gdn2_fwd_intra':
             inspect.signature(chunk_gdn2_fwd_intra_npu).bind(**kwargs)
+        else:
+            inspect.signature(chunk_gdn2_bwd_wy_dqkg_fused_npu).bind(**kwargs)
     elif case == 'oversized_k':
         assert actual_reason == reason
     else:
@@ -664,6 +929,56 @@ def test_fused_recurrent_npu_verifier(case, dtype, reason):
         assert actual_reason is None
     else:
         assert reason in actual_reason
+
+
+@pytest.mark.parametrize(('K', 'raw_gates'), [
+    pytest.param(32, False, id='K32-prefix'),
+    pytest.param(128, True, id='K128-raw'),
+    pytest.param(256, False, id='K256-prefix'),
+    pytest.param(256, True, id='K256-raw'),
+])
+def test_chunk_npu_wy_tiling(K, raw_gates, monkeypatch):
+    """The WY key launches must fit their actual row geometry and cover every channel."""
+    from fla.ops.gdn2.backends.triton_ascend import chunk_bwd
+    from fla.utils import ascend_ub_manager
+
+    capacity = 192 * 1024 * 8
+    monkeypatch.setattr(ascend_ub_manager, '_ub_manager', ascend_ub_manager.UBManager(ub_capacity_bits=capacity))
+    monkeypatch.setattr(chunk_bwd, 'get_npu_properties', lambda: {'num_vectorcore': 48})
+    launches = {}
+    for name in [name for name in vars(chunk_bwd) if '_bwd_kernel_' in name]:
+        kernel = MagicMock()
+        launches[name] = kernel.__getitem__.return_value
+        monkeypatch.setattr(chunk_bwd, name, kernel)
+
+    q = torch.zeros(1, 64, 1, K)
+    v = torch.zeros(1, 64, 1, 128)
+    h = torch.zeros(1, 1, 1, K, 128)
+    A = torch.zeros(1, 64, 1, 64)
+    monkeypatch.setattr(chunk_bwd, 'gdn2_chunk_gate', lambda *args: q)
+    chunk_bwd.chunk_gdn2_bwd_wy_dqkg_fused_npu.__wrapped__(
+        q=q,
+        k=q,
+        v=v,
+        v_new=v,
+        g=q,
+        b=q,
+        w_gate=v,
+        A=A,
+        h=h,
+        do=v,
+        dh=h,
+        dv=v,
+        scale=1.0,
+        g_raw=q if raw_gates else None,
+    )
+    covered = []
+    for call in launches['chunk_kda_bwd_kernel_wy_k_part_npu'].call_args_list:
+        args = call.kwargs
+        assert args['BC'] * args['BK'] * 4 * 8 * chunk_bwd.BWD_MEM_MULT <= capacity * chunk_bwd.SAFETY_MARGIN
+        start = args['K_OFFSET'] * args['BK']
+        covered.extend(range(start, min(start + args['BK'], K)))
+    assert covered == list(range(K))
 
 
 @pytest.mark.skipif(not IS_NPU, reason='Ascend dispatch and launch splitting require NPU')

@@ -19,6 +19,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.gdn2.gate import gdn2_local_log_cumsum
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp2
 from fla.ops.utils.triton_ascend.addressing import chunk_token_rows
@@ -27,6 +28,7 @@ from fla.ops.utils.triton_ascend.addressing import chunk_token_rows
 @triton.heuristics({
     'STORE_QG': lambda args: args['qg'] is not None,
     'STORE_KG': lambda args: args['kg'] is not None,
+    'USE_RAW_G': lambda args: args['g_raw'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.jit(do_not_specialize=['T'])
@@ -42,6 +44,7 @@ def recompute_w_u_fwd_gdn2_kernel_npu(
     u,
     A,
     gk,
+    g_raw,
     cu_seqlens,
     chunk_indices,
     T,
@@ -53,6 +56,7 @@ def recompute_w_u_fwd_gdn2_kernel_npu(
     BV: tl.constexpr,
     STORE_QG: tl.constexpr,
     STORE_KG: tl.constexpr,
+    USE_RAW_G: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
@@ -112,11 +116,12 @@ def recompute_w_u_fwd_gdn2_kernel_npu(
                 gk + ((bos + last_idx) * H + i_h) * K + o_k,
                 mask=m_k, other=0.,
             ).to(tl.float32)
-            b_kg = b_k * tl.where(
-                m_rows[:, None],
-                exp2(b_gn[None, :] - b_gk),
-                0,
-            )
+            b_gs = b_gn[None, :] - b_gk
+            if USE_RAW_G:
+                b_gs = gdn2_local_log_cumsum(
+                    g_raw + (bos * H + i_h) * K, i_t * BT, min(i_t * BT + BT, T), o_k, H, K, BT, True,
+                )
+            b_kg = b_k * tl.where(m_rows[:, None], exp2(b_gs), 0)
             p_kg = kg + (bos * H + i_h) * K + row_base * (H * K) + rows[:, None] * (H * K) + o_k[None, :]
             tl.store(p_kg, b_kg.to(p_kg.dtype.element_ty), mask=m_kk)
 
@@ -135,6 +140,7 @@ def recompute_w_u_fwd_gdn2_npu(
     gk: torch.Tensor | None = None,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
+    g_raw: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
     """NPU WY recompute. ``A @ x`` and the returned factors stay in fp32.
 
@@ -167,6 +173,7 @@ def recompute_w_u_fwd_gdn2_npu(
         u=u,
         A=A,
         gk=gk,
+        g_raw=g_raw,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         T=T,
