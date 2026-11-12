@@ -89,6 +89,8 @@ def recompute_w_u_fwd_kda_kernel(
     b_b = tl.load(p_b, mask=m_t, other=0.0).to(tl.float32)
 
     o_A = tl.arange(0, BT)
+    # since A is unit lower triangular, A @ x = (A - I) @ x + x.
+    # load A - I and preserve the diagonal term in fp32 via acc=x for both w and u.
     m_A = m_t[:, None] & (o_A[:, None] > o_A[None, :])
     p_A = A + o_t[:, None] * (HV*BT) + o_A[None, :]
     b_A = tl.load(p_A, mask=m_A, other=0.0)
@@ -100,7 +102,7 @@ def recompute_w_u_fwd_kda_kernel(
         p_u = u + o_t[:, None] * (HV*V) + o_v[None, :]
         b_v = tl.load(p_v, mask=m_v, other=0.0)
         b_vb = b_v * b_b[:, None]
-        b_u = tl.dot(b_A, b_vb.to(b_v.dtype), b_vb)
+        b_u = tl.dot(b_A, b_vb.to(b_v.dtype), acc=b_vb)
         tl.store(p_u, b_u.to(p_u.dtype.element_ty), mask=m_v)
 
     for i_k in range(tl.cdiv(K, BK)):
@@ -128,7 +130,7 @@ def recompute_w_u_fwd_kda_kernel(
             p_kg = kg + o_t[:, None] * (HV*K) + o_k[None, :]
             tl.store(p_kg, b_kg.to(p_kg.dtype.element_ty), mask=m_tk)
 
-        b_w = tl.dot(b_A, b_kb.to(b_k.dtype), b_kb)
+        b_w = tl.dot(b_A, b_kb.to(b_k.dtype), acc=b_kb)
         tl.store(p_w, b_w.to(p_w.dtype.element_ty), mask=m_tk)
 
 
