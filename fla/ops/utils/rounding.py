@@ -13,18 +13,8 @@ from fla.utils import input_guard
 
 
 # algorithm reference: https://github.com/pytorch/ao/blob/a724e78/torchao/optim/quant_utils.py#L121
-@triton.jit
-def _fp32_to_bf16_sr(x, rand):
-    x = x.to(tl.uint32, bitcast=True)
-    rand = rand.to(tl.uint32) & 0xFFFF
-    y = (x >> 16) + (rand < (x & 0xFFFF)).to(tl.uint32)
-    # preserve NaNs whose payload is confined to the discarded bits.
-    y = tl.where((x & 0x7FFFFFFF) > 0x7F800000, (x >> 16) | 0x40, y)
-    return y.to(tl.uint16).to(tl.bfloat16, bitcast=True)
-
-
 @triton.jit(do_not_specialize=['T'])
-def fp32_to_bf16_sr_fwd_kernel(x, rand, y, seed, T, BT: tl.constexpr):
+def fp32_to_bf16_sr_kernel(x, rand, y, seed, T, BT: tl.constexpr):
     i_t = tl.program_id(0).to(tl.int64)
     o_t = i_t * BT + tl.arange(0, BT)
     b_x = tl.load(x + o_t, mask=o_t < T, other=0)
@@ -32,7 +22,12 @@ def fp32_to_bf16_sr_fwd_kernel(x, rand, y, seed, T, BT: tl.constexpr):
         b_r = tl.randint(tl.load(seed), o_t)
     else:
         b_r = tl.load(rand + o_t, mask=o_t < T, other=0)
-    b_y = _fp32_to_bf16_sr(b_x, b_r)
+    b_x = b_x.to(tl.uint32, bitcast=True)
+    b_r = b_r.to(tl.uint32) & 0xFFFF
+    b_y = (b_x >> 16) + (b_r < (b_x & 0xFFFF)).to(tl.uint32)
+    # preserve NaNs whose payload is confined to the discarded bits.
+    b_y = tl.where((b_x & 0x7FFFFFFF) > 0x7F800000, (b_x >> 16) | 0x40, b_y)
+    b_y = b_y.to(tl.uint16).to(tl.bfloat16, bitcast=True)
     tl.store(y + o_t, b_y, mask=o_t < T)
 
 
@@ -63,7 +58,6 @@ def fp32_to_bf16_sr(x: torch.Tensor, rand: torch.Tensor | None = None) -> torch.
             raise ValueError("rand must have the same shape and device as x")
     y = torch.empty_like(x, dtype=torch.bfloat16)
     T = x.numel()
-    if T > 0:
-        seed = torch.randint(0, 2**32, (), dtype=torch.int64, device=x.device) if rand is None else None
-        fp32_to_bf16_sr_fwd_kernel[(triton.cdiv(T, 256),)](x=x, rand=rand, y=y, seed=seed, T=T, BT=256)
+    seed = torch.randint(0, 2**32, (), dtype=torch.int64, device=x.device) if rand is None else None
+    fp32_to_bf16_sr_kernel[(triton.cdiv(T, 256),)](x=x, rand=rand, y=y, seed=seed, T=T, BT=256)
     return y
