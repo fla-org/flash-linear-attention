@@ -84,22 +84,23 @@ def chunk_fwd_kernel_o(
         b_o = tl.zeros([BT, BV], dtype=tl.float32)
         b_A = tl.zeros([BT, BT], dtype=tl.float32)
 
+        o_t = i_t * BT + tl.arange(0, BT)
+        m_t = o_t < T
+        o_v = i_v * BV + tl.arange(0, BV)
+        m_v = o_v < V
+
         for i_k in range(tl.cdiv(K, BK)):
-            p_q = tl.make_block_ptr(
-                q, (T, K), (Hg * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0)
-            )
-            p_k = tl.make_block_ptr(
-                k, (K, T), (1, Hg * K), (i_k * BK, i_t * BT), (BK, BT), (0, 1)
-            )
-            p_h = tl.make_block_ptr(
-                h_base, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0)
-            )
+            o_k = i_k * BK + tl.arange(0, BK)
+            m_k = o_k < K
+            p_q = q + o_t[:, None] * (Hg * K) + o_k[None, :]
+            p_k = k + o_k[:, None] + o_t[None, :] * (Hg * K)
+            p_h = h_base + o_k[:, None] * V + o_v[None, :]
             # shape BT x BK
-            b_q = tl.load(p_q, boundary_check=(0, 1))
+            b_q = tl.load(p_q, mask=m_t[:, None] & m_k[None, :], other=0)
             # shape BK x BT
-            b_k = tl.load(p_k, boundary_check=(0, 1))
+            b_k = tl.load(p_k, mask=m_k[:, None] & m_t[None, :], other=0)
             # shape BK x BV
-            b_h = tl.load(p_h, boundary_check=(0, 1))
+            b_h = tl.load(p_h, mask=m_k[:, None] & m_v[None, :], other=0)
 
             # [BT, BK] @ [BK, BV] -> [BT, BV]
             b_o += tl.dot(b_q, b_h)
@@ -107,10 +108,8 @@ def chunk_fwd_kernel_o(
             b_A += tl.dot(b_q, b_k)
 
         if USE_G:
-            offs_t = i_t * BT + tl.arange(0, BT)
-            mask_t = offs_t < T
             g_ptr = g + bos + i_h * T_max
-            b_g = tl.load(g_ptr + offs_t, mask=mask_t, other=0.0)
+            b_g = tl.load(g_ptr + o_t, mask=m_t, other=0.0)
 
             b_o = b_o * tl.exp(b_g)[:, None]
             b_A = b_A * safe_exp(b_g[:, None] - b_g[None, :])
@@ -119,18 +118,14 @@ def chunk_fwd_kernel_o(
         m_A = o_i[:, None] >= o_i[None, :]
         b_A = tl.where(m_A, b_A, 0)
 
-        p_v = tl.make_block_ptr(
-            v, (T, V), (H * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0)
-        )
-        p_o = tl.make_block_ptr(
-            o_buf, (T, V), (H * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0)
-        )
+        p_v = v + o_t[:, None] * (H * V) + o_v[None, :]
+        p_o = o_buf + o_t[:, None] * (H * V) + o_v[None, :]
 
-        b_v = tl.load(p_v, boundary_check=(0, 1))
+        b_v = tl.load(p_v, mask=m_t[:, None] & m_v[None, :], other=0)
         # to fix mma -> mma layout conversion
         # already solved by triton v3.2 or higher
         b_o = b_o * scale + tl.dot(b_A.to(b_v.dtype), b_v) * scale
-        tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
+        tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=m_t[:, None] & m_v[None, :])
 
 
 def chunk_fwd_o(
