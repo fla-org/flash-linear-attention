@@ -17,6 +17,7 @@ import triton.language as tl
 
 from fla.backends import TritonAscendBackend, register
 from fla.ops.gdn2.wy_fast import recompute_w_u_fwd_gdn2
+from fla.ops.gdn2.gate import gdn2_local_log_cumsum
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp2
 from fla.ops.utils.triton_ascend.addressing import chunk_token_rows
@@ -27,6 +28,7 @@ from fla.utils.ascend_ub_manager import compute_row_tile_block_size, get_ub_mana
 @triton.heuristics({
     'STORE_QG': lambda args: args['qg'] is not None,
     'STORE_KG': lambda args: args['kg'] is not None,
+    'USE_RAW_G': lambda args: args['g_raw'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.jit(do_not_specialize=['T'])
@@ -42,6 +44,7 @@ def recompute_w_u_fwd_gdn2_fp32_kernel_npu(
     u,
     A,
     gk,
+    g_raw,
     cu_seqlens,
     chunk_indices,
     T,
@@ -53,6 +56,7 @@ def recompute_w_u_fwd_gdn2_fp32_kernel_npu(
     BV: tl.constexpr,
     STORE_QG: tl.constexpr,
     STORE_KG: tl.constexpr,
+    USE_RAW_G: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
@@ -112,11 +116,12 @@ def recompute_w_u_fwd_gdn2_fp32_kernel_npu(
                 gk + ((bos + last_idx) * H + i_h) * K + o_k,
                 mask=m_k, other=0.,
             ).to(tl.float32)
-            b_kg = b_k * tl.where(
-                m_rows[:, None],
-                exp2(b_gn[None, :] - b_gk),
-                0,
-            )
+            b_gs = b_gn[None, :] - b_gk
+            if USE_RAW_G:
+                b_gs = gdn2_local_log_cumsum(
+                    g_raw + (bos * H + i_h) * K, i_t * BT, min(i_t * BT + BT, T), o_k, H, K, BT, True,
+                )
+            b_kg = b_k * tl.where(m_rows[:, None], exp2(b_gs), 0)
             p_kg = kg + (bos * H + i_h) * K + row_base * (H * K) + rows[:, None] * (H * K) + o_k[None, :]
             tl.store(p_kg, b_kg.to(p_kg.dtype.element_ty), mask=m_kk)
 
@@ -135,6 +140,7 @@ def _recompute_w_u_fwd_gdn2_fp32_npu(
     gk: torch.Tensor | None = None,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
+    g_raw: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
     """NPU WY recompute. ``A @ x`` and the returned factors stay in fp32.
 
@@ -171,6 +177,7 @@ def _recompute_w_u_fwd_gdn2_fp32_npu(
         u=u,
         A=A,
         gk=gk,
+        g_raw=g_raw,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         T=T,
@@ -267,6 +274,7 @@ def recompute_w_u_fwd_gdn2_kernel_npu(
     u,
     A,
     gk,
+    g_raw,
     cu_seqlens,
     chunk_indices,
     T,
@@ -282,6 +290,7 @@ def recompute_w_u_fwd_gdn2_kernel_npu(
     STORE_QG: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     IS_ALIGNED: tl.constexpr,
+    USE_RAW_G: tl.constexpr,
 ):
     T_seq = T
     BH = B * H
@@ -354,7 +363,12 @@ def recompute_w_u_fwd_gdn2_kernel_npu(
             m_last_k = o_k64 < K
             p_gn = gk + ((bos + last_idx64) * H + i_h64) * K + o_k64
             b_gn = tl.load(p_gn, mask=m_last_k, other=0.0).to(tl.float32)
-            b_kg = b_k * tl.where(m_t[:, None], exp2(b_gn[None, :] - b_gk), 0.0)
+            b_gs = b_gn[None, :] - b_gk
+            if USE_RAW_G:
+                b_gs = gdn2_local_log_cumsum(
+                    g_raw + head_k, i_t64 * BT, min(i_t64 * BT + BT, T_cur), o_k64, H, K, BT, True,
+                )
+            b_kg = b_k * tl.where(m_t[:, None], exp2(b_gs), 0.0)
             p_kg = kg + head_k + local_t64[:, None] * (H * K) + o_k64[None, :]
             tl.store(p_kg, b_kg.to(p_kg.dtype.element_ty), mask=m_k)
 
@@ -378,10 +392,11 @@ def recompute_w_u_fwd_gdn2_verifier(
     gk: torch.Tensor | None = None,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
+    g_raw: torch.Tensor | None = None,
 ) -> tuple[bool, str | None]:
     if gk is None:
         return False, "GDN-2 Ascend WY requires gk"
-    float_tensors = (k, v, b, w_gate, A, gk, *(t for t in (q,) if t is not None))
+    float_tensors = (k, v, b, w_gate, A, gk, *(t for t in (q, g_raw) if t is not None))
     if any(t.ndim != 4 for t in float_tensors):
         return False, "GDN-2 Ascend WY requires rank-4 tensors"
     k_shape, k_device = k.shape, k.device
@@ -390,7 +405,7 @@ def recompute_w_u_fwd_gdn2_verifier(
         return False, f"GDN-2 Ascend WY requires chunk_size=64, got {A.shape[-1]}"
     if A.shape[:3] != k_shape[:3]:
         return False, "GDN-2 Ascend WY requires A to match k on [B, T, H]"
-    if any(t.shape != k_shape for t in (b, gk, *(t for t in (q,) if t is not None))):
+    if any(t.shape != k_shape for t in (b, gk, *(t for t in (q, g_raw) if t is not None))):
         return False, "GDN-2 Ascend WY requires b/gk/q shapes to match k"
     if v.shape[:3] != k_shape[:3] or w_gate.shape != v.shape:
         return False, "GDN-2 Ascend WY requires v/w_gate to match k on [B, T, H]"
@@ -430,6 +445,7 @@ def recompute_w_u_fwd_gdn2_npu(
     gk: torch.Tensor | None = None,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
+    g_raw: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
     if gk is None:
         raise ValueError('GDN-2 Ascend WY requires gk')
@@ -444,6 +460,7 @@ def recompute_w_u_fwd_gdn2_npu(
             gk=gk,
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
+            g_raw=g_raw,
         )
 
     B, T, H, K, V = *k.shape, v.shape[-1]
@@ -482,6 +499,8 @@ def recompute_w_u_fwd_gdn2_npu(
             u=u,
             A=A,
             gk=gk,
+            g_raw=g_raw,
+            USE_RAW_G=g_raw is not None,
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
             T=T,

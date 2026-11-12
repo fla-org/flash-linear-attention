@@ -40,9 +40,10 @@ from fla.backends import dispatch
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu, chunk_gated_delta_rule_fwd_h
 from fla.ops.cp.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu_pre_process, expand_h0
 from fla.ops.gdn2.chunk_intra import chunk_gdn2_bwd_intra
+from fla.ops.gdn2.gate import gdn2_chunk_gate, gdn2_local_log_cumsum
 from fla.ops.gdn2.wy_fast import recompute_w_u_fwd_gdn2
 from fla.ops.kda.chunk_bwd import chunk_kda_bwd_dAv
-from fla.ops.kda.gate import kda_gate_bwd, kda_gate_chunk_cumsum
+from fla.ops.kda.gate import kda_gate_bwd, kda_gate_chunk_cumsum, kda_gate_fwd
 from fla.ops.utils import chunk_local_cumsum, prepare_chunk_indices
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.constant import RCP_LN2
@@ -56,6 +57,7 @@ NUM_WARPS_WY = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8]
 
 
 @triton.heuristics({
+    'USE_RAW_G': lambda args: args['g_raw'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @fla_cache_autotune(
@@ -79,6 +81,7 @@ def chunk_gdn2_bwd_kernel_wy_dqkg_fused(
     v,
     v_new,
     g,
+    g_raw,
     b,
     w_gate,
     A,
@@ -105,6 +108,7 @@ def chunk_gdn2_bwd_kernel_wy_dqkg_fused(
     BV: tl.constexpr,
     STATE_V_FIRST: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    USE_RAW_G: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
@@ -219,7 +223,8 @@ def chunk_gdn2_bwd_kernel_wy_dqkg_fused(
         b_gb = b_gk_exp * b_b
         b_dgk *= exp2(b_gn)
         b_dq = b_dq * b_gk_exp * scale
-        b_dk = b_dk * tl.where(m_t[:, None], exp2(b_gn[None, :] - b_g), 0)
+        if not USE_RAW_G:
+            b_dk = b_dk * tl.where(m_t[:, None], exp2(b_gn[None, :] - b_g), 0)
 
         b_kg = b_k * b_gk_exp
 
@@ -231,6 +236,12 @@ def chunk_gdn2_bwd_kernel_wy_dqkg_fused(
         p_db = db + o_t[:, None] * (H * K) + o_k[None, :]
         b_db_partial = b_dkgb * b_kg
         tl.store(p_db, b_db_partial.to(p_db.dtype.element_ty), mask=m_kk)
+
+        if USE_RAW_G:
+            b_gs = gdn2_local_log_cumsum(
+                g_raw + (bos * H + i_h) * K, i_t * BT, min(i_t * BT + BT, T), o_k, H, K, BT, True,
+            )
+            b_dk = b_dk * tl.where(m_t[:, None], exp2(b_gs), 0)
 
         p_q = q + o_t[:, None] * (H * K) + o_k[None, :]
         b_q = tl.load(p_q, mask=m_kk, other=0.0)
@@ -274,6 +285,7 @@ def chunk_gdn2_bwd_wy_dqkg_fused(
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
     state_v_first: bool = False,
+    g_raw: torch.Tensor | None = None,
 ):
     """Fused WY backward producing dq, dk, dv, db (K-dim), dw (V-dim), dg, dA."""
     B, T, H, K, V = *k.shape, v.shape[-1]
@@ -298,6 +310,7 @@ def chunk_gdn2_bwd_wy_dqkg_fused(
         v=v,
         v_new=v_new,
         g=g,
+        g_raw=g_raw,
         b=b,
         w_gate=w_gate,
         A=A,
@@ -364,6 +377,10 @@ def chunk_gdn2_bwd(
     shape [B, T, H, K] (channel-wise erase gate); ``dw`` has shape [B, T, H, V]
     (channel-wise write gate).
     """
+    g_raw = None
+    if not safe_gate:
+        g_raw = kda_gate_fwd(g=g_org, A_log=A_log, dt_bias=dt_bias, lower_bound=lower_bound) if use_gate_in_kernel else g_org
+
     if cp_context is not None:
         # If CP was used, the initial_state is guaranteed to have been populated in the fwd
         # Restore the full initial_state tensor from the compressed version.
@@ -390,6 +407,7 @@ def chunk_gdn2_bwd(
             A=Akk,
             q=q,
             gk=g,
+            g_raw=g_raw,
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
         )
@@ -459,6 +477,7 @@ def chunk_gdn2_bwd(
         v=v,
         v_new=v_new,
         g=g,
+        g_raw=g_raw,
         b=b,
         w_gate=w_gate,
         A=Akk,
@@ -477,6 +496,7 @@ def chunk_gdn2_bwd(
         q=q,
         k=k,
         g=g,
+        g_raw=g_raw,
         b=b,
         dAqk=dAqk,
         dAkk=dAkk,
@@ -491,13 +511,16 @@ def chunk_gdn2_bwd(
     )
 
     dA_log, dt_bias_grad = None, None
-    dg = chunk_local_cumsum(
-        dg,
-        chunk_size=chunk_size,
-        reverse=True,
-        cu_seqlens=cu_seqlens,
-        chunk_indices=chunk_indices,
-    )
+    if g_raw is not None:
+        dg = gdn2_chunk_gate(g=g_raw, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices, chunk_size=chunk_size, dg=dg)
+    else:
+        dg = chunk_local_cumsum(
+            dg,
+            chunk_size=chunk_size,
+            reverse=True,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+        )
     if use_gate_in_kernel:
         dg, dA_log, dt_bias_grad = kda_gate_bwd(
             g=g_org,
