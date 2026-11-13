@@ -38,7 +38,11 @@ def ref_prepare_position_ids(cu_seqlens):
 
 
 def ref_prepare_sequence_ids(cu_seqlens):
-    return ref_prepare_position_ids(cu_seqlens).eq(0).cumsum(0) - 1
+    seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+    return torch.cat([
+        torch.full((n,), i, dtype=cu_seqlens.dtype, device=cu_seqlens.device)
+        for i, n in enumerate(seqlens)
+    ])
 
 
 def ref_prepare_token_indices(cu_seqlens):
@@ -52,7 +56,11 @@ def ref_prepare_chunk_indices(cu_seqlens, chunk_size=CHUNK_SIZE):
         torch.arange(n, device=cu_seqlens.device, dtype=cu_seqlens.dtype)
         for n in n_chunks_per_seq
     ])
-    return torch.stack([indices.eq(0).cumsum(0) - 1, indices], 1)
+    sequence_ids = torch.cat([
+        torch.full((n,), i, device=cu_seqlens.device, dtype=cu_seqlens.dtype)
+        for i, n in enumerate(n_chunks_per_seq)
+    ])
+    return torch.stack([sequence_ids, indices], 1)
 
 
 def ref_prepare_chunk_offsets(cu_seqlens, chunk_size=CHUNK_SIZE):
@@ -130,6 +138,13 @@ def test_matches_reference(name, impl, ref, batch_size, max_seq_len):
     torch.manual_seed(42)
     seqlens = torch.randint(1, max_seq_len, (batch_size,), device=device, dtype=torch.int32)
     cu_seqlens = torch.cat([torch.zeros(1, device=device, dtype=torch.int32), seqlens.cumsum(0)])
+    torch.testing.assert_close(impl(cu_seqlens).long(), ref(cu_seqlens).long(), msg=f"{name} mismatch")
+
+
+@pytest.mark.parametrize("name,impl,ref", HELPERS, ids=HELPER_IDS)
+def test_empty_sequences(name, impl, ref):
+    # empty sequences first, in the middle, back to back, and last must still advance the sequence index
+    cu_seqlens = make_cu_seqlens([0, 5, 0, 0, 7, 0])
     torch.testing.assert_close(impl(cu_seqlens).long(), ref(cu_seqlens).long(), msg=f"{name} mismatch")
 
 
