@@ -27,12 +27,11 @@ BWD_MEM_MULT = 10.0
 SAFETY_MARGIN = 0.80
 FALLBACK_TILE = 16
 MAX_TILE = 128
-_BC = 16
 
 
-def get_bwd_tile(size: int) -> int:
+def get_bwd_tile(size: int, block_rows: int) -> int:
     return compute_row_tile_block_size(
-        SUB_CHUNK_SIZE,
+        block_rows,
         size,
         BWD_MEM_MULT,
         tiling_row=False,
@@ -861,11 +860,12 @@ def chunk_gdn2_bwd_wy_dqkg_fused_npu(
     dA = torch.empty_like(A, dtype=torch.float)
     dA_acc = torch.zeros(B, T, H, BT, dtype=torch.float, device=A.device)
 
-    BK = get_bwd_tile(K)
+    bc_k = min(32, BT)
+    BK = get_bwd_tile(K, block_rows=bc_k)
     # Odd half-precision K tails use a smaller fused gate tile to stay within UB.
     if K % 64 and k.dtype in (torch.float16, torch.bfloat16):
         BK = min(BK, 32)
-    BV = get_bwd_tile(V)
+    BV = get_bwd_tile(V, block_rows=bc_k)
     NK = triton.cdiv(K, BK)
     is_varlen = cu_seqlens is not None
     chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT) if is_varlen else g.new_zeros(1, dtype=torch.int64)
@@ -900,7 +900,6 @@ def chunk_gdn2_bwd_wy_dqkg_fused_npu(
         **ascend_compile_kwargs(),
     )
 
-    bc_k = 32 if BT >= 32 else _BC
     mask_dma = need_dma_mask(T, BT, K, BK, V, BV, is_varlen, cu_seqlens) or BT % bc_k != 0
     k_part_kwargs = dict(
         q=q,

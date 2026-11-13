@@ -807,7 +807,7 @@ def chunk_gated_delta_rule_h_fwd_kernel(
                 m_i = (o_i >= 0) & (o_i < K)
                 m_p_w1 = m_rows[:, None] & m_i[None, :]
                 p_w1 = add_token_rows(w_base, row_base, rows[:, None], stride_w, True) + o_i[None, :]
-                b_w = mload(p_w1, m_p_w1, (MASK_DMA and phase == 1) or K % BK != 0 or V % BV != 0).to(tl.float32)
+                b_w = mload(p_w1, m_p_w1, (MASK_DMA and phase == 1) or MASK_KV).to(tl.float32)
                 if STATE_V_FIRST:
                     b_v = tl.dot(b_w, tl.trans(b_h1).to(b_w.dtype))
                 else:
@@ -817,7 +817,7 @@ def chunk_gated_delta_rule_h_fwd_kernel(
                     m_k = (o_k >= 0) & (o_k < K)
                     m_p_w2 = m_rows[:, None] & m_k[None, :]
                     p_w2 = add_token_rows(w_base, row_base, rows[:, None], stride_w, True) + o_k[None, :]
-                    b_w = mload(p_w2, m_p_w2, (MASK_DMA and phase == 1) or K % BK != 0 or V % BV != 0).to(tl.float32)
+                    b_w = mload(p_w2, m_p_w2, (MASK_DMA and phase == 1) or MASK_KV).to(tl.float32)
                     if STATE_V_FIRST:
                         b_v = tl.dot(b_w, tl.trans(b_h2).to(b_w.dtype), b_v)
                     else:
@@ -827,7 +827,7 @@ def chunk_gated_delta_rule_h_fwd_kernel(
                     m_k = (o_k >= 0) & (o_k < K)
                     m_p_w3 = m_rows[:, None] & m_k[None, :]
                     p_w3 = add_token_rows(w_base, row_base, rows[:, None], stride_w, True) + o_k[None, :]
-                    b_w = mload(p_w3, m_p_w3, (MASK_DMA and phase == 1) or K % BK != 0 or V % BV != 0).to(tl.float32)
+                    b_w = mload(p_w3, m_p_w3, (MASK_DMA and phase == 1) or MASK_KV).to(tl.float32)
                     if STATE_V_FIRST:
                         b_v = tl.dot(b_w, tl.trans(b_h3).to(b_w.dtype), b_v)
                     else:
@@ -837,7 +837,7 @@ def chunk_gated_delta_rule_h_fwd_kernel(
                     m_k = (o_k >= 0) & (o_k < K)
                     m_p_w4 = m_rows[:, None] & m_k[None, :]
                     p_w4 = add_token_rows(w_base, row_base, rows[:, None], stride_w, True) + o_k[None, :]
-                    b_w = mload(p_w4, m_p_w4, (MASK_DMA and phase == 1) or K % BK != 0 or V % BV != 0).to(tl.float32)
+                    b_w = mload(p_w4, m_p_w4, (MASK_DMA and phase == 1) or MASK_KV).to(tl.float32)
                     if STATE_V_FIRST:
                         b_v = tl.dot(b_w, tl.trans(b_h4).to(b_w.dtype), b_v)
                     else:
@@ -864,12 +864,12 @@ def chunk_gated_delta_rule_h_fwd_kernel(
                 m_v = (o_v >= 0) & (o_v < V)
                 m_p_v = m_rows[:, None] & m_v[None, :]
                 p_v = add_token_rows(v_base, row_base, rows[:, None], stride_v, True) + o_v[None, :]
-                b_v = mload(p_v, m_p_v, (MASK_DMA and phase == 1) or K % BK != 0 or V % BV != 0).to(tl.float32) - b_v
+                b_v = mload(p_v, m_p_v, (MASK_DMA and phase == 1) or MASK_KV).to(tl.float32) - b_v
 
                 if SAVE_NEW_VALUE:
                     p_v_new = add_token_rows(v_new_base, row_base, rows[:, None], stride_v, True) + o_v[None, :]
                     mstore(p_v_new, b_v.to(p_v_new.dtype.element_ty), m_p_v,
-                           (MASK_DMA and phase == 1) or K % BK != 0 or V % BV != 0)
+                           (MASK_DMA and phase == 1) or MASK_KV)
 
                 if USE_G:
                     if USE_G_PRECOMP:
@@ -909,7 +909,7 @@ def chunk_gated_delta_rule_h_fwd_kernel(
                         b_h1 *= b_gk_last1[:, None]
                 m_p_k1 = m_i[:, None] & m_rows[None, :]
                 p_k1 = add_token_rows(k_base, row_base, rows[None, :], stride_k, True) + o_i[:, None]
-                b_k = mload(p_k1, m_p_k1, (MASK_DMA and phase == 1) or K % BK != 0 or V % BV != 0).to(tl.float32)
+                b_k = mload(p_k1, m_p_k1, (MASK_DMA and phase == 1) or MASK_KV).to(tl.float32)
                 if STATE_V_FIRST:
                     b_h1 += tl.trans(tl.dot(b_k, b_v))
                 else:
@@ -930,7 +930,7 @@ def chunk_gated_delta_rule_h_fwd_kernel(
                     m_k = (o_k >= 0) & (o_k < K)
                     m_p_k2 = m_k[:, None] & m_rows[None, :]
                     p_k2 = add_token_rows(k_base, row_base, rows[None, :], stride_k, True) + o_k[:, None]
-                    b_k = mload(p_k2, m_p_k2, (MASK_DMA and phase == 1) or K % BK != 0 or V % BV != 0).to(tl.float32)
+                    b_k = mload(p_k2, m_p_k2, (MASK_DMA and phase == 1) or MASK_KV).to(tl.float32)
                     if STATE_V_FIRST:
                         b_h2 += tl.trans(tl.dot(b_k, b_v))
                     else:
@@ -951,7 +951,7 @@ def chunk_gated_delta_rule_h_fwd_kernel(
                     m_k = (o_k >= 0) & (o_k < K)
                     m_p_k3 = m_k[:, None] & m_rows[None, :]
                     p_k3 = add_token_rows(k_base, row_base, rows[None, :], stride_k, True) + o_k[:, None]
-                    b_k = mload(p_k3, m_p_k3, (MASK_DMA and phase == 1) or K % BK != 0 or V % BV != 0).to(tl.float32)
+                    b_k = mload(p_k3, m_p_k3, (MASK_DMA and phase == 1) or MASK_KV).to(tl.float32)
                     if STATE_V_FIRST:
                         b_h3 += tl.trans(tl.dot(b_k, b_v))
                     else:
@@ -972,7 +972,7 @@ def chunk_gated_delta_rule_h_fwd_kernel(
                     m_k = (o_k >= 0) & (o_k < K)
                     m_p_k4 = m_k[:, None] & m_rows[None, :]
                     p_k4 = add_token_rows(k_base, row_base, rows[None, :], stride_k, True) + o_k[:, None]
-                    b_k = mload(p_k4, m_p_k4, (MASK_DMA and phase == 1) or K % BK != 0 or V % BV != 0).to(tl.float32)
+                    b_k = mload(p_k4, m_p_k4, (MASK_DMA and phase == 1) or MASK_KV).to(tl.float32)
                     if STATE_V_FIRST:
                         b_h4 += tl.trans(tl.dot(b_k, b_v))
                     else:
@@ -1667,13 +1667,13 @@ def chunk_gated_delta_rule_h_bwd_kernel(
                     p_dv = add_token_rows(dv_base, row_base, rows[:, None], stride_v, True) + o_v[None, :]
                     p_dv2 = add_token_rows(dv2_base, row_base, rows[:, None], stride_v, True) + o_v[None, :]
                     p_do = add_token_rows(do_base, row_base, rows[:, None], stride_v, True) + o_v[None, :]
-                    b_do = mload(p_do, m_p_dv, (MASK_DMA and phase == 0) or K % BK != 0 or V % BV != 0)
+                    b_do = mload(p_do, m_p_dv, (MASK_DMA and phase == 0) or MASK_KV)
 
                     o_i = tl.arange(0, 64)
                     m_i = (o_i >= 0) & (o_i < K)
                     m_p_k = m_rows[:, None] & m_i[None, :]
                     p_k = add_token_rows(k_base, row_base, rows[:, None], stride_k, True) + o_i[None, :]
-                    b_k = mload(p_k, m_p_k, (MASK_DMA and phase == 0) or K % BK != 0 or V % BV != 0)
+                    b_k = mload(p_k, m_p_k, (MASK_DMA and phase == 0) or MASK_KV)
                     if USE_GK:
                         last_idx = min((i_t + 1) * BT, T) - 1
                         b_gk_last1 = mload(gk_base + last_idx * stride_w + o_k1, (o_k1 < K), K % BK != 0).to(tl.float32)
@@ -1688,7 +1688,7 @@ def chunk_gated_delta_rule_h_bwd_kernel(
                         m_i_2 = (o_i_2 >= 0) & (o_i_2 < K)
                         m_p_k = m_rows[:, None] & m_i_2[None, :]
                         p_k = add_token_rows(k_base, row_base, rows[:, None], stride_k, True) + o_i_2[None, :]
-                        b_k = mload(p_k, m_p_k, (MASK_DMA and phase == 0) or K % BK != 0 or V % BV != 0)
+                        b_k = mload(p_k, m_p_k, (MASK_DMA and phase == 0) or MASK_KV)
                         if USE_GK:
                             o_k2 = 64 + o_k1
                             b_gk_last2 = mload(gk_base + last_idx * stride_w + o_k2, (o_k2 < K), K % BK != 0).to(tl.float32)
@@ -1703,7 +1703,7 @@ def chunk_gated_delta_rule_h_bwd_kernel(
                         m_i_2 = (o_i_2 >= 0) & (o_i_2 < K)
                         m_p_k = m_rows[:, None] & m_i_2[None, :]
                         p_k = add_token_rows(k_base, row_base, rows[:, None], stride_k, True) + o_i_2[None, :]
-                        b_k = mload(p_k, m_p_k, (MASK_DMA and phase == 0) or K % BK != 0 or V % BV != 0)
+                        b_k = mload(p_k, m_p_k, (MASK_DMA and phase == 0) or MASK_KV)
                         if USE_GK:
                             o_k3 = 128 + o_k1
                             b_gk_last3 = mload(gk_base + last_idx * stride_w + o_k3, (o_k3 < K), K % BK != 0).to(tl.float32)
@@ -1718,7 +1718,7 @@ def chunk_gated_delta_rule_h_bwd_kernel(
                         m_i_2 = (o_i_2 >= 0) & (o_i_2 < K)
                         m_p_k = m_rows[:, None] & m_i_2[None, :]
                         p_k = add_token_rows(k_base, row_base, rows[:, None], stride_k, True) + o_i_2[None, :]
-                        b_k = mload(p_k, m_p_k, (MASK_DMA and phase == 0) or K % BK != 0 or V % BV != 0)
+                        b_k = mload(p_k, m_p_k, (MASK_DMA and phase == 0) or MASK_KV)
                         if USE_GK:
                             o_k4 = 192 + o_k1
                             b_gk_last4 = mload(gk_base + last_idx * stride_w + o_k4, (o_k4 < K), K % BK != 0).to(tl.float32)
@@ -1736,10 +1736,11 @@ def chunk_gated_delta_rule_h_bwd_kernel(
                             b_dv = tl.where(m_rows[:, None], b_dv, 0)
                     elif USE_G:
                         b_dv *= b_g_ratio[:, None]
-                    b_dv = b_dv.to(tl.float32) + mload(p_dv, m_p_dv, (MASK_DMA and phase == 0) or K %
-                                                       BK != 0 or V % BV != 0).to(tl.float32)
+                    b_dv = b_dv.to(tl.float32) + mload(
+                        p_dv, m_p_dv, (MASK_DMA and phase == 0) or MASK_KV,
+                    ).to(tl.float32)
                     mstore(p_dv2,  b_dv.to(p_dv2.dtype.element_ty), m_p_dv,
-                           (MASK_DMA and phase == 0) or K % BK != 0 or V % BV != 0)
+                           (MASK_DMA and phase == 0) or MASK_KV)
                     # v-first uses dv as lhs of the subtract dot, which clobbers it.
                     if STATE_V_FIRST:
                         b_dv_pristine = b_dv + 0.0
@@ -1767,8 +1768,8 @@ def chunk_gated_delta_rule_h_bwd_kernel(
                     m_p_w = m_i[:, None] & m_rows[None, :]
                     p_w = add_token_rows(w_base, row_base, rows[None, :], stride_w, True) + o_i[:, None]
                     p_q = add_token_rows(q_base, row_base, rows[None, :], stride_k, True) + o_i[:, None]
-                    b_w = mload(p_w, m_p_w, (MASK_DMA and phase == 0) or K % BK != 0 or V % BV != 0)
-                    b_q = mload(p_q, m_p_w, (MASK_DMA and phase == 0) or K % BK != 0 or V % BV != 0)
+                    b_w = mload(p_w, m_p_w, (MASK_DMA and phase == 0) or MASK_KV)
+                    b_q = mload(p_q, m_p_w, (MASK_DMA and phase == 0) or MASK_KV)
                     if USE_GK:
                         if STATE_V_FIRST:
                             b_dh1 *= exp2(b_gk_last1)[None, :]
@@ -1790,8 +1791,8 @@ def chunk_gated_delta_rule_h_bwd_kernel(
                         m_p_q = m_i_2[:, None] & m_rows[None, :]
                         p_q = add_token_rows(q_base, row_base, rows[None, :], stride_k, True) + o_i_2[:, None]
                         p_w = add_token_rows(w_base, row_base, rows[None, :], stride_w, True) + o_i_2[:, None]
-                        b_q = mload(p_q, m_p_q, (MASK_DMA and phase == 0) or K % BK != 0 or V % BV != 0)
-                        b_w = mload(p_w, m_p_q, (MASK_DMA and phase == 0) or K % BK != 0 or V % BV != 0)
+                        b_q = mload(p_q, m_p_q, (MASK_DMA and phase == 0) or MASK_KV)
+                        b_w = mload(p_w, m_p_q, (MASK_DMA and phase == 0) or MASK_KV)
                         if USE_GK:
                             if STATE_V_FIRST:
                                 b_dh2 *= exp2(b_gk_last2)[None, :]
@@ -1812,8 +1813,8 @@ def chunk_gated_delta_rule_h_bwd_kernel(
                         m_p_q = m_i_2[:, None] & m_rows[None, :]
                         p_q = add_token_rows(q_base, row_base, rows[None, :], stride_k, True) + o_i_2[:, None]
                         p_w = add_token_rows(w_base, row_base, rows[None, :], stride_w, True) + o_i_2[:, None]
-                        b_q = mload(p_q, m_p_q, (MASK_DMA and phase == 0) or K % BK != 0 or V % BV != 0)
-                        b_w = mload(p_w, m_p_q, (MASK_DMA and phase == 0) or K % BK != 0 or V % BV != 0)
+                        b_q = mload(p_q, m_p_q, (MASK_DMA and phase == 0) or MASK_KV)
+                        b_w = mload(p_w, m_p_q, (MASK_DMA and phase == 0) or MASK_KV)
                         if USE_GK:
                             if STATE_V_FIRST:
                                 b_dh3 *= exp2(b_gk_last3)[None, :]
@@ -1834,8 +1835,8 @@ def chunk_gated_delta_rule_h_bwd_kernel(
                         m_p_q = m_i_2[:, None] & m_rows[None, :]
                         p_q = add_token_rows(q_base, row_base, rows[None, :], stride_k, True) + o_i_2[:, None]
                         p_w = add_token_rows(w_base, row_base, rows[None, :], stride_w, True) + o_i_2[:, None]
-                        b_q = mload(p_q, m_p_q, (MASK_DMA and phase == 0) or K % BK != 0 or V % BV != 0)
-                        b_w = mload(p_w, m_p_q, (MASK_DMA and phase == 0) or K % BK != 0 or V % BV != 0)
+                        b_q = mload(p_q, m_p_q, (MASK_DMA and phase == 0) or MASK_KV)
+                        b_w = mload(p_w, m_p_q, (MASK_DMA and phase == 0) or MASK_KV)
                         if USE_GK:
                             if STATE_V_FIRST:
                                 b_dh4 *= exp2(b_gk_last4)[None, :]
