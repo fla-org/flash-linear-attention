@@ -35,8 +35,8 @@ def naive_attnres(
             Per-layer pseudo-query of shape `[D]` or `[D, 1]`, where `D` is the hidden size.
         residuals (Sequence[torch.Tensor]):
             Non-empty sequence of same-dtype, same-`D` residual sources, each of shape `[..., D]`.
-        rms_weight (torch.Tensor):
-            RMSNorm scale for key normalization of shape `[D]`.
+        rms_weight (torch.Tensor, Optional):
+            RMSNorm scale for key normalization of shape `[D]`. If `None`, no scale is applied. Default: `None`.
         output_rms_weight (torch.Tensor, optional):
             If set, an extra RMSNorm with this weight is applied to the mixed residual before returning, fusing the
             prenorm that would otherwise follow the AttnRes call (e.g. `attn_norm` / `mlp_norm`). Default: `None`.
