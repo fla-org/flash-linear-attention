@@ -49,7 +49,8 @@ def test_chunk_kda_cache(monkeypatch):
     B, T, H, D = 1, 32768, 1, 32
 
     q = torch.randn(B, T, H, D, device=device, dtype=dtype)
-    k = torch.randn(B, T, H, D, device=device, dtype=dtype)
+    # Unit-length keys keep the long recurrence bounded so this isolates cache reuse.
+    k = F.normalize(torch.randn(B, T, H, D, device=device, dtype=dtype), dim=-1)
     v = torch.randn(B, T, H, D, device=device, dtype=dtype)
     g = torch.full((B, T, H, D), -0.05, device=device, dtype=dtype)
     beta = torch.sigmoid(torch.randn(B, T, H, device=device, dtype=dtype))
@@ -101,6 +102,7 @@ def test_chunk_kda_cache(monkeypatch):
     entry = _intracard_cache[key]
     assert key[0] == id(cu_seqlens)
     assert entry.cu_seqlens_ref() is cu_seqlens
+    assert torch.isfinite(o1).all() and torch.isfinite(o2).all()
     assert torch.allclose(o1, o2, atol=1e-4, rtol=1e-4)
 
 
