@@ -13,6 +13,7 @@ import os
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path, PurePosixPath
 
 PLATFORMS = {"h100", "ascend-a2"}
@@ -95,12 +96,13 @@ def require_evidence(result: dict) -> None:
 
 
 def run_targets(catalog: dict, repo: Path, platform: str, suite: str, targets: list[str], dispatch: str, results: Path) -> dict:
-    records = []
     pytest_args = []
     if platform == "ascend-a2" and suite != "cp":
         pytest_args = ["-n", "8", "--dist", "load"]
+
     for mode in validate_dispatch(catalog, suite, dispatch):
-        for index, target in enumerate(targets):
+        def run_target(index_and_target):
+            index, target = index_and_target
             junit = results / f"{mode}-{index}.xml"
             env = os.environ.copy()
             if mode == "off":
@@ -117,10 +119,14 @@ def run_targets(catalog: dict, repo: Path, platform: str, suite: str, targets: l
                 raise AgentCIError(f"Pytest did not produce JUnit XML for {target} ({mode})")
             result = read_junit(junit)
             result.update({"target": target, "dispatch": mode, "exit_code": completed.returncode})
-            records.append(result)
+            return result
+
+        with ThreadPoolExecutor(max_workers=2 if platform == "h100" else 1) as executor:
+            records = list(executor.map(run_target, enumerate(targets)))
+        for result in records:
             require_evidence(result)
-            if completed.returncode != 0:
-                raise AgentCIError(f"Pytest failed for {target} ({mode}); see JUnit XML")
+            if result["exit_code"] != 0:
+                raise AgentCIError(f"Pytest failed for {result['target']} ({mode}); see JUnit XML")
     return {"test_count": len(records), "results": records}
 
 

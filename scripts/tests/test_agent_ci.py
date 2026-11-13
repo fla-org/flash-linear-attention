@@ -12,6 +12,9 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
+from unittest.mock import call
 
 SPEC = importlib.util.spec_from_file_location("agent_ci", Path(__file__).parents[1] / "agent_ci.py")
 agent_ci = importlib.util.module_from_spec(SPEC)
@@ -103,6 +106,31 @@ class AgentCITest(unittest.TestCase):
         }))
         with self.assertRaises(agent_ci.AgentCIError):
             agent_ci.load_catalog(path)
+
+    def test_run_targets_parallelism_and_junit_order(self):
+        executor = mock.MagicMock()
+        executor.map.side_effect = lambda function, arguments: [function(argument) for argument in arguments]
+        executor.__enter__.return_value = executor
+        executor.__exit__.return_value = None
+
+        def fake_run(arguments, **kwargs):
+            junit = Path(next(arg for arg in arguments if arg.startswith("--junitxml=")).split("=", 1)[1])
+            junit.parent.mkdir(parents=True, exist_ok=True)
+            junit.write_text('<testsuite tests="1" skipped="0" failures="0" errors="0"/>')
+            return SimpleNamespace(returncode=0)
+
+        targets = ["tests/ops/test_ok.py::test_ok", "tests/ops/test_ok.py::test_other"]
+        with (
+            mock.patch.object(agent_ci, "ThreadPoolExecutor", return_value=executor) as factory,
+            mock.patch.object(agent_ci.subprocess, "run", side_effect=fake_run),
+        ):
+            h100 = agent_ci.run_targets(self.catalog, self.repo, "h100", "ops", targets, "off", self.repo / "results-h100")
+            a2 = agent_ci.run_targets(self.catalog, self.repo, "ascend-a2", "ops", targets, "off", self.repo / "results-a2")
+        self.assertEqual([call(max_workers=2), call(max_workers=1)], factory.call_args_list)
+        self.assertEqual([item["target"] for item in h100["results"]], targets)
+        self.assertEqual([item["target"] for item in a2["results"]], targets)
+        self.assertEqual(h100["test_count"], 2)
+        self.assertEqual(a2["test_count"], 2)
 
 
 if __name__ == "__main__":
