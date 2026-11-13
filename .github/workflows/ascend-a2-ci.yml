@@ -231,8 +231,10 @@ jobs:
             tests/ops/test_gdn_kernels.py \
             tests/ops/test_gdn.py \
             tests/ops/test_gdn2.py \
+            tests/ops/test_gdn_graph.py \
             tests/ops/test_gdn_graph_launch.py \
             tests/ops/test_kda.py \
+            tests/ops/test_kda_graph.py \
             tests/ops/test_gla.py \
             tests/ops/test_oja.py \
             tests/ops/test_attnres.py \
@@ -245,31 +247,6 @@ jobs:
             tests/ops/test_ttt.py \
             tests/ops/test_simple_gla.py::test_simple_gla_ascend_verifier \
             tests/ops/test_simple_gla.py::test_retention_ascend_registration_import_order
-
-      - name: Run NPU graph suites on separate devices
-        id: pytest-graph
-        if: github.event_name != 'schedule' || steps.triton-cache.outputs.cache-hit != 'true'
-        shell: bash
-        env:
-          FLA_NPU_XDIST: "0"
-        run: |
-          source /usr/local/Ascend/ascend-toolkit/set_env.sh
-          ASCEND_RT_VISIBLE_DEVICES=0 pytest -s -v --exitfirst \
-            tests/ops/test_kda_graph.py > >(tee "$RUNNER_TEMP/kda-graph.log") 2>&1 &
-          pid_kda=$!
-          ASCEND_RT_VISIBLE_DEVICES=1 FLA_CI_ENV=0 pytest -s -v --exitfirst \
-            tests/ops/test_gdn_graph.py > >(tee "$RUNNER_TEMP/gdn-graph.log") 2>&1 &
-          pid_gdn=$!
-
-          trap 'kill "$pid_kda" "$pid_gdn" 2>/dev/null || true' EXIT
-          trap 'exit 130' INT
-          trap 'exit 143' TERM
-
-          status=0
-          wait "$pid_kda" || status=1
-          wait "$pid_gdn" || status=1
-          trap - EXIT INT TERM
-          exit "$status"
 
       # Phases run in order. Each pytest in a phase sees a disjoint device set.
       - name: Run CP tests on disjoint device groups
@@ -309,7 +286,6 @@ jobs:
         if: |
           steps.pytest.outcome == 'success' &&
           steps.pytest-cp.outcome == 'success' &&
-          steps.pytest-graph.outcome == 'success' &&
           steps.triton-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
