@@ -105,9 +105,9 @@ def test_gluon_requires_triton_3_5(monkeypatch):
     from fla.backends import GluonBackend
 
     monkeypatch.setattr(utils, 'IS_NVIDIA', True)
-    monkeypatch.setattr(utils, 'TRITON_ABOVE_3_5_0', False)
+    monkeypatch.setattr(backends, 'TRITON_ABOVE_3_5_0', False)
     assert GluonBackend.is_available() is False
-    monkeypatch.setattr(utils, 'TRITON_ABOVE_3_5_0', True)
+    monkeypatch.setattr(backends, 'TRITON_ABOVE_3_5_0', True)
     assert GluonBackend.is_available() is (utils.find_spec_cached('triton.experimental.gluon') is not None)
 
 
