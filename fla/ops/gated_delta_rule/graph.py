@@ -35,7 +35,12 @@ def _validate_graph_config(q_shape, v_shape, dtype, options):
 def _validate_graph_inputs(q, k, v, g, beta, scale, initial_state, cu_seqlens, options):
     # only inspect host metadata: offset values belong to the caller's replay contract.
     if q.device.type != 'npu':
-        raise ValueError("use_graph=True is supported only on NPU")
+        raise ValueError(
+            "use_graph=True is supported only on NPU and selects FLA's NPU-specific graph execution path, "
+            f"but q is on {q.device.type}. "
+            "For ordinary GPU execution, omit use_graph or set it to False. "
+            "CUDA Graph capture is controlled separately by the caller."
+        )
     _validate_graph_config(q.shape, v.shape, str(q.dtype).removeprefix('torch.'), options)
     if k.shape != q.shape:
         raise ValueError("graph requires equal q/k/v shapes")

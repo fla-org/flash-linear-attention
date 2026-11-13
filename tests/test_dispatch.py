@@ -45,8 +45,16 @@ def test_gdn_graph_not_consumed_by_flash_qla(monkeypatch, graph_option, grad_ena
     kwargs = {} if graph_option is None else {'use_graph': graph_option}
     with torch.set_grad_enabled(grad_enabled):
         if graph_option:
-            with pytest.raises(ValueError, match='only on NPU'):
+            accepted, reason = candidate.chunk_gated_delta_rule_verifier(q, q, q, g, beta, **kwargs)
+            assert not accepted
+            assert 'NPU-specific graph execution path; skipping FlashQLA' in reason
+            assert 'omit use_graph or set it to False' in reason
+            assert 'CUDA Graph capture is controlled separately by the caller' in reason
+            with pytest.raises(ValueError, match='only on NPU') as error:
                 chunk_gated_delta_rule(q, q, q, g, beta, **kwargs)
+            assert f'but q is on {q.device.type}' in str(error.value)
+            assert 'omit use_graph or set it to False' in str(error.value)
+            assert 'CUDA Graph capture is controlled separately by the caller' in str(error.value)
             assert not calls
         else:
             assert chunk_gated_delta_rule(q, q, q, g, beta, **kwargs) is expected
