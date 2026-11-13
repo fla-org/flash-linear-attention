@@ -465,6 +465,37 @@ def test_benchmark_input_geometry_matches_metadata(monkeypatch):
     assert cu.shape == (5,)
 
 
+@pytest.mark.parametrize('tail_value', [0.0, 1.0, float('nan')], ids=['zero-tail', 'nonzero-tail', 'nan-tail'])
+@torch.no_grad()
+def test_benchmark_checks_inactive_output_tail(tail_value):
+    from benchmarks.ops.graph_registry import get_graph_op
+
+    torch.manual_seed(42)
+    actual_t = 65
+    case = get_graph_op('chunk_gdn').build_case(
+        shape={'B': 1, 'T': 128, 'actual_T': actual_t, 'H': 1, 'D': 64, 'N': 2},
+        mode='fwd',
+        device=device,
+        seed=42,
+    )
+    reference = case.run_once(case.eager_step, case.eager_args, True)
+    actual = case.run_once(case.graph_step, case.graph_args, True)
+    case.assert_close(actual, reference)
+
+    def step(*args):
+        o, ht = case.graph_step(*args)
+        o = o.clone()
+        o[:, actual_t:] = tail_value
+        return o, ht
+
+    assert case.run_once(step, case.graph_args, False) == {}
+    if tail_value == 0:
+        case.assert_close(case.run_once(step, case.graph_args, True), reference)
+    else:
+        with pytest.raises(AssertionError, match='Nonzero GDN inactive o'):
+            case.run_once(step, case.graph_args, True)
+
+
 @torch.no_grad()
 def test_persistent_kernels_skip_holes_without_losing_later_tasks(monkeypatch):
     from fla.ops.utils.index import prepare_chunk_indices_static
