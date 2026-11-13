@@ -7,6 +7,7 @@
 
 import torch
 
+from fla.backends import dispatch
 from fla.modules.norm.l2norm import l2norm_bwd, l2norm_fwd
 from fla.ops.momentum_delta_rule.naive import chunk_momentum_delta_rule_ref
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
@@ -92,6 +93,7 @@ class ChunkMomentumDeltaRuleFunction(torch.autograd.Function):
 
 
 @torch.compiler.disable
+@dispatch('momentum_delta_rule')
 def chunk_momentum_delta_rule(q, k, v, log_alpha, log_mu, p=None, beta=None, eta=None, scale=None, initial_state=None, output_final_state=False, cu_seqlens=None, use_qk_l2norm_in_kernel=True, use_p_times_alpha=True, chunk_size=64):
     assert q.dtype == k.dtype == v.dtype
     assert q.dtype != torch.float32, "ChunkMomentumDeltaRuleFunction does not support float32. Please use bfloat16."
