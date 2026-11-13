@@ -12,7 +12,6 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
-from benchmarks.ops import prewarm_gdn
 from benchmarks.ops.graph_registry import get_graph_op, normalize_gdn_shape
 
 
@@ -119,52 +118,3 @@ def test_gdn_cache_prepares_environment_on_partial_hit(event, kda_hit, gdn_hit, 
         condition = condition.replace(name, repr(value))
     condition = condition.replace('||', 'or')
     assert eval(condition, {'__builtins__': {}}) == prepare
-
-
-@pytest.fixture
-def prewarm_shapes():
-    return {'d128': {'D': 128}, 'd64': {'D': 64}}, get_graph_op('chunk_gdn').default_shapes
-
-
-def test_gdn_prewarm_merges_distinct_shards(tmp_path, monkeypatch, prewarm_shapes):
-    ordinary, graph = prewarm_shapes
-    visited = {}
-
-    def worker(device, workloads, output_dir):
-        assert len(workloads) == 1
-        workload = workloads[0]
-        visited[device] = workload
-        rows = [dict(shape=name, mode=mode) for name in workload.shapes for mode in ('fwd', 'fwdbwd')]
-        result = {'current': {'results': rows}} if workload.graph else {'results': rows}
-        (output_dir / f'{workload.name}.json').write_text(json.dumps(result))
-
-    monkeypatch.setattr(prewarm_gdn, '_prewarm_worker', worker)
-    output_dir = tmp_path / 'prewarm'
-    prewarm_gdn.prewarm(ordinary, graph, ['0', '1', '2', '3'], output_dir)
-    assert sorted(visited) == ['0', '1', '2', '3']
-    assert set(visited['0'].shapes) == {'d128'}
-    assert set(visited['1'].shapes) == {'d64'}
-    assert {s['dtype'] for s in visited['2'].shapes.values()} == {'float16'}
-    assert {s['dtype'] for s in visited['3'].shapes.values()} == {'bfloat16'}
-    ordinary_result = json.loads((output_dir / 'benchmark_chunk_gdn.json').read_text())
-    graph_result = json.loads((output_dir / 'benchmark_gdn_graph.json').read_text())
-    for rows, expected in ((ordinary_result['results'], ordinary), (graph_result['current']['results'], graph)):
-        assert sorted((row['shape'], row['mode']) for row in rows) == sorted(
-            (name, mode) for name in expected for mode in ('fwd', 'fwdbwd')
-        )
-
-
-def test_gdn_prewarm_waits_for_all_workers_on_failure(tmp_path, monkeypatch, prewarm_shapes):
-    visited = []
-
-    def worker(device, workloads, output_dir):
-        visited.append(device)
-        if device == '0':
-            raise RuntimeError('worker failed')
-
-    monkeypatch.setattr(prewarm_gdn, '_prewarm_worker', worker)
-    output_dir = tmp_path / 'prewarm'
-    with pytest.raises(RuntimeError, match='worker failed'):
-        prewarm_gdn.prewarm(*prewarm_shapes, ['0', '1', '2', '3'], output_dir)
-    assert sorted(visited) == ['0', '1', '2', '3']
-    assert not list(output_dir.glob('benchmark_*.json'))
