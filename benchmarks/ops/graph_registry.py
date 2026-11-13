@@ -455,6 +455,8 @@ def _build_gdn_case(shape: dict[str, Any], mode: str, device: str, seed: int) ->
             grads = torch.autograd.grad((o, ht), args[:-1], (do[:, :o.shape[1]].contiguous(), dht))
         if not collect:
             return {}
+        if torch.count_nonzero(o[:, actual_t:]):
+            raise AssertionError("Nonzero GDN inactive o")
         result = {"o": o[:, :actual_t].detach().clone(), "ht": ht.detach().clone()}
         if grads is not None:
             for index, (name, grad) in enumerate(zip(input_names, grads)):
