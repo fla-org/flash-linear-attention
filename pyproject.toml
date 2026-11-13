@@ -50,7 +50,7 @@ version = {attr = "fla.__version__"}
 log_cli = true
 log_cli_level = "INFO"
 markers = [
-    "smoke: core tests run in the dependent-files smoke tier on every PR push (fast feedback)",
+    "smoke: core tests selected for the H100 smoke tier (manual or agent-selected runs)",
 ]
 pythonpath = [
   "."

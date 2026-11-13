@@ -4,33 +4,11 @@ name: ascend-a2-benchmark-ci
 # (torch 2.10.0 / torch_npu 2.10.0.post7 / torchvision 0.25.0 / triton-ascend 3.6.0)
 # Runs NPU performance benchmarks for triton-ascend backends and causal conv.
 
+# Manual NPU benchmark pipeline. Agent-selected benchmarks use the same
+# attempt identity as agent-ascend-a2-tests.yml; automatic triggers are disabled.
+
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-    paths:
-      - "fla/ops/kda/**/*.py"
-      - "fla/ops/precond_kda/**/*.py"
-      - "benchmarks/ops/run.py"
-      - "benchmarks/ops/registry.py"
-      - "benchmarks/ops/graph_benchmark.py"
-      - "benchmarks/ops/graph_registry.py"
-      - "benchmarks/ops/benchmark_kda_recurrent.py"
-      - "pyproject.toml"
-      - ".github/workflows/ascend-a2-benchmark-ci.yml"
-  # Refresh the main cache before GitHub evicts entries left unused for seven days.
-  schedule:
-    # Monday, Wednesday and Friday at 00:00 Asia/Shanghai (UTC+8).
-    - cron: "0 16 * * 0,2,4"
-  pull_request:
-    branches:
-      - main
-    types: [opened, synchronize, reopened, edited]
-    paths:
-      - "**/*.py"
-      - "pyproject.toml"
-      - ".github/workflows/*.yml"
 
 jobs:
   changes:

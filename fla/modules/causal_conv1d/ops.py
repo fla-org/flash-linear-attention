@@ -101,7 +101,7 @@ def causal_conv1d_fwd_kernel(
     if not USE_INITIAL_STATE:
         for i_w in tl.static_range(-W + 1, 1):
             o_x = o_t + i_w
-            p_yi = p_x + o_x[:, None] * stride_x_t + o_d[None, :] * stride_x_d
+            p_yi = p_x + o_x[:, None] * stride_x_t + o_d[None, :].to(tl.int64) * stride_x_d
             # [BT, BD]
             b_yi = tl.load(p_yi, mask=((o_x >= 0) & (o_x < T))[:, None] & m_d[None, :], other=0.0).to(tl.float32)
             if HAS_WEIGHT:
@@ -111,7 +111,7 @@ def causal_conv1d_fwd_kernel(
         # separate branches avoid a Triton compiler issue.
         for i_w in tl.static_range(-W + 1, 1):
             o_x = o_t + i_w
-            p_yi = p_x + o_x[:, None] * stride_x_t + o_d[None, :] * stride_x_d
+            p_yi = p_x + o_x[:, None] * stride_x_t + o_d[None, :].to(tl.int64) * stride_x_d
             # [BT, BD]
             b_yi = tl.load(p_yi, mask=((o_x >= 0) & (o_x < T))[:, None] & m_d[None, :], other=0.0).to(tl.float32)
             if HAS_WEIGHT:
@@ -124,7 +124,7 @@ def causal_conv1d_fwd_kernel(
             m_x = ((o_x >= 0) & (o_x < T))[:, None] & m_d
             m_c = ((o_x + W >= 0) & (o_x < 0))[:, None] & m_d
 
-            b_yi = tl.load(p_x + o_x[:, None] * stride_x_t + o_d * stride_x_d, mask=m_x, other=0).to(tl.float32)
+            b_yi = tl.load(p_x + o_x[:, None] * stride_x_t + o_d.to(tl.int64) * stride_x_d, mask=m_x, other=0).to(tl.float32)
 
             b_yi += tl.load(initial_state + i_n * D*W + o_d * W + (o_x + W)[:, None], mask=m_c, other=0).to(tl.float32)
 
@@ -225,7 +225,7 @@ def causal_conv1d_bwd_kernel(
     m_x = (o_t < T)[:, None] & m_d[None, :]
 
     if HAS_WEIGHT:
-        p_x = p_x + o_t[:, None] * stride_x_t + o_d[None, :] * stride_x_d
+        p_x = p_x + o_t[:, None] * stride_x_t + o_d[None, :].to(tl.int64) * stride_x_d
         b_x = tl.load(p_x, mask=m_x, other=0.0)
         # [BD, BW]
         b_w = tl.load(weight + o_d[:, None] * W + o_w, mask=m_d[:, None] & m_w, other=0)
@@ -237,7 +237,7 @@ def causal_conv1d_bwd_kernel(
     if not USE_FINAL_STATE and not USE_INITIAL_STATE:
         for i_w in tl.static_range(0, W):
             o_dy = o_t + i_w
-            p_dy_blk = p_dy + o_dy[:, None] * stride_dy_t + o_d[None, :] * stride_dy_d
+            p_dy_blk = p_dy + o_dy[:, None] * stride_dy_t + o_d[None, :].to(tl.int64) * stride_dy_d
             # [BT, BD]
             b_dy = tl.load(p_dy_blk, mask=((o_dy < T)[:, None] & m_d[None, :]), other=0.0).to(tl.float32)
             if ACTIVATION == 'swish' or ACTIVATION == 'silu':
@@ -259,7 +259,7 @@ def causal_conv1d_bwd_kernel(
         # separate branches avoid a Triton compiler issue.
         for i_w in tl.static_range(0, W):
             o_dy = o_t + i_w
-            p_dy_blk = p_dy + o_dy[:, None] * stride_dy_t + o_d[None, :] * stride_dy_d
+            p_dy_blk = p_dy + o_dy[:, None] * stride_dy_t + o_d[None, :].to(tl.int64) * stride_dy_d
             # [BT, BD]
             b_dy = tl.load(p_dy_blk, mask=((o_dy < T)[:, None] & m_d[None, :]), other=0.0).to(tl.float32)
             if ACTIVATION == 'swish' or ACTIVATION == 'silu':
@@ -281,7 +281,7 @@ def causal_conv1d_bwd_kernel(
         o_t = i_t.to(tl.int64) * BT + tl.arange(0, BT)
         for i_w in tl.static_range(0, W):
             o_dy = o_t + i_w
-            p_dy_blk = p_dy + o_dy[:, None] * stride_dy_t + o_d[None, :] * stride_dy_d
+            p_dy_blk = p_dy + o_dy[:, None] * stride_dy_t + o_d[None, :].to(tl.int64) * stride_dy_d
             b_dy_shift = tl.load(p_dy_blk, mask=((o_dy < T)[:, None] & m_d[None, :]), other=0.0).to(tl.float32)
             if ACTIVATION == 'swish' or ACTIVATION == 'silu':
                 p_y = y + bos * D + o_dy[:, None] * D + o_d[None, :]
@@ -293,7 +293,7 @@ def causal_conv1d_bwd_kernel(
                 if USE_INITIAL_STATE:
                     mask_head_rows = (o_t < i_w) & (o_t < T)
                     b_dy_head = tl.load(
-                        p_dy + o_t[:, None] * stride_dy_t + o_d * stride_dy_d,
+                        p_dy + o_t[:, None] * stride_dy_t + o_d.to(tl.int64) * stride_dy_d,
                         mask=mask_head_rows[:, None] & m_d[None, :],
                         other=0.0,
                     ).to(tl.float32)
@@ -344,7 +344,7 @@ def causal_conv1d_bwd_kernel(
     else:
         p_dx = dx + tl.cast(i_b, tl.int64) * stride_dx_n
 
-    p_dx = p_dx + o_t[:, None] * stride_dx_t + o_d[None, :] * stride_dx_d
+    p_dx = p_dx + o_t[:, None] * stride_dx_t + o_d[None, :].to(tl.int64) * stride_dx_d
     tl.store(p_dx, tl.cast(b_dx, dtype=p_dx.dtype.element_ty, fp_downcast_rounding='rtne'), mask=m_x)
 
 
@@ -396,7 +396,7 @@ def causal_conv1d_update_kernel(
     m_w = o_w < W
 
     # [BD]
-    b_x = tl.load(x + i_n * stride_x_n + o_d * stride_x_d, mask=m_d, other=0).to(tl.float32)
+    b_x = tl.load(x + i_n * stride_x_n + o_d.to(tl.int64) * stride_x_d, mask=m_d, other=0).to(tl.float32)
 
     b_cache = tl.zeros((BD, BW), dtype=tl.float32)
 
@@ -423,7 +423,7 @@ def causal_conv1d_update_kernel(
         b_y += tl.load(residual + i_n * D + o_d, mask=m_d, other=0)
 
     tl.store(
-        y + i_n * stride_y_n + o_d * stride_y_d,
+        y + i_n * stride_y_n + o_d.to(tl.int64) * stride_y_d,
         tl.cast(b_y, dtype=y.dtype.element_ty, fp_downcast_rounding='rtne'),
         mask=m_d,
     )
@@ -499,7 +499,7 @@ def compute_dh0_kernel(
             if t < i_w:
                 w_idx = i_w - 1 - t
 
-                p_dy = dy_base + t * stride_dy_t + o_d * stride_dy_d
+                p_dy = dy_base + t * stride_dy_t + o_d.to(tl.int64) * stride_dy_d
                 m_t = (t < seq_len) & m_d
                 b_dy = tl.load(p_dy, mask=m_t, other=0).to(tl.float32)
 
@@ -560,7 +560,7 @@ def causal_conv1d_states_fwd_kernel(
         p_x = x + tl.cast(i_n, tl.int64) * stride_x_n
 
     o_x = tl.cast(seq_len, tl.int64) - BW + tl.arange(0, BW)
-    p_x = p_x + o_x[:, None] * stride_x_t + o_d[None, :] * stride_x_d
+    p_x = p_x + o_x[:, None] * stride_x_t + o_d[None, :].to(tl.int64) * stride_x_d
 
     # [BW, BD]
     b_x = tl.load(p_x, mask=((o_x >= 0) & (o_x < seq_len))[:, None] & m_d[None, :], other=0.0).to(tl.float32)

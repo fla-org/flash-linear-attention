@@ -14,6 +14,7 @@ import triton
 import triton.language as tl
 
 from fla.backends import TritonAscendBackend, register
+from fla.ops.common.backends.triton_ascend.chunk_delta_h import need_dma_mask, time_axis_needs_mask
 from fla.ops.gated_delta_rule.backends.triton_ascend import wy_fast
 from fla.ops.precond_gated_delta_rule.chunk_precond_wy_bwd import prepare_precond_wy_repr_bwd
 from fla.ops.utils import prepare_chunk_indices
@@ -70,7 +71,6 @@ def prepare_precond_wy_repr_bwd_finalize_k_npu(
             dA_out + (bos * HV + i_h) * BT + o_i[:, None] + o_t[None, :] * (HV * BT),
             mask=m_t[None, :], other=0,
         ).to(tl.float32)
-        b_dA_c = b_dA + 0.0
         i_key = i_h // (HV // H)
 
         for i_k in range(tl.cdiv(K, BK)):
@@ -83,13 +83,13 @@ def prepare_precond_wy_repr_bwd_finalize_k_npu(
             b_k = tl.load(p_k, mask=m_tk, other=0).to(tl.float32)
             b_kp = tl.load(p_kp, mask=m_tk, other=0).to(tl.float32)
             b_kb = b_k * b_b[:, None]
-            # Ascend tl.dot clobbers lhs; keep a pristine copy for the rhs dot.
+            # lhs dot consumes its copy; the original dA stays for the rhs dot.
             b_dA_lhs = b_dA + 0.0
             b_dkb = tl.dot(b_dA_lhs, b_kp, allow_tf32=False)
             b_db += tl.sum(b_dkb * b_k, 1)
             b_dk = b_dkb * b_b[:, None]
             b_dk += tl.load(p_dk, mask=m_tk, other=0).to(tl.float32)
-            b_dkp = tl.trans(tl.dot(tl.trans(b_kb), b_dA_c, allow_tf32=False))
+            b_dkp = tl.trans(tl.dot(tl.trans(b_kb), b_dA, allow_tf32=False))
             tl.store(p_dk, b_dk.to(dk.dtype.element_ty), mask=m_tk)
             tl.store(p_dkp, b_dkp.to(dk_precond.dtype.element_ty), mask=m_tk)
 
@@ -145,8 +145,7 @@ def prepare_precond_wy_repr_bwd_finalize_a2_dg_npu(
             mask=m_tk, other=0,
         ).to(tl.float32)
         b_kb = b_k * b_b[:, None]
-        b_kp_c = b_kp + 0.0
-        b_A_asymm = tl.dot(b_kb, tl.trans(b_kp_c), b_A_asymm, allow_tf32=False)
+        b_A_asymm = tl.dot(b_kb, tl.trans(b_kp), b_A_asymm, allow_tf32=False)
     b_dA = tl.load(
         dA_out + (bos * HV + i_h) * BT + o_i[:, None] + o_t[None, :] * (HV * BT),
         mask=m_t[None, :], other=0,
@@ -198,8 +197,8 @@ def prepare_precond_wy_repr_bwd_npu(
     BK_FIN = wy_fast.get_wy_block_size(BT, K, PRECOND_BWD_K_MEM_MULT, wy_fast.MAX_TILE_BWD)
     use_g = g is not None
     is_varlen = cu_seqlens is not None
-    # Shared WY kernels still store with boundary_check, so partial chunks stay zero-filled.
-    zero_ws = is_varlen or T % BT != 0
+    # Shared WY kernels mask partial chunks, so the unwritten tail stays zero-filled.
+    zero_ws = time_axis_needs_mask(T, BT, cu_seqlens)
     KP = K
     dk = k.new_zeros(B, T, HV, K) if zero_ws else k.new_empty(B, T, HV, K)
     dk_precond = k.new_zeros(B, T, HV, K) if zero_ws else k.new_empty(B, T, HV, K)
@@ -222,6 +221,8 @@ def prepare_precond_wy_repr_bwd_npu(
     dA_mid = torch.empty_like(A, dtype=torch.float32)
     dA_out = torch.empty_like(A)
 
+    mask_dma = need_dma_mask(T, BT, K, BK, V, BV, is_varlen, cu_seqlens)
+    mask_time = time_axis_needs_mask(T, BT, cu_seqlens)
     base = dict(
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
@@ -244,7 +245,7 @@ def prepare_precond_wy_repr_bwd_npu(
             du=du,
             dk=dk,
             dv=dv,
-            dA_scr=dA_scr,
+            dA=dA_scr,
             db=db,
             dg=dg_arg,
             H=H,
@@ -258,6 +259,7 @@ def prepare_precond_wy_repr_bwd_npu(
             BETA_T_CONTIG=beta_t_contig,
             DG_T_CONTIG=dg_t_contig,
             DB_T_CONTIG=db_t_contig,
+            MASK_DMA=mask_dma,
             G_EXP_PRECOMP=g_exp_precomp,
             **core_base,
         ),
@@ -271,6 +273,7 @@ def prepare_precond_wy_repr_bwd_npu(
             dA_scr=dA_scr,
             dA_mid=dA_mid,
             HV=HV,
+            MASK_DMA=mask_time,
             **base,
         ),
     )
@@ -283,6 +286,7 @@ def prepare_precond_wy_repr_bwd_npu(
             dA_mid=dA_mid,
             dA_out=dA_out,
             HV=HV,
+            MASK_DMA=mask_time,
             **base,
         ),
     )
@@ -296,6 +300,7 @@ def prepare_precond_wy_repr_bwd_npu(
                 dA_out=dA_out,
                 HV=HV,
                 G_T_CONTIG=g_t_contig,
+                MASK_DMA=mask_time,
                 **base,
             ),
         )
