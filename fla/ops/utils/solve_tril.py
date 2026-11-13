@@ -77,9 +77,11 @@ def solve_tril_16x16_kernel(
         b_A = tl.load(p_A, mask=m_t[:, None], other=0.0).to(tl.float32)
         b_A = tl.where(m_A, b_A, 0)
     else:
+        # Descriptor coordinates are int32; global pointer offsets stay int64.
+        o_t_tma = (i_t * BT).to(tl.int32)
         desc = make_tensor_descriptor(A, [T, BT], [H*BT, 1], [16, 16])
         desc_o = make_tensor_descriptor(Ai, [T, 16], [H*16, 1], [16, 16])
-        b_A = desc.load([i_t * 16, offset]).to(tl.float32)
+        b_A = desc.load([o_t_tma, offset.to(tl.int32)]).to(tl.float32)
         b_A = tl.where(m_A, b_A, 0)
     b_A = -b_A
 
@@ -94,7 +96,7 @@ def solve_tril_16x16_kernel(
         p_Ai = Ai + o_t[:, None] * (H*16) + o_i[None, :]
         tl.store(p_Ai, b_A.to(p_Ai.dtype.element_ty, fp_downcast_rounding="rtne"), mask=m_t[:, None])
     else:
-        desc_o.store([i_t * 16, 0], b_A.to(desc_o.dtype, fp_downcast_rounding="rtne"))
+        desc_o.store([o_t_tma, 0], b_A.to(desc_o.dtype, fp_downcast_rounding="rtne"))
 
 
 @triton.heuristics({
@@ -145,10 +147,12 @@ def merge_16x16_to_32x32_inverse_kernel(
         b_Ai_11 = tl.load(p_A_11, mask=(o_t[:, None] < T), other=0.0).to(tl.float32)
         b_Ai_22 = tl.load(p_A_22, mask=(o_t[:, None] + 16 < T), other=0.0).to(tl.float32)
     else:
+        # Descriptor coordinates are int32; global pointer offsets stay int64.
+        o_t_tma = (i_t * BT).to(tl.int32)
         desc = make_tensor_descriptor(A, [T, BT], [H*BT, 1], [16, 16])
         desc_o = make_tensor_descriptor(Ai, [T, BT], [H*BT, 1], [16, 16])
-        b_Ai_11 = desc.load([i_t * BT + 0, 0]).to(tl.float32)
-        b_Ai_22 = desc.load([i_t * BT + 16, 16]).to(tl.float32)
+        b_Ai_11 = desc.load([o_t_tma + 0, 0]).to(tl.float32)
+        b_Ai_22 = desc.load([o_t_tma + 16, 16]).to(tl.float32)
 
     # [16, 16]
     b_Ai_11 = -tl.where(m_A, b_Ai_11, 0)
@@ -170,7 +174,7 @@ def merge_16x16_to_32x32_inverse_kernel(
         p_A_21 = A + (o_t[:, None] + 16) * (H*BT) + o_i[None, :]
         b_A_21 = tl.load(p_A_21, mask=(o_t[:, None] + 16 < T), other=0.0).to(tl.float32)
     else:
-        b_A_21 = desc.load([i_t * BT + 16, 0]).to(tl.float32)
+        b_A_21 = desc.load([o_t_tma + 16, 0]).to(tl.float32)
 
     b_Ai_21 = -tl.dot(tl.dot(b_Ai_22, b_A_21, input_precision=DOT_PRECISION), b_Ai_11, input_precision=DOT_PRECISION)
 
@@ -182,9 +186,9 @@ def merge_16x16_to_32x32_inverse_kernel(
         tl.store(p_Ai_22, b_Ai_22.to(p_Ai_22.dtype.element_ty, fp_downcast_rounding="rtne"), mask=(o_t[:, None] + 16 < T))
         tl.store(p_Ai_21, b_Ai_21.to(p_Ai_21.dtype.element_ty, fp_downcast_rounding="rtne"), mask=(o_t[:, None] + 16 < T))
     else:
-        desc_o.store([i_t * BT + 0, 0], b_Ai_11.to(desc_o.dtype, fp_downcast_rounding="rtne"))
-        desc_o.store([i_t * BT + 16, 0], b_Ai_21.to(desc_o.dtype, fp_downcast_rounding="rtne"))
-        desc_o.store([i_t * BT + 16, 16], b_Ai_22.to(desc_o.dtype, fp_downcast_rounding="rtne"))
+        desc_o.store([o_t_tma + 0, 0], b_Ai_11.to(desc_o.dtype, fp_downcast_rounding="rtne"))
+        desc_o.store([o_t_tma + 16, 0], b_Ai_21.to(desc_o.dtype, fp_downcast_rounding="rtne"))
+        desc_o.store([o_t_tma + 16, 16], b_Ai_22.to(desc_o.dtype, fp_downcast_rounding="rtne"))
 
 
 @triton.heuristics({
@@ -239,12 +243,14 @@ def merge_16x16_to_64x64_inverse_kernel(
         b_Ai_33 = tl.load(p_A_33, mask=(o_t[:, None] + 32 < T), other=0.0).to(tl.float32)
         b_Ai_44 = tl.load(p_A_44, mask=(o_t[:, None] + 48 < T), other=0.0).to(tl.float32)
     else:
+        # Descriptor coordinates are int32; global pointer offsets stay int64.
+        o_t_tma = (i_t * BT).to(tl.int32)
         desc = make_tensor_descriptor(A, [T, BT], [H*BT, 1], [16, 16])
         desc_o = make_tensor_descriptor(Ai, [T, BT], [H*BT, 1], [16, 16])
-        b_Ai_11 = desc.load([i_t * BT + 0, 0]).to(tl.float32)
-        b_Ai_22 = desc.load([i_t * BT + 16, 16]).to(tl.float32)
-        b_Ai_33 = desc.load([i_t * BT + 32, 32]).to(tl.float32)
-        b_Ai_44 = desc.load([i_t * BT + 48, 48]).to(tl.float32)
+        b_Ai_11 = desc.load([o_t_tma + 0, 0]).to(tl.float32)
+        b_Ai_22 = desc.load([o_t_tma + 16, 16]).to(tl.float32)
+        b_Ai_33 = desc.load([o_t_tma + 32, 32]).to(tl.float32)
+        b_Ai_44 = desc.load([o_t_tma + 48, 48]).to(tl.float32)
 
     # [16, 16]
     b_Ai_11 = -tl.where(m_A, b_Ai_11, 0)
@@ -291,12 +297,12 @@ def merge_16x16_to_64x64_inverse_kernel(
         b_A_42 = tl.load(p_A_42, mask=(o_t[:, None] + 48 < T), other=0.0).to(tl.float32)
         b_A_43 = tl.load(p_A_43, mask=(o_t[:, None] + 48 < T), other=0.0).to(tl.float32)
     else:
-        b_A_21 = desc.load([i_t * BT + 16, 0]).to(tl.float32)
-        b_A_31 = desc.load([i_t * BT + 32, 0]).to(tl.float32)
-        b_A_32 = desc.load([i_t * BT + 32, 16]).to(tl.float32)
-        b_A_41 = desc.load([i_t * BT + 48, 0]).to(tl.float32)
-        b_A_42 = desc.load([i_t * BT + 48, 16]).to(tl.float32)
-        b_A_43 = desc.load([i_t * BT + 48, 32]).to(tl.float32)
+        b_A_21 = desc.load([o_t_tma + 16, 0]).to(tl.float32)
+        b_A_31 = desc.load([o_t_tma + 32, 0]).to(tl.float32)
+        b_A_32 = desc.load([o_t_tma + 32, 16]).to(tl.float32)
+        b_A_41 = desc.load([o_t_tma + 48, 0]).to(tl.float32)
+        b_A_42 = desc.load([o_t_tma + 48, 16]).to(tl.float32)
+        b_A_43 = desc.load([o_t_tma + 48, 32]).to(tl.float32)
 
     b_Ai_21 = -tl.dot(tl.dot(b_Ai_22, b_A_21, input_precision=DOT_PRECISION), b_Ai_11, input_precision=DOT_PRECISION)
     b_Ai_32 = -tl.dot(tl.dot(b_Ai_33, b_A_32, input_precision=DOT_PRECISION), b_Ai_22, input_precision=DOT_PRECISION)
@@ -344,16 +350,16 @@ def merge_16x16_to_64x64_inverse_kernel(
         tl.store(p_Ai_42, b_Ai_42.to(p_Ai_42.dtype.element_ty, fp_downcast_rounding="rtne"), mask=(o_t[:, None] + 48 < T))
         tl.store(p_Ai_43, b_Ai_43.to(p_Ai_43.dtype.element_ty, fp_downcast_rounding="rtne"), mask=(o_t[:, None] + 48 < T))
     else:
-        desc_o.store([i_t * BT + 0, 0], b_Ai_11.to(desc_o.dtype, fp_downcast_rounding="rtne"))
-        desc_o.store([i_t * BT + 16, 16], b_Ai_22.to(desc_o.dtype, fp_downcast_rounding="rtne"))
-        desc_o.store([i_t * BT + 32, 32], b_Ai_33.to(desc_o.dtype, fp_downcast_rounding="rtne"))
-        desc_o.store([i_t * BT + 48, 48], b_Ai_44.to(desc_o.dtype, fp_downcast_rounding="rtne"))
-        desc_o.store([i_t * BT + 16, 0], b_Ai_21.to(desc_o.dtype, fp_downcast_rounding="rtne"))
-        desc_o.store([i_t * BT + 32, 0], b_Ai_31.to(desc_o.dtype, fp_downcast_rounding="rtne"))
-        desc_o.store([i_t * BT + 32, 16], b_Ai_32.to(desc_o.dtype, fp_downcast_rounding="rtne"))
-        desc_o.store([i_t * BT + 48, 0], b_Ai_41.to(desc_o.dtype, fp_downcast_rounding="rtne"))
-        desc_o.store([i_t * BT + 48, 16], b_Ai_42.to(desc_o.dtype, fp_downcast_rounding="rtne"))
-        desc_o.store([i_t * BT + 48, 32], b_Ai_43.to(desc_o.dtype, fp_downcast_rounding="rtne"))
+        desc_o.store([o_t_tma + 0, 0], b_Ai_11.to(desc_o.dtype, fp_downcast_rounding="rtne"))
+        desc_o.store([o_t_tma + 16, 16], b_Ai_22.to(desc_o.dtype, fp_downcast_rounding="rtne"))
+        desc_o.store([o_t_tma + 32, 32], b_Ai_33.to(desc_o.dtype, fp_downcast_rounding="rtne"))
+        desc_o.store([o_t_tma + 48, 48], b_Ai_44.to(desc_o.dtype, fp_downcast_rounding="rtne"))
+        desc_o.store([o_t_tma + 16, 0], b_Ai_21.to(desc_o.dtype, fp_downcast_rounding="rtne"))
+        desc_o.store([o_t_tma + 32, 0], b_Ai_31.to(desc_o.dtype, fp_downcast_rounding="rtne"))
+        desc_o.store([o_t_tma + 32, 16], b_Ai_32.to(desc_o.dtype, fp_downcast_rounding="rtne"))
+        desc_o.store([o_t_tma + 48, 0], b_Ai_41.to(desc_o.dtype, fp_downcast_rounding="rtne"))
+        desc_o.store([o_t_tma + 48, 16], b_Ai_42.to(desc_o.dtype, fp_downcast_rounding="rtne"))
+        desc_o.store([o_t_tma + 48, 32], b_Ai_43.to(desc_o.dtype, fp_downcast_rounding="rtne"))
 
 
 @dispatch
