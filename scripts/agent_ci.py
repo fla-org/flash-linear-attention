@@ -94,8 +94,11 @@ def require_evidence(result: dict) -> None:
         raise AgentCIError("All tests were skipped; this is not passing evidence")
 
 
-def run_targets(catalog: dict, repo: Path, suite: str, targets: list[str], dispatch: str, results: Path) -> dict:
+def run_targets(catalog: dict, repo: Path, platform: str, suite: str, targets: list[str], dispatch: str, results: Path) -> dict:
     records = []
+    pytest_args = []
+    if platform == "ascend-a2" and suite != "cp":
+        pytest_args = ["-n", "8", "--dist", "load"]
     for mode in validate_dispatch(catalog, suite, dispatch):
         for index, target in enumerate(targets):
             junit = results / f"{mode}-{index}.xml"
@@ -105,7 +108,7 @@ def run_targets(catalog: dict, repo: Path, suite: str, targets: list[str], dispa
             else:
                 env.pop("FLA_DISABLE_BACKEND_DISPATCH", None)
             completed = subprocess.run(
-                [sys.executable, "-m", "pytest", "-s", "-v", "--exitfirst", f"--junitxml={junit}", target],
+                [sys.executable, "-m", "pytest", "-s", "-v", "--exitfirst", *pytest_args, f"--junitxml={junit}", target],
                 cwd=repo,
                 env=env,
                 check=False,
@@ -161,7 +164,7 @@ def main() -> int:
         "dispatch": args.dispatch,
     }
     try:
-        summary = run_targets(catalog, repo, args.suite, targets, args.dispatch, args.results)
+        summary = run_targets(catalog, repo, args.platform, args.suite, targets, args.dispatch, args.results)
         metadata.update({"status": "passed", **summary})
     except AgentCIError as error:
         metadata.update({"status": "invalid_or_failed", "error": str(error)})

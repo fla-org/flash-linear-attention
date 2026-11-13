@@ -207,7 +207,7 @@ jobs:
             --custom-shapes "$PRECOND_KDA_SHAPES" --json benchmark_chunk_precond_kda.json
           echo "Benchmark chunk_precond_kda prewarm: elapsed=$((SECONDS - precond_started))s"
 
-      - name: Benchmark chunk_gdn, fused_recurrent_gdn2, chunk_gdn2, chunk_kda, KDA graph, fused_attnres, conv1d, chunk_precond_gdn, parallel_wall_attn, fused_recurrent_oja, chunk_precond_kda, and chunk_ttt
+      - name: Benchmark chunk_gdn, fused_recurrent_gdn2, chunk_gdn2, chunk_kda, KDA graph, fused_attnres, conv1d, chunk_momentum_delta, chunk_precond_gdn, parallel_wall_attn, fused_recurrent_oja, chunk_precond_kda, and chunk_ttt
         id: benchmark
         if: github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
         shell: bash
@@ -291,6 +291,10 @@ jobs:
           pid_conv1d=$!
           status=0
           wait "$pid_conv1d" || status=1
+          run_benchmark chunk_momentum_delta 3 python -m benchmarks.ops.run \
+            --op chunk_momentum_delta --base '' --json benchmark_chunk_momentum_delta.json &
+          pid_momentum=$!
+          wait "$pid_momentum" || status=1
           (
             set -e
             ASCEND_RT_VISIBLE_DEVICES=3 python -m benchmarks.ops.run \
@@ -339,6 +343,8 @@ jobs:
           cat chunk_kda_graph.log
           echo "========== conv1d =========="
           cat conv1d.log
+          echo "========== chunk_momentum_delta =========="
+          cat chunk_momentum_delta.log
           echo "========== chunk_precond_gdn =========="
           cat chunk_precond_gdn.log
           echo "========== chunk_precond_kda =========="
@@ -485,6 +491,7 @@ jobs:
             benchmark_kda_graph.json
             benchmark_parallel_wall_attn.json
             benchmark_chunk_ttt.json
+            benchmark_chunk_momentum_delta.json
             conv_benchmark/
           if-no-files-found: ignore
           retention-days: 10
