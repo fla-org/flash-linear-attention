@@ -55,18 +55,17 @@ def _build_p_eff(p: torch.Tensor, log_alpha: torch.Tensor, use_p_times_alpha: bo
 class MomentumChunkPrecompute:
     """All `[B, H, NT, BT]` fp32 vectors and `[B, H, NT]` scalars the chunk kernels need."""
 
-    log_m_cum: torch.Tensor
-    a_cum: torch.Tensor
-    log_ct: torch.Tensor      # per-chunk logcumsumexp(log_beta + log_m_cum - log_a_cum)
-    lct1: torch.Tensor        # log_ct shifted by one slot, -inf at slot 0
+    log_a_cum: torch.Tensor   # per-chunk cumsum of log_alpha (natural log)
+    log_m_cum: torch.Tensor   # per-chunk cumsum of log_mu (natural log)
+    beta: torch.Tensor        # fp32 gate strength, zeros past T
+    a_cum: torch.Tensor       # exp(log_a_cum)
     b_t: torch.Tensor         # exp(log_a_cum + log_ct)
     b_tm1: torch.Tensor       # b_t shifted, 0 at slot 0
     bar_a_tm1: torch.Tensor   # a_cum shifted, 1 at slot 0 (exp of the log-space shift)
-    cfac: torch.Tensor        # exp(-log_m_cum)
     # per-chunk scalars gathered at the last *real* row of each chunk (pad-safe)
     a_last: torch.Tensor
     b_last: torch.Tensor
-    ct_last: torch.Tensor
+    la_last: torch.Tensor
     lm_last: torch.Tensor
 
 
@@ -97,18 +96,18 @@ def momentum_chunk_precompute(
 
     log_a_cum = pad_t(chunk_local_cumsum(log_alpha, chunk_size), replicate=True).reshape(B, NT, BT, H).permute(0, 3, 1, 2)
     log_m_cum = pad_t(chunk_local_cumsum(log_mu, chunk_size), replicate=True).reshape(B, NT, BT, H).permute(0, 3, 1, 2)
-    beta_p = pad_t(beta)
+    # fp32 before +1e-6 / log: bf16 arithmetic would round the gate strength
+    beta_p = pad_t(beta).to(torch.float32)
+    beta_c = beta_p.reshape(B, NT, BT, H).permute(0, 3, 1, 2)
     log_beta = (beta_p + 1e-6).log().reshape(B, NT, BT, H).permute(0, 3, 1, 2)
     log_c_before = log_beta + log_m_cum - log_a_cum
     log_ct = torch.logcumsumexp(log_c_before, dim=-1)
-    lct1 = torch.cat([torch.full_like(log_ct[..., :1], float('-inf')), log_ct[..., :-1]], dim=-1)
 
     a_cum = log_a_cum.exp()
     b_t = (log_a_cum + log_ct).exp()
     # naive.py shifts bar_a in *log* space before exp, so slot 0 is exp(0) == 1
     bar_a_tm1 = torch.cat([torch.ones_like(a_cum[..., :1]), a_cum[..., :-1]], dim=-1)
     b_tm1 = torch.cat([torch.zeros_like(b_t[..., :1]), b_t[..., :-1]], dim=-1)
-    cfac = (-log_m_cum).exp()
 
     # per-chunk scalars gathered at the last *real* row of each chunk (pad-safe)
     last_idx = torch.full((NT,), BT - 1, dtype=torch.long, device=log_alpha.device)
@@ -119,21 +118,20 @@ def momentum_chunk_precompute(
 
     a_last = gather_last(a_cum)
     b_last = gather_last(b_t)
-    ct_last = gather_last(log_ct)
+    la_last = gather_last(log_a_cum)
     lm_last = gather_last(log_m_cum)
 
     return MomentumChunkPrecompute(
+        log_a_cum=log_a_cum,
         log_m_cum=log_m_cum,
+        beta=beta_c,
         a_cum=a_cum,
-        log_ct=log_ct,
-        lct1=lct1,
         b_t=b_t,
         b_tm1=b_tm1,
         bar_a_tm1=bar_a_tm1,
-        cfac=cfac,
         a_last=a_last,
         b_last=b_last,
-        ct_last=ct_last,
+        la_last=la_last,
         lm_last=lm_last,
     )
 
@@ -155,9 +153,9 @@ def prepare_wy_repr_fwd(
     A = chunk_momentum_delta_kkt_fwd_npu(
         p_eff=p_eff,
         k_eta=k_eta,
-        cfac=pre.cfac,
-        lct1=pre.lct1,
-        b_tm1=pre.b_tm1,
+        log_a_cum=pre.log_a_cum,
+        lm_cum=pre.log_m_cum,
+        beta=pre.beta,
         chunk_size=chunk_size,
     )
     A = solve_tril(A=A, output_dtype=torch.float32)
@@ -199,14 +197,15 @@ class ChunkMomentumDeltaRuleFunctionNPU(torch.autograd.Function):
         u_c, y_c, z_c = prepare_wy_repr_fwd(p_eff, k_eta, v, pre, chunk_size)
         h_s, h_m, v_i, final_S, final_M = chunk_momentum_delta_fwd_h_npu(
             k_eta=k_eta, u_c=u_c, y_c=y_c, z_c=z_c,
-            cfac=pre.cfac, lct1=pre.lct1, lm_cum=pre.log_m_cum,
-            a_last=pre.a_last, b_last=pre.b_last, ct_last=pre.ct_last, lm_last=pre.lm_last,
+            log_a_cum=pre.log_a_cum, lm_cum=pre.log_m_cum, beta=pre.beta,
+            a_last=pre.a_last, b_last=pre.b_last, la_last=pre.la_last, lm_last=pre.lm_last,
             initial_S=initial_S, initial_M=initial_M,
             output_final_state=output_final_state, chunk_size=chunk_size,
         )
         o = chunk_momentum_delta_fwd_o_npu(
             q=q, k_eta=k_eta, v_i=v_i, h_s=h_s, h_m=h_m,
-            a_cum=pre.a_cum, b_t=pre.b_t, cfac=pre.cfac, lct=pre.log_ct, lct1=pre.lct1,
+            a_cum=pre.a_cum, b_t=pre.b_t,
+            log_a_cum=pre.log_a_cum, lm_cum=pre.log_m_cum, beta=pre.beta,
             scale=scale, chunk_size=chunk_size,
         )
         # same ctx contract as the community backward expects

@@ -198,19 +198,29 @@ def test_chunk_initial_state_grad_count():
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'K', 'V', 'chunk_size'),
+    ('B', 'T', 'H', 'K', 'V', 'chunk_size', 'use_qk_l2norm_in_kernel', 'use_p_times_alpha'),
     [
-        pytest.param(*test, id="B{}-T{}-H{}-K{}-V{}-CS{}".format(*test))
+        pytest.param(*test, id="B{}-T{}-H{}-K{}-V{}-CS{}-l2{}-pa{}".format(*test))
         for test in [
-            (2, 33, 2, 8, 6, 16),
-            (2, 33, 2, 128, 128, 16),
-            (2, 33, 2, 320, 128, 16),
-            (2, 200, 2, 128, 128, 64),
+            (2, 33, 2, 8, 6, 16, False, False),
+            (2, 33, 2, 128, 128, 16, False, False),
+            (2, 33, 2, 320, 128, 16, False, False),
+            (2, 200, 2, 128, 128, 64, False, False),
+            (2, 200, 2, 256, 128, 64, True, True),
         ]
     ],
 )
 @pytest.mark.skipif(device_platform == 'intel', reason='Intel Triton Failure')
-def test_full_momentum_chunk_recurrent_backward_parity(B: int, T: int, H: int, K: int, V: int, chunk_size: int):
+def test_full_momentum_chunk_recurrent_backward_parity(
+    B: int,
+    T: int,
+    H: int,
+    K: int,
+    V: int,
+    chunk_size: int,
+    use_qk_l2norm_in_kernel: bool,
+    use_p_times_alpha: bool,
+):
     torch.manual_seed(3)
     dtype = torch.bfloat16
     values = [
@@ -232,12 +242,18 @@ def test_full_momentum_chunk_recurrent_backward_parity(B: int, T: int, H: int, K
     def run(op, reference=False):
         xs = [x.detach().clone().requires_grad_(True) for x in values]
         if reference:
-            o, state = op(q=xs[0], k=xs[1], v=xs[2], p=xs[3], log_alpha=xs[4], log_mu=xs[5], beta=xs[6], eta=xs[7],
+            q, k, p = xs[0], xs[1], xs[3]
+            if use_qk_l2norm_in_kernel:
+                q, k, p = (F.normalize(x.float(), dim=-1).to(dtype) for x in (q, k, p))
+            if use_p_times_alpha:
+                p = p * xs[4].exp().unsqueeze(-1)
+            o, state = op(q=q, k=k, v=xs[2], p=p, log_alpha=xs[4], log_mu=xs[5], beta=xs[6], eta=xs[7],
                           initial_S=xs[8], initial_M=xs[9], output_final_state=True, scale=K ** -0.5)
         else:
             op_kwargs = dict(q=xs[0], k=xs[1], v=xs[2], p=xs[3], log_alpha=xs[4], log_mu=xs[5], beta=xs[6], eta=xs[7],
                              initial_state=torch.stack(xs[8:10]), output_final_state=True,
-                             use_qk_l2norm_in_kernel=False, use_p_times_alpha=False)
+                             use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+                             use_p_times_alpha=use_p_times_alpha)
             if op is chunk_momentum_delta_rule:
                 op_kwargs['chunk_size'] = chunk_size
             o, state = op(**op_kwargs)
@@ -260,6 +276,37 @@ def test_full_momentum_chunk_recurrent_backward_parity(B: int, T: int, H: int, K
         ('q', 'k', 'v', 'p', 'log_alpha', 'log_mu', 'beta', 'eta', 'S0', 'M0'), recurrent[2], chunk[2],
     ):
         assert_close(name, grad_a, grad_b, 0.02)
+
+
+@pytest.mark.skipif(device_platform == 'intel', reason='Intel Triton Failure')
+def test_full_momentum_chunk_strong_decay_finiteness():
+    """Sustained min_log_mu=-2 across a full 64-token chunk must stay finite.
+    """
+    torch.manual_seed(0)
+    B, T, H, K, V = 2, 128, 2, 128, 128
+    dtype = torch.bfloat16
+    q = F.normalize(torch.randn(B, T, H, K, dtype=dtype, device=device), dim=-1)
+    k = F.normalize(torch.randn(B, T, H, K, dtype=dtype, device=device), dim=-1)
+    p = F.normalize(torch.randn(B, T, H, K, dtype=dtype, device=device), dim=-1)
+    v = torch.randn(B, T, H, V, dtype=dtype, device=device)
+    log_alpha = -0.1 * F.softplus(torch.randn(B, T, H, dtype=torch.float32, device=device))
+    log_mu = torch.full((B, T, H), -2.0, dtype=torch.float32, device=device)
+    beta = torch.rand(B, T, H, dtype=dtype, device=device)
+    S0 = torch.randn(B, H, K, V, dtype=torch.float32, device=device)
+    M0 = torch.randn(B, H, K, V, dtype=torch.float32, device=device)
+    named = dict(q=q, k=k, v=v, p=p, log_alpha=log_alpha, log_mu=log_mu, beta=beta, S0=S0, M0=M0)
+    for x in named.values():
+        x.requires_grad_(True)
+
+    o, (S, M) = chunk_momentum_delta_rule(
+        q=q, k=k, v=v, p=p, log_alpha=log_alpha, log_mu=log_mu, beta=beta,
+        initial_state=(S0, M0), output_final_state=True, chunk_size=64,
+    )
+    for name, x in (('o', o), ('S', S), ('M', M)):
+        assert torch.isfinite(x).all(), f'{name} is not finite'
+    (o.sum() + S.sum() + M.sum()).backward()
+    for name, x in named.items():
+        assert x.grad is not None and torch.isfinite(x.grad).all(), f'd{name} is not finite'
 
 
 @pytest.mark.parametrize('mu', [0.8, 0.135, None])

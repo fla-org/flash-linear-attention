@@ -14,6 +14,10 @@ gate prep and fp32 input scaling stay host-side in the composition (chunk_local_
 recurrence -> output. All math is fp32 with ``allow_tf32=False`` (the state recurrence
 amplifies bf16 noise past the parity tolerance); every ``exp`` becomes ``exp2`` on
 pre-scaled log values (the wrapper multiplies by log2(e), the repo-wide gate convention).
+Gate masks multiply two within-chunk decay matrices, ``exp(log_a_cum[i] - log_a_cum[k])``
+and ``exp(log_m_cum[k] - log_m_cum[j])``; materializing ``exp(-log_m_cum)`` instead
+overflows fp32 once a chunk's cumsum passes ~-88.7, which the layer default
+``min_log_mu=-2`` reaches at ``chunk_size=64`` (cumsum -128).
 
 The kernels are called directly by the op-level NPU composition (``chunk_momentum_delta.py``
 in this package); the backend verifier rejects K > 256 before the composition runs, so
@@ -109,9 +113,9 @@ def _st(ptr, val, mask, ALIGNED: tl.constexpr):
 def chunk_momentum_delta_kkt_fwd_kernel_npu(
     p_eff,
     k_eta,
-    cfac,
-    lct1,
-    b_tm1,
+    log_a_cum,
+    lm_cum,
+    beta,
     A,
     T,
     task_num,
@@ -147,12 +151,14 @@ def chunk_momentum_delta_kkt_fwd_kernel_npu(
             # acc is a fresh product; the carried tile is added outside the dot
             b_A = tl.dot(b_p + 0.0, tl.trans(b_k + 0.0), b_A * 0.0, allow_tf32=False) + b_A
 
-        b_tm1_v = tl.load(b_tm1 + (i_n * H + i_h) * NT * BT + i_t * BT + o_i)
-        b_cfac = tl.load(cfac + (i_n * H + i_h) * NT * BT + i_t * BT + o_i)
-        b_lct1 = tl.load(lct1 + (i_n * H + i_h) * NT * BT + i_t * BT + o_i)
-        b_diff = b_lct1[None, :] - b_lct1[:, None]
-        b_diff = tl.where(b_r[:, None] > b_r[None, :], b_diff, 0.0)
-        b_A *= b_tm1_v[:, None] * b_cfac[None, :] * (1.0 - tl.exp2(b_diff))
+        g_off = (i_n * H + i_h) * NT * BT + i_t * BT
+        b_la = tl.load(log_a_cum + g_off + o_i)
+        b_lm = tl.load(lm_cum + g_off + o_i)
+        b_beta = tl.load(beta + g_off + o_i)
+        b_la_prev = tl.load(log_a_cum + g_off + tl.maximum(o_i - 1, 0), mask=o_i > 0, other=0.0)
+        b_Da = tl.where(b_r[:, None] > b_r[None, :], tl.exp2(b_la_prev[:, None] - b_la[None, :]), 0.0)
+        b_Dm = tl.where(b_r[:, None] >= b_r[None, :], tl.exp2(b_lm[:, None] - b_lm[None, :]), 0.0)
+        b_A *= tl.dot(b_Da, b_beta[:, None] * b_Dm, allow_tf32=False)
 
         p_A = A + (i_n * NT * BT) * H * BT + o_t[:, None] * (H * BT) + i_h * BT + o_i[None, :]
         tl.store(p_A, b_A, mask=m_t[:, None])
@@ -162,9 +168,9 @@ def chunk_momentum_delta_kkt_fwd_kernel_npu(
 def chunk_momentum_delta_kkt_fwd_npu(
     p_eff: torch.Tensor,
     k_eta: torch.Tensor,
-    cfac: torch.Tensor,
-    lct1: torch.Tensor,
-    b_tm1: torch.Tensor,
+    log_a_cum: torch.Tensor,
+    lm_cum: torch.Tensor,
+    beta: torch.Tensor,
     chunk_size: int,
 ) -> torch.Tensor:
     B, T, H, K = p_eff.shape
@@ -179,9 +185,9 @@ def chunk_momentum_delta_kkt_fwd_npu(
         kernel_kwargs=dict(
             p_eff=p_eff,
             k_eta=k_eta,
-            cfac=cfac,
-            lct1=_exp2_vec(lct1),
-            b_tm1=b_tm1,
+            log_a_cum=_exp2_vec(log_a_cum),
+            lm_cum=_exp2_vec(lm_cum),
+            beta=beta,
             A=A,
             T=T,
         ),
@@ -320,13 +326,13 @@ def chunk_momentum_delta_fwd_h_kernel_npu(
     u_c,
     y_c,
     z_c,
-    cfac,
-    lct1,
+    log_a_cum,
     lm_cum,
+    beta,
     a_last,
     b_last,
+    la_last,
     m_last,
-    ct_last,
     h_s,
     h_m,
     v_i,
@@ -360,6 +366,7 @@ def chunk_momentum_delta_fwd_h_kernel_npu(
         v_start = i_v * BV
 
         o_t = tl.arange(0, BT)
+        b_r = tl.arange(0, BT)
         o_v = tl.arange(0, BV)
         o_vs = v_start + o_v
         o_k1 = tl.arange(0, BK)
@@ -477,17 +484,18 @@ def chunk_momentum_delta_fwd_h_kernel_npu(
 
             # per-chunk gate scalars/vectors (exp2-scaled logs)
             g_off = (i_n * H + i_h) * NT
+            b_la = tl.load(log_a_cum + g_off * BT + o_t2)
+            b_lm = tl.load(lm_cum + g_off * BT + o_t2)
+            b_beta = tl.load(beta + g_off * BT + o_t2)
+            b_la_last = tl.load(la_last + g_off + i_t)
             b_a_last = tl.load(a_last + g_off + i_t)
             b_b_last = tl.load(b_last + g_off + i_t)
             b_m_last = tl.load(m_last + g_off + i_t)
-            b_ct_last = tl.load(ct_last + g_off + i_t)
-            b_cfac = tl.load(cfac + g_off * BT + o_t2)
-            b_lct1 = tl.load(lct1 + g_off * BT + o_t2)
-            b_lm_cum = tl.load(lm_cum + g_off * BT + o_t2)
-            # decay_s[r] = b_last * cfac[r] * (1 - exp2(lct1[r] - ct_last))
-            b_ds = b_b_last * b_cfac * (1.0 - tl.exp2(b_lct1 - b_ct_last))
-            # decay_m[r] = exp2(lm_last - lm_cum[r])
-            b_dm = tl.exp2(b_m_last - b_lm_cum)
+            b_w = tl.exp2(b_la_last - b_la) * b_beta
+            b_Dm = tl.where(b_r[:, None] >= b_r[None, :], tl.exp2(b_lm[:, None] - b_lm[None, :]), 0.0)
+            b_ds = tl.sum(b_Dm * b_w[:, None], axis=0)
+            # decay_m[r] = exp2(lm_last - lm[r])
+            b_dm = tl.exp2(b_m_last - b_lm)
 
             # state updates per K-slab (acc is a product, never the carried tile)
             b_k = _ld(k_base + offs_t + o_k1[None, :], m_k1, T_K_ALIGNED).to(tl.float32)
@@ -539,12 +547,12 @@ def chunk_momentum_delta_fwd_h_npu(
     u_c: torch.Tensor,
     y_c: torch.Tensor,
     z_c: torch.Tensor,
-    cfac: torch.Tensor,
-    lct1: torch.Tensor,
+    log_a_cum: torch.Tensor,
     lm_cum: torch.Tensor,
+    beta: torch.Tensor,
     a_last: torch.Tensor,
     b_last: torch.Tensor,
-    ct_last: torch.Tensor,
+    la_last: torch.Tensor,
     lm_last: torch.Tensor,
     initial_S: torch.Tensor | None,
     initial_M: torch.Tensor | None,
@@ -573,13 +581,13 @@ def chunk_momentum_delta_fwd_h_npu(
             u_c=u_c,
             y_c=y_c,
             z_c=z_c,
-            cfac=cfac,
-            lct1=_exp2_vec(lct1),
+            log_a_cum=_exp2_vec(log_a_cum),
             lm_cum=_exp2_vec(lm_cum),
+            beta=beta,
             a_last=a_last,
             b_last=b_last,
+            la_last=_exp2_vec(la_last),
             m_last=m_last,
-            ct_last=_exp2_vec(ct_last),
             h_s=h_s,
             h_m=h_m,
             v_i=v_i,
@@ -609,9 +617,9 @@ def chunk_momentum_delta_fwd_o_kernel_npu(
     h_m,
     a_cum,
     b_t,
-    cfac,
-    lct,
-    lct1,
+    log_a_cum,
+    lm_cum,
+    beta,
     o,
     scale,
     T,
@@ -664,9 +672,12 @@ def chunk_momentum_delta_fwd_o_kernel_npu(
 
             b_a_cum = tl.load(a_cum + g_off * BT + o_t2, mask=m_t, other=0.0)
             b_bt = tl.load(b_t + g_off * BT + o_t2, mask=m_t, other=0.0)
-            b_cfac = tl.load(cfac + g_off * BT + o_t2, mask=m_t, other=0.0)
-            b_lct = tl.load(lct + g_off * BT + o_t2, mask=m_t, other=0.0)
-            b_lct1 = tl.load(lct1 + g_off * BT + o_t2, mask=m_t, other=0.0)
+            b_la = tl.load(log_a_cum + g_off * BT + o_t2, mask=m_t, other=0.0)
+            b_lm = tl.load(lm_cum + g_off * BT + o_t2, mask=m_t, other=0.0)
+            b_beta = tl.load(beta + g_off * BT + o_t2, mask=m_t, other=0.0)
+            b_Da = tl.where(b_r[:, None] >= b_r[None, :], tl.exp2(b_la[:, None] - b_la[None, :]), 0.0)
+            b_Dm = tl.where(b_r[:, None] >= b_r[None, :], tl.exp2(b_lm[:, None] - b_lm[None, :]), 0.0)
+            b_mask = tl.dot(b_Da, b_beta[:, None] * b_Dm, allow_tf32=False)
 
             p_hs1 = h_s_nh + i_t * H * K * V + o_k1[:, None] * V + o_vs[None, :]
             b_hs = tl.load(p_hs1, mask=(o_k1[:, None] < K) & (o_vs[None, :] < V), other=0.0)
@@ -677,9 +688,8 @@ def chunk_momentum_delta_fwd_o_kernel_npu(
 
             b_o = tl.dot(b_q * b_a_cum[:, None], b_hs, allow_tf32=False)
             b_o = b_o - tl.dot(b_q * b_bt[:, None], b_hm, allow_tf32=False)
-            # intra: qk masked by gamma_mask_q[i, j] = b_t[i] * cfac[j] * (1 - exp2(lct1[j] - lct[i]))
+            # intra: qk masked by the precomputed gamma_mask_q (see above)
             b_qk = tl.dot(b_q + 0.0, tl.trans(b_k + 0.0), allow_tf32=False)
-            b_mask = b_bt[:, None] * b_cfac[None, :] * (1.0 - tl.exp2(b_lct1[None, :] - b_lct[:, None]))
             b_qk = tl.where(b_r[:, None] >= b_r[None, :], b_qk * b_mask, 0.0)
             b_o = b_o + tl.dot(b_qk, b_v, allow_tf32=False)
 
@@ -736,9 +746,9 @@ def chunk_momentum_delta_fwd_o_npu(
     h_m: torch.Tensor,
     a_cum: torch.Tensor,
     b_t: torch.Tensor,
-    cfac: torch.Tensor,
-    lct: torch.Tensor,
-    lct1: torch.Tensor,
+    log_a_cum: torch.Tensor,
+    lm_cum: torch.Tensor,
+    beta: torch.Tensor,
     scale: float,
     chunk_size: int,
 ) -> torch.Tensor:
@@ -758,9 +768,9 @@ def chunk_momentum_delta_fwd_o_npu(
             h_m=h_m,
             a_cum=a_cum,
             b_t=b_t,
-            cfac=cfac,
-            lct=_exp2_vec(lct),
-            lct1=_exp2_vec(lct1),
+            log_a_cum=_exp2_vec(log_a_cum),
+            lm_cum=_exp2_vec(lm_cum),
+            beta=beta,
             o=o,
             scale=scale,
             T=T,
