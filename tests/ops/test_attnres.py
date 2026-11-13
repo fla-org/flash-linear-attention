@@ -45,6 +45,9 @@ from fla.utils import IS_NPU, IS_NVIDIA, assert_close, device
             3, 1, 63, 1000, 1000 ** -0.5, True, torch.float16, 1, False,
             id="no-rms-weight",
         ),
+        pytest.param(3, 1, 63, 1000, 1000 ** -0.5, False, torch.bfloat16, 0, False, id="no-rms-weight-bf16-ckpt0"),
+        pytest.param(3, 1, 63, 128, 128 ** -0.5, True, torch.bfloat16, 0, False, id="no-rms-weight-bf16-onorm-ckpt0"),
+        pytest.param(15, 1, 15, 8192, 1.0, True, torch.float16, 1, False, id="no-rms-weight-streaming"),
     ],
 )
 @pytest.mark.smoke
@@ -119,6 +122,7 @@ def test_attnres(
         pytest.param('tensor', True, 128, torch.float16, False, 0, True, id='weighted'),
         pytest.param('none', True, 1000, torch.float16, True, 1, True, id='none'),
         pytest.param('omitted', True, 128, torch.float32, True, 0, True, id='omitted'),
+        pytest.param('omitted', False, 128, torch.float32, True, 0, False, id='omitted-default-triton'),
         pytest.param('none', False, 128, torch.float16, False, 1, False, id='disabled'),
         pytest.param('none', True, 32, torch.float16, False, 1, False, id='small-D-fallback'),
     ],
