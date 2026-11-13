@@ -11,7 +11,7 @@ import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 from fla.ops.utils.op import exp, unflatten_program_id
-from fla.utils import IS_NVIDIA_BLACKWELL, autotune_cache_kwargs, check_shared_mem, is_nvidia_hopper
+from fla.utils import IS_NVIDIA_BLACKWELL, IS_NVIDIA_SM120, autotune_cache_kwargs, check_shared_mem, is_nvidia_hopper
 
 BKV_LIST = [64, 128] if check_shared_mem() else [32, 64]
 NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8, 16]
@@ -23,7 +23,8 @@ def _prune_bwd_dhu_configs(configs, named_args, **kwargs):
         # four fp32 state tiles exceed shared memory when software-pipelined
         max_bk = 32 if check_shared_mem('hopper') else 16
         return [config for config in configs if config.num_stages == 1 and config.kwargs['BK'] <= max_bk]
-    return [config for config in configs if config.num_stages > 1]
+    # Keep single-stage options when pipelining exceeds SM120 shared memory.
+    return [config for config in configs if IS_NVIDIA_SM120 or config.num_stages > 1]
 
 
 @triton.heuristics({
