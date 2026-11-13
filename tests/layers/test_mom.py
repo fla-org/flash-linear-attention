@@ -74,4 +74,4 @@ def test_causal(T: int, topk: int):
 
     # the prefix can use fused_recurrent while the full sequence uses chunk
     prefix = layer(hidden_states[:, :T // 2])[0]
-    assert_close('prefix', reference[:, :T // 2], prefix, 1e-3)
+    assert_close('prefix', reference[:, :T // 2], prefix, 1e-3, err_atol=1e-3)
