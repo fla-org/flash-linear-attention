@@ -155,6 +155,14 @@ def chunk_fwd_kernel_o(
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=m_t[:, None] & (o_v < V)[None, :])
 
 
+def _prune_dqkwg_configs(configs, named_args, **kwargs):
+    args = {**named_args, **kwargs}
+    # four-warp MMA on Hopper reads past shared memory for 16-column tiles on Triton 3.7.1.
+    if IS_NVIDIA_HOPPER and TRITON_ABOVE_3_7_1 and args['BK'] == 16:
+        return [config for config in configs if config.num_warps == 2]
+    return configs
+
+
 @triton.heuristics({
     'USE_G': lambda args: args['g'] is not None,
     'USE_G_GAMMA': lambda args: args['g_gamma'] is not None,
@@ -168,6 +176,7 @@ def chunk_fwd_kernel_o(
         for num_stages in [2, 3, 4]
     ],
     key=['H', 'HV', 'K', 'V', 'BT', 'BK', 'BV', 'USE_G', 'USE_G_GAMMA', 'USE_DW', 'STATE_V_FIRST'],
+    prune_configs_by={'early_config_prune': _prune_dqkwg_configs},
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
