@@ -95,21 +95,9 @@ jobs:
         env:
           FLA_DISABLE_BACKEND_DISPATCH: "1"
         run: |
-          # Run each test file in its own pytest process (single concurrency).
-          # The op suite accumulates Triton JIT caches, PyTorch allocator state
-          # and Python objects in a single process until it exceeds the runner's
-          # ~15GB RAM and gets OOM-killed (exit 137). One file per process
-          # releases all memory between files. --exitfirst still stops a file at
-          # its first failure.
-          executed=0
-          for f in ${{ steps.find-ops-tests.outputs.test_files }}; do
-            $CONDA_BIN_PATH/pytest -s -v --exitfirst "$f" || exit 1
-            executed=1
-          done
-          if [ "$executed" -eq 0 ]; then
-            echo "::error::No tests were executed in the dispatch-disabled suite"
-            exit 1
-          fi
+          # Keep files in separate processes to release memory, with a bounded
+          # default of two workers (FLA_TEST_JOBS=1 restores serial execution).
+          $CONDA_BIN_PATH/python scripts/run_tests_parallel.py --jobs "${FLA_TEST_JOBS:-2}" ${{ steps.find-ops-tests.outputs.test_files }}
 
       - name: Run pytest on ops test files (dispatch ENABLED, backend coverage)
         if: steps.find-ops-tests.outputs.test_files && steps.setup.outputs.skip_tests == 'false' && steps.check-dispatch.outputs.dispatch_changed == 'true'
@@ -117,19 +105,10 @@ jobs:
         continue-on-error: true
         shell: bash
         run: |
-          # Same per-file splitting as the baseline batch above (avoid runner OOM).
-          # Append each file's output to the coverage log.
+          # Keep per-file output for the dispatch coverage comment.
           : > /tmp/fla-dispatch-coverage.log
-          executed=0
-          for f in ${{ steps.find-ops-tests.outputs.test_files }}; do
-            $CONDA_BIN_PATH/pytest -s -v --exitfirst "$f" 2>&1 | tee -a /tmp/fla-dispatch-coverage.log
-            test ${PIPESTATUS[0]} -eq 0 || exit 1
-            executed=1
-          done
-          if [ "$executed" -eq 0 ]; then
-            echo "::error::No tests were executed in the dispatch-enabled suite"
-            exit 1
-          fi
+          $CONDA_BIN_PATH/python scripts/run_tests_parallel.py --jobs "${FLA_TEST_JOBS:-2}" ${{ steps.find-ops-tests.outputs.test_files }} 2>&1 | tee -a /tmp/fla-dispatch-coverage.log
+          test ${PIPESTATUS[0]} -eq 0 || exit 1
 
       - name: Fail on empty ops-only selection
         if: steps.find-ops-tests.outputs.test_files == '' && inputs.skip_models_tests == true && steps.setup.outputs.skip_tests == 'false'
@@ -206,7 +185,7 @@ jobs:
         if: steps.find-models-tests.outputs.test_files && steps.setup.outputs.skip_tests == 'false'
         shell: bash
         run: |
-          $CONDA_BIN_PATH/pytest -s -v --exitfirst ${{ steps.find-models-tests.outputs.test_files }}
+          $CONDA_BIN_PATH/python scripts/run_tests_parallel.py --jobs "${FLA_TEST_JOBS:-2}" ${{ steps.find-models-tests.outputs.test_files }}
 
       - name: Fail on empty dependent test selection
         if: needs.test-ops.outputs.test_files == '' && steps.find-models-tests.outputs.test_files == '' && steps.setup.outputs.skip_tests == 'false'
