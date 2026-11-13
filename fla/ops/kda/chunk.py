@@ -324,18 +324,24 @@ def chunk_kda(
               so output/gradient rows not covered by real tokens are left undefined.
             - Shape ``initial_state`` and the incoming ``dht`` gradient (when used) as ``[max_num_seqs, ...]``.
             - Warm up the captured step eagerly so kernel autotuning runs outside the graph;
-              with ``cp_context``, this also includes NCCL communicator setup.
+              with ``cp_context``, this also includes NCCL or HCCL communicator setup.
 
             With ``cp_context``, the cross-rank state all-gathers are recorded into the graph. This additionally requires:
 
-            - A graph-capturable (non-blocking) NCCL communicator;
+            - A graph-capturable communicator (non-blocking NCCL on CUDA, or HCCL on Ascend);
               all ranks must capture and replay the same collectives in the same order.
             - A persistent padded ``cp_context.cu_seqlens`` buffer, refreshed in place before each replay.
-            - Persistent int32 device scalars ``cp_context.pre_num_ranks_dev`` and ``post_num_ranks_dev``,
+            - Persistent int32 device tensors ``cp_context.pre_num_ranks_dev`` and ``post_num_ranks_dev``,
               refreshed in place before each replay.
+              Contiguous layouts use one value; zigzag layouts use shape ``[2]`` in front/back order.
+            - Zigzag inputs pack equally sized front/back parts before unused token padding,
+              and local ``cu_seqlens`` must retain the boundary between these parts.
+              The sequence capacity must account for both local parts.
 
-            Ascend currently requires flattened variable-length inputs and does not support context parallelism in graph mode.
-            ``disable_recompute=True`` is not supported. Default: ``False``.
+            Ascend requires flattened variable-length inputs. Context-parallel graphs support contiguous and zigzag layouts;
+            the process group, local token capacity, and sequence capacity must remain fixed.
+            For Ascend CP graphed callables, synchronize forward/backward warmup and release its autograd graphs,
+            then capture with ``torch.npu.make_graphed_callables(..., num_warmup_iters=0)``. Default: ``False``.
         max_num_seqs (int, Optional):
             Static upper bound of the sequence count used together with ``use_graph``.
             Uses ``cu_seqlens.shape[0] - 1`` when omitted. Default: ``None``.
@@ -438,8 +444,18 @@ def chunk_kda(
 
     if use_graph and IS_NPU:
         if cp_context is not None:
-            raise NotImplementedError("Ascend KDA graph mode does not currently support context parallelism.")
-        if cu_seqlens is None:
+            if cp_context.layout not in ('contiguous', 'zigzag'):
+                raise NotImplementedError(f"Ascend KDA graph mode does not support CP layout {cp_context.layout!r}.")
+            if cp_context.group is None:
+                raise ValueError("Ascend KDA CP graph mode requires a process group.")
+            for name in ('pre_num_ranks_dev', 'post_num_ranks_dev'):
+                metadata = getattr(cp_context, name)
+                zigzag = cp_context.layout == 'zigzag'
+                valid_shape = metadata is not None and (metadata.shape == (2,) if zigzag else metadata.numel() == 1)
+                if not valid_shape or metadata.dtype != torch.int32 or metadata.device != q.device:
+                    shape = 'shape [2]' if zigzag else 'one element'
+                    raise ValueError(f"Ascend KDA CP graph mode requires {name} to be int32 with {shape} on {q.device}.")
+        elif cu_seqlens is None:
             raise NotImplementedError("Ascend KDA graph mode currently requires flattened variable-length inputs.")
 
     if cp_context is not None:

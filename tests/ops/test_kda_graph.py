@@ -529,6 +529,27 @@ def test_chunk_kda_graph_callable_skips_sentinels_between_tasks(monkeypatch):
             id="fp16-unaligned-head-partial",
         ),
         pytest.param(
+            _GraphCase(
+                T=2048, H=1, HV=2, K=100, V=80, chunk_size=32, cu_dtype=torch.int32,
+                use_qk_l2norm_in_kernel=True, use_gate_in_kernel=True, use_beta_sigmoid_in_kernel=True,
+            ),
+            ([0, 65, 2048], [0, 33, 1024], [0, 0, 2048], [0, 65, 2048]),
+            id="fp16-long-unaligned-gva-fused",
+        ),
+        pytest.param(
+            _GraphCase(T=1024, H=1, HV=1, K=100, V=80, chunk_size=32, dtype=torch.bfloat16, state_v_first=True),
+            ([0, 31, 1024], [0, 1, 512], [0, 512, 512], [0, 31, 1024]),
+            id="bf16-long-unaligned-v-first",
+        ),
+        pytest.param(
+            _GraphCase(
+                T=1024, H=1, HV=1, K=100, V=80, state_v_first=True,
+                use_qk_l2norm_in_kernel=True, use_gate_in_kernel=True, use_beta_sigmoid_in_kernel=True,
+            ),
+            ([0, 63, 1024], [0, 33, 512], [0, 0, 1024], [0, 63, 1024]),
+            id="fp16-bt64-unaligned-v-first",
+        ),
+        pytest.param(
             _GraphCase(T=4, N=8),
             [0, 0, 1, 1, 2, 2, 3, 3, 4],
             id="fp16-more-sequence-slots-than-tokens",
@@ -595,13 +616,70 @@ def test_chunk_kda_graph_callable_rejects_mismatched_sequence_capacity():
         )
 
 
+def _make_cp_graph_context(case, layout):
+    return FLACPContext(
+        group=object(),
+        cu_seqlens=torch.tensor([0, 64, case.T], dtype=case.cu_dtype, device=device),
+        pre_num_ranks_dev=torch.zeros(2 if layout == 'zigzag' else 1, dtype=torch.int32, device=device),
+        post_num_ranks_dev=torch.zeros(2 if layout == 'zigzag' else 1, dtype=torch.int32, device=device),
+        layout=layout,
+    )
+
+
+@pytest.mark.parametrize(
+    ('layout', 'field', 'message'),
+    [
+        pytest.param('contiguous', 'group', 'process group', id='missing-process-group'),
+        pytest.param('zigzag', 'pre_num_ranks_dev', 'pre_num_ranks_dev', id='missing-pre-rank-count'),
+    ],
+)
+@pytest.mark.skipif(not IS_NPU, reason='Ascend CP graph metadata validation')
+def test_chunk_kda_graph_callable_rejects_missing_cp_metadata(layout, field, message):
+    case = _GraphCase()
+    inputs = _make_case_inputs(case, seed=0)
+    context = _make_cp_graph_context(case, layout)
+    setattr(context, field, None)
+    with pytest.raises(ValueError, match=message):
+        chunk_kda(*inputs[:5], cp_context=context, use_graph=True, max_num_seqs=case.N)
+
+
+@pytest.mark.parametrize(
+    ('field', 'invalid', 'layout'),
+    [
+        pytest.param('post_num_ranks_dev', 'device', 'contiguous', id='rank-count-device'),
+        pytest.param('pre_num_ranks_dev', 'dtype', 'zigzag', id='rank-count-dtype'),
+        pytest.param('post_num_ranks_dev', 'shape', 'zigzag', id='rank-count-shape'),
+        pytest.param('post_num_ranks_dev', 'count', 'contiguous', id='contiguous-rank-count-size'),
+        pytest.param('post_num_ranks_dev', 'count', 'zigzag', id='zigzag-rank-count-size'),
+    ],
+)
+@pytest.mark.skipif(not IS_NPU, reason='Ascend CP graph metadata validation')
+def test_chunk_kda_graph_callable_rejects_invalid_cp_metadata(field, invalid, layout):
+    case = _GraphCase()
+    inputs = _make_case_inputs(case, seed=0)
+    context = _make_cp_graph_context(case, layout)
+    shape = 2 if layout == 'zigzag' else 1
+    if invalid == 'shape':
+        shape = (2, 1)
+    elif invalid == 'count':
+        shape = 1 if layout == 'zigzag' else 2
+    value = torch.zeros(
+        shape,
+        dtype=torch.int64 if invalid == 'dtype' else torch.int32,
+        device='cpu' if invalid == 'device' else device,
+    )
+    setattr(context, field, value)
+    with pytest.raises(ValueError, match=field):
+        chunk_kda(*inputs[:5], cp_context=context, use_graph=True, max_num_seqs=case.N)
+
+
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [
         pytest.param(
-            {"cp_context": FLACPContext()},
-            "does not currently support context parallelism",
-            id="context-parallel",
+            {"cp_context": FLACPContext(layout="invalid")},
+            "does not support CP layout",
+            id="unknown-context-parallel-layout",
         ),
         pytest.param({"cu_seqlens": None}, "requires flattened variable-length inputs", id="dense"),
     ],
