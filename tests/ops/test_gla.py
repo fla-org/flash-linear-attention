@@ -320,6 +320,85 @@ def test_chunk(
     assert_close('dh0', ref_dh0, tri_dh0, 0.005)
 
 
+def test_chunk_intermediate_states_requires_inference_mode():
+    q = torch.ones(1, 1, 1, 64)
+    with torch.no_grad(), pytest.raises(AssertionError, match='only allowed in inference mode'):
+        chunk_gla(q=q, k=q, v=q, g=q, return_intermediate_states=True)
+
+
+@pytest.mark.parametrize(
+    ('B', 'T', 'cu_seqlens', 'K', 'V', 'state_v_first', 'use_initial_state', 'output_final_state', 'dtype'),
+    [
+        pytest.param(2, 15, None, 64, 32, False, False, False, torch.float16, id='short-zero-state'),
+        pytest.param(2, 129, None, 60, 96, True, True, True, torch.bfloat16, id='dense-v-first-tail'),
+        pytest.param(1, 130, [0, 1, 65, 130], 64, 32, False, False, True, torch.float16, id='varlen-zero-state'),
+        pytest.param(1, 209, [0, 15, 80, 209], 64, 96, True, True, False, torch.bfloat16, id='varlen-v-first'),
+    ],
+)
+@torch.inference_mode()
+def test_chunk_return_intermediate_states(
+    B, T, cu_seqlens, K, V, state_v_first, use_initial_state, output_final_state, dtype, monkeypatch,
+):
+    torch.manual_seed(42)
+    monkeypatch.setenv('TRITON_F32_DEFAULT', 'ieee')
+    H, HV = 2, 2
+    q = F.normalize(torch.randn(B, T, H, K, device=device), p=2, dim=-1).to(dtype)
+    k = F.normalize(torch.randn(B, T, H, K, device=device), p=2, dim=-1).to(dtype)
+    v = torch.randn(B, T, HV, V, dtype=dtype, device=device)
+    g = F.logsigmoid(torch.randn(B, T, HV, K, device=device)) / 5
+    boundaries = cu_seqlens
+    N = B if boundaries is None else len(boundaries) - 1
+    cu_seqlens = None if boundaries is None else torch.tensor(boundaries, dtype=torch.int32, device=device)
+    h0 = torch.randn(N, HV, K, V, device=device) if use_initial_state else None
+    initial_state = h0.transpose(-1, -2).contiguous() if state_v_first and h0 is not None else h0
+    chunk_size = min(64, max(16, 1 << (T - 1).bit_length()))
+    kwargs = dict(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        initial_state=initial_state,
+        output_final_state=output_final_state,
+        state_v_first=state_v_first,
+        cu_seqlens=cu_seqlens,
+    )
+    o, ht, h = chunk_gla(**kwargs, return_intermediate_states=True)
+    default_o, default_ht = chunk_gla(**kwargs)
+    assert torch.equal(o, default_o)
+    assert (ht is None and default_ht is None) if not output_final_state else torch.equal(ht, default_ht)
+    assert h.dtype == k.dtype
+    if state_v_first:
+        h = h.transpose(-1, -2)
+        ht = ht.transpose(-1, -2) if ht is not None else None
+    lengths = [T] if boundaries is None else [end - start for start, end in zip(boundaries[:-1], boundaries[1:])]
+    nt = sum((length + chunk_size - 1) // chunk_size for length in lengths)
+    assert h.shape == (B, nt, HV, K, V)
+
+    ref = torch.empty_like(v)
+    offset = 0
+    for n in range(N):
+        b = n if boundaries is None else 0
+        start, end = (0, T) if boundaries is None else boundaries[n:n+2]
+        state = torch.zeros(1, HV, K, V, device=device) if h0 is None else h0[n:n+1]
+        for j, pos in enumerate(range(start, end, chunk_size)):
+            assert_close('h', state[0], h[b, offset + j], 0.005)
+            stop = min(pos + chunk_size, end)
+            ref_o, state = naive_recurrent_gla(
+                q=q[b:b+1, pos:stop],
+                k=k[b:b+1, pos:stop],
+                v=v[b:b+1, pos:stop],
+                gk=g[b:b+1, pos:stop],
+                initial_state=state,
+                output_final_state=True,
+            )
+            ref[b:b+1, pos:stop] = ref_o
+        if output_final_state:
+            assert_close('ht', state[0], ht[n], 0.005)
+        if boundaries is not None:
+            offset += (end - start + chunk_size - 1) // chunk_size
+    assert_close('o', ref, o, 0.004)
+
+
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'K', 'V', 'dtype'),
     [

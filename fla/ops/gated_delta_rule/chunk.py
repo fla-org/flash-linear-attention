@@ -47,6 +47,7 @@ def chunk_gated_delta_rule_fwd(
     A_log: torch.Tensor | None = None,
     dt_bias: torch.Tensor | None = None,
     chunk_size: int = 64,
+    return_intermediate_states: bool = False,
 ):
     g_input = g if use_gate_in_kernel else None
     if use_gate_in_kernel:
@@ -120,7 +121,7 @@ def chunk_gated_delta_rule_fwd(
         state_v_first=state_v_first,
         chunk_size=chunk_size,
     )
-    return g, o, A, final_state, initial_state, g_input
+    return g, o, A, final_state, initial_state, g_input, h if return_intermediate_states else None
 
 
 def chunk_gated_delta_rule_bwd(
@@ -277,6 +278,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         allow_neg_eigval: bool = False,
         cp_context: FLACPContext | None = None,
         chunk_size: int = 64,
+        return_intermediate_states: bool = False,
     ):
         q_rstd, k_rstd = None, None
         if use_qk_l2norm_in_kernel:
@@ -289,7 +291,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
 
         if chunk_indices is None and cu_seqlens is not None:
             chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size, cu_seqlens_cpu=cu_seqlens_cpu)
-        g, o, A, final_state, initial_state, g_input = chunk_gated_delta_rule_fwd(
+        g, o, A, final_state, initial_state, g_input, h = chunk_gated_delta_rule_fwd(
             q=q,
             k=k,
             v=v,
@@ -306,7 +308,10 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             A_log=A_log,
             dt_bias=dt_bias,
             chunk_size=chunk_size,
+            return_intermediate_states=return_intermediate_states,
         )
+        if return_intermediate_states:
+            return o.to(q.dtype), final_state, h
         ctx.save_for_backward(
             q,
             q_rstd,
@@ -388,7 +393,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         return (
             dq.to(q), dk.to(k), dv.to(v), dg.to(g), db.to(beta_raw),
             None, dh0, None, None, None, None, None, None, None, dA_log, ddt_bias,
-            None, None, None, None,
+            None, None, None, None, None,
         )
 
 
@@ -411,6 +416,7 @@ def chunk_gated_delta_rule(
     cu_seqlens_cpu: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
     cp_context: FLACPContext | None = None,
+    return_intermediate_states: bool = False,
     **kwargs,
 ):
     r"""
@@ -471,12 +477,23 @@ def chunk_gated_delta_rule(
             Context parallel context for distributed training across multiple devices.
             When provided, `initial_state` and `output_final_state` are not supported,
             and `cu_seqlens` will be overridden by the context. Default: `None`.
+        return_intermediate_states (bool, Optional):
+            Return the recurrent state entering each chunk as a third output.
+            Requires `torch.inference_mode()`; backward is unsupported. Default: `False`.
 
     Returns:
         o (torch.Tensor):
             Outputs of shape `[B, T, HV, V]`.
         final_state (torch.Tensor):
             Final state of shape `[N, HV, K, V]` if `output_final_state=True` else `None`.
+        h (torch.Tensor):
+            Returned only when `return_intermediate_states=True`, with shape `[B, NT, HV, K, V]`
+            (or `[B, NT, HV, V, K]` if `state_v_first=True`) and dtype `k.dtype`.
+            Each entry is the state before its chunk. Sequences start from their initial state or zero,
+            or from the incoming cross-rank state with context parallelism.
+            `NT = ceil(T / chunk_size)`, where `chunk_size` defaults to 64.
+            For variable-length inputs, `B=1` and `NT` is the sum of per-sequence chunk counts,
+            with entries ordered by sequence and then chunk. The final state is returned separately.
 
     Examples::
         >>> import torch
@@ -507,6 +524,8 @@ def chunk_gated_delta_rule(
             cu_seqlens=cu_seqlens
         )
     """
+    if return_intermediate_states:
+        assert torch.is_inference_mode_enabled(), "return_intermediate_states is only allowed in inference mode"
     if 'transpose_state_layout' in kwargs:
         if state_v_first:
             raise ValueError("Cannot pass both `state_v_first` and the deprecated `transpose_state_layout`.")
@@ -568,7 +587,7 @@ def chunk_gated_delta_rule(
 
     if scale is None:
         scale = k.shape[-1] ** -0.5
-    o, final_state = ChunkGatedDeltaRuleFunction.apply(
+    return ChunkGatedDeltaRuleFunction.apply(
         q,
         k,
         v,
@@ -589,8 +608,8 @@ def chunk_gated_delta_rule(
         allow_neg_eigval,
         cp_context,
         chunk_size,
+        return_intermediate_states,
     )
-    return o, final_state
 
 
 chunk_gdn = chunk_gated_delta_rule
