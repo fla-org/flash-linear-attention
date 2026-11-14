@@ -37,7 +37,7 @@ on:
         description: Backend dispatch mode
         required: true
         type: string
-        default: off
+        default: on
       source_ref:
         description: Trusted source ref for the runner and catalog
         required: false
