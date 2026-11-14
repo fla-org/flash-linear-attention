@@ -16,12 +16,12 @@ from fla.utils import input_guard
 
 try:
     from causal_conv1d.cpp_functions import causal_conv1d_bwd_function
-except ImportError:
+except (ImportError, OSError):
     causal_conv1d_bwd_function = None
 
 try:
     from causal_conv1d import causal_conv1d_fn as causal_conv1d_fn_cuda
-except ImportError:
+except (ImportError, OSError):
     causal_conv1d_fn_cuda = None
 
 
