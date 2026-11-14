@@ -1261,10 +1261,13 @@ def chunk_gated_delta_rule_fwd_h_npu(
     cu_seqlens_cpu: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
     chunk_offsets: torch.LongTensor | None = None,
+    use_graph: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     B, T, H, K, V, HV = *k.shape, u.shape[-1], u.shape[2]
     BT = chunk_size
-    cu_seqlens_cpu = _recurrence_cu_seqlens_cpu(cu_seqlens, cu_seqlens_cpu)
+    if use_graph and (cu_seqlens is None or chunk_indices is None or chunk_offsets is None):
+        raise ValueError("GDN graph recurrence requires fixed chunk indices, offsets, and cu_seqlens.")
+    cu_seqlens_cpu = None if use_graph else _recurrence_cu_seqlens_cpu(cu_seqlens, cu_seqlens_cpu)
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(
             cu_seqlens=cu_seqlens,
@@ -1280,7 +1283,8 @@ def chunk_gated_delta_rule_fwd_h_npu(
     assert K <= 256, "current kernel does not support head dimension larger than 256."
 
     # blockdim64 keeps T/K/V masks (and inline exp2 when T % BT != 0).
-    masked = time_axis_needs_mask(T, BT, cu_seqlens, cu_seqlens_cpu)
+    # replayed lengths can acquire tails after an aligned warmup.
+    masked = use_graph or time_axis_needs_mask(T, BT, cu_seqlens, cu_seqlens_cpu)
     dense_tail = T % BT != 0 and _dense_single_slab_tail(K, V, state_v_first, g, cu_seqlens)
     BK, BV = _select_fwd_h_tiles(K, V, state_v_first, masked=masked and not dense_tail)
     # Partial K/V tiles take the masked DMA path. That path keeps a second image
@@ -1292,7 +1296,7 @@ def chunk_gated_delta_rule_fwd_h_npu(
     v_pad = triton.cdiv(V, BV) * BV
     if (
         not state_v_first
-        and not time_axis_needs_mask(T, BT, cu_seqlens, cu_seqlens_cpu)
+        and not (use_graph or time_axis_needs_mask(T, BT, cu_seqlens, cu_seqlens_cpu))
         and k_pad <= 256
         and (k_pad != K or v_pad != V)
     ):
@@ -1315,7 +1319,7 @@ def chunk_gated_delta_rule_fwd_h_npu(
         h = k.new_empty(B, NT, HV, K, V)
         final_state = k.new_zeros(N, HV, K, V, dtype=torch.float32) if output_final_state else None
 
-    v_new = torch.empty_like(u) if save_new_value else None
+    v_new = (torch.zeros_like if use_graph else torch.empty_like)(u) if save_new_value else None
     g, g_ratio, g_last_exp = _prepare_fwd_g_gates(g=g, B=B, T=T, HV=HV, BT=BT, cu_seqlens=cu_seqlens)
     gk, gk_last_exp = _prepare_fwd_gk_last_exp(gk=gk, B=B, T=T, HV=HV, K=K, BT=BT, cu_seqlens=cu_seqlens)
     oneslab = (
@@ -1363,7 +1367,7 @@ def chunk_gated_delta_rule_fwd_h_npu(
                 "cu_seqlens": cu_seqlens,
                 "chunk_offsets": chunk_offsets,
                 "STATE_V_FIRST": state_v_first,
-                "MASK_DMA": need_dma_mask(
+                "MASK_DMA": use_graph or need_dma_mask(
                     T, BT, K, BK, V, BV, cu_seqlens is not None, cu_seqlens, cu_seqlens_cpu,
                 ),
             },
@@ -1965,10 +1969,13 @@ def chunk_gated_delta_rule_bwd_dhu_npu(
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
     chunk_offsets: torch.LongTensor | None = None,
+    use_graph: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     B, T, H, K, V, HV = *q.shape, do.shape[-1], do.shape[2]
     BT = chunk_size
-    cu_seqlens_cpu = _recurrence_cu_seqlens_cpu(cu_seqlens, cu_seqlens_cpu)
+    if use_graph and (cu_seqlens is None or chunk_indices is None or chunk_offsets is None):
+        raise ValueError("GDN graph recurrence requires fixed chunk indices, offsets, and cu_seqlens.")
+    cu_seqlens_cpu = None if use_graph else _recurrence_cu_seqlens_cpu(cu_seqlens, cu_seqlens_cpu)
     assert K <= 256, "current kernel does not support head dimension being larger than 256."
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens=cu_seqlens, chunk_size=chunk_size)
@@ -1983,7 +1990,7 @@ def chunk_gated_delta_rule_bwd_dhu_npu(
     # masked image still overflows (D=100 / two slabs). Pad onto the power-of-two
     # tile the aligned kernel already compiles and slice the gradients back.
     K_orig, V_orig = K, V
-    if not time_axis_needs_mask(T, BT, cu_seqlens, cu_seqlens_cpu):
+    if not (use_graph or time_axis_needs_mask(T, BT, cu_seqlens, cu_seqlens_cpu)):
         k_pad = triton.next_power_of_2(K)
         v_pad = triton.next_power_of_2(V)
         if k_pad <= 256 and v_pad <= 256 and (k_pad != K or v_pad != V):
@@ -2009,12 +2016,12 @@ def chunk_gated_delta_rule_bwd_dhu_npu(
             K, V = k_pad, v_pad
 
     if state_v_first:
-        dh = q.new_empty(B, NT, HV, V, K)
+        dh = (q.new_zeros if use_graph else q.new_empty)(B, NT, HV, V, K)
     else:
-        dh = q.new_empty(B, NT, HV, K, V)
-    dh0 = torch.empty_like(h0, dtype=torch.float32) if h0 is not None else None
+        dh = (q.new_zeros if use_graph else q.new_empty)(B, NT, HV, K, V)
+    dh0 = (torch.zeros_like if use_graph else torch.empty_like)(h0, dtype=torch.float32) if h0 is not None else None
     # keep the caller's dv unchanged while updating the value gradient.
-    dv2 = torch.empty_like(dv)
+    dv2 = (torch.zeros_like if use_graph else torch.empty_like)(dv)
     g_log, g_exp, g_ratio, g_last_exp, use_g_precomp = _prepare_dhu_gate_tensors(
         g=g,
         B=B,
@@ -2024,7 +2031,7 @@ def chunk_gated_delta_rule_bwd_dhu_npu(
         cu_seqlens=cu_seqlens,
     )
     gate_inline = g is not None and not use_g_precomp
-    masked = time_axis_needs_mask(T, BT, cu_seqlens, cu_seqlens_cpu)
+    masked = use_graph or time_axis_needs_mask(T, BT, cu_seqlens, cu_seqlens_cpu)
     min_nv = triton.cdiv(get_npu_properties()["num_aicore"], N * HV)
     BK, BV = _select_bwd_dhu_tiles(
         K=K,
@@ -2078,7 +2085,7 @@ def chunk_gated_delta_rule_bwd_dhu_npu(
             "USE_FINAL_STATE_GRADIENT": dht is not None,
             "STATE_V_FIRST": state_v_first,
             "IS_VARLEN": cu_seqlens is not None,
-            "MASK_DMA": need_dma_mask(
+            "MASK_DMA": use_graph or need_dma_mask(
                 T, BT, K, BK, V, BV, cu_seqlens is not None, cu_seqlens, cu_seqlens_cpu,
             ),
         },

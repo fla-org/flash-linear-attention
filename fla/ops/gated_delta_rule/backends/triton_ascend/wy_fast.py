@@ -139,7 +139,9 @@ def _launch_wy_kernel(
     launch_opts = compile_kwargs or {}
     for nt_off in range(0, NT, max_nt):
         nt_len = min(max_nt, NT - nt_off)
-        if cu_seqlens is not None and chunk_indices is not None:
+        if kernel_kwargs.get('USE_GRAPH', False):
+            kernel_kwargs['NT_OFFSET'] = nt_off
+        elif cu_seqlens is not None and chunk_indices is not None:
             kernel_kwargs['chunk_indices'] = chunk_indices[nt_off:nt_off + nt_len]
             kernel_kwargs['NT_OFFSET'] = 0
         else:
@@ -167,7 +169,7 @@ def _varlen_chunk_passes(cu_seqlens, chunk_indices, chunk_size):
 
 def _launch_wy_core_full_tail(kernel, *, task_num: int, kernel_kwargs: dict, feature_mask: bool) -> None:
     cu_seqlens = kernel_kwargs.get('cu_seqlens')
-    if cu_seqlens is None or torch.npu.is_current_stream_capturing():
+    if cu_seqlens is None or kernel_kwargs.get('USE_GRAPH', False) or torch.npu.is_current_stream_capturing():
         launch_wy_core_grid(kernel, task_num=task_num, kernel_kwargs=kernel_kwargs)
         return
     for chunk_indices, is_tail in _varlen_chunk_passes(
@@ -189,7 +191,7 @@ def _launch_wy_kernel_full_tail(
     compile_kwargs: dict | None = None,
 ) -> None:
     cu_seqlens = kernel_kwargs.get('cu_seqlens')
-    if cu_seqlens is None or torch.npu.is_current_stream_capturing():
+    if cu_seqlens is None or kernel_kwargs.get('USE_GRAPH', False) or torch.npu.is_current_stream_capturing():
         _launch_wy_kernel(
             kernel, NT=NT, bh_total=bh_total, kernel_kwargs=kernel_kwargs, compile_kwargs=compile_kwargs,
         )
@@ -249,6 +251,7 @@ def recompute_w_u_fwd_kernel_npu(
     G_T_CONTIG: tl.constexpr,
     BETA_T_CONTIG: tl.constexpr,
     MASK_DMA: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
 ):
     T_seq = T
     core_id = tl.program_id(0)
@@ -256,72 +259,77 @@ def recompute_w_u_fwd_kernel_npu(
         i_t_o = task_id // (B * HV)
         i_bh = task_id % (B * HV)
         i_b, i_h = i_bh // HV, i_bh % HV
-        if IS_VARLEN:
-            i_n, i_t = tl.load(chunk_indices + i_t_o * 2).to(tl.int32), tl.load(
-                chunk_indices + i_t_o * 2 + 1
-            ).to(tl.int32)
-            bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(
-                cu_seqlens + i_n + 1
-            ).to(tl.int64)
-            T = (eos - bos).to(tl.int32)
-        else:
-            i_t = i_t_o
-            bos = tl.cast(i_b, tl.int64) * T_seq
-
-        k_ptr = k + (bos * H + i_h // (HV // H)) * K
-        v_ptr = v + (bos * HV + i_h) * V
-        u_ptr = u + (bos * HV + i_h) * V
-        w_ptr = w + (bos * HV + i_h) * K
-        if BETA_T_CONTIG:
-            beta_ptr = get_gate_base(beta, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
-        else:
-            beta_ptr = beta + bos * HV + i_h
-        if not MASK_DMA:
-            row_base, o_t, m_t = chunk_token_rows(i_t, T, BT)
-        else:
-            row_base = tl.cast(0, tl.int64)
-            o_t = tl.cast(i_t, tl.int64) * BT + tl.arange(0, BT)
-            m_t = (o_t >= 0) & (o_t < T)
-        p_b = _t_row_ptr(beta_ptr, row_base, o_t, BETA_T_CONTIG, HV, not MASK_DMA)
-        b_b = mload(p_b, m_t, MASK_DMA)
-        o_i = tl.arange(0, BT)
-        m_p_A = m_t[:, None]
-        p_A = add_token_rows(
-            A + (bos * HV + i_h) * BT, row_base, o_t[:, None], HV * BT, not MASK_DMA,
-        ) + o_i[None, :]
-        if USE_G:
-            if G_T_CONTIG:
-                g_ptr = get_gate_base(g, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
+        is_valid = True
+        if USE_GRAPH:
+            i_n_check = tl.load(chunk_indices + tl.cast(i_t_o, tl.int64) * 2).to(tl.int32)
+            is_valid = i_n_check >= 0
+        if is_valid:
+            if IS_VARLEN:
+                i_n, i_t = tl.load(chunk_indices + i_t_o * 2).to(tl.int32), tl.load(
+                    chunk_indices + i_t_o * 2 + 1
+                ).to(tl.int32)
+                bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(
+                    cu_seqlens + i_n + 1
+                ).to(tl.int64)
+                T = (eos - bos).to(tl.int32)
             else:
-                g_ptr = g + bos * HV + i_h
-            p_g = _t_row_ptr(g_ptr, row_base, o_t, G_T_CONTIG, HV, not MASK_DMA)
-            b_g = exp2(mload(p_g, m_t, MASK_DMA).to(tl.float32))
-        for i_v in range(tl.cdiv(V, BV)):
-            o_v = i_v * BV + tl.arange(0, BV)
-            m_v = (o_v >= 0) & (o_v < V)
-            m_p_v = m_t[:, None] & m_v[None, :]
-            p_v = add_token_rows(v_ptr, row_base, o_t[:, None], HV * V, not MASK_DMA) + o_v[None, :]
-            p_u = add_token_rows(u_ptr, row_base, o_t[:, None], HV * V, not MASK_DMA) + o_v[None, :]
-            b_v = mload(p_v, m_p_v, MASK_DMA)
-            b_vb = (b_v * b_b[:, None]).to(b_v.dtype)
-            # Ascend tl.dot may clobber the left operand; reload A each V tile.
-            b_A = mload(p_A, m_p_A, MASK_DMA)
-            b_u = tl.dot(b_A, b_vb, allow_tf32=False)
-            mstore(p_u, b_u.to(p_u.dtype.element_ty), m_p_v, MASK_DMA)
-        for i_k in range(tl.cdiv(K, BK)):
-            o_k = i_k * BK + tl.arange(0, BK)
-            m_k = (o_k >= 0) & (o_k < K)
-            m_p_k = m_t[:, None] & m_k[None, :]
-            p_k = add_token_rows(k_ptr, row_base, o_t[:, None], H * K, not MASK_DMA) + o_k[None, :]
-            p_w = add_token_rows(w_ptr, row_base, o_t[:, None], HV * K, not MASK_DMA) + o_k[None, :]
-            b_k = mload(p_k, m_p_k, MASK_DMA)
-            b_kb = b_k * b_b[:, None]
+                i_t = i_t_o
+                bos = tl.cast(i_b, tl.int64) * T_seq
+
+            k_ptr = k + (bos * H + i_h // (HV // H)) * K
+            v_ptr = v + (bos * HV + i_h) * V
+            u_ptr = u + (bos * HV + i_h) * V
+            w_ptr = w + (bos * HV + i_h) * K
+            if BETA_T_CONTIG:
+                beta_ptr = get_gate_base(beta, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
+            else:
+                beta_ptr = beta + bos * HV + i_h
+            if not MASK_DMA:
+                row_base, o_t, m_t = chunk_token_rows(i_t, T, BT)
+            else:
+                row_base = tl.cast(0, tl.int64)
+                o_t = tl.cast(i_t, tl.int64) * BT + tl.arange(0, BT)
+                m_t = (o_t >= 0) & (o_t < T)
+            p_b = _t_row_ptr(beta_ptr, row_base, o_t, BETA_T_CONTIG, HV, not MASK_DMA)
+            b_b = mload(p_b, m_t, MASK_DMA)
+            o_i = tl.arange(0, BT)
+            m_p_A = m_t[:, None]
+            p_A = add_token_rows(
+                A + (bos * HV + i_h) * BT, row_base, o_t[:, None], HV * BT, not MASK_DMA,
+            ) + o_i[None, :]
             if USE_G:
-                b_kb = b_kb * b_g[:, None]
-            # Ascend tl.dot may clobber the left operand; reload A each K tile.
-            b_A = mload(p_A, m_p_A, MASK_DMA)
-            b_w = tl.dot(b_A, b_kb.to(b_k.dtype), allow_tf32=False)
-            mstore(p_w, b_w.to(p_w.dtype.element_ty), m_p_k, MASK_DMA)
+                if G_T_CONTIG:
+                    g_ptr = get_gate_base(g, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
+                else:
+                    g_ptr = g + bos * HV + i_h
+                p_g = _t_row_ptr(g_ptr, row_base, o_t, G_T_CONTIG, HV, not MASK_DMA)
+                b_g = exp2(mload(p_g, m_t, MASK_DMA).to(tl.float32))
+            for i_v in range(tl.cdiv(V, BV)):
+                o_v = i_v * BV + tl.arange(0, BV)
+                m_v = (o_v >= 0) & (o_v < V)
+                m_p_v = m_t[:, None] & m_v[None, :]
+                p_v = add_token_rows(v_ptr, row_base, o_t[:, None], HV * V, not MASK_DMA) + o_v[None, :]
+                p_u = add_token_rows(u_ptr, row_base, o_t[:, None], HV * V, not MASK_DMA) + o_v[None, :]
+                b_v = mload(p_v, m_p_v, MASK_DMA)
+                b_vb = (b_v * b_b[:, None]).to(b_v.dtype)
+                # Ascend tl.dot may clobber the left operand; reload A each V tile.
+                b_A = mload(p_A, m_p_A, MASK_DMA)
+                b_u = tl.dot(b_A, b_vb, allow_tf32=False)
+                mstore(p_u, b_u.to(p_u.dtype.element_ty), m_p_v, MASK_DMA)
+            for i_k in range(tl.cdiv(K, BK)):
+                o_k = i_k * BK + tl.arange(0, BK)
+                m_k = (o_k >= 0) & (o_k < K)
+                m_p_k = m_t[:, None] & m_k[None, :]
+                p_k = add_token_rows(k_ptr, row_base, o_t[:, None], H * K, not MASK_DMA) + o_k[None, :]
+                p_w = add_token_rows(w_ptr, row_base, o_t[:, None], HV * K, not MASK_DMA) + o_k[None, :]
+                b_k = mload(p_k, m_p_k, MASK_DMA)
+                b_kb = b_k * b_b[:, None]
+                if USE_G:
+                    b_kb = b_kb * b_g[:, None]
+                # Ascend tl.dot may clobber the left operand; reload A each K tile.
+                b_A = mload(p_A, m_p_A, MASK_DMA)
+                b_w = tl.dot(b_A, b_kb.to(b_k.dtype), allow_tf32=False)
+                mstore(p_w, b_w.to(p_w.dtype.element_ty), m_p_k, MASK_DMA)
 
 
 @triton.heuristics({
@@ -338,6 +346,7 @@ def prepare_wy_repr_bwd_kv_npu(
     G_T_CONTIG: tl.constexpr, BETA_T_CONTIG: tl.constexpr,
     DG_T_CONTIG: tl.constexpr, DB_T_CONTIG: tl.constexpr,
     G_EXP_PRECOMP: tl.constexpr, MASK_DMA: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
 ):
     """K/V backward stage on a 1D Cube core-grid.
 
@@ -350,128 +359,133 @@ def prepare_wy_repr_bwd_kv_npu(
         i_t_o = task_id // (B * HV)
         i_bh = task_id % (B * HV)
         i_b, i_h = i_bh // HV, i_bh % HV
-        if IS_VARLEN:
-            i_n, i_t = tl.load(chunk_indices + i_t_o * 2).to(tl.int32), tl.load(
-                chunk_indices + i_t_o * 2 + 1
-            ).to(tl.int32)
-            bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(
-                cu_seqlens + i_n + 1
-            ).to(tl.int64)
-            T = (eos - bos).to(tl.int32)
-        else:
-            i_t = i_t_o
-            bos = tl.cast(i_b, tl.int64) * T_seq
-
-        if not MASK_DMA:
-            row_base, o_t, m_t = chunk_token_rows(i_t, T, BT)
-        else:
-            row_base = tl.cast(0, tl.int64)
-            o_t = tl.cast(i_t, tl.int64) * BT + tl.arange(0, BT)
-            m_t = (o_t >= 0) & (o_t < T)
-        o_i = tl.arange(0, BT)
-        if BETA_T_CONTIG:
-            beta_ptr = get_gate_base(beta, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
-            p_b = _t_row_ptr(beta_ptr, row_base, o_t, True, HV, not MASK_DMA)
-        else:
-            p_b = add_token_rows(beta + (bos * HV + i_h), row_base, o_t, HV, not MASK_DMA)
-        if DB_T_CONTIG:
-            db_ptr = get_gate_base(db, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
-            p_db = _t_row_ptr(db_ptr, row_base, o_t, True, HV, not MASK_DMA)
-        else:
-            p_db = add_token_rows(db + (bos * HV + i_h), row_base, o_t, HV, not MASK_DMA)
-        # A is stored with stride-1 on the row axis. Load the contiguous
-        # transpose and flip it in UB; a stride-(HV*BT) gather is much slower.
-        # The BT axis is a full tile; only T can run past the sequence.
-        m_p_AT = m_t[:, None]
-        p_A = add_token_rows(
-            A + (bos * HV + i_h) * BT, row_base, o_t[:, None], HV * BT, not MASK_DMA,
-        ) + o_i[None, :]
-
-        b_b = mload(p_b, m_t, MASK_DMA).to(tl.float32)
-        b_db = tl.zeros([BT], dtype=tl.float32)
-        b_dA = tl.zeros([BT, BT], dtype=tl.float32)
-        b_A = tl.trans(mload(p_A, m_p_AT, MASK_DMA)).to(tl.float32)
-
-        if USE_G:
-            if G_T_CONTIG:
-                g_ptr = get_gate_base(g, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
-                p_g = _t_row_ptr(g_ptr, row_base, o_t, True, HV, not MASK_DMA)
+        is_valid = True
+        if USE_GRAPH:
+            i_n_check = tl.load(chunk_indices + tl.cast(i_t_o, tl.int64) * 2).to(tl.int32)
+            is_valid = i_n_check >= 0
+        if is_valid:
+            if IS_VARLEN:
+                i_n, i_t = tl.load(chunk_indices + i_t_o * 2).to(tl.int32), tl.load(
+                    chunk_indices + i_t_o * 2 + 1
+                ).to(tl.int32)
+                bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(
+                    cu_seqlens + i_n + 1
+                ).to(tl.int64)
+                T = (eos - bos).to(tl.int32)
             else:
-                p_g = add_token_rows(g + (bos * HV + i_h), row_base, o_t, HV, not MASK_DMA)
-            b_g = mload(p_g, m_t, MASK_DMA).to(tl.float32)
-            b_g_exp = b_g if G_EXP_PRECOMP else exp2(b_g)
-            b_bg = b_b * b_g_exp
-            b_dg = tl.zeros([BT], dtype=tl.float32)
+                i_t = i_t_o
+                bos = tl.cast(i_b, tl.int64) * T_seq
 
-        k_ptr = k + (bos * H + i_h // (HV // H)) * K
-        dk_ptr = dk + (bos * HV + i_h) * K
-        dw_ptr = dw + (bos * HV + i_h) * K
-        for i_k in range(tl.cdiv(K, BK)):
-            o_k = i_k * BK + tl.arange(0, BK)
-            m_k = (o_k >= 0) & (o_k < K)
-            m_p_k = m_t[:, None] & m_k[None, :]
-            p_k = add_token_rows(k_ptr, row_base, o_t[:, None], H * K, not MASK_DMA) + o_k[None, :]
-            p_dk = add_token_rows(dk_ptr, row_base, o_t[:, None], HV * K, not MASK_DMA) + o_k[None, :]
-            p_dw = add_token_rows(dw_ptr, row_base, o_t[:, None], HV * K, not MASK_DMA) + o_k[None, :]
-            b_k = mload(p_k, m_p_k, MASK_DMA)
-            b_dw = mload(p_dw, m_p_k, MASK_DMA)
-            # First dot clobbers b_dw; keep a copy for the dk dot.
-            b_dw_c = b_dw + 0.0
-            b_A_c = b_A.to(b_dw.dtype) + 0.0
+            if not MASK_DMA:
+                row_base, o_t, m_t = chunk_token_rows(i_t, T, BT)
+            else:
+                row_base = tl.cast(0, tl.int64)
+                o_t = tl.cast(i_t, tl.int64) * BT + tl.arange(0, BT)
+                m_t = (o_t >= 0) & (o_t < T)
+            o_i = tl.arange(0, BT)
+            if BETA_T_CONTIG:
+                beta_ptr = get_gate_base(beta, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
+                p_b = _t_row_ptr(beta_ptr, row_base, o_t, True, HV, not MASK_DMA)
+            else:
+                p_b = add_token_rows(beta + (bos * HV + i_h), row_base, o_t, HV, not MASK_DMA)
+            if DB_T_CONTIG:
+                db_ptr = get_gate_base(db, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
+                p_db = _t_row_ptr(db_ptr, row_base, o_t, True, HV, not MASK_DMA)
+            else:
+                p_db = add_token_rows(db + (bos * HV + i_h), row_base, o_t, HV, not MASK_DMA)
+            # A is stored with stride-1 on the row axis. Load the contiguous
+            # transpose and flip it in UB; a stride-(HV*BT) gather is much slower.
+            # The BT axis is a full tile; only T can run past the sequence.
+            m_p_AT = m_t[:, None]
+            p_A = add_token_rows(
+                A + (bos * HV + i_h) * BT, row_base, o_t[:, None], HV * BT, not MASK_DMA,
+            ) + o_i[None, :]
+
+            b_b = mload(p_b, m_t, MASK_DMA).to(tl.float32)
+            b_db = tl.zeros([BT], dtype=tl.float32)
+            b_dA = tl.zeros([BT, BT], dtype=tl.float32)
+            b_A = tl.trans(mload(p_A, m_p_AT, MASK_DMA)).to(tl.float32)
+
             if USE_G:
-                b_kbg = (b_k.to(tl.float32) * b_bg[:, None]).to(b_k.dtype)
-            else:
-                b_kbg = (b_k.to(tl.float32) * b_b[:, None]).to(b_k.dtype)
-            # Explicit transpose, then dot. Nested tl.trans() inside tl.dot
-            # miscompiles in this kernel on triton-ascend.
-            b_kbg_T = tl.trans(b_kbg)
-            b_dA = tl.dot(b_dw, b_kbg_T, b_dA, allow_tf32=False)
-            b_dkbg = tl.dot(b_A_c, b_dw_c, allow_tf32=False).to(tl.float32)
-            b_k_f = b_k.to(tl.float32)
+                if G_T_CONTIG:
+                    g_ptr = get_gate_base(g, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
+                    p_g = _t_row_ptr(g_ptr, row_base, o_t, True, HV, not MASK_DMA)
+                else:
+                    p_g = add_token_rows(g + (bos * HV + i_h), row_base, o_t, HV, not MASK_DMA)
+                b_g = mload(p_g, m_t, MASK_DMA).to(tl.float32)
+                b_g_exp = b_g if G_EXP_PRECOMP else exp2(b_g)
+                b_bg = b_b * b_g_exp
+                b_dg = tl.zeros([BT], dtype=tl.float32)
+
+            k_ptr = k + (bos * H + i_h // (HV // H)) * K
+            dk_ptr = dk + (bos * HV + i_h) * K
+            dw_ptr = dw + (bos * HV + i_h) * K
+            for i_k in range(tl.cdiv(K, BK)):
+                o_k = i_k * BK + tl.arange(0, BK)
+                m_k = (o_k >= 0) & (o_k < K)
+                m_p_k = m_t[:, None] & m_k[None, :]
+                p_k = add_token_rows(k_ptr, row_base, o_t[:, None], H * K, not MASK_DMA) + o_k[None, :]
+                p_dk = add_token_rows(dk_ptr, row_base, o_t[:, None], HV * K, not MASK_DMA) + o_k[None, :]
+                p_dw = add_token_rows(dw_ptr, row_base, o_t[:, None], HV * K, not MASK_DMA) + o_k[None, :]
+                b_k = mload(p_k, m_p_k, MASK_DMA)
+                b_dw = mload(p_dw, m_p_k, MASK_DMA)
+                # First dot clobbers b_dw; keep a copy for the dk dot.
+                b_dw_c = b_dw + 0.0
+                b_A_c = b_A.to(b_dw.dtype) + 0.0
+                if USE_G:
+                    b_kbg = (b_k.to(tl.float32) * b_bg[:, None]).to(b_k.dtype)
+                else:
+                    b_kbg = (b_k.to(tl.float32) * b_b[:, None]).to(b_k.dtype)
+                # Explicit transpose, then dot. Nested tl.trans() inside tl.dot
+                # miscompiles in this kernel on triton-ascend.
+                b_kbg_T = tl.trans(b_kbg)
+                b_dA = tl.dot(b_dw, b_kbg_T, b_dA, allow_tf32=False)
+                b_dkbg = tl.dot(b_A_c, b_dw_c, allow_tf32=False).to(tl.float32)
+                b_k_f = b_k.to(tl.float32)
+                if USE_G:
+                    b_dk = b_dkbg * b_bg[:, None]
+                    b_db += b_g_exp * tl.sum(b_dkbg * b_k_f, 1)
+                    b_dg += tl.sum(b_dkbg * b_kbg.to(tl.float32), 1)
+                else:
+                    b_dk = b_dkbg * b_b[:, None]
+                    b_db += tl.sum(b_dkbg * b_k_f, 1)
+                mstore(p_dk, b_dk.to(p_dk.dtype.element_ty), m_p_k, MASK_DMA)
+
+            v_ptr = v + (bos * HV + i_h) * V
+            dv_ptr = dv + (bos * HV + i_h) * V
+            du_ptr = du + (bos * HV + i_h) * V
+            for i_v in range(tl.cdiv(V, BV)):
+                o_v = i_v * BV + tl.arange(0, BV)
+                m_v = (o_v >= 0) & (o_v < V)
+                m_p_v = m_t[:, None] & m_v[None, :]
+                p_v = add_token_rows(v_ptr, row_base, o_t[:, None], HV * V, not MASK_DMA) + o_v[None, :]
+                p_dv = add_token_rows(dv_ptr, row_base, o_t[:, None], HV * V, not MASK_DMA) + o_v[None, :]
+                p_du = add_token_rows(du_ptr, row_base, o_t[:, None], HV * V, not MASK_DMA) + o_v[None, :]
+                b_v = mload(p_v, m_p_v, MASK_DMA)
+                b_du = mload(p_du, m_p_v, MASK_DMA)
+                b_du_c = b_du + 0.0
+                b_A_c = b_A.to(b_du.dtype) + 0.0
+                b_vb = (b_v.to(tl.float32) * b_b[:, None]).to(b_v.dtype)
+                b_vb_T = tl.trans(b_vb)
+                b_dA = tl.dot(b_du, b_vb_T, b_dA, allow_tf32=False)
+                b_dvb = tl.dot(b_A_c, b_du_c, allow_tf32=False).to(tl.float32)
+                b_v_f = b_v.to(tl.float32)
+                b_dv = b_dvb * b_b[:, None]
+                b_db += tl.sum(b_dvb * b_v_f, 1)
+                mstore(p_dv, b_dv.to(p_dv.dtype.element_ty), m_p_v, MASK_DMA)
+
+            p_dA = add_token_rows(
+                dA + (bos * HV + i_h) * BT, row_base, o_t[:, None], HV * BT, not MASK_DMA,
+            ) + o_i[None, :]
+            mstore(p_dA, tl.trans(b_dA).to(p_dA.dtype.element_ty), m_p_AT, MASK_DMA)
+            mstore(p_db, b_db.to(p_db.dtype.element_ty), m_t, MASK_DMA)
             if USE_G:
-                b_dk = b_dkbg * b_bg[:, None]
-                b_db += b_g_exp * tl.sum(b_dkbg * b_k_f, 1)
-                b_dg += tl.sum(b_dkbg * b_kbg.to(tl.float32), 1)
-            else:
-                b_dk = b_dkbg * b_b[:, None]
-                b_db += tl.sum(b_dkbg * b_k_f, 1)
-            mstore(p_dk, b_dk.to(p_dk.dtype.element_ty), m_p_k, MASK_DMA)
-
-        v_ptr = v + (bos * HV + i_h) * V
-        dv_ptr = dv + (bos * HV + i_h) * V
-        du_ptr = du + (bos * HV + i_h) * V
-        for i_v in range(tl.cdiv(V, BV)):
-            o_v = i_v * BV + tl.arange(0, BV)
-            m_v = (o_v >= 0) & (o_v < V)
-            m_p_v = m_t[:, None] & m_v[None, :]
-            p_v = add_token_rows(v_ptr, row_base, o_t[:, None], HV * V, not MASK_DMA) + o_v[None, :]
-            p_dv = add_token_rows(dv_ptr, row_base, o_t[:, None], HV * V, not MASK_DMA) + o_v[None, :]
-            p_du = add_token_rows(du_ptr, row_base, o_t[:, None], HV * V, not MASK_DMA) + o_v[None, :]
-            b_v = mload(p_v, m_p_v, MASK_DMA)
-            b_du = mload(p_du, m_p_v, MASK_DMA)
-            b_du_c = b_du + 0.0
-            b_A_c = b_A.to(b_du.dtype) + 0.0
-            b_vb = (b_v.to(tl.float32) * b_b[:, None]).to(b_v.dtype)
-            b_vb_T = tl.trans(b_vb)
-            b_dA = tl.dot(b_du, b_vb_T, b_dA, allow_tf32=False)
-            b_dvb = tl.dot(b_A_c, b_du_c, allow_tf32=False).to(tl.float32)
-            b_v_f = b_v.to(tl.float32)
-            b_dv = b_dvb * b_b[:, None]
-            b_db += tl.sum(b_dvb * b_v_f, 1)
-            mstore(p_dv, b_dv.to(p_dv.dtype.element_ty), m_p_v, MASK_DMA)
-
-        p_dA = add_token_rows(
-            dA + (bos * HV + i_h) * BT, row_base, o_t[:, None], HV * BT, not MASK_DMA,
-        ) + o_i[None, :]
-        mstore(p_dA, tl.trans(b_dA).to(p_dA.dtype.element_ty), m_p_AT, MASK_DMA)
-        mstore(p_db, b_db.to(p_db.dtype.element_ty), m_t, MASK_DMA)
-        if USE_G:
-            if DG_T_CONTIG:
-                dg_ptr = get_gate_base(dg, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
-                p_dg = _t_row_ptr(dg_ptr, row_base, o_t, True, HV, not MASK_DMA)
-            else:
-                p_dg = add_token_rows(dg + (bos * HV + i_h), row_base, o_t, HV, not MASK_DMA)
-            mstore(p_dg, b_dg.to(p_dg.dtype.element_ty), m_t, MASK_DMA)
+                if DG_T_CONTIG:
+                    dg_ptr = get_gate_base(dg, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
+                    p_dg = _t_row_ptr(dg_ptr, row_base, o_t, True, HV, not MASK_DMA)
+                else:
+                    p_dg = add_token_rows(dg + (bos * HV + i_h), row_base, o_t, HV, not MASK_DMA)
+                mstore(p_dg, b_dg.to(p_dg.dtype.element_ty), m_t, MASK_DMA)
 
 
 @triton.jit(do_not_specialize=['T'])
@@ -481,6 +495,7 @@ def prepare_wy_repr_bwd_da_mask_dot1_npu(
     HV: tl.constexpr, BT: tl.constexpr,
     IS_VARLEN: tl.constexpr, MASK_DMA: tl.constexpr,
     NT_OFFSET: tl.constexpr, BH_OFFSET: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
 ):
     i_t = tl.program_id(0) + NT_OFFSET
     i_bh = tl.program_id(1) + BH_OFFSET
@@ -489,6 +504,8 @@ def prepare_wy_repr_bwd_da_mask_dot1_npu(
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(
             chunk_indices + i_t * 2 + 1
         ).to(tl.int32)
+        if USE_GRAPH and i_n < 0:
+            return
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(
             cu_seqlens + i_n + 1
         ).to(tl.int64)
@@ -535,12 +552,15 @@ def prepare_wy_repr_bwd_da_dot2_npu(
     HV: tl.constexpr, BT: tl.constexpr,
     IS_VARLEN: tl.constexpr, MASK_DMA: tl.constexpr,
     NT_OFFSET: tl.constexpr, BH_OFFSET: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
 ):
     i_t = tl.program_id(0) + NT_OFFSET
     i_bh = tl.program_id(1) + BH_OFFSET
     i_b, i_h = i_bh // HV, i_bh % HV
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        if USE_GRAPH and i_n < 0:
+            return
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = (eos - bos).to(tl.int32)
     else:
@@ -589,6 +609,7 @@ def prepare_wy_repr_bwd_da_gate_npu(
     IS_VARLEN: tl.constexpr, G_T_CONTIG: tl.constexpr,
     NT_OFFSET: tl.constexpr, BH_OFFSET: tl.constexpr,
     MASK_DMA: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
 ):
     i_t = tl.program_id(0) + NT_OFFSET
     i_bh = tl.program_id(1) + BH_OFFSET
@@ -598,6 +619,8 @@ def prepare_wy_repr_bwd_da_gate_npu(
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(
             chunk_indices + i_t * 2 + 1
         ).to(tl.int32)
+        if USE_GRAPH and i_n < 0:
+            return
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(
             cu_seqlens + i_n + 1
         ).to(tl.int64)
@@ -652,6 +675,7 @@ def prepare_wy_repr_bwd_finalize_k_npu(
     BT: tl.constexpr, BK: tl.constexpr,
     IS_VARLEN: tl.constexpr, BETA_T_CONTIG: tl.constexpr, DB_T_CONTIG: tl.constexpr,
     MASK_DMA: tl.constexpr, MASK_T: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
 ):
     T_seq = T
     core_id = tl.program_id(0)
@@ -659,103 +683,108 @@ def prepare_wy_repr_bwd_finalize_k_npu(
         i_t_o = task_id // (B * HV)
         i_bh = task_id % (B * HV)
         i_b, i_h = i_bh // HV, i_bh % HV
-        if IS_VARLEN:
-            i_n, i_t = tl.load(chunk_indices + i_t_o * 2).to(tl.int32), tl.load(
-                chunk_indices + i_t_o * 2 + 1
-            ).to(tl.int32)
-            bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(
-                cu_seqlens + i_n + 1
-            ).to(tl.int64)
-            T = (eos - bos).to(tl.int32)
-        else:
-            i_t = i_t_o
-            bos = tl.cast(i_b, tl.int64) * T_seq
+        is_valid = True
+        if USE_GRAPH:
+            i_n_check = tl.load(chunk_indices + tl.cast(i_t_o, tl.int64) * 2).to(tl.int32)
+            is_valid = i_n_check >= 0
+        if is_valid:
+            if IS_VARLEN:
+                i_n, i_t = tl.load(chunk_indices + i_t_o * 2).to(tl.int32), tl.load(
+                    chunk_indices + i_t_o * 2 + 1
+                ).to(tl.int32)
+                bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(
+                    cu_seqlens + i_n + 1
+                ).to(tl.int64)
+                T = (eos - bos).to(tl.int32)
+            else:
+                i_t = i_t_o
+                bos = tl.cast(i_b, tl.int64) * T_seq
 
-        o_i = tl.arange(0, BT)
-        if BETA_T_CONTIG:
-            beta_ptr = get_gate_base(beta, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
-        if DB_T_CONTIG:
-            db_ptr = get_gate_base(db, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
-
-        # Ragged chunks: masked loads past T still issue the address and return
-        # NaN. That lane sits on the dot reduction and poisons dk/db. Clamp the
-        # index and drop it with a select — NaN * 0 stays NaN. Aligned chunks
-        # keep int32 in-chunk rows so the DMA stays vectorized.
-        if MASK_T:
-            o_t = tl.cast(i_t, tl.int64) * BT + tl.arange(0, BT)
-            m_t = (o_t >= 0) & (o_t < T)
-            o_safe = tl.minimum(o_t, tl.maximum(tl.cast(T, tl.int64) - 1, 0))
+            o_i = tl.arange(0, BT)
             if BETA_T_CONTIG:
-                p_b = beta_ptr + o_safe
-            else:
-                p_b = beta + (bos * HV + i_h) + o_safe * HV
+                beta_ptr = get_gate_base(beta, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
             if DB_T_CONTIG:
-                p_db = db_ptr + o_safe
-            else:
-                p_db = db + (bos * HV + i_h) + o_safe * HV
-            p_dA = dA_out + (bos * HV + i_h) * BT + o_i[:, None] + o_safe[None, :] * (HV * BT)
-            b_b = tl.where(m_t, tl.load(p_b).to(tl.float32), 0)
-            b_db = tl.where(m_t, tl.load(p_db).to(tl.float32), 0)
-            b_dA = tl.where(m_t[None, :], tl.load(p_dA).to(tl.float32), 0)
-        else:
-            row_base, o_t, m_t = chunk_token_rows(i_t, T, BT)
-            if BETA_T_CONTIG:
-                p_b = _t_row_ptr(beta_ptr, row_base, o_t, True, HV, True)
-            else:
-                p_b = add_token_rows(beta + (bos * HV + i_h), row_base, o_t, HV, True)
-            if DB_T_CONTIG:
-                p_db = _t_row_ptr(db_ptr, row_base, o_t, True, HV, True)
-            else:
-                p_db = add_token_rows(db + (bos * HV + i_h), row_base, o_t, HV, True)
-            p_dA = add_token_rows(
-                dA_out + (bos * HV + i_h) * BT, row_base, o_t[None, :], HV * BT, True,
-            ) + o_i[:, None]
-            b_b = mload(p_b, m_t, MASK_DMA).to(tl.float32)
-            b_db = mload(p_db, m_t, MASK_DMA).to(tl.float32)
-            b_dA = mload(p_dA, m_t[None, :], MASK_DMA).to(tl.float32)
+                db_ptr = get_gate_base(db, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
 
-        for i_k in range(tl.cdiv(K, BK)):
-            o_k = i_k * BK + tl.arange(0, BK)
-            m_k = (o_k >= 0) & (o_k < K)
-            m_p_k = m_t[:, None] & m_k[None, :]
+            # Ragged chunks: masked loads past T still issue the address and return
+            # NaN. That lane sits on the dot reduction and poisons dk/db. Clamp the
+            # index and drop it with a select — NaN * 0 stays NaN. Aligned chunks
+            # keep int32 in-chunk rows so the DMA stays vectorized.
             if MASK_T:
-                p_k = k + (bos * H + i_h // (HV // H)) * K + o_safe[:, None] * (H * K) + o_k[None, :]
-                b_k = tl.where(m_t[:, None] & m_k[None, :], tl.load(p_k, mask=m_k[None, :], other=0).to(tl.float32), 0)
+                o_t = tl.cast(i_t, tl.int64) * BT + tl.arange(0, BT)
+                m_t = (o_t >= 0) & (o_t < T)
+                o_safe = tl.minimum(o_t, tl.maximum(tl.cast(T, tl.int64) - 1, 0))
+                if BETA_T_CONTIG:
+                    p_b = beta_ptr + o_safe
+                else:
+                    p_b = beta + (bos * HV + i_h) + o_safe * HV
+                if DB_T_CONTIG:
+                    p_db = db_ptr + o_safe
+                else:
+                    p_db = db + (bos * HV + i_h) + o_safe * HV
+                p_dA = dA_out + (bos * HV + i_h) * BT + o_i[:, None] + o_safe[None, :] * (HV * BT)
+                b_b = tl.where(m_t, tl.load(p_b).to(tl.float32), 0)
+                b_db = tl.where(m_t, tl.load(p_db).to(tl.float32), 0)
+                b_dA = tl.where(m_t[None, :], tl.load(p_dA).to(tl.float32), 0)
             else:
-                p_k = add_token_rows(
-                    k + (bos * H + i_h // (HV // H)) * K, row_base, o_t[:, None], H * K, True,
-                ) + o_k[None, :]
-                b_k = mload(p_k, m_p_k, MASK_DMA).to(tl.float32)
-            if MASK_T:
-                p_dk = dk + (bos * HV + i_h) * K + o_t[:, None] * (HV * K) + o_k[None, :]
-            else:
-                p_dk = add_token_rows(
-                    dk + (bos * HV + i_h) * K, row_base, o_t[:, None], HV * K, True,
-                ) + o_k[None, :]
-            b_kb = b_k * b_b[:, None]
-            # lhs dot consumes its copy; the original dA stays for the rhs dot.
-            b_dA_lhs = b_dA + 0.0
-            b_dkb = tl.dot(b_dA_lhs, b_k, allow_tf32=False)
-            b_dk = b_dkb * b_b[:, None] + tl.trans(tl.dot(tl.trans(b_kb), b_dA, allow_tf32=False))
-            if MASK_T:
-                # Cube dots leave NaN in padded token rows. Drop them before the
-                # db reduction; a multiply would keep NaN (NaN * 0 stays NaN).
-                b_dkb = tl.where(m_t[:, None] & m_k[None, :], b_dkb, 0)
-                b_dk = tl.where(m_t[:, None] & m_k[None, :], b_dk, 0)
-                p_dk_in = dk + (bos * HV + i_h) * K + o_safe[:, None] * (HV * K) + o_k[None, :]
-                b_dk += tl.where(
-                    m_t[:, None] & m_k[None, :],
-                    tl.load(p_dk_in, mask=m_k[None, :], other=0).to(tl.float32),
-                    0,
-                )
-            else:
-                b_dk += mload(p_dk, m_p_k, MASK_DMA).to(tl.float32)
-            b_db += tl.sum(b_dkb * b_k, 1)
-            mstore(p_dk, b_dk.to(p_dk.dtype.element_ty), m_p_k, MASK_DMA)
+                row_base, o_t, m_t = chunk_token_rows(i_t, T, BT)
+                if BETA_T_CONTIG:
+                    p_b = _t_row_ptr(beta_ptr, row_base, o_t, True, HV, True)
+                else:
+                    p_b = add_token_rows(beta + (bos * HV + i_h), row_base, o_t, HV, True)
+                if DB_T_CONTIG:
+                    p_db = _t_row_ptr(db_ptr, row_base, o_t, True, HV, True)
+                else:
+                    p_db = add_token_rows(db + (bos * HV + i_h), row_base, o_t, HV, True)
+                p_dA = add_token_rows(
+                    dA_out + (bos * HV + i_h) * BT, row_base, o_t[None, :], HV * BT, True,
+                ) + o_i[:, None]
+                b_b = mload(p_b, m_t, MASK_DMA).to(tl.float32)
+                b_db = mload(p_db, m_t, MASK_DMA).to(tl.float32)
+                b_dA = mload(p_dA, m_t[None, :], MASK_DMA).to(tl.float32)
 
-        if MASK_T:
-            b_db = tl.where(m_t, b_db, 0)
-        mstore(p_db, b_db.to(p_db.dtype.element_ty), m_t, MASK_DMA)
+            for i_k in range(tl.cdiv(K, BK)):
+                o_k = i_k * BK + tl.arange(0, BK)
+                m_k = (o_k >= 0) & (o_k < K)
+                m_p_k = m_t[:, None] & m_k[None, :]
+                if MASK_T:
+                    p_k = k + (bos * H + i_h // (HV // H)) * K + o_safe[:, None] * (H * K) + o_k[None, :]
+                    b_k = tl.where(m_t[:, None] & m_k[None, :], tl.load(p_k, mask=m_k[None, :], other=0).to(tl.float32), 0)
+                else:
+                    p_k = add_token_rows(
+                        k + (bos * H + i_h // (HV // H)) * K, row_base, o_t[:, None], H * K, True,
+                    ) + o_k[None, :]
+                    b_k = mload(p_k, m_p_k, MASK_DMA).to(tl.float32)
+                if MASK_T:
+                    p_dk = dk + (bos * HV + i_h) * K + o_t[:, None] * (HV * K) + o_k[None, :]
+                else:
+                    p_dk = add_token_rows(
+                        dk + (bos * HV + i_h) * K, row_base, o_t[:, None], HV * K, True,
+                    ) + o_k[None, :]
+                b_kb = b_k * b_b[:, None]
+                # lhs dot consumes its copy; the original dA stays for the rhs dot.
+                b_dA_lhs = b_dA + 0.0
+                b_dkb = tl.dot(b_dA_lhs, b_k, allow_tf32=False)
+                b_dk = b_dkb * b_b[:, None] + tl.trans(tl.dot(tl.trans(b_kb), b_dA, allow_tf32=False))
+                if MASK_T:
+                    # Cube dots leave NaN in padded token rows. Drop them before the
+                    # db reduction; a multiply would keep NaN (NaN * 0 stays NaN).
+                    b_dkb = tl.where(m_t[:, None] & m_k[None, :], b_dkb, 0)
+                    b_dk = tl.where(m_t[:, None] & m_k[None, :], b_dk, 0)
+                    p_dk_in = dk + (bos * HV + i_h) * K + o_safe[:, None] * (HV * K) + o_k[None, :]
+                    b_dk += tl.where(
+                        m_t[:, None] & m_k[None, :],
+                        tl.load(p_dk_in, mask=m_k[None, :], other=0).to(tl.float32),
+                        0,
+                    )
+                else:
+                    b_dk += mload(p_dk, m_p_k, MASK_DMA).to(tl.float32)
+                b_db += tl.sum(b_dkb * b_k, 1)
+                mstore(p_dk, b_dk.to(p_dk.dtype.element_ty), m_p_k, MASK_DMA)
+
+            if MASK_T:
+                b_db = tl.where(m_t, b_db, 0)
+            mstore(p_db, b_db.to(p_db.dtype.element_ty), m_t, MASK_DMA)
 
 
 @triton.jit(do_not_specialize=['T'])
@@ -767,6 +796,7 @@ def prepare_wy_repr_bwd_finalize_a2_dg_npu(
     IS_VARLEN: tl.constexpr, BETA_T_CONTIG: tl.constexpr, DG_T_CONTIG: tl.constexpr,
     MASK_DMA: tl.constexpr, MASK_T: tl.constexpr,
     NT_OFFSET: tl.constexpr, BH_OFFSET: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
 ):
     """Fuse A2 = (k k^T) * beta with dg += row(dA*A2) - col(dA*A2).
 
@@ -779,6 +809,8 @@ def prepare_wy_repr_bwd_finalize_a2_dg_npu(
     T_seq = T
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        if USE_GRAPH and i_n < 0:
+            return
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = (eos - bos).to(tl.int32)
     else:
@@ -886,6 +918,7 @@ def recompute_w_u_fwd_npu(
     g: torch.Tensor | None = None,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
+    use_graph: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K = k.shape
     HV, V = v.shape[2], v.shape[-1]
@@ -914,8 +947,8 @@ def recompute_w_u_fwd_npu(
             if best_cost is None or cost < best_cost or (cost == best_cost and bk + bv > BK + BV):
                 best_cost, BK, BV = cost, bk, bv
 
-    u = torch.empty_like(v)
-    w = k.new_empty(B, T, HV, K)
+    u = (torch.zeros_like if use_graph else torch.empty_like)(v)
+    w = (k.new_zeros if use_graph else k.new_empty)(B, T, HV, K)
     beta, beta_t_contig = prepare_beta_input(beta, HV)
     g, g_t_contig = prepare_gate_input(g, HV)
 
@@ -943,7 +976,8 @@ def recompute_w_u_fwd_npu(
             BV=BV,
             G_T_CONTIG=g_t_contig,
             BETA_T_CONTIG=beta_t_contig,
-            MASK_DMA=need_dma_mask(T, BT, K, BK, V, BV, cu_seqlens is not None, cu_seqlens),
+            USE_GRAPH=use_graph,
+            MASK_DMA=use_graph or need_dma_mask(T, BT, K, BK, V, BV, cu_seqlens is not None, cu_seqlens),
         ),
     )
     return w, u
@@ -960,10 +994,13 @@ def prepare_wy_repr_bwd_npu(
     g: torch.Tensor = None,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
+    use_graph: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
     B, T, H, K = k.shape
     HV, V = v.shape[2], v.shape[-1]
     BT = A.shape[-1]
+    if use_graph and (cu_seqlens is None or chunk_indices is None):
+        raise ValueError("GDN graph backward requires fixed chunk indices and cu_seqlens.")
     if cu_seqlens is None and T >= 8 * BT and T % BT:
         T_pad = triton.cdiv(T, BT) * BT
         dk, dv, db, dg = prepare_wy_repr_bwd_npu(
@@ -1000,7 +1037,7 @@ def prepare_wy_repr_bwd_npu(
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     is_varlen = cu_seqlens is not None
-    mask_time = time_axis_needs_mask(T, BT, cu_seqlens)
+    mask_time = use_graph or time_axis_needs_mask(T, BT, cu_seqlens)
     BK = get_wy_block_size(BT, K, PREPARE_BWD_KV_MEM_MULT, MAX_TILE_BWD_KV)
     BV = get_wy_block_size(BT, V, PREPARE_BWD_KV_MEM_MULT, MAX_TILE_BWD_KV)
     # MASK_T keeps the clamped index, the select, and a second dA. BK=128 then
@@ -1009,8 +1046,8 @@ def prepare_wy_repr_bwd_npu(
     BK_FIN = get_wy_block_size(BT, K, PREPARE_BWD_K_MEM_MULT, fin_max)
     use_g = g is not None
 
-    dk = k.new_empty(B, T, HV, K)
-    dv = torch.empty_like(v)
+    dk = (k.new_zeros if use_graph else k.new_empty)(B, T, HV, K)
+    dv = (torch.zeros_like if use_graph else torch.empty_like)(v)
     db, db_t_contig = allocate_time_buffer(B, T, HV, dtype=beta.dtype, device=k.device)
     beta_arg, beta_t_contig = prepare_beta_input(beta, HV)
     dg, dg_t_contig = None, False
@@ -1024,20 +1061,25 @@ def prepare_wy_repr_bwd_npu(
         if not is_varlen:
             g_k_arg = torch.exp2(g_gate.float()).to(g_gate.dtype)
             g_exp_precomp = True
+    if use_graph:
+        db.zero_()
+        if dg is not None:
+            dg.zero_()
     dg_arg = dg if use_g else beta
-    dA_scr = torch.empty_like(A, dtype=torch.float32)
-    dA_mid = torch.empty_like(A, dtype=torch.float32)
-    dA_out = torch.empty_like(A, dtype=torch.float32)
+    dA_scr = (torch.zeros_like if use_graph else torch.empty_like)(A, dtype=torch.float32)
+    dA_mid = (torch.zeros_like if use_graph else torch.empty_like)(A, dtype=torch.float32)
+    dA_out = (torch.zeros_like if use_graph else torch.empty_like)(A, dtype=torch.float32)
 
-    mask_dma = need_dma_mask(T, BT, K, BK, V, BV, is_varlen, cu_seqlens)
-    mask_fin = need_dma_mask(T, BT, K, BK_FIN, K, BK_FIN, is_varlen, cu_seqlens)
-    mask_time = time_axis_needs_mask(T, BT, cu_seqlens)
+    mask_dma = use_graph or need_dma_mask(T, BT, K, BK, V, BV, is_varlen, cu_seqlens)
+    mask_fin = use_graph or need_dma_mask(T, BT, K, BK_FIN, K, BK_FIN, is_varlen, cu_seqlens)
+    mask_time = use_graph or time_axis_needs_mask(T, BT, cu_seqlens)
     base = dict(
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         T=T,
         BT=BT,
         IS_VARLEN=is_varlen,
+        USE_GRAPH=use_graph,
     )
     core_base = dict(B=B, **base)
     task_num = NT * B * HV

@@ -9,9 +9,37 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
+
+_INTEGER_FIELDS = ('B', 'T', 'H', 'D', 'N', 'actual_T', 'HV', 'DV', 'chunk_size')
+_RESULT_FIELDS = {'op', 'shape', 'mode', 'eager', 'graph', 'graph_safe', 'memory', 'capture_ms', 'validation'}
+
+
+_BOOLEAN_FIELDS = ('fused_options', 'safe_gate', 'allow_neg_eigval', 'disable_recompute')
+_METADATA_FIELDS = set(_INTEGER_FIELDS) | set(_BOOLEAN_FIELDS) | {'dtype', 'sequence_profile'}
+
+
+def validate_graph_metadata(metadata: dict[str, Any]) -> None:
+    """Validate supplied workload fields and protect runner-owned result fields."""
+    if not isinstance(metadata, dict):
+        raise TypeError('metadata must be a dictionary')
+    if _RESULT_FIELDS.intersection(metadata):
+        raise ValueError('metadata must not override reserved benchmark fields')
+    for name in _INTEGER_FIELDS:
+        if name in metadata and (type(metadata[name]) is not int or metadata[name] <= 0):
+            raise ValueError(f'{name} must be a positive integer')
+    if 'actual_T' in metadata and 'T' in metadata and metadata['actual_T'] > metadata['T']:
+        raise ValueError('actual_T must satisfy 0 < actual_T <= T')
+    if 'dtype' in metadata and (not isinstance(metadata['dtype'], str) or not metadata['dtype']):
+        raise ValueError('dtype must be a nonempty string')
+    if 'sequence_profile' in metadata and metadata['sequence_profile'] not in ('balanced', 'ragged', 'empty_tail'):
+        raise ValueError('sequence_profile must be balanced, ragged, or empty_tail')
+    for name in _BOOLEAN_FIELDS:
+        if name in metadata and type(metadata[name]) is not bool:
+            raise ValueError(f'{name} must be a boolean')
 
 
 @dataclass
@@ -31,6 +59,9 @@ class GraphBenchmarkCase:
     run_once: Callable[[Callable, tuple[Any, ...], bool], dict[str, Any]]
     assert_close: Callable[[dict[str, Any], dict[str, Any]], None]
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self):
+        validate_graph_metadata(self.metadata)
 
 
 @dataclass(frozen=True)
@@ -66,12 +97,10 @@ def _as_bool(shape: dict[str, Any], name: str, default: bool = False) -> bool:
     raise ValueError(f"{name} must be a boolean, got {value!r}")
 
 
-def normalize_kda_shape(shape: dict[str, Any], default_dtype: str = "float16") -> dict[str, Any]:
-    """Validate a KDA graph shape while preserving the common B/T/H/D axes."""
-
+def _normalize_graph_shape(shape: dict[str, Any], default_dtype: str) -> dict[str, Any]:
     missing = [name for name in ("B", "T", "H", "D") if name not in shape]
     if missing:
-        raise ValueError(f"KDA graph shape is missing required dimensions: {missing}")
+        raise ValueError(f"Graph shape is missing required dimensions: {missing}")
 
     normalized = dict(shape)
     for name in ("B", "T", "H", "D"):
@@ -87,6 +116,13 @@ def normalize_kda_shape(shape: dict[str, Any], default_dtype: str = "float16") -
     for name in ("fused_options", "safe_gate", "allow_neg_eigval", "disable_recompute"):
         normalized[name] = _as_bool(normalized, name)
 
+    validate_graph_metadata(normalized)
+    return normalized
+
+
+def normalize_kda_shape(shape: dict[str, Any], default_dtype: str = "float16") -> dict[str, Any]:
+    """Validate a KDA graph shape while preserving the common B/T/H/D axes."""
+    normalized = _normalize_graph_shape(shape, default_dtype)
     if normalized["B"] != 1:
         raise ValueError("KDA graph benchmark requires B=1 for flattened variable-length inputs")
     if min(normalized[name] for name in ("T", "H", "D", "N", "HV", "DV")) <= 0:
@@ -296,6 +332,176 @@ register_graph_op(GraphOpConfig(
     name="chunk_kda",
     build_case=_build_kda_case,
     default_shapes=KDA_GRAPH_SHAPES,
+    supported_modes=("fwd", "fwdbwd"),
+    category="gate_beta",
+))
+
+
+def normalize_gdn_shape(shape: dict[str, Any], default_dtype: str = "float16") -> dict[str, Any]:
+    """Normalize workload metadata; the operator validates graph capabilities when building the case."""
+    unknown = set(shape) - _METADATA_FIELDS
+    if unknown:
+        raise ValueError(f'Unknown graph benchmark fields: {sorted(unknown)}')
+    for name in _INTEGER_FIELDS:
+        if name in shape and type(shape[name]) is not int:
+            raise ValueError(f'{name} must be a positive integer')
+    return _normalize_graph_shape(shape, default_dtype)
+
+
+def _check_gdn_error(name: str, abs_error: float, rms_error: float, tolerance: float) -> None:
+    # keep the existing RMS/absolute budgets, independently of FLA_CI_ENV.
+    if not math.isfinite(abs_error) or not math.isfinite(rms_error):
+        raise AssertionError(f"Non-finite GDN {name} error")
+    if abs_error > 1e-6 and rms_error >= tolerance:
+        raise AssertionError(f"GDN {name}: abs={abs_error}, RMS={rms_error}, tolerance={tolerance}")
+
+
+def _build_gdn_case(shape: dict[str, Any], mode: str, device: str, seed: int) -> GraphBenchmarkCase:
+    if mode not in ("fwd", "fwdbwd"):
+        raise ValueError(f"Unsupported GDN graph benchmark mode: {mode}")
+
+    from importlib import import_module
+
+    import torch
+    import torch.nn.functional as F
+
+    from fla.ops.gated_delta_rule import chunk_gated_delta_rule
+    from fla.utils.testing import get_abs_err, get_err_ratio
+
+    # eager baselines may predate the graph module or its shared config validator.
+    module_name = 'fla.ops.gated_delta_rule.graph'
+    try:
+        graph_module = import_module(module_name)
+    except ModuleNotFoundError as error:
+        if error.name != module_name:
+            raise
+        graph_module = None
+    validate_config = getattr(graph_module, '_validate_graph_config', None)
+    shape = normalize_gdn_shape(shape)
+    if torch.device(device).type != "npu":
+        raise ValueError("GDN graph benchmark requires NPU")
+    options = {
+        'chunk_size': shape['chunk_size'],
+        'use_qk_l2norm_in_kernel': shape['fused_options'],
+        'use_beta_sigmoid_in_kernel': shape['fused_options'],
+        'use_gate_in_kernel': shape['fused_options'],
+        'allow_neg_eigval': shape['allow_neg_eigval'],
+    }
+    for name in ('safe_gate', 'disable_recompute'):
+        if shape[name]:
+            options[name] = True
+    if validate_config is not None:
+        validate_config(
+            q_shape=(shape['B'], shape['T'], shape['H'], shape['D']),
+            v_shape=(shape['B'], shape['T'], shape['HV'], shape['DV']),
+            dtype=shape['dtype'],
+            options=options,
+        )
+    B, T, H, D = (shape[name] for name in ('B', 'T', 'H', 'D'))
+    N, actual_t, HV, V = (shape[name] for name in ('N', 'actual_T', 'HV', 'DV'))
+    dtype = getattr(torch, shape["dtype"])
+    requires_grad = mode == "fwdbwd"
+
+    def make_inputs(input_seed):
+        gen = torch.Generator(device).manual_seed(input_seed)
+        size = (B, T, H, D)
+        q, k = [F.normalize(torch.randn(size, device=device, generator=gen), dim=-1).to(dtype) for _ in range(2)]
+        v = torch.randn((B, T, HV, V), dtype=dtype, device=device, generator=gen)
+        g = F.logsigmoid(torch.randn((B, T, HV), device=device, generator=gen)) / 8
+        beta = torch.rand((B, T, HV), dtype=dtype, device=device, generator=gen)
+        h0 = torch.randn(N, HV, D, V, device=device, generator=gen)
+        return tuple(x.requires_grad_(requires_grad) for x in (q, k, v, g, beta, h0))
+
+    capture_cu = torch.tensor(make_cu_seqlens(T, N, "balanced"), device=device)
+    live_cu = torch.tensor(make_cu_seqlens(actual_t, N, shape["sequence_profile"]), device=device)
+    capture_args = make_inputs(seed) + (capture_cu,)
+    graph_args = make_inputs(seed + 1) + (live_cu,)
+    eager_inputs = tuple(
+        (x[:, :actual_t] if i < 5 else x).detach().clone().requires_grad_(requires_grad)
+        for i, x in enumerate(graph_args[:-1])
+    )
+    eager_args = eager_inputs + (live_cu.clone(),)
+    generator = torch.Generator(device).manual_seed(seed + 2)
+    do = torch.randn((B, T, HV, V), dtype=dtype, device=device, generator=generator)
+    dht = torch.randn((N, HV, D, V), device=device, generator=generator)
+    input_names = ("q", "k", "v", "g", "beta", "h0")
+
+    def call(q, k, v, g, beta, h0, cu, use_graph):
+        return chunk_gated_delta_rule(
+            q,
+            k,
+            v,
+            g,
+            beta,
+            initial_state=h0,
+            output_final_state=True,
+            cu_seqlens=cu,
+            use_graph=use_graph,
+            **options,
+        )
+
+    def eager_step(*args):
+        return call(*args, use_graph=False)
+
+    def graph_step(*args):
+        if graph_module is None:
+            raise RuntimeError('This revision does not support GDN graph replay')
+        return call(*args, use_graph=True)
+
+    def run_once(step, args, collect):
+        o, ht = step(*args)
+        grads = None
+        if requires_grad:
+            grads = torch.autograd.grad((o, ht), args[:-1], (do[:, :o.shape[1]].contiguous(), dht))
+        if not collect:
+            return {}
+        if torch.count_nonzero(o[:, actual_t:]):
+            raise AssertionError("Nonzero GDN inactive o")
+        result = {"o": o[:, :actual_t].detach().clone(), "ht": ht.detach().clone()}
+        if grads is not None:
+            for index, (name, grad) in enumerate(zip(input_names, grads)):
+                if index < 5:
+                    if torch.count_nonzero(grad[:, actual_t:]):
+                        raise AssertionError(f"Nonzero GDN inactive d{name}")
+                    grad = grad[:, :actual_t]
+                result[f"d{name}"] = grad.detach().clone()
+        return result
+
+    def compare(actual, reference):
+        if actual.keys() != reference.keys():
+            raise AssertionError(f"GDN result keys differ: {actual.keys()} != {reference.keys()}")
+        tolerances = {"o": 0.005, "ht": 0.005, "dq": 0.007, "dk": 0.008,
+                      "dv": 0.007, "dg": 0.015, "dbeta": 0.015, "dh0": 0.007}
+        for name in reference:
+            if not torch.isfinite(actual[name]).all() or not torch.isfinite(reference[name]).all():
+                raise AssertionError(f"Non-finite GDN {name}")
+            _check_gdn_error(
+                name,
+                get_abs_err(reference[name], actual[name]),
+                get_err_ratio(reference[name], actual[name]),
+                tolerances[name] if requires_grad else 3e-3,
+            )
+
+    return GraphBenchmarkCase(
+        eager_step=eager_step,
+        graph_step=graph_step,
+        capture_args=capture_args,
+        eager_args=eager_args,
+        graph_args=graph_args,
+        run_once=run_once,
+        assert_close=compare,
+        metadata=shape,
+    )
+
+
+register_graph_op(GraphOpConfig(
+    name="chunk_gdn",
+    build_case=_build_gdn_case,
+    default_shapes={
+        f'{label}_{suffix}': {**KDA_GRAPH_SHAPES[source], 'dtype': dtype}
+        for label, source in (('baseline', 'baseline_fp16'), ('longer_sequence', 'longer_sequence_fp16'))
+        for suffix, dtype in (('fp16', 'float16'), ('bf16', 'bfloat16'))
+    },
     supported_modes=("fwd", "fwdbwd"),
     category="gate_beta",
 ))

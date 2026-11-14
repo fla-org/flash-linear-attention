@@ -5,11 +5,134 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+import inspect
+
 import pytest
 import torch
 
 from fla import backends, utils
 from fla.backends import BackendRegistry, BaseBackend, TritonAscendBackend, dispatch, register
+
+
+@pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
+@pytest.mark.parametrize(
+    'graph_option,grad_enabled',
+    [(None, False), (False, True), (True, False), (True, True)],
+    ids=['default-inference', 'eager-training', 'graph-inference', 'graph-training'],
+)
+def test_gdn_graph_not_consumed_by_flash_qla(monkeypatch, graph_option, grad_enabled):
+    from fla.ops.gated_delta_rule import chunk_gated_delta_rule
+    from fla.ops.gated_delta_rule.backends import flash_qla
+
+    registry = backends._function_registries[inspect.unwrap(chunk_gated_delta_rule)]
+    candidate = flash_qla.FlashQLABackend()
+    monkeypatch.setattr(registry, '_backends', {'flash_qla': candidate})
+    monkeypatch.setattr(candidate, 'is_available', lambda: True)
+    monkeypatch.setattr(candidate, 'is_enabled', lambda: True)
+    monkeypatch.setattr(flash_qla, 'IS_NVIDIA_HOPPER', True)
+    monkeypatch.setattr(flash_qla, 'IS_NVIDIA_SM120', False)
+    calls = []
+    expected = object()
+
+    def implementation(*args, **kwargs):
+        calls.append(kwargs)
+        return expected
+
+    monkeypatch.setattr(candidate, 'chunk_gated_delta_rule', implementation)
+    q = torch.zeros(1, 65, 1, 128, dtype=torch.bfloat16, requires_grad=grad_enabled)
+    g = torch.zeros(1, 65, 1)
+    beta = torch.ones_like(g, dtype=q.dtype)
+    kwargs = {} if graph_option is None else {'use_graph': graph_option}
+    with torch.set_grad_enabled(grad_enabled):
+        if graph_option:
+            accepted, reason = candidate.chunk_gated_delta_rule_verifier(q, q, q, g, beta, **kwargs)
+            assert not accepted
+            assert 'NPU-specific graph execution path; skipping FlashQLA' in reason
+            assert 'omit use_graph or set it to False' in reason
+            assert 'CUDA Graph capture is controlled separately by the caller' in reason
+            with pytest.raises(ValueError, match='only on NPU') as error:
+                chunk_gated_delta_rule(q, q, q, g, beta, **kwargs)
+            assert f'but q is on {q.device.type}' in str(error.value)
+            assert 'omit use_graph or set it to False' in str(error.value)
+            assert 'CUDA Graph capture is controlled separately by the caller' in str(error.value)
+            assert not calls
+        else:
+            assert chunk_gated_delta_rule(q, q, q, g, beta, **kwargs) is expected
+            assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    'use_graph,requires_grad',
+    [(False, False), (False, True), (True, True)],
+    ids=['eager-inference', 'eager-training', 'graph-training'],
+)
+def test_gdn_graph_routes_through_autograd(monkeypatch, use_graph, requires_grad):
+    from fla.ops.gated_delta_rule import chunk, graph
+
+    validation = []
+    monkeypatch.setattr(graph, '_validate_graph_inputs', lambda *args: validation.append(args))
+    calls = []
+    expected = (object(), object())
+
+    def apply(*args):
+        calls.append(args)
+        return expected
+
+    monkeypatch.setattr(chunk.ChunkGatedDeltaRuleFunction, 'apply', apply)
+    q = torch.zeros(1, 65, 1, 64, dtype=torch.bfloat16, requires_grad=requires_grad)
+    g = torch.zeros(1, 65, 1)
+    beta = torch.ones_like(g, dtype=q.dtype)
+    cu = torch.tensor([0, 65])
+    # inspect the default entry's routing without launching a kernel or requiring an NPU.
+    entry = inspect.unwrap(chunk.chunk_gated_delta_rule)
+    result = entry(q, q, q, g, beta, cu_seqlens=cu, use_graph=use_graph)
+    assert all(actual is reference for actual, reference in zip(result, expected))
+    assert len(calls) == 1
+    assert calls[0][0] is q
+    assert calls[0][-1] is use_graph
+    assert len(validation) == int(use_graph)
+
+
+def test_solve_tril_ascend_eager_forwarding(run_python):
+    run_python(
+        """
+        import importlib
+        from unittest.mock import patch
+
+        from triton.language import math
+
+        from fla import backends
+
+        if not hasattr(math, 'tanh'):
+            math.tanh = None
+        backends.TritonAscendBackend.is_available = classmethod(lambda cls: True)
+        importlib.reload(importlib.import_module('fla.ops.utils'))
+        solve = importlib.import_module('fla.ops.utils.solve_tril')
+        ascend = importlib.import_module('fla.ops.utils.triton_ascend.solve_tril')
+        import inspect
+
+        registry = backends._function_registries[inspect.unwrap(solve.solve_tril)]
+        candidate = registry._backends[backends.TritonAscendBackend.backend_type]
+        assert candidate.implementation is ascend.solve_tril_npu
+        signature = inspect.signature(candidate.implementation)
+        assert signature.parameters['use_graph'].default is False
+        A, cu, indices, expected = object(), object(), object(), object()
+
+        def implementation(*args, **kwargs):
+            bound = signature.bind(*args, **kwargs)
+            bound.apply_defaults()
+            calls.append(bound.arguments)
+            return expected
+
+        calls = []
+        with patch.object(candidate, 'implementation', implementation), patch.object(candidate, 'is_enabled', return_value=True):
+            assert solve.solve_tril(A) is expected
+            assert calls[-1] == dict(A=A, cu_seqlens=None, chunk_indices=None, output_dtype=ascend.torch.float, use_graph=False)
+            assert solve.solve_tril(A, cu, indices, None) is expected
+            assert calls[-1] == dict(A=A, cu_seqlens=cu, chunk_indices=indices, output_dtype=None, use_graph=False)
+        """,
+        FLA_DISABLE_BACKEND_DISPATCH='0',
+    )
 
 
 @pytest.fixture
