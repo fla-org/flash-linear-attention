@@ -123,6 +123,60 @@ def chunk_gated_delta_rule_fwd(
     return g, o, A, final_state, initial_state, g_input
 
 
+@dispatch
+def chunk_gated_delta_rule_bwd_dqkvbg(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    A: torch.Tensor,
+    w: torch.Tensor,
+    v_new: torch.Tensor,
+    h: torch.Tensor,
+    dh: torch.Tensor,
+    dv: torch.Tensor,
+    do: torch.Tensor,
+    scale: float,
+    state_v_first: bool = False,
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
+    cp_context: FLACPContext | None = None,
+    chunk_size: int = 64,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Compute input gradients after the reverse state scan, before the gate suffix sum."""
+    dq, dk, dw, dg = chunk_bwd_dqkwg(
+        q=q,
+        k=k,
+        v=v_new,
+        do=do,
+        h=h,
+        dh=dh,
+        w=w,
+        g=g,
+        dv=dv,
+        scale=scale,
+        state_v_first=state_v_first,
+        cu_seqlens=cu_seqlens,
+        chunk_size=chunk_size,
+        chunk_indices=chunk_indices,
+    )
+    dk2, dv, db, dg2 = prepare_wy_repr_bwd(
+        k=k,
+        v=v,
+        beta=beta,
+        A=A,
+        dw=dw,
+        du=dv,
+        g=g,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+    )
+    dk.add_(dk2)
+    dg.add_(dg2)
+    return dq, dk, dv, db, dg
+
+
 def chunk_gated_delta_rule_bwd(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -214,35 +268,26 @@ def chunk_gated_delta_rule_bwd(
         state_v_first=state_v_first,
         chunk_size=chunk_size,
     )
-    dq, dk, dw, dg = chunk_bwd_dqkwg(
+    dq, dk, dv, db, dg = chunk_gated_delta_rule_bwd_dqkvbg(
         q=q,
         k=k,
-        v=v_new,
-        w=w,
+        v=v,
         g=g,
+        beta=beta,
+        A=A,
+        w=w,
+        v_new=v_new,
         h=h,
+        dh=dh,
         dv=dv,
         do=do,
-        dh=dh,
         scale=scale,
+        state_v_first=state_v_first,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
-        state_v_first=state_v_first,
+        cp_context=cp_context,
         chunk_size=chunk_size,
     )
-    dk2, dv, db, dg2 = prepare_wy_repr_bwd(
-        k=k,
-        v=v,
-        beta=beta,
-        g=g,
-        A=A,
-        dw=dw,
-        du=dv,
-        cu_seqlens=cu_seqlens,
-        chunk_indices=chunk_indices,
-    )
-    dk.add_(dk2)
-    dg.add_(dg2)
     dg = chunk_local_cumsum(dg, chunk_size=chunk_size, reverse=True, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
     dA_log, ddt_bias = None, None
     if use_gate_in_kernel:

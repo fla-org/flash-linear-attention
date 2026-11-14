@@ -19,6 +19,7 @@ These switches control registered implementations. Unavailable backends and unsu
 | `FLA_DISABLE_BACKEND_DISPATCH` | `0`               | `0` / `1` | Bypass all backend dispatch. Takes precedence over every backend switch below.                      |
 | `FLA_TILELANG`                 | Backend-dependent | `0` / `1` | Enable TileLang implementations when installed. Default enablement depends on the operator and GPU. |
 | `FLA_FLASH_KDA`                | `1`               | `0` / `1` | Enable [FlashKDA](https://github.com/MoonshotAI/FlashKDA) for KDA inference when installed.         |
+| `FLA_REWY`                     | `0`               | `0` / `1` | Enable [ReWY GDN backward](fla/ops/gated_delta_rule/README.md#rewy-backward) on NVIDIA GPUs.        |
 
 ### Gluon
 

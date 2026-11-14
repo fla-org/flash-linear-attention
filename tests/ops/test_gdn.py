@@ -23,6 +23,7 @@ from fla.ops.gated_delta_rule.wy_fast import prepare_wy_repr_bwd, recompute_w_u_
 from fla.utils import (
     IS_INTEL_ALCHEMIST,
     IS_NPU,
+    IS_NVIDIA,
     IS_NVIDIA_BLACKWELL,
     IS_NVIDIA_HOPPER,
     IS_NVIDIA_SM100,
@@ -1813,3 +1814,183 @@ def test_chunk_bwd_tilelang_backend():
     expected = [(p.name, p.kind, p.default) for p in inspect.signature(chunk_bwd_dqkwg).parameters.values()]
     actual = [(p.name, p.kind, p.default) for p in inspect.signature(chunk_bwd_dqkwg_tilelang).parameters.values()]
     assert actual == expected
+
+
+@pytest.mark.skipif(not IS_NVIDIA or backends._DISPATCH_DISABLED, reason='ReWY requires NVIDIA and backend dispatch')
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'K', 'V', 'dtype', 'state_v_first', 'cu_seqlens', 'chunk_size'),
+    [
+        pytest.param(1, 129, 2, 128, 128, torch.bfloat16, False, None, 64, id='bf16-tail'),
+        pytest.param(2, 75, 2, 60, 96, torch.float16, False, None, 32, id='fp16-asymmetric'),
+        pytest.param(1, 63, 2, 64, 128, torch.bfloat16, True, None, 16, id='value-first-short'),
+        pytest.param(1, 1000, 2, 128, 128, torch.float16, False, None, 64, id='multiple-chunks'),
+        pytest.param(1, 211, 2, 128, 64, torch.float16, True, [0, 1, 64, 67, 211], 64, id='packed-short-segments'),
+    ],
+)
+def test_rewy_chunk(B, T, H, K, V, dtype, state_v_first, cu_seqlens, chunk_size, monkeypatch):
+    from fla.ops.gated_delta_rule.backends.rewy import ReWYBackend
+
+    monkeypatch.setenv('FLA_REWY', '1')
+    monkeypatch.setenv('FLA_FLASH_QLA', '0')
+    monkeypatch.setenv('FLA_TILELANG', '0')
+    calls = []
+    implementation = ReWYBackend.chunk_gated_delta_rule_bwd_dqkvbg
+
+    def spy(self, *args, **kwargs):
+        calls.append(True)
+        return implementation(self, *args, **kwargs)
+
+    monkeypatch.setattr(ReWYBackend, 'chunk_gated_delta_rule_bwd_dqkvbg', spy)
+    torch.manual_seed(42)
+    q = F.normalize(torch.randn(B, T, H, K, device=device, dtype=dtype), dim=-1)
+    k = F.normalize(torch.randn(B, T, H, K, device=device, dtype=dtype), dim=-1)
+    v = torch.randn(B, T, H, V, device=device, dtype=dtype)
+    g = F.logsigmoid(torch.randn(B, T, H, device=device)) / 10
+    beta = torch.rand(B, T, H, device=device) * 2
+    # zero beta exercises the residual formulation without a division by beta.
+    beta[:, ::17] = 0
+    g[:, ::11] = 0
+    N = B if cu_seqlens is None else len(cu_seqlens) - 1
+    h0 = torch.randn(N, H, K, V, device=device)
+    if state_v_first:
+        h0 = h0.transpose(-1, -2).contiguous()
+    inputs = tuple(x.requires_grad_(True) for x in (q, k, v, g, beta, h0))
+    cu = None if cu_seqlens is None else torch.tensor(cu_seqlens, device=device, dtype=torch.int64)
+    o, ht = chunk_gated_delta_rule(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        beta=beta,
+        initial_state=h0,
+        output_final_state=True,
+        state_v_first=state_v_first,
+        cu_seqlens=cu,
+        chunk_size=chunk_size,
+    )
+    do, dht = torch.randn_like(o), torch.randn_like(ht)
+    gradients = torch.autograd.grad((o * do).sum() + (ht * dht).sum(), inputs)
+    assert calls, 'ReWY did not run'
+
+    h0_ref = h0.transpose(-1, -2) if state_v_first else h0
+    if cu_seqlens is None:
+        ref_o, ref_ht = naive_recurrent_gated_delta_rule(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            initial_state=h0_ref,
+            output_final_state=True,
+        )
+    else:
+        parts = [
+            naive_recurrent_gated_delta_rule(
+                q=q[:, s:e],
+                k=k[:, s:e],
+                v=v[:, s:e],
+                g=g[:, s:e],
+                beta=beta[:, s:e],
+                initial_state=h0_ref[i:i + 1],
+                output_final_state=True,
+            )
+            for i, (s, e) in enumerate(zip(cu_seqlens[:-1], cu_seqlens[1:]))
+        ]
+        ref_o = torch.cat([part[0] for part in parts], dim=1)
+        ref_ht = torch.cat([part[1] for part in parts], dim=0)
+    if state_v_first:
+        ref_ht = ref_ht.transpose(-1, -2)
+    ref_gradients = torch.autograd.grad((ref_o * do).sum() + (ref_ht * dht).sum(), inputs)
+    assert torch.isfinite(o).all() and torch.isfinite(ht).all()
+    assert_close('o', ref_o, o, 0.005)
+    assert_close('ht', ref_ht, ht, 0.005)
+    for name, ref, actual, tolerance in zip(
+        ('dq', 'dk', 'dv', 'dg', 'db', 'dh0'),
+        ref_gradients,
+        gradients,
+        (0.008, 0.008, 0.008, 0.02, 0.02, 0.008),
+    ):
+        assert torch.isfinite(actual).all(), name
+        assert_close(name, ref, actual, tolerance)
+
+
+@pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
+def test_rewy_registration():
+    from fla.ops.gated_delta_rule.backends.rewy import ReWYBackend
+    from fla.ops.gated_delta_rule.chunk import chunk_gated_delta_rule_bwd_dqkvbg
+
+    backend = ReWYBackend()
+    candidate = backends._function_registries[inspect.unwrap(chunk_gated_delta_rule_bwd_dqkvbg)]._backends['rewy']
+    assert isinstance(candidate, ReWYBackend)
+    assert candidate.default_enable is False
+    expected = [(p.name, p.kind, p.default) for p in inspect.signature(chunk_gated_delta_rule_bwd_dqkvbg).parameters.values()]
+    implementation = backend.chunk_gated_delta_rule_bwd_dqkvbg
+    actual = [(p.name, p.kind, p.default) for p in inspect.signature(implementation).parameters.values()]
+    assert actual == expected
+
+
+@pytest.mark.parametrize('case', ['accepted', 'context-parallel', 'mixed-dtype', 'unsupported-chunk'])
+def test_rewy_verifier(case):
+    from fla.ops.gated_delta_rule.backends.rewy import ReWYBackend
+
+    q = torch.empty(1, 64, 2, 64, dtype=torch.float16, device='cpu')
+    v = q.to(torch.bfloat16) if case == 'mixed-dtype' else q
+    accepted, reason = ReWYBackend().chunk_gated_delta_rule_bwd_dqkvbg_verifier(
+        q=q,
+        k=q,
+        v=v,
+        g=None,
+        beta=None,
+        A=None,
+        w=None,
+        v_new=None,
+        h=None,
+        dh=None,
+        dv=None,
+        do=None,
+        scale=0.125,
+        cp_context=object() if case == 'context-parallel' else None,
+        chunk_size=128 if case == 'unsupported-chunk' else 64,
+    )
+    assert accepted is (case == 'accepted')
+    assert (reason is None) is accepted
+
+
+@pytest.mark.skipif(not IS_NVIDIA or backends._DISPATCH_DISABLED, reason='ReWY requires NVIDIA and backend dispatch')
+@pytest.mark.parametrize('case', ['disabled', 'fp32', 'grouped-heads', 'wide-values'])
+def test_rewy_fallback(case, monkeypatch):
+    from fla.ops.gated_delta_rule.backends.rewy import ReWYBackend
+
+    monkeypatch.setenv('FLA_FLASH_QLA', '0')
+    monkeypatch.setenv('FLA_TILELANG', '0')
+    torch.manual_seed(42)
+    dtype = torch.float32 if case == 'fp32' else torch.float16
+    B, T, H, K = 1, 65, 2, 64
+    HV = 4 if case == 'grouped-heads' else H
+    V = 160 if case == 'wide-values' else 64
+    q = F.normalize(torch.randn(B, T, H, K, device=device, dtype=dtype), dim=-1)
+    k = F.normalize(torch.randn_like(q), dim=-1)
+    v = torch.randn(B, T, HV, V, device=device, dtype=dtype)
+    g = F.logsigmoid(torch.randn(B, T, HV, device=device))
+    beta = torch.rand_like(g)
+    h0 = torch.randn(B, HV, K, V, device=device)
+    do, dht = torch.randn_like(v), torch.randn_like(h0)
+    inputs = tuple(x.requires_grad_(True) for x in (q, k, v, g, beta, h0))
+
+    def run():
+        o, ht = chunk_gated_delta_rule(q=q, k=k, v=v, g=g, beta=beta, initial_state=h0, output_final_state=True)
+        gradients = torch.autograd.grad((o * do).sum() + (ht * dht).sum(), inputs)
+        return (o, ht, *gradients)
+
+    monkeypatch.setenv('FLA_REWY', '0')
+    expected = run()
+
+    def unexpected(*args, **kwargs):
+        pytest.fail('ReWY ran for a rejected or disabled call')
+
+    monkeypatch.setattr(ReWYBackend, 'chunk_gated_delta_rule_bwd_dqkvbg', unexpected)
+    monkeypatch.setenv('FLA_REWY', '0' if case == 'disabled' else '1')
+    actual = run()
+    for ref, out in zip(expected, actual):
+        assert ref.dtype == out.dtype
+        assert torch.equal(ref, out)
