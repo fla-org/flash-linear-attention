@@ -756,6 +756,32 @@ register_op(OpConfig(
     category='hgrn',
 ))
 
+
+def _msa_post_init(inputs, B, T, H, D, **kw):
+    """Select the 16 blocks of 128 tokens ending at every query, as MiniMax-M3 does at its local block."""
+    t = torch.arange(T, device=inputs['q'].device) // 128
+    indices = t[:, None] - torch.arange(16, device=t.device)[None, :]
+    H_kv = inputs['k'].shape[2]
+    inputs['indices'] = indices.masked_fill(indices < 0, -1)[None, :, None].expand(B, T, H_kv, 16).contiguous()
+
+
+register_op(OpConfig(
+    name='parallel_msa',
+    import_path='fla.ops.msa',
+    inputs={
+        'q': TensorSpec(shape_BTHD),
+        # GQA with groups of 16 query heads, as in MiniMax-M3
+        'k': TensorSpec(lambda B, T, H, D, **kw: (B, T, max(1, H // 16), D)),
+        'v': TensorSpec(lambda B, T, H, D, **kw: (B, T, max(1, H // 16), D)),
+    },
+    post_init=_msa_post_init,
+    extra_kwargs={'block_size': 128},
+    output_is_tuple=False,
+    category='attn',
+    dim_constraints={'H': [16, 32, 64]},
+    test_file='tests/ops/test_msa.py',
+))
+
 # --- Generalized delta rule (DPLR) ---
 
 register_op(OpConfig(
