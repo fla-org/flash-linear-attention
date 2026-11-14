@@ -7,10 +7,41 @@
 
 import pytest
 import torch
+import torch.nn.functional as F
 
 from fla.models import MomConfig
+from fla.models.mom.modeling_mom import MomBlock
+from fla.modules import RMSNorm
+from fla.utils import assert_close, device_name
 
 from .utils import check_forward, check_generation
+
+
+@pytest.mark.parametrize('fuse_norm', [False, True], ids=['unfused', 'fused'])
+def test_norm(fuse_norm, monkeypatch):
+    """Match residual addition, normalization, and gradients with PyTorch branch computations."""
+    if fuse_norm and device_name == 'cpu':
+        pytest.skip('Fused normalization requires an accelerator.')
+    torch.manual_seed(42)
+    config = MomConfig(hidden_size=64, num_heads=2, head_dim=32, intermediate_size=128, fuse_norm=fuse_norm)
+    block = MomBlock(config=config, layer_idx=0).to(device_name)
+    norm_class = RMSNorm if fuse_norm else torch.nn.RMSNorm
+    assert isinstance(block.attn_norm, norm_class)
+    assert isinstance(block.mlp_norm, norm_class)
+    monkeypatch.setattr(block.attn, 'forward', lambda hidden_states, **kwargs: (hidden_states.tanh(), None, None, None))
+    monkeypatch.setattr(block.mlp, 'forward', lambda hidden_states, **kwargs: hidden_states.sigmoid())
+    x = torch.randn(2, 7, 64, device=device_name, requires_grad=True)
+    actual = block(hidden_states=x)[0]
+    expected = x + F.rms_norm(x, (64,), block.attn_norm.weight, config.norm_eps).tanh()
+    expected = expected + F.rms_norm(expected, (64,), block.mlp_norm.weight, config.norm_eps).sigmoid()
+    assert_close('output', expected, actual, 1e-3)
+    gradient = torch.randn_like(expected)
+    parameters = (x, block.attn_norm.weight, block.mlp_norm.weight)
+    expected_gradients = torch.autograd.grad(expected, parameters, gradient)
+    actual_gradients = torch.autograd.grad(actual, parameters, gradient)
+    for index, (ref, tri) in enumerate(zip(expected_gradients, actual_gradients, strict=True)):
+        assert torch.isfinite(tri).all()
+        assert_close(f'gradient_{index}', ref, tri, 1e-3)
 
 
 @pytest.mark.parametrize('varlen', [False, True], ids=['dense', 'varlen'])

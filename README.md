@@ -3,7 +3,7 @@
 <img width="50%" alt="Flash Linear Attention" src="images/logo.png">
 <br>
 
-[![hf_model](https://img.shields.io/badge/-Models-gray.svg?logo=huggingface&style=flat-square)](https://huggingface.co/fla-hub) [![Discord](https://img.shields.io/badge/Discord-%235865F2.svg?&logo=discord&logoColor=white&style=flat-square)](https://discord.gg/vDaJTmKNcS)
+[![hf_model](https://img.shields.io/badge/-Models-gray.svg?logo=huggingface&style=flat-square)](https://huggingface.co/fla-hub) [![inspect.software](https://raw.githubusercontent.com/inspect-software/badges/main/v1/f/fla-org/flash-linear-attention.svg)](https://inspect.software/software/fla-org/flash-linear-attention) [![Discord](https://img.shields.io/badge/Discord-%235865F2.svg?&logo=discord&logoColor=white&style=flat-square)](https://discord.gg/vDaJTmKNcS)
 
 </div>
 
@@ -29,6 +29,7 @@
 
 ## News
 
+- [2026-11] 🔀 Add [dynamic short convolution](fla/modules/dynamic_conv) to `fla` ([paper](https://arxiv.org/abs/2606.03825)).
 - [2026-11] 🧱 Add [HC, mHC, and iHC](fla/ops/hc) implementations to `fla` ([paper](https://arxiv.org/abs/2409.19606)).
 - [2026-10] 🧠 Add Gated Slot Attention 2 (GSA2) implementation to `fla` ([paper](https://arxiv.org/abs/2610.02816)).
 - [2026-10] 🛰️ Add Gated KalmaNet (GKA) implementation to `fla` ([paper](https://arxiv.org/abs/2511.21016)) - a fading-memory layer that solves a test-time ridge regression at every token.

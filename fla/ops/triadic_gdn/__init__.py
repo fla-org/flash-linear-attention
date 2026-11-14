@@ -5,9 +5,11 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+from .chunk import chunk_triadic_gdn
 from .naive import naive_chunk_triadic_gdn, naive_recurrent_triadic_gdn
 
 __all__ = [
+    "chunk_triadic_gdn",
     "naive_chunk_triadic_gdn",
     "naive_recurrent_triadic_gdn",
 ]

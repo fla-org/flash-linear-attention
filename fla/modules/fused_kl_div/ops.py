@@ -126,9 +126,9 @@ def fused_kl_div_fwd(
 
     grad_dtype = torch.float32 if accumulate_grad_in_fp32 else weight.dtype
 
-    dx = torch.zeros_like(x, device=device) if use_dx else None
-    dw = torch.zeros_like(weight, device=device, dtype=grad_dtype) if use_dw else None
-    loss = torch.zeros(N, dtype=torch.float32, device=device)
+    dx = torch.empty_like(x, device=device) if use_dx else None
+    dw = torch.empty_like(weight, device=device, dtype=grad_dtype) if use_dw else None
+    loss = torch.empty(N, dtype=torch.float32, device=device)
 
     for ic in range(NC):
         start, end = ic * C, min((ic + 1) * C, N)
@@ -168,7 +168,7 @@ def fused_kl_div_fwd(
             dx[start:end] = torch.mm(c_sl, weight)
 
         if dw is not None:
-            torch.addmm(input=dw, mat1=c_sl.t().to(dtype=grad_dtype), mat2=c_sx, out=dw)
+            torch.addmm(input=dw, mat1=c_sl.t().to(dtype=grad_dtype), mat2=c_sx, beta=0 if ic == 0 else 1, out=dw)
 
     loss = loss.sum()
     if dw is not None:

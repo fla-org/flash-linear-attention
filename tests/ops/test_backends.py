@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from fla import backends
+from fla import backends, utils
 from fla.utils import env
 
 _REAL_PATH_EXISTS = Path.exists
@@ -100,6 +100,18 @@ def test_tilelang_available(monkeypatch, package_available, nvcc_available, expe
     monkeypatch.setattr(backends, 'find_spec_cached', lambda name: object() if package_available else None)
     monkeypatch.setattr(backends, 'has_usable_nvcc', lambda: nvcc_available)
     assert backends.TileLangBackend.is_available() is expected
+
+
+@pytest.mark.parametrize(
+    ('triton_above_3_5_0', 'package_available', 'expected'),
+    [(False, True, False), (True, True, True), (True, False, False)],
+    ids=['triton-3.4', 'triton-3.5', 'no-gluon'],
+)
+def test_gluon_available(monkeypatch, triton_above_3_5_0, package_available, expected):
+    monkeypatch.setattr(utils, 'IS_NVIDIA', True)
+    monkeypatch.setattr(backends, 'TRITON_ABOVE_3_5_0', triton_above_3_5_0)
+    monkeypatch.setattr(backends, 'find_spec_cached', lambda name: object() if package_available else None)
+    assert backends.GluonBackend.is_available() is expected
 
 
 @pytest.mark.parametrize(('setting', 'expected'), [(None, True), ('0', False), ('1', True)])

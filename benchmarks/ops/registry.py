@@ -37,6 +37,10 @@ def shape_BTH(B, T, H, D, **kw):
     return (B, T, H)
 
 
+def shape_BTH1(B, T, H, D, **kw):
+    return (B, T, H, 1)
+
+
 def shape_BHDD(B, T, H, D, **kw):
     return (B, H, D, D)
 
@@ -461,6 +465,20 @@ register_op(OpConfig(
 ))
 
 register_op(OpConfig(
+    name='chunk_ttt',
+    import_path='fla.ops.ttt',
+    inputs={
+        **_simple_qkv,
+        'w': TensorSpec(shape_HD),
+        'b': TensorSpec(shape_HD),
+        'eta': TensorSpec(shape_BTH1, transform=lambda t: t * 5e-3),
+    },
+    func_name='chunk_ttt_linear',
+    category='ttt',
+    test_file='tests/ops/test_ttt.py',
+))
+
+register_op(OpConfig(
     name='chunk_kda',
     import_path='fla.ops.kda',
     inputs={
@@ -519,6 +537,32 @@ for _name, _packed in (('fused_recurrent_kda', False), ('fused_recurrent_kda_var
         category='gate_beta',
     ))
 
+
+def shape_BTHE(B, T, H, D, E=8, **kw):
+    return (B, T, H, E)
+
+
+def init_triadic_gdn_inputs(inputs, **kwargs):
+    with torch.no_grad():
+        for name in ('q', 'k'):
+            inputs[name].copy_(F.normalize(inputs[name].float(), p=2, dim=-1))
+        for name in ('k2', 'q2'):
+            inputs[name].copy_(F.normalize(F.softplus(inputs[name]), p=2, dim=-1))
+
+
+register_op(OpConfig(
+    name='chunk_triadic_gdn',
+    import_path='fla.ops.triadic_gdn',
+    inputs={
+        **_simple_qkv,
+        'k2': TensorSpec(shape_BTHE, dtype='float32'),
+        'q2': TensorSpec(shape_BTHE, dtype='float32'),
+        'g': TensorSpec(shape_BTHE, dtype='float32', transform=logsigmoid),
+        'beta': TensorSpec(shape_BTH, dtype='float32', transform=sigmoid_transform),
+    },
+    post_init=init_triadic_gdn_inputs,
+    category='gate_beta',
+))
 
 register_op(OpConfig(
     name='fused_recurrent_gdn2',
@@ -588,6 +632,23 @@ register_op(OpConfig(
 ))
 
 register_op(OpConfig(
+    name='chunk_momentum_delta',
+    import_path='fla.ops.momentum_delta_rule',
+    func_name='chunk_momentum_delta_rule',
+    inputs={
+        **_simple_qkv,
+        'p': TensorSpec(shape_BTHD),
+        'log_alpha': TensorSpec(shape_BTH, dtype='float32'),
+        'log_mu': TensorSpec(shape_BTH, dtype='float32'),
+        'beta': TensorSpec(shape_BTH, transform=lambda t: torch.rand_like(t)),
+        'eta': TensorSpec(shape_BTH, transform=lambda t: torch.rand_like(t) + 0.5),
+    },
+    extra_kwargs={'use_qk_l2norm_in_kernel': False, 'use_p_times_alpha': False},
+    category='momentum',
+    test_file='tests/ops/test_momentum_delta.py',
+))
+
+register_op(OpConfig(
     name='chunk_precond_kda',
     import_path='fla.ops.precond_kda',
     inputs={
@@ -598,6 +659,7 @@ register_op(OpConfig(
         'beta_atk': TensorSpec(shape_BTH, transform=sigmoid_transform),
         'log_atk_scale': TensorSpec(shape_H, dtype='float32'),
     },
+    func_name='chunk_precond_kda',
     extra_kwargs={'x': 1.5},
     category='gate_beta',
     test_file='tests/ops/test_precond_kda.py',
