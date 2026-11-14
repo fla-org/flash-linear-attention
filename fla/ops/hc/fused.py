@@ -21,18 +21,17 @@ from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_k
         triton.Config({}, num_warps=num_warps)
         for num_warps in [2, 4, 8]
     ],
-    key=['T', 'N', 'D', 'BD', 'IS_POST', 'HAS_MIXING'],
+    key=['N', 'D', 'BD', 'IS_POST', 'HAS_MIXING'],
     do_bench=do_bench_cudagraph,
     **autotune_cache_kwargs,
 )
-@triton.jit(do_not_specialize=['T'])
+@triton.jit
 def hc_fwd_kernel(
     x,
     w,
     branch,
     mixing,
     o,
-    T,
     N: tl.constexpr,
     D: tl.constexpr,
     BN: tl.constexpr,
@@ -80,11 +79,11 @@ def hc_fwd_kernel(
         triton.Config({}, num_warps=num_warps)
         for num_warps in [2, 4, 8]
     ],
-    key=['T', 'N', 'D', 'BD', 'IS_POST', 'HAS_MIXING'],
+    key=['N', 'D', 'BD', 'IS_POST', 'HAS_MIXING'],
     do_bench=do_bench_cudagraph,
     **autotune_cache_kwargs,
 )
-@triton.jit(do_not_specialize=['T'])
+@triton.jit
 def hc_bwd_kernel(
     x,
     w,
@@ -95,7 +94,6 @@ def hc_bwd_kernel(
     dbranch,
     dw_partial,
     dmixing_partial,
-    T,
     N: tl.constexpr,
     D: tl.constexpr,
     BN: tl.constexpr,
@@ -153,12 +151,12 @@ def hc_bwd_kernel(
         triton.Config({}, num_warps=num_warps)
         for num_warps in [2, 4, 8]
     ],
-    key=['T', 'C', 'S'],
+    key=['C', 'S'],
     do_bench=do_bench_cudagraph,
     **autotune_cache_kwargs,
 )
-@triton.jit(do_not_specialize=['T'])
-def hc_bwd_kernel_reduce(partial, grad, T, C: tl.constexpr, S: tl.constexpr, BC: tl.constexpr, BS: tl.constexpr):
+@triton.jit
+def hc_bwd_kernel_reduce(partial, grad, C: tl.constexpr, S: tl.constexpr, BC: tl.constexpr, BS: tl.constexpr):
     i_t = tl.program_id(0).to(tl.int64)
     o_c = tl.arange(0, BC).to(tl.int64)
     o_s = tl.arange(0, BS).to(tl.int64)
@@ -192,7 +190,6 @@ def hc_fwd(
         branch=branch,
         mixing=mixing,
         o=o,
-        T=T,
         N=N,
         D=D,
         BN=triton.next_power_of_2(N),
@@ -231,7 +228,6 @@ def hc_bwd(
         dbranch=dbranch,
         dw_partial=dw_partial,
         dmixing_partial=dmixing_partial,
-        T=T,
         N=N,
         D=D,
         BN=triton.next_power_of_2(N),
@@ -245,7 +241,6 @@ def hc_bwd(
             hc_bwd_kernel_reduce[(T,)](
                 partial=partial,
                 grad=grad,
-                T=T,
                 C=ND,
                 S=size,
                 BC=triton.next_power_of_2(ND),
