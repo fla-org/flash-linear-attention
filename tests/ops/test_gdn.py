@@ -1667,6 +1667,9 @@ def test_flash_qla_verifier_rejects(monkeypatch):
     passed, reason = be.chunk_gated_delta_rule_verifier(**ok_kwargs, cp_context=object())
     assert not passed and "context parallel" in reason
 
+    passed, reason = be.chunk_gated_delta_rule_verifier(**ok_kwargs, return_intermediate_states=True)
+    assert not passed and "return_intermediate_states" in reason
+
     passed, reason = be.chunk_gated_delta_rule_verifier(**ok_kwargs)
     assert passed and reason is None
 

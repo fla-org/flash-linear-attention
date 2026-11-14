@@ -66,7 +66,9 @@ class FlashQLABackend(BaseBackend):
         state_v_first: bool = False,
         cu_seqlens: torch.LongTensor | None = None,
         cu_seqlens_cpu: torch.LongTensor | None = None,
+        chunk_indices: torch.LongTensor | None = None,
         cp_context: FLACPContext | None = None,
+        return_intermediate_states: bool = False,
         **kwargs,
     ) -> tuple[bool, str | None]:
         if not (IS_NVIDIA_HOPPER or IS_NVIDIA_SM100 or IS_NVIDIA_SM120):
@@ -95,6 +97,8 @@ class FlashQLABackend(BaseBackend):
             return False, "FlashQLA does not support the deprecated transpose_state_layout"
         if cp_context is not None:
             return False, "FlashQLA does not support inter-card context parallel"
+        if return_intermediate_states:
+            return False, "FlashQLA does not support return_intermediate_states"
         return True, None
 
     def chunk_gated_delta_rule(
@@ -113,7 +117,9 @@ class FlashQLABackend(BaseBackend):
         state_v_first: bool = False,
         cu_seqlens: torch.LongTensor | None = None,
         cu_seqlens_cpu: torch.LongTensor | None = None,
+        chunk_indices: torch.LongTensor | None = None,
         cp_context: FLACPContext | None = None,
+        return_intermediate_states: bool = False,
         **kwargs,
     ):
         import flash_qla

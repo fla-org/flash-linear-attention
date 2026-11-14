@@ -1387,6 +1387,7 @@ class ChunkGLAFunction(torch.autograd.Function):
         state_v_first,
         cu_seqlens,
         cu_seqlens_cpu,
+        return_intermediate_states,
     ):
         chunk_size = min(64, max(16, triton.next_power_of_2(q.shape[1])))
         if cu_seqlens is not None:
@@ -1398,7 +1399,7 @@ class ChunkGLAFunction(torch.autograd.Function):
         else:
             chunk_indices = None
 
-        g_cumsum, A, _, ht, o = chunk_gla_fwd(
+        g_cumsum, A, h, ht, o = chunk_gla_fwd(
             q=q,
             k=k,
             v=v,
@@ -1407,11 +1408,13 @@ class ChunkGLAFunction(torch.autograd.Function):
             scale=scale,
             initial_state=initial_state,
             output_final_state=output_final_state,
+            state_v_first=state_v_first,
             cu_seqlens=cu_seqlens,
             chunk_size=chunk_size,
             chunk_indices=chunk_indices,
-            state_v_first=state_v_first,
         )
+        if return_intermediate_states:
+            return o, ht, h
         # recompute g_cumsum in bwd pass
         if g.dtype != torch.float:
             g_cumsum = None
@@ -1436,17 +1439,17 @@ class ChunkGLAFunction(torch.autograd.Function):
             g=g,
             g_cumsum=g_cumsum,
             scale=scale,
+            initial_state=initial_state,
             h=None,
             A=A,
-            initial_state=initial_state,
             do=do,
             dht=dht,
+            state_v_first=ctx.state_v_first,
             cu_seqlens=cu_seqlens,
             chunk_size=chunk_size,
             chunk_indices=chunk_indices,
-            state_v_first=ctx.state_v_first,
         )
-        return dq.to(q), dk.to(k), dv.to(v), dg, None, dh0, None, None, None, None
+        return dq.to(q), dk.to(k), dv.to(v), dg, None, dh0, None, None, None, None, None
 
 
 @torch.compiler.disable
@@ -1461,7 +1464,8 @@ def chunk_gla(
     state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     cu_seqlens_cpu: torch.LongTensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
+    return_intermediate_states: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor | None] | tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
     r"""
     Args:
         q (torch.Tensor):
@@ -1488,6 +1492,9 @@ def chunk_gla(
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
+        return_intermediate_states (bool, Optional):
+            Return the recurrent state entering each chunk as a third output.
+            Requires `torch.no_grad()` or `torch.inference_mode()`; backward is unsupported. Default: `False`.
 
     Returns:
         o (torch.Tensor):
@@ -1495,6 +1502,13 @@ def chunk_gla(
         final_state (torch.Tensor):
             Final state of shape `[N, H, K, V]` (or `[N, H, V, K]` if `state_v_first=True`)
             if `output_final_state=True` else `None`.
+        h (torch.Tensor):
+            Returned only when `return_intermediate_states=True`, with shape `[B, NT, H, K, V]`
+            (or `[B, NT, H, V, K]` if `state_v_first=True`) and dtype `k.dtype`.
+            Each entry is the state before its chunk; the first entry is the initial state or zero.
+            The chunk size is `min(64, max(16, next_power_of_2(T)))` and `NT = ceil(T / chunk_size)`.
+            For variable-length inputs, `B=1` and `NT` is the sum of per-sequence chunk counts,
+            with entries ordered by sequence and then chunk. The final state is returned separately.
 
     Examples::
         >>> import torch
@@ -1524,6 +1538,8 @@ def chunk_gla(
             cu_seqlens=cu_seqlens
         )
     """
+    if return_intermediate_states:
+        assert not torch.is_grad_enabled(), "return_intermediate_states requires gradients to be disabled"
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(
@@ -1541,7 +1557,7 @@ def chunk_gla(
         assert initial_state.dtype == torch.float32, "initial_state must be in float32."
     assert q.shape == k.shape == g.shape, "q, k, g must have the same shape."
     assert v.shape == (*q.shape[:3], v.shape[-1]), "v must be of shape (batch size, seq len, num of head, head dim)."
-    o, final_state = ChunkGLAFunction.apply(
+    return ChunkGLAFunction.apply(
         q,
         k,
         v,
@@ -1552,5 +1568,5 @@ def chunk_gla(
         state_v_first,
         cu_seqlens,
         cu_seqlens_cpu,
+        return_intermediate_states,
     )
-    return o, final_state
