@@ -1494,7 +1494,7 @@ def chunk_gla(
             consistent with the FlashAttention API.
         return_intermediate_states (bool, Optional):
             Return the recurrent state entering each chunk as a third output.
-            Requires `torch.inference_mode()`; backward is unsupported. Default: `False`.
+            Requires `torch.no_grad()` or `torch.inference_mode()`; backward is unsupported. Default: `False`.
 
     Returns:
         o (torch.Tensor):
@@ -1539,7 +1539,7 @@ def chunk_gla(
         )
     """
     if return_intermediate_states:
-        assert torch.is_inference_mode_enabled(), "return_intermediate_states is only allowed in inference mode"
+        assert not torch.is_grad_enabled(), "return_intermediate_states requires gradients to be disabled"
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(

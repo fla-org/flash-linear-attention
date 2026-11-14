@@ -479,7 +479,7 @@ def chunk_gated_delta_rule(
             and `cu_seqlens` will be overridden by the context. Default: `None`.
         return_intermediate_states (bool, Optional):
             Return the recurrent state entering each chunk as a third output.
-            Requires `torch.inference_mode()`; backward is unsupported. Default: `False`.
+            Requires `torch.no_grad()` or `torch.inference_mode()`; backward is unsupported. Default: `False`.
 
     Returns:
         o (torch.Tensor):
@@ -525,7 +525,7 @@ def chunk_gated_delta_rule(
         )
     """
     if return_intermediate_states:
-        assert torch.is_inference_mode_enabled(), "return_intermediate_states is only allowed in inference mode"
+        assert not torch.is_grad_enabled(), "return_intermediate_states requires gradients to be disabled"
     if 'transpose_state_layout' in kwargs:
         if state_v_first:
             raise ValueError("Cannot pass both `state_v_first` and the deprecated `transpose_state_layout`.")

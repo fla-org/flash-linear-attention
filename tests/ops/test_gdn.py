@@ -266,25 +266,25 @@ def test_chunk(
     assert_close('dh0', ref_dh0, tri_dh0, 0.008)
 
 
-def test_chunk_intermediate_states_requires_inference_mode():
+def test_chunk_intermediate_states_requires_no_grad():
     q = torch.ones(1, 1, 1, 64)
     beta = torch.ones(1, 1, 1)
-    with torch.no_grad(), pytest.raises(AssertionError, match='only allowed in inference mode'):
+    with torch.enable_grad(), pytest.raises(AssertionError, match='requires gradients to be disabled'):
         chunk_gated_delta_rule(q=q, k=q, v=q, g=q[:, :, :, 0], beta=beta, return_intermediate_states=True)
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'cu_seqlens', 'K', 'V', 'state_v_first', 'use_initial_state', 'output_final_state', 'dtype'),
+    ('B', 'T', 'cu_seqlens', 'K', 'V', 'state_v_first', 'use_initial_state', 'output_final_state', 'dtype', 'inference_mode'),
     [
-        pytest.param(2, 15, None, 64, 32, False, False, False, torch.float16, id='short-zero-state'),
-        pytest.param(2, 129, None, 60, 96, True, True, True, torch.bfloat16, id='dense-v-first-tail'),
-        pytest.param(1, 130, [0, 1, 65, 130], 64, 32, False, False, True, torch.float16, id='varlen-zero-state'),
-        pytest.param(1, 209, [0, 15, 80, 209], 64, 96, True, True, False, torch.bfloat16, id='varlen-v-first'),
+        pytest.param(2, 15, None, 64, 32, False, False, False, torch.float16, False, id='short-zero-state'),
+        pytest.param(2, 129, None, 60, 96, True, True, True, torch.bfloat16, True, id='dense-v-first-tail'),
+        pytest.param(1, 130, [0, 1, 65, 130], 64, 32, False, False, True, torch.float16, True, id='varlen-zero-state'),
+        pytest.param(1, 209, [0, 15, 80, 209], 64, 96, True, True, False, torch.bfloat16, False, id='varlen-v-first'),
     ],
 )
-@torch.inference_mode()
+@torch.no_grad()
 def test_chunk_return_intermediate_states(
-    B, T, cu_seqlens, K, V, state_v_first, use_initial_state, output_final_state, dtype, monkeypatch,
+    B, T, cu_seqlens, K, V, state_v_first, use_initial_state, output_final_state, dtype, inference_mode, monkeypatch,
 ):
     torch.manual_seed(42)
     monkeypatch.setenv('TRITON_F32_DEFAULT', 'ieee')
@@ -307,16 +307,20 @@ def test_chunk_return_intermediate_states(
         v=v,
         g=g,
         beta=beta,
-        chunk_size=chunk_size,
         initial_state=initial_state,
         output_final_state=output_final_state,
         state_v_first=state_v_first,
         cu_seqlens=cu_seqlens,
+        chunk_size=chunk_size,
     )
-    o, ht, h = chunk_gated_delta_rule(**kwargs, return_intermediate_states=True)
-    default_o, default_ht = chunk_gated_delta_rule(**kwargs)
+    with torch.inference_mode() if inference_mode else torch.no_grad():
+        o, ht, h = chunk_gated_delta_rule(**kwargs, return_intermediate_states=True)
+        default_o, default_ht = chunk_gated_delta_rule(**kwargs)
     assert torch.equal(o, default_o)
-    assert (ht is None and default_ht is None) if not output_final_state else torch.equal(ht, default_ht)
+    if output_final_state:
+        assert torch.equal(ht, default_ht)
+    else:
+        assert ht is None and default_ht is None
     assert h.dtype == k.dtype
     if state_v_first:
         h = h.transpose(-1, -2)
@@ -1761,7 +1765,7 @@ def test_flash_qla_verifier_rejects(monkeypatch):
 
 @pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
 @pytest.mark.parametrize('return_intermediate_states', [False, True])
-@torch.inference_mode()
+@torch.no_grad()
 def test_flash_qla_dispatch_intermediate_states(monkeypatch, return_intermediate_states):
     from fla.ops.gated_delta_rule.backends import flash_qla
     from fla.ops.gated_delta_rule.chunk import ChunkGatedDeltaRuleFunction

@@ -299,7 +299,7 @@ def chunk_kda(
             which is beneficial for training small models at the cost of increased memory usage. Default: ``False``.
         return_intermediate_states (bool, Optional):
             Return the recurrent state entering each chunk as a third output.
-            Requires ``torch.inference_mode()`` and ``disable_recompute=False``;
+            Requires ``torch.no_grad()`` or ``torch.inference_mode()``, and ``disable_recompute=False``;
             backward is unsupported. Default: ``False``.
         state_v_first (bool, Optional):
             Store the recurrent state in V-first ``[V, K]`` layout instead of the default ``[K, V]``. Default: ``False``.
@@ -430,7 +430,7 @@ def chunk_kda(
         ... )
     """
     if return_intermediate_states:
-        assert torch.is_inference_mode_enabled(), "return_intermediate_states is only allowed in inference mode"
+        assert not torch.is_grad_enabled(), "return_intermediate_states requires gradients to be disabled"
         assert disable_recompute is False, "return_intermediate_states must be used with disable_recompute=False"
     if 'transpose_state_layout' in kwargs:
         if state_v_first:
