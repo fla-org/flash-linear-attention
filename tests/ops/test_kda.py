@@ -5,6 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+import importlib
 import importlib.util
 import inspect
 import logging
@@ -2022,6 +2023,142 @@ def test_triton_ascend_backend_routing():
     finally:
         for backend in candidates.values():
             backend.implementation = backend.implementation.__wrapped__
+
+
+@pytest.mark.skipif(not IS_NPU, reason='Triton-Ascend KDA autotuning is only exercised on NPU')
+@pytest.mark.parametrize(
+    ('capacity_kib', 'D', 'expected_blocks'),
+    [
+        pytest.param(64, 256, {8}, id='fallback-64kib'),
+        pytest.param(192, 60, {8, 16, 32}, id='padded-k64'),
+        pytest.param(192, 100, {8, 16}, id='padded-k128'),
+        pytest.param(192, 256, {8}, id='limited-192kib'),
+        pytest.param(256, 256, {8, 16}, id='expanded-256kib'),
+    ],
+)
+def test_triton_ascend_kda_autotune_pruning(monkeypatch, capacity_kib, D, expected_blocks):
+    from fla.utils import ascend_ub_manager
+
+    intra = importlib.import_module('fla.ops.kda.backends.triton_ascend.chunk_intra')
+    manager = ascend_ub_manager.UBManager(ub_capacity_bits=capacity_kib * 1024 * 8)
+    monkeypatch.setattr(ascend_ub_manager, '_ub_manager', manager)
+    configs = [triton.Config({'BC': bc}) for bc in (8, 16, 32, 64)]
+    configs = intra.prune_bwd_intra_configs(configs, {}, BK=triton.next_power_of_2(D), BT=64)
+    retained = {config.kwargs['BC'] for config in configs}
+    assert retained == expected_blocks
+
+
+@pytest.mark.skipif(not IS_NPU, reason='Triton-Ascend KDA autotuning is only exercised on NPU')
+@pytest.mark.parametrize(
+    ('config', 'accepted'),
+    [
+        pytest.param({'BC': 8}, True, id='legacy-defaults'),
+        pytest.param({'BC': 8, 'LOOP_UNROLL': 2, 'multibuffer': False, 'set_workspace_multibuffer': 1},
+                     True, id='joint-config'),
+        pytest.param({'BC': 8, 'LOOP_UNROLL': 3}, False, id='invalid-unroll'),
+        pytest.param({'BC': 8, 'multibuffer': False, 'set_workspace_multibuffer': 4}, False, id='invalid-workspace'),
+        pytest.param({'BC': 8, 'multibuffer': True, 'set_workspace_multibuffer': 1}, False, id='mixed-compile-options'),
+    ],
+)
+def test_triton_ascend_kda_config_validation(monkeypatch, config, accepted):
+    from fla.utils import ascend_ub_manager
+
+    intra = importlib.import_module('fla.ops.kda.backends.triton_ascend.chunk_intra')
+    monkeypatch.setattr(ascend_ub_manager, '_ub_manager', ascend_ub_manager.UBManager(ub_capacity_bits=192 * 1024 * 8))
+    cfg = triton.Config(config)
+    assert intra.prune_bwd_intra_configs([cfg], {}, BK=256, BT=64) == ([cfg] if accepted else [])
+
+
+@pytest.mark.skipif(not IS_NPU, reason='Triton-Ascend KDA tiling is only exercised on NPU')
+@pytest.mark.parametrize(
+    ('module_name', 'helper_name', 'args', 'expected'),
+    [
+        pytest.param('chunk_intra', '_get_inter_bk', (256,), (128, 32, 128), id='inter-tile'),
+        pytest.param('gate', 'get_chunk_cumsum_bs', (64, 256), (64, 16, 64), id='gate-tile'),
+    ],
+)
+def test_triton_ascend_kda_resource_cache(monkeypatch, module_name, helper_name, args, expected):
+    from fla.utils import ascend_ub_manager
+
+    module = importlib.import_module(f'fla.ops.kda.backends.triton_ascend.{module_name}')
+    helper = getattr(module, helper_name)
+    helper.cache_clear()
+    try:
+        for capacity_kib, block in zip((192, 64, 192), expected):
+            capacity = capacity_kib * 1024 * 8
+            monkeypatch.setattr(ascend_ub_manager, '_ub_manager', ascend_ub_manager.UBManager(ub_capacity_bits=capacity))
+            assert helper(*args, ub_capacity_bits=capacity) == block
+        assert helper.cache_info().misses == 2
+        assert helper.cache_info().hits == 1
+    finally:
+        helper.cache_clear()
+
+
+@pytest.mark.skipif(not IS_NPU, reason='Triton-Ascend KDA launches are only exercised on NPU')
+@pytest.mark.parametrize(
+    ('tg_total', 'hv_total'),
+    [
+        pytest.param(65, 9, id='time-split'),
+        pytest.param(3, 257, id='head-split'),
+    ],
+)
+def test_triton_ascend_kda_launch_grid(monkeypatch, tg_total, hv_total):
+    token_parallel = importlib.import_module('fla.ops.kda.backends.triton_ascend.chunk_intra_token_parallel')
+    monkeypatch.setattr(token_parallel, 'ASCEND_MAX_GRID_DIM', 63)
+
+    for bh in token_parallel.HEAD_TILES:
+        covered = set()
+
+        class Kernel:
+            def __getitem__(self, grid):
+                def launch(**kwargs):
+                    nt, nh = grid({'BH': bh})
+                    assert nt * nh <= token_parallel.ASCEND_MAX_GRID_DIM
+                    for t in range(kwargs['TG_OFFSET'], kwargs['TG_OFFSET'] + nt):
+                        for h in range(kwargs['HEAD_OFFSET'], min(kwargs['HEAD_OFFSET'] + nh * bh, hv_total)):
+                            assert (t, h) not in covered
+                            covered.add((t, h))
+                return launch
+
+        token_parallel.launch_token_parallel_kernel(Kernel(), tg_total=tg_total, hv_total=hv_total, kernel_kwargs={})
+        assert covered == {(t, h) for t in range(tg_total) for h in range(hv_total)}
+
+
+@pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
+@pytest.mark.skipif(not IS_NPU, reason='Triton-Ascend KDA autotuning is only exercised on NPU')
+@pytest.mark.parametrize(
+    ('packed', 'D'),
+    [
+        pytest.param(False, 60, id='dense-padded-k64'),
+        pytest.param(True, 256, id='packed-k256'),
+    ],
+)
+def test_triton_ascend_kda_autotune_candidates(monkeypatch, packed, D):
+    intra = importlib.import_module('fla.ops.kda.backends.triton_ascend.chunk_intra')
+    token_parallel = importlib.import_module('fla.ops.kda.backends.triton_ascend.chunk_intra_token_parallel')
+    cache = importlib.import_module('fla.ops.utils.cache')
+    monkeypatch.setattr(cache, 'FLA_CACHE_MODE', cache.FlaCacheMode.DISABLED)
+    monkeypatch.setitem(globals(), 'FLA_CACHE_MODE', cache.FlaCacheMode.DISABLED)
+    forward_configs = token_parallel.prune_head_tiles(token_parallel._autotuned_token_parallel.configs, {}, K=D)
+    backward_configs = intra.prune_bwd_intra_configs(
+        intra._autotuned_bwd_intra.configs, {}, BK=triton.next_power_of_2(D), BT=64,
+    )
+    assert forward_configs and backward_configs
+
+    for i in range(max(len(forward_configs), len(backward_configs))):
+        monkeypatch.setattr(token_parallel._autotuned_token_parallel, 'configs', [forward_configs[i % len(forward_configs)]])
+        monkeypatch.setattr(intra._autotuned_bwd_intra, 'configs', [backward_configs[i % len(backward_configs)]])
+        if packed:
+            test_chunk_varlen(
+                H=3, D=D, mask_p=0, cu_seqlens=[0, 1, 17, 65], dtype=torch.bfloat16,
+                use_gate_in_kernel=False, safe_gate=False, disable_recompute=False, chunk_size=64,
+            )
+        else:
+            test_chunk(
+                B=1, T=65, H=3, HV=9, D=D, scale=1, gate_logit_normalizer=10, mask_p=0,
+                use_qk_l2norm_in_kernel=False, use_gate_in_kernel=False, has_a_log=False,
+                dtype=torch.float16, safe_gate=False, disable_recompute=False, chunk_size=64,
+            )
 
 
 @pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
