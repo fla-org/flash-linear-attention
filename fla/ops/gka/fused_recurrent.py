@@ -9,6 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.backends import dispatch
 from fla.ops.gka.chunk import check_gka_inputs
 from fla.ops.simple_gla import fused_recurrent_simple_gla
 from fla.ops.utils.op import exp
@@ -159,6 +160,7 @@ class FusedRecurrentGKAFunction(torch.autograd.Function):
 
 
 @torch.compiler.disable
+@dispatch
 def fused_recurrent_gka(
     q: torch.Tensor,
     k: torch.Tensor,

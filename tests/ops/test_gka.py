@@ -5,12 +5,15 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+import os
+from unittest.mock import Mock
+
 import pytest
 import torch
 import torch.nn.functional as F
 
 from fla.ops.gka import chunk_gka, fused_recurrent_gka, naive_recurrent_gka, naive_recurrent_gka_chebyshev
-from fla.utils import assert_close, device
+from fla.utils import IS_NPU, assert_close, device
 
 
 def tol(base: float, dtype: torch.dtype) -> float:
@@ -37,20 +40,21 @@ def make_inputs(B, T, H, K, V, gates, use_alpha, use_initial_state, dtype, N=Non
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'K', 'V', 'gates', 'use_alpha', 'use_initial_state', 'dtype'),
+    ('B', 'T', 'H', 'K', 'V', 'gates', 'use_alpha', 'use_initial_state', 'dtype', 'num_iter'),
     [
-        pytest.param(*test, id="B{}-T{}-H{}-K{}-V{}-{}-alpha{}-h0{}-{}".format(*test))
+        pytest.param(*test, id="B{}-T{}-H{}-K{}-V{}-{}-alpha{}-h0{}-{}-iter{}".format(*test))
         for test in [
-            (1, 63, 1, 64, 64, 'tied', True, False, torch.float),
-            (2, 500, 4, 60, 60, 'tied', True, True, torch.float),
-            (2, 1024, 4, 128, 128, 'tied', False, True, torch.float),
-            (2, 256, 4, 64, 100, 'g_only', True, True, torch.float),
-            (2, 256, 4, 100, 64, 'none', True, False, torch.float),
-            (2, 1024, 4, 128, 128, 'tied', True, True, torch.float16),
-            (2, 500, 4, 64, 64, 'g_only', True, True, torch.float16),
-            (2, 256, 4, 64, 64, 'separate', True, True, torch.float),
-            (2, 1024, 4, 128, 128, 'tied', True, True, torch.bfloat16),
-            (2, 500, 4, 64, 64, 'separate', True, True, torch.bfloat16),
+            (1, 63, 1, 64, 64, 'tied', True, False, torch.float, 5),
+            (1, 65, 1, 65, 64, 'tied', True, True, torch.float, 5),
+            (2, 500, 4, 60, 60, 'tied', True, True, torch.float, 30),
+            (2, 1024, 4, 128, 128, 'tied', False, True, torch.float, 30),
+            (2, 256, 4, 64, 100, 'g_only', True, True, torch.float, 30),
+            (2, 256, 4, 100, 64, 'none', True, False, torch.float, 30),
+            (2, 1024, 4, 128, 128, 'tied', True, True, torch.float16, 30),
+            (2, 500, 4, 64, 64, 'g_only', True, True, torch.float16, 5),
+            (2, 256, 4, 64, 64, 'separate', True, True, torch.float, 30),
+            (2, 1024, 4, 128, 128, 'tied', True, True, torch.bfloat16, 30),
+            (2, 500, 4, 64, 64, 'separate', True, True, torch.bfloat16, 5),
         ]
     ],
 )
@@ -64,17 +68,32 @@ def test_chunk_fwd(
     use_alpha: bool,
     use_initial_state: bool,
     dtype: torch.dtype,
+    num_iter: int,
+    monkeypatch,
 ):
     """`chunk_gka`'s outputs and final states must match `naive_recurrent_gka_chebyshev` at the same `num_iter`."""
+    if IS_NPU and os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") != "1":
+        from fla.ops.gka.backends.triton_ascend import chunk_solve_fwd
+
+        solve_fwd = Mock(wraps=chunk_solve_fwd._run_chunk_solve)
+        monkeypatch.setattr(chunk_solve_fwd, '_run_chunk_solve', solve_fwd)
+
     torch.manual_seed(42)
     q, k, v, g, gk, alpha, initial_state = make_inputs(B, T, H, K, V, gates, use_alpha, use_initial_state, dtype)
 
     with torch.no_grad():
         tri, (tri_hkk, tri_hkv) = chunk_gka(
             q=q, k=k, v=v, g=g, gk=gk, alpha=alpha, initial_state=initial_state, output_final_state=True,
+            num_iter=num_iter,
         )
+        if IS_NPU and os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") != "1":
+            if K <= 64:
+                solve_fwd.assert_not_called()
+            else:
+                solve_fwd.assert_called_once()
         ref, (ref_hkk, ref_hkv) = naive_recurrent_gka_chebyshev(
             q=q, k=k, v=v, g=g, gk=gk, alpha=alpha, initial_state=initial_state, output_final_state=True,
+            num_iter=num_iter,
         )
 
     # compare in float32: the RMS in `assert_close` overflows when taken in float16
@@ -103,8 +122,15 @@ def test_chunk_varlen_fwd(
     gates: str,
     cu_seqlens: list[int],
     dtype: torch.dtype,
+    monkeypatch,
 ):
     """Packed sequences must match `naive_recurrent_gka_chebyshev` run on each sequence separately."""
+    if IS_NPU and os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") != "1":
+        from fla.ops.gka.backends.triton_ascend import chunk_solve_fwd
+
+        solve_fwd = Mock(wraps=chunk_solve_fwd._run_chunk_solve)
+        monkeypatch.setattr(chunk_solve_fwd, '_run_chunk_solve', solve_fwd)
+
     torch.manual_seed(42)
     T, N = cu_seqlens[-1], len(cu_seqlens) - 1
     q, k, v, g, gk, alpha, initial_state = make_inputs(1, T, H, K, K, gates, True, True, dtype, N=N)
@@ -115,6 +141,11 @@ def test_chunk_varlen_fwd(
             q=q, k=k, v=v, g=g, gk=gk, alpha=alpha, initial_state=initial_state, output_final_state=True,
             cu_seqlens=cu_seqlens,
         )
+        if IS_NPU and os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") != "1":
+            if K <= 64:
+                solve_fwd.assert_not_called()
+            else:
+                solve_fwd.assert_called_once()
         refs, ref_hkks, ref_hkvs = [], [], []
         for i in range(N):
             bos, eos = cu_seqlens[i].item(), cu_seqlens[i + 1].item()
@@ -232,8 +263,15 @@ def test_chunk_varlen_bwd(
     gates: str,
     cu_seqlens: list[int],
     dtype: torch.dtype,
+    monkeypatch,
 ):
     """All gradients for packed sequences must match `naive_recurrent_gka` run on each sequence separately."""
+    if IS_NPU and os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") != "1":
+        from fla.ops.gka.backends.triton_ascend import chunk_solve_bwd
+
+        solve_bwd = Mock(wraps=chunk_solve_bwd.chunk_gka_solve_bwd_npu)
+        monkeypatch.setattr(chunk_solve_bwd, 'chunk_gka_solve_bwd_npu', solve_bwd)
+
     torch.manual_seed(42)
     T, N = cu_seqlens[-1], len(cu_seqlens) - 1
     inputs = make_inputs(1, T, H, K, K, gates, True, True, dtype, N=N)
@@ -242,6 +280,8 @@ def test_chunk_varlen_bwd(
     cu = torch.tensor(cu_seqlens, dtype=torch.long, device=device)
 
     _, _, tri = _grads(chunk_gka, *inputs, do, dht, cu_seqlens=cu)
+    if IS_NPU and os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") != "1":
+        solve_bwd.assert_called_once()
 
     # the reference runs each sequence separately on slices of the same leaves
     q, k, v, g, gk, alpha, initial_state = _leaves(*inputs)
@@ -326,6 +366,7 @@ def test_chunk_state_chaining(
         ]
     ],
 )
+@pytest.mark.skipif(IS_NPU, reason='Ascend dispatch uses the same implementation for split and fused')
 def test_chunk_bwd_split_matches_fused(
     B: int,
     T: int,
@@ -357,6 +398,41 @@ def test_chunk_bwd_split_matches_fused(
             assert_close(name, ref, tri, 1e-5)
 
 
+@pytest.mark.skipif(not IS_NPU, reason='Ascend dispatch requires NPU')
+@pytest.mark.parametrize(
+    ('K', 'gates'),
+    [
+        pytest.param(60, 'tied', id='K60-tied'),
+        pytest.param(64, 'tied', id='K64-tied'),
+        pytest.param(65, 'tied', id='K65-tied'),
+        pytest.param(128, 'tied', id='K128-tied'),
+        pytest.param(128, 'none', id='K128-none'),
+    ],
+)
+def test_ascend_chunk_bwd_against_naive(K, gates, monkeypatch):
+    """Check chunk GKA states and gradients on NPU against the naive reference."""
+    from fla.ops.gka.backends.triton_ascend import chunk_solve_bwd
+
+    solve_bwd = Mock(wraps=chunk_solve_bwd.chunk_gka_solve_bwd_npu)
+    monkeypatch.setattr(chunk_solve_bwd, 'chunk_gka_solve_bwd_npu', solve_bwd)
+
+    torch.manual_seed(42)
+    B, T, H = 1, 65, 1
+    inputs = make_inputs(B, T, H, K, K, gates, True, True, torch.float)
+    do = torch.randn(B, T, H, K, device=device)
+    dht = _random_dht(B, H, K, K)
+    _, (tri_hkk, tri_hkv), tri = _grads(chunk_gka, *inputs, do, dht)
+    if os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") != "1":
+        solve_bwd.assert_called_once()
+    _, (ref_hkk, ref_hkv), ref = _grads(naive_recurrent_gka, *inputs, do, dht)
+
+    assert_close('h_kk_final', ref_hkk, tri_hkk, 0.005)
+    assert_close('h_kv_final', ref_hkv, tri_hkv, 0.005)
+    assert ref.keys() == tri.keys()
+    for name in ref:
+        assert_close(name, ref[name].float(), tri[name].float(), 0.02 if name in ('dg', 'dgk', 'dh0_kk') else 0.01)
+
+
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'K', 'V', 'gates', 'use_alpha', 'use_initial_state', 'dtype'),
     [
@@ -382,14 +458,23 @@ def test_fused_recurrent(
     use_alpha: bool,
     use_initial_state: bool,
     dtype: torch.dtype,
+    monkeypatch,
 ):
     """`fused_recurrent_gka`'s outputs and final states must match `naive_recurrent_gka_chebyshev` at the same `num_iter`."""
+    if IS_NPU and os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") != "1":
+        from fla.ops.gka.backends.triton_ascend import fused_recurrent
+
+        fused_solve = Mock(wraps=fused_recurrent._run_fused_solve)
+        monkeypatch.setattr(fused_recurrent, '_run_fused_solve', fused_solve)
+
     torch.manual_seed(42)
     q, k, v, g, gk, alpha, initial_state = make_inputs(B, T, H, K, V, gates, use_alpha, use_initial_state, dtype)
 
     tri, (tri_hkk, tri_hkv) = fused_recurrent_gka(
         q=q, k=k, v=v, g=g, gk=gk, alpha=alpha, initial_state=initial_state, output_final_state=True,
     )
+    if IS_NPU and os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") != "1":
+        fused_solve.assert_called_once()
     ref, (ref_hkk, ref_hkv) = naive_recurrent_gka_chebyshev(
         q=q, k=k, v=v, g=g, gk=gk, alpha=alpha, initial_state=initial_state, output_final_state=True,
     )
@@ -418,8 +503,15 @@ def test_fused_recurrent_varlen(
     gates: str,
     cu_seqlens: list[int],
     dtype: torch.dtype,
+    monkeypatch,
 ):
     """Packed sequences must match `naive_recurrent_gka_chebyshev` run on each sequence separately."""
+    if IS_NPU and os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") != "1":
+        from fla.ops.gka.backends.triton_ascend import fused_recurrent
+
+        fused_solve = Mock(wraps=fused_recurrent._run_fused_solve)
+        monkeypatch.setattr(fused_recurrent, '_run_fused_solve', fused_solve)
+
     torch.manual_seed(42)
     T, N = cu_seqlens[-1], len(cu_seqlens) - 1
     q, k, v, g, gk, alpha, initial_state = make_inputs(1, T, H, K, K, gates, True, True, dtype, N=N)
@@ -428,6 +520,8 @@ def test_fused_recurrent_varlen(
         q=q, k=k, v=v, g=g, gk=gk, alpha=alpha, initial_state=initial_state, output_final_state=True,
         cu_seqlens=torch.tensor(cu_seqlens, dtype=torch.long, device=device),
     )
+    if IS_NPU and os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") != "1":
+        fused_solve.assert_called_once()
     refs, ref_hkks, ref_hkvs = [], [], []
     for i in range(N):
         bos, eos = cu_seqlens[i], cu_seqlens[i + 1]
@@ -465,8 +559,15 @@ def test_fused_recurrent_decode_after_chunk_prefill(
     K: int,
     gates: str,
     prefill: int,
+    monkeypatch,
 ):
     """Prefill with `chunk_gka`, then decode one token at a time: must match `chunk_gka` on the whole sequence."""
+    if IS_NPU and os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") != "1":
+        from fla.ops.gka.backends.triton_ascend import fused_recurrent
+
+        fused_solve = Mock(wraps=fused_recurrent._run_fused_solve)
+        monkeypatch.setattr(fused_recurrent, '_run_fused_solve', fused_solve)
+
     torch.manual_seed(42)
     q, k, v, g, gk, alpha, initial_state = make_inputs(B, T, H, K, K, gates, True, True, torch.float)
 
@@ -480,6 +581,8 @@ def test_fused_recurrent_decode_after_chunk_prefill(
     for t in range(prefill, T):
         o, state = fused_recurrent_gka(**step(slice(t, t + 1)), initial_state=state, output_final_state=True)
         outputs.append(o)
+    if IS_NPU and os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") != "1":
+        assert fused_solve.call_count == T - prefill
 
     assert_close('o', ref, torch.cat(outputs, 1), 0.01)
     assert_close('h_kk_final', ref_hkk, state[0], 0.005)
