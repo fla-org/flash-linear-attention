@@ -10,7 +10,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils.op import exp
-from fla.utils import input_guard
+from fla.utils import IS_NVIDIA_HOPPER, input_guard
 
 
 @triton.heuristics({
@@ -127,10 +127,14 @@ def fused_recurrent_triadic_gdn_fwd(
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
     BE = triton.next_power_of_2(E)
     BK = triton.next_power_of_2(K)
-    # each program keeps a [BE, BK, BV] state block in registers: wide value blocks while there are few slices,
-    # and enough warps to hold at most 128 state values per thread up to BE * BK = 4096
-    BV = min(32 if BE <= 2 else 16, triton.next_power_of_2(V))
-    while BV > 8 and BE * BK * BV > 32768:
+    # each program keeps a [BE, BK, BV] state block in registers, with enough warps for at most 128 state values
+    # per thread up to 8 warps; Hopper runs best with blocks of up to 32K state values, B200 with up to 16K
+    if IS_NVIDIA_HOPPER:
+        BV, max_block = (32 if BE <= 2 else 16), 32768
+    else:
+        BV, max_block = (32 if BE <= 4 else 16), 16384
+    BV = min(BV, triton.next_power_of_2(V))
+    while BV > 8 and max_block < BE * BK * BV:
         BV //= 2
     NV = triton.cdiv(V, BV)
 
