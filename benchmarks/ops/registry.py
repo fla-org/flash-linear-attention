@@ -1150,3 +1150,21 @@ register_op(OpConfig(
     category='nsa',
     test_file='tests/ops/test_nsa.py',
 ))
+
+
+# --- decay-max scan: x=[B,T,D,H], per-channel decay params [D] ---
+
+def shape_BTxDH(B, T, H, D, **kw):
+    return (B, T, D, H)
+
+
+register_op(OpConfig(
+    name='chunk_decay_max_scan',
+    import_path='fla.ops.decay_max_scan',
+    inputs={
+        'x': TensorSpec(shape_BTxDH),
+        'decay_v': TensorSpec(lambda B, T, H, D, **kw: (D,)),
+        'decay_b': TensorSpec(lambda B, T, H, D, **kw: (D,)),
+    },
+    category='decay_max_scan',
+))
