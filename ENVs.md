@@ -31,6 +31,12 @@ These switches control registered implementations. Unavailable backends and unsu
 
 When `FLA_GLUON` is unset or `0`, the individual switches apply. `FLA_DISABLE_BACKEND_DISPATCH=1` overrides all of them.
 
+### KDA
+
+| Variable             | Default | Options   | Description |
+| -------------------- | ------- | --------- | ----------- |
+| `FLA_KDA_COMPACT_H`  | `1`     | `0` / `1` | Store varlen NVIDIA KDA `h` and `dh` in at most `T // chunk_size` slots, plus one entry-state slot for `h` in contiguous CP mode. Explicit per-sequence initial states, zigzag CP, and returned intermediate states retain their original layout. Set `0` for the original layout; recapture graphs after changing this flag. |
+
 ### Intra-card context parallelism
 
 | Variable                   | Default | Options     | Description                                                                                          |
