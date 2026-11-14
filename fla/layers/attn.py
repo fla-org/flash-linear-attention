@@ -46,6 +46,8 @@ class Attention(nn.Module):
         window_size: int | None = None,
         rope_theta: float | None = 10000.,
         max_position_embeddings: int | None = None,
+        rotary_dim: int | None = None,
+        o_bias: bool = False,
         layer_idx: int = None,
     ):
         super().__init__()
@@ -74,13 +76,15 @@ class Attention(nn.Module):
         self.q_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=self.qkv_bias)
         self.k_proj = nn.Linear(self.hidden_size, self.kv_dim, bias=self.qkv_bias)
         self.v_proj = nn.Linear(self.hidden_size, self.kv_dim, bias=self.qkv_bias)
-        self.o_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
+        self.o_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=o_bias)
 
         if qk_norm:
             self.q_norm = RMSNorm(self.head_dim, dtype=torch.float32)
             self.k_norm = RMSNorm(self.head_dim, dtype=torch.float32)
 
-        self.rotary = RotaryEmbedding(dim=self.head_dim, base=self.rope_theta)
+        # rotate the first `rotary_dim` dimensions of every head, or all of them by default
+        self.rotary_dim = self.head_dim if rotary_dim is None else rotary_dim
+        self.rotary = RotaryEmbedding(dim=self.rotary_dim, base=self.rope_theta)
 
     def forward(
         self,
