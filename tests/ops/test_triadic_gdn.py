@@ -10,7 +10,12 @@ import torch
 import torch.nn.functional as F
 
 from fla.ops.kda.naive import naive_recurrent_kda
-from fla.ops.triadic_gdn import chunk_triadic_gdn, naive_chunk_triadic_gdn, naive_recurrent_triadic_gdn
+from fla.ops.triadic_gdn import (
+    chunk_triadic_gdn,
+    fused_recurrent_triadic_gdn,
+    naive_chunk_triadic_gdn,
+    naive_recurrent_triadic_gdn,
+)
 from fla.utils import assert_close, device
 
 
@@ -241,3 +246,126 @@ def test_chunk_varlen(H: int, K: int, V: int, E: int, cu_seqlens: list[int], dty
         (0.008, 0.008, 0.008, 0.008, 0.008, 0.02, 0.02, 0.008),
     ):
         assert_close(name, ref_grad, tri_grad, ratio)
+
+
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'K', 'V', 'E', 'scale', 'gate_logit_normalizer', 'use_state', 'dtype'),
+    [
+        pytest.param(
+            *test,
+            id="B{}-T{}-H{}-K{}-V{}-E{}-scale{}-gate_logit_normalizer{}-use_state{}-{}".format(*test),
+        )
+        for test in [
+            (1, 63, 1, 64, 64, 1, 1, 1, True, torch.float),
+            # one and four decoding steps
+            (8, 1, 4, 128, 128, 8, 1, 1, True, torch.bfloat16),
+            (4, 4, 2, 128, 128, 4, 1, 1, True, torch.bfloat16),
+            (2, 500, 3, 60, 64, 2, 1, 1, False, torch.float16),
+            # strong decay
+            (2, 1000, 2, 128, 128, 4, 1, 0.1, True, torch.float),
+            # E, K and V that are not powers of two
+            (1, 256, 2, 100, 96, 12, 0.1, 1, True, torch.float),
+            (1, 512, 2, 128, 128, 16, 1, 10, False, torch.bfloat16),
+            (2, 100, 2, 8, 12, 2, 1, 1, True, torch.float16),
+            (1, 128, 2, 256, 256, 4, 1, 1, True, torch.bfloat16),
+        ]
+    ],
+)
+def test_fused_recurrent(
+    B: int,
+    T: int,
+    H: int,
+    K: int,
+    V: int,
+    E: int,
+    scale: float,
+    gate_logit_normalizer: float,
+    use_state: bool,
+    dtype: torch.dtype,
+):
+    torch.manual_seed(42)
+    q, k, v, k2, q2, g, beta = _make_inputs(B, T, H, K, V, E, gate_logit_normalizer, dtype)
+    h0 = torch.randn(B, H, E, K, V, dtype=torch.float32, device=device) if use_state else None
+
+    ref, ref_ht = naive_recurrent_triadic_gdn(
+        q=q,
+        k=k,
+        v=v,
+        k2=k2,
+        q2=q2,
+        g=g,
+        beta=beta,
+        scale=scale,
+        initial_state=h0,
+        output_final_state=use_state,
+    )
+    tri, tri_ht = fused_recurrent_triadic_gdn(
+        q=q,
+        k=k,
+        v=v,
+        k2=k2,
+        q2=q2,
+        g=g,
+        beta=beta,
+        scale=scale,
+        initial_state=h0,
+        output_final_state=use_state,
+    )
+    assert_close('o', ref, tri, 0.002)
+    if use_state:
+        assert_close('ht', ref_ht, tri_ht, 0.002)
+    else:
+        assert tri_ht is None
+
+
+@pytest.mark.parametrize(
+    ('H', 'K', 'V', 'E', 'cu_seqlens', 'dtype'),
+    [
+        pytest.param(*test, id="H{}-K{}-V{}-E{}-cu_seqlens{}-{}".format(*test))
+        for test in [
+            (2, 64, 64, 1, [0, 15], torch.float),
+            # one decoding step per sequence
+            (4, 128, 128, 8, [0, 1, 2, 3, 4], torch.bfloat16),
+            (3, 128, 128, 4, [0, 256, 500, 1000], torch.float16),
+            (2, 128, 128, 8, [0, 15, 100, 300, 1200, 2000], torch.bfloat16),
+        ]
+    ],
+)
+def test_fused_recurrent_varlen(H: int, K: int, V: int, E: int, cu_seqlens: list[int], dtype: torch.dtype):
+    torch.manual_seed(42)
+    N, T = len(cu_seqlens) - 1, cu_seqlens[-1]
+    q, k, v, k2, q2, g, beta = _make_inputs(1, T, H, K, V, E, 1, dtype)
+    h0 = torch.randn(N, H, E, K, V, dtype=torch.float32, device=device)
+
+    refs, ref_hts = [], []
+    for i in range(N):
+        bos, eos = cu_seqlens[i], cu_seqlens[i + 1]
+        ref, ref_ht = naive_recurrent_triadic_gdn(
+            q=q[:, bos:eos],
+            k=k[:, bos:eos],
+            v=v[:, bos:eos],
+            k2=k2[:, bos:eos],
+            q2=q2[:, bos:eos],
+            g=g[:, bos:eos],
+            beta=beta[:, bos:eos],
+            initial_state=h0[i:i+1],
+            output_final_state=True,
+        )
+        refs.append(ref)
+        ref_hts.append(ref_ht)
+    ref, ref_ht = torch.cat(refs, 1), torch.cat(ref_hts, 0)
+
+    tri, tri_ht = fused_recurrent_triadic_gdn(
+        q=q,
+        k=k,
+        v=v,
+        k2=k2,
+        q2=q2,
+        g=g,
+        beta=beta,
+        initial_state=h0,
+        output_final_state=True,
+        cu_seqlens=torch.tensor(cu_seqlens, dtype=torch.int32, device=device),
+    )
+    assert_close('o', ref, tri, 0.002)
+    assert_close('ht', ref_ht, tri_ht, 0.002)
