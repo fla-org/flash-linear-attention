@@ -121,7 +121,7 @@ def chunk_ttt_linear_fwd_kernel_h(
         tl.store(p_v_new, b_v2.to(p_v_new.dtype.element_ty), mask=m_v)
         b_eta_last = tl.load(p_eta_last)
         b_h = b_h - tl.dot(b_eta_last * b_k, b_v2.to(b_k.dtype), allow_tf32=False)
-        b_hb = b_hb - tl.sum(b_eta_last * b_v2.to(b_k.dtype), axis=0)
+        b_hb = b_hb - tl.sum(b_eta_last * tl.where(m_v, b_v2, 0.0).to(b_k.dtype), axis=0)
 
     if STORE_FINAL_STATE:
         p_ht = ht + i_nh * K*V + o_k[:, None] * V + o_v[None, :]
@@ -339,7 +339,7 @@ def chunk_ttt_linear_bwd_kernel_h(
         tl.store(p_v_new, b_v2.to(p_v_new.dtype.element_ty), mask=m_v)
         b_eta_last = tl.load(p_eta_last)
         b_h = b_h - tl.dot(b_eta_last * b_k, b_v2.to(b_k.dtype), allow_tf32=False)
-        b_hb = b_hb - tl.sum(b_eta_last * b_v2.to(b_k.dtype), axis=0)
+        b_hb = b_hb - tl.sum(b_eta_last * tl.where(m_v, b_v2, 0.0).to(b_k.dtype), axis=0)
 
 
 @triton.heuristics({

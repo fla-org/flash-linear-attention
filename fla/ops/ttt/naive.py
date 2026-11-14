@@ -22,10 +22,12 @@ def ttt_linear(
     initial_state: torch.Tensor,
     initial_state_bias: torch.Tensor,
     output_final_state: bool,
+    valid_tokens: int | None = None,
 ):
     B, H, T, D = q.shape
     BT = mini_batch_size
     NT = T // BT
+    valid_tokens = T if valid_tokens is None else valid_tokens
     # [NT, B, H, mini_batch_size, D]
     _q = q.reshape(B, H, NT, BT, D).permute(2, 0, 1, 3, 4)
     _k = k.reshape(B, H, NT, BT, D).permute(2, 0, 1, 3, 4)
@@ -55,6 +57,10 @@ def ttt_linear(
         g = w * kh_hat + b - reconstruction_target
         g *= w
         v_new = (D * g - g.sum(-1, True) - kh_hat * (g * kh_hat).sum(-1, True)) / (rstd * D)
+        if (i + 1) * BT > valid_tokens:
+            valid = valid_tokens - i * BT
+            mask = torch.arange(BT, device=v_new.device) < valid
+            v_new = torch.where(mask[None, None, :, None], v_new, 0.0)
 
         Attn = torch.tril(q_i @ k_i.transpose(-2, -1))
         o_i = q_i @ h - (eta_i * Attn) @ v_new + hb - torch.tril(eta_i.expand_as(Attn)) @ v_new
@@ -121,6 +127,7 @@ def chunk_ttt_linear_ref(
         initial_state,
         initial_state_bias,
         output_final_state,
+        valid_tokens=T,
     )
     o = o[:, :, :T, :].contiguous()
     o = o.transpose(1, 2)
