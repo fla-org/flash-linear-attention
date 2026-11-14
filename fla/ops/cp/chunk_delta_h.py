@@ -18,9 +18,21 @@ from fla.ops.cp.chunk_fwd import chunk_cp_fwd_h
 from fla.ops.cp.chunk_merge import chunk_cp_merge
 from fla.ops.cp.comm import all_gather_into_tensor
 from fla.ops.cp.context import _check_cp_device
+from fla.utils import IS_NPU
 
 if TYPE_CHECKING:
     from fla.ops.cp.context import FLACPContext
+
+
+def _zigzag_graph_seq_indices(cu_seqlens: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    if not IS_NPU:
+        raise NotImplementedError('zigzag CP graph replay is currently supported only on Ascend NPU.')
+    # each part has equal token length; the split is also a local sequence boundary.
+    front_num_seqs = (cu_seqlens[:-1] < cu_seqlens[-1] // 2).sum()
+    num_seqs = (cu_seqlens[1:] > cu_seqlens[:-1]).sum()
+    first = torch.stack((torch.zeros_like(front_num_seqs), front_num_seqs))
+    last = torch.stack((front_num_seqs - 1, num_seqs - 1))
+    return first, last
 
 
 @dispatch('cp')
@@ -53,7 +65,11 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
 
     if context.layout == 'zigzag':
         if use_graph:
-            raise NotImplementedError("use_graph is not supported with zigzag CP layout")
+            assert context.pre_num_ranks_dev is not None, "use_graph with CP requires context.pre_num_ranks_dev"
+            first, last = _zigzag_graph_seq_indices(cu_seqlens)
+            cu_parts = tuple(cu_seqlens.index_select(0, torch.stack((index, index + 1))) for index in last.unbind())
+        else:
+            cu_parts = (cu_seqlens[context.front_num_seqs - 1: context.front_num_seqs + 1], cu_seqlens[-2:])
         front_num_seqs = context.front_num_seqs
         hm = k.new_zeros(2, HV, K, V + K, dtype=torch.float32)
         if state_v_first:
@@ -62,8 +78,8 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
             initial_state = k.new_zeros(N, HV, K, V, dtype=torch.float32)
         # each part exports the affine chain of its last segment, skipped when chain-last
         for i_part, (cu_seqlens_part, is_last) in enumerate(zip(
-            (cu_seqlens[front_num_seqs - 1: front_num_seqs + 1], cu_seqlens[-2:]),
-            context.is_last_by_part,
+            cu_parts,
+            (False, False) if use_graph else context.is_last_by_part,
         )):
             if not is_last:
                 chunk_cp_fwd_h(
@@ -84,16 +100,17 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
         world_size = dist.get_world_size(group=context.group)
 
         for i_part in range(2):
-            if not context.is_first_by_part[i_part]:
+            if use_graph or not context.is_first_by_part[i_part]:
                 chunk_cp_merge(
-                    h=initial_state[0] if i_part == 0 else initial_state[front_num_seqs],
+                    h=initial_state if use_graph else initial_state[0] if i_part == 0 else initial_state[front_num_seqs],
                     ag_hm=hm_chain,
-                    num_ranks=context.pre_num_ranks_by_part[i_part],
+                    num_ranks=context.pre_num_ranks_dev[i_part:i_part + 1] if use_graph else
+                    context.pre_num_ranks_by_part[i_part],
                     rank=rank if i_part == 0 else 2 * world_size - 1 - rank,
                     state_v_first=state_v_first,
                     forward=True,
-                    h_seq_idx=None,
-                    use_graph=False,
+                    h_seq_idx=first[i_part:i_part + 1] if use_graph else None,
+                    use_graph=use_graph,
                 )
         return initial_state
 
@@ -171,7 +188,11 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
 
     if context.layout == 'zigzag':
         if use_graph:
-            raise NotImplementedError("use_graph is not supported with zigzag CP layout")
+            assert context.post_num_ranks_dev is not None, "use_graph with CP requires context.post_num_ranks_dev"
+            first, last = _zigzag_graph_seq_indices(cu_seqlens)
+            cu_parts = tuple(cu_seqlens.index_select(0, torch.stack((index, index + 1))) for index in first.unbind())
+        else:
+            cu_parts = (cu_seqlens[:2], cu_seqlens[context.front_num_seqs: context.front_num_seqs + 2])
         front_num_seqs = context.front_num_seqs
         dhm = q.new_zeros(2, HV, K, V + K, dtype=torch.float32)
         if state_v_first:
@@ -180,8 +201,8 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
             dht = q.new_zeros(N, HV, K, V, dtype=torch.float32)
         # each part exports the backward affine chain of its first segment, skipped when chain-first
         for i_part, (cu_seqlens_part, is_first) in enumerate(zip(
-            (cu_seqlens[:2], cu_seqlens[front_num_seqs: front_num_seqs + 2]),
-            context.is_first_by_part,
+            cu_parts,
+            (False, False) if use_graph else context.is_first_by_part,
         )):
             if not is_first:
                 chunk_cp_bwd_dh(
@@ -204,16 +225,17 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
         world_size = dist.get_world_size(group=context.group)
 
         for i_part in range(2):
-            if not context.is_last_by_part[i_part]:
+            if use_graph or not context.is_last_by_part[i_part]:
                 chunk_cp_merge(
-                    h=dht[front_num_seqs - 1] if i_part == 0 else dht[-1],
+                    h=dht if use_graph else dht[front_num_seqs - 1] if i_part == 0 else dht[-1],
                     ag_hm=dhm_chain,
-                    num_ranks=context.post_num_ranks_by_part[i_part],
+                    num_ranks=context.post_num_ranks_dev[i_part:i_part + 1] if use_graph else
+                    context.post_num_ranks_by_part[i_part],
                     rank=rank if i_part == 0 else 2 * world_size - 1 - rank,
                     state_v_first=state_v_first,
                     forward=False,
-                    h_seq_idx=None,
-                    use_graph=False,
+                    h_seq_idx=last[i_part:i_part + 1] if use_graph else None,
+                    use_graph=use_graph,
                 )
         return dht, None
 
@@ -266,10 +288,13 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
     return dht, None
 
 
-def compress_h0(h0: torch.Tensor | None, context: FLACPContext) -> torch.Tensor | None:
+def compress_h0(h0: torch.Tensor | None, context: FLACPContext, use_graph: bool = False) -> torch.Tensor | None:
     if h0 is None or len(context.cu_seqlens) == 2:
         return h0
     if context.layout == 'zigzag':
+        if use_graph:
+            first, _ = _zigzag_graph_seq_indices(context.cu_seqlens)
+            return h0.index_select(0, first)
         if len(context.cu_seqlens) == 3:
             # both parts can carry a cross-rank state
             return h0
@@ -279,7 +304,7 @@ def compress_h0(h0: torch.Tensor | None, context: FLACPContext) -> torch.Tensor 
     return h0[:1].clone()
 
 
-def expand_h0(h0: torch.Tensor | None, context: FLACPContext) -> torch.Tensor | None:
+def expand_h0(h0: torch.Tensor | None, context: FLACPContext, use_graph: bool = False) -> torch.Tensor | None:
     if h0 is None or len(context.cu_seqlens) == 2:
         return h0
     B = len(context.cu_seqlens) - 1
@@ -287,6 +312,9 @@ def expand_h0(h0: torch.Tensor | None, context: FLACPContext) -> torch.Tensor | 
         if B == 2:
             return h0
         expanded = h0.new_zeros(B, *h0.shape[1:])
+        if use_graph:
+            first, _ = _zigzag_graph_seq_indices(context.cu_seqlens)
+            return expanded.index_copy_(0, first, h0)
         expanded[[0, context.front_num_seqs]] = h0
         return expanded
     expanded = h0.new_zeros(B, *h0.shape[1:])

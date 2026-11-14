@@ -44,7 +44,9 @@ class FLACPContext:
     """Sequence partition and communication metadata for context parallelism.
 
     Contiguous layouts use scalar rank-boundary metadata. Zigzag layouts use front/back tuples in local-buffer order.
-    The optional device rank counts are persistent int32 tensors refreshed in place for CUDA Graph replay.
+    The optional device rank counts are persistent int32 tensors refreshed in place for CUDA or NPU graph replay.
+    They contain one value for contiguous layouts, or two values in front/back order for zigzag layouts.
+    Zigzag counts refer to chain slots, including the two slots held by the same rank.
     """
     group: ProcessGroup | None = None
     cu_seqlens: torch.Tensor | None = None

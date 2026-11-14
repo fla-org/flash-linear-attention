@@ -270,9 +270,9 @@ jobs:
             '4,5:tests/cp/test_kda.py tests/cp/test_conv.py' \
             '6,7:tests/cp/test_gdp.py tests/cp/test_intracard.py tests/cp/test_context.py tests/cp/test_graph.py tests/cp/test_gdn2.py'
           phase cp4 \
-            '0,1,2,3:tests/cp/test_kda.py tests/cp/test_conv.py' \
+            '0,1,2,3:tests/cp/test_kda.py tests/cp/test_conv.py tests/cp/test_graph.py' \
             '4,5,6,7:tests/cp/test_dplr.py tests/cp/test_gdn.py tests/cp/test_token_shift.py tests/cp/test_gdn2.py'
-          phase cp8 '0,1,2,3,4,5,6,7:tests/cp/test_gdn.py tests/cp/test_kda.py tests/cp/test_gdn2.py'
+          phase cp8 '0,1,2,3,4,5,6,7:tests/cp/test_gdn.py tests/cp/test_kda.py tests/cp/test_graph.py tests/cp/test_gdn2.py'
 
       - name: Save A2 pytest Triton-Ascend kernel cache
         if: |

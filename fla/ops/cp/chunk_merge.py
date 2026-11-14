@@ -231,7 +231,7 @@ def chunk_cp_merge(
     _check_cp_device(h.device)
     _, HV, K, VK = ag_hm.shape
     V = VK - K
-    BK = triton.next_power_of_2(K)
+    BK = max(16, triton.next_power_of_2(K)) if IS_NPU else triton.next_power_of_2(K)
 
     def grid(meta):
         return (triton.cdiv(V, meta['BV']), HV)

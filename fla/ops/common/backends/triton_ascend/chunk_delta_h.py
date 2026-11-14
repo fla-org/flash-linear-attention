@@ -40,12 +40,13 @@ def _cached_cu_seqlens_cpu(cu_seqlens, version):
 
 
 def _recurrence_cu_seqlens_cpu(cu_seqlens, cu_seqlens_cpu):
+    if cu_seqlens is not None and cu_seqlens.device.type != 'cpu' and torch.npu.is_current_stream_capturing():
+        # CPU hints cannot prove that future replay lengths remain aligned.
+        return None
     if cu_seqlens_cpu is not None or cu_seqlens is None:
         return cu_seqlens_cpu
     if cu_seqlens.device.type == 'cpu':
         return cu_seqlens
-    if torch.npu.is_current_stream_capturing():
-        return None
     # include the version so eager in-place length updates cannot reuse stale bounds.
     if cu_seqlens.is_inference():
         return cu_seqlens.cpu()
@@ -1285,17 +1286,12 @@ def chunk_gated_delta_rule_fwd_h_npu(
     BK, BV = _select_fwd_h_tiles(K, V, state_v_first, masked=masked and not dense_tail)
     # Partial K/V tiles take the masked DMA path. That path keeps a second image
     # of the state plus the w/v operands: BK=128/BV=128 asks for 230528 B against
-    # 192 KiB. Zero-pad onto the tile already chosen so the unmasked kernel runs
-    # at the same block size.
+    # 192 KiB. Zero-pad features onto the selected tile so only sequence tails
+    # require masked DMA.
     K_orig, V_orig = K, V
     k_pad = triton.cdiv(K, BK) * BK
     v_pad = triton.cdiv(V, BV) * BV
-    if (
-        not state_v_first
-        and not time_axis_needs_mask(T, BT, cu_seqlens, cu_seqlens_cpu)
-        and k_pad <= 256
-        and (k_pad != K or v_pad != V)
-    ):
+    if k_pad <= 256 and (k_pad != K or v_pad != V):
         if k_pad != K:
             k = _pad_head_dim(k, k_pad)
             w = _pad_head_dim(w, k_pad)
@@ -1304,7 +1300,8 @@ def chunk_gated_delta_rule_fwd_h_npu(
         if v_pad != V:
             u = _pad_head_dim(u, v_pad)
         if initial_state is not None:
-            initial_state = torch.nn.functional.pad(initial_state, (0, v_pad - V, 0, k_pad - K))
+            state_pad = (0, k_pad - K, 0, v_pad - V) if state_v_first else (0, v_pad - V, 0, k_pad - K)
+            initial_state = torch.nn.functional.pad(initial_state, state_pad)
         K, V = k_pad, v_pad
 
     k, w, u = k.contiguous(), w.contiguous(), u.contiguous()
@@ -1371,11 +1368,12 @@ def chunk_gated_delta_rule_fwd_h_npu(
             **ascend_compile_kwargs(),
         )
     if K_orig != K or V_orig != V:
-        h = h[..., :K_orig, :V_orig].contiguous()
+        h = h[..., :V_orig, :K_orig].contiguous() if state_v_first else h[..., :K_orig, :V_orig].contiguous()
         if v_new is not None:
             v_new = v_new[..., :V_orig].contiguous()
         if final_state is not None:
-            final_state = final_state[..., :K_orig, :V_orig].contiguous()
+            final_state = (final_state[..., :V_orig, :K_orig] if state_v_first else
+                           final_state[..., :K_orig, :V_orig]).contiguous()
     return h, v_new, final_state
 
 
@@ -1983,30 +1981,29 @@ def chunk_gated_delta_rule_bwd_dhu_npu(
     # masked image still overflows (D=100 / two slabs). Pad onto the power-of-two
     # tile the aligned kernel already compiles and slice the gradients back.
     K_orig, V_orig = K, V
-    if not time_axis_needs_mask(T, BT, cu_seqlens, cu_seqlens_cpu):
-        k_pad = triton.next_power_of_2(K)
-        v_pad = triton.next_power_of_2(V)
-        if k_pad <= 256 and v_pad <= 256 and (k_pad != K or v_pad != V):
-            if k_pad != K:
-                q = torch.nn.functional.pad(q, (0, k_pad - K))
-                k = torch.nn.functional.pad(k, (0, k_pad - K))
-                w = torch.nn.functional.pad(w, (0, k_pad - K))
-                if gk is not None and gk.shape[-1] == K:
-                    gk = torch.nn.functional.pad(gk, (0, k_pad - K))
-            if v_pad != V:
-                do = torch.nn.functional.pad(do, (0, v_pad - V))
-                dv = torch.nn.functional.pad(dv, (0, v_pad - V))
-            if h0 is not None:
-                if state_v_first:
-                    h0 = torch.nn.functional.pad(h0, (0, k_pad - K, 0, v_pad - V))
-                else:
-                    h0 = torch.nn.functional.pad(h0, (0, v_pad - V, 0, k_pad - K))
-            if dht is not None:
-                if state_v_first:
-                    dht = torch.nn.functional.pad(dht, (0, k_pad - K, 0, v_pad - V))
-                else:
-                    dht = torch.nn.functional.pad(dht, (0, v_pad - V, 0, k_pad - K))
-            K, V = k_pad, v_pad
+    k_pad = triton.next_power_of_2(K)
+    v_pad = triton.next_power_of_2(V)
+    if k_pad <= 256 and v_pad <= 256 and (k_pad != K or v_pad != V):
+        if k_pad != K:
+            q = torch.nn.functional.pad(q, (0, k_pad - K))
+            k = torch.nn.functional.pad(k, (0, k_pad - K))
+            w = torch.nn.functional.pad(w, (0, k_pad - K))
+            if gk is not None and gk.shape[-1] == K:
+                gk = torch.nn.functional.pad(gk, (0, k_pad - K))
+        if v_pad != V:
+            do = torch.nn.functional.pad(do, (0, v_pad - V))
+            dv = torch.nn.functional.pad(dv, (0, v_pad - V))
+        if h0 is not None:
+            if state_v_first:
+                h0 = torch.nn.functional.pad(h0, (0, k_pad - K, 0, v_pad - V))
+            else:
+                h0 = torch.nn.functional.pad(h0, (0, v_pad - V, 0, k_pad - K))
+        if dht is not None:
+            if state_v_first:
+                dht = torch.nn.functional.pad(dht, (0, k_pad - K, 0, v_pad - V))
+            else:
+                dht = torch.nn.functional.pad(dht, (0, v_pad - V, 0, k_pad - K))
+        K, V = k_pad, v_pad
 
     if state_v_first:
         dh = q.new_empty(B, NT, HV, V, K)
