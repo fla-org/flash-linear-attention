@@ -207,6 +207,7 @@ def parallel_nsa_compression_bwd_kernel_dq(
     # [G]
     b_lse = tl.load(p_lse)
     b_delta = tl.load(p_delta)
+    b_delta = tl.where(i_v == 0, b_delta, 0.0)
 
     # [G, BK]
     b_dq = tl.zeros([G, BK], dtype=tl.float32)
@@ -356,6 +357,7 @@ def parallel_nsa_compression_bwd_kernel_dkv(
         # [BQ*G]
         b_lse = tl.load(p_lse, mask=m_q, other=0.0)
         b_delta = tl.load(p_delta, mask=m_q, other=0.0)
+        b_delta = tl.where(i_v == 0, b_delta, 0.0)
         # [BC, BQ*G]
         b_s = tl.dot(b_k, tl.trans(b_q))
         b_p = exp(b_s - b_lse[None, :])
