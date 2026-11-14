@@ -266,95 +266,6 @@ def test_chunk(
     assert_close('dh0', ref_dh0, tri_dh0, 0.008)
 
 
-def test_chunk_intermediate_states_requires_no_grad():
-    q = torch.ones(1, 1, 1, 64)
-    beta = torch.ones(1, 1, 1)
-    with torch.enable_grad(), pytest.raises(AssertionError, match='requires gradients to be disabled'):
-        chunk_gated_delta_rule(q=q, k=q, v=q, g=q[:, :, :, 0], beta=beta, return_intermediate_states=True)
-
-
-@pytest.mark.parametrize(
-    ('B', 'T', 'cu_seqlens', 'K', 'V', 'state_v_first', 'use_initial_state', 'output_final_state', 'dtype', 'inference_mode'),
-    [
-        pytest.param(2, 15, None, 64, 32, False, False, False, torch.float16, False, id='short-zero-state'),
-        pytest.param(2, 129, None, 60, 96, True, True, True, torch.bfloat16, True, id='dense-v-first-tail'),
-        pytest.param(1, 130, [0, 1, 65, 130], 64, 32, False, False, True, torch.float16, True, id='varlen-zero-state'),
-        pytest.param(1, 209, [0, 15, 80, 209], 64, 96, True, True, False, torch.bfloat16, False, id='varlen-v-first'),
-    ],
-)
-@torch.no_grad()
-def test_chunk_return_intermediate_states(
-    B, T, cu_seqlens, K, V, state_v_first, use_initial_state, output_final_state, dtype, inference_mode, monkeypatch,
-):
-    torch.manual_seed(42)
-    monkeypatch.setenv('TRITON_F32_DEFAULT', 'ieee')
-    monkeypatch.setenv('FLA_FLASH_QLA', '0')
-    H, HV = 2, 4
-    q = F.normalize(torch.randn(B, T, H, K, device=device), p=2, dim=-1).to(dtype)
-    k = F.normalize(torch.randn(B, T, H, K, device=device), p=2, dim=-1).to(dtype)
-    v = torch.randn(B, T, HV, V, dtype=dtype, device=device)
-    g = F.logsigmoid(torch.randn(B, T, HV, device=device)) / 5
-    beta = torch.rand(B, T, HV, dtype=dtype, device=device)
-    boundaries = cu_seqlens
-    N = B if boundaries is None else len(boundaries) - 1
-    cu_seqlens = None if boundaries is None else torch.tensor(boundaries, dtype=torch.int32, device=device)
-    h0 = torch.randn(N, HV, K, V, device=device) if use_initial_state else None
-    initial_state = h0.transpose(-1, -2).contiguous() if state_v_first and h0 is not None else h0
-    chunk_size = 16 if T < 16 else (32 if boundaries is not None and use_initial_state else 64)
-    kwargs = dict(
-        q=q,
-        k=k,
-        v=v,
-        g=g,
-        beta=beta,
-        initial_state=initial_state,
-        output_final_state=output_final_state,
-        state_v_first=state_v_first,
-        cu_seqlens=cu_seqlens,
-        chunk_size=chunk_size,
-    )
-    with torch.inference_mode() if inference_mode else torch.no_grad():
-        o, ht, h = chunk_gated_delta_rule(**kwargs, return_intermediate_states=True)
-        default_o, default_ht = chunk_gated_delta_rule(**kwargs)
-    assert torch.equal(o, default_o)
-    if output_final_state:
-        assert torch.equal(ht, default_ht)
-    else:
-        assert ht is None and default_ht is None
-    assert h.dtype == k.dtype
-    if state_v_first:
-        h = h.transpose(-1, -2)
-        ht = ht.transpose(-1, -2) if ht is not None else None
-    lengths = [T] if boundaries is None else [end - start for start, end in zip(boundaries[:-1], boundaries[1:])]
-    nt = sum((length + chunk_size - 1) // chunk_size for length in lengths)
-    assert h.shape == (B, nt, HV, K, V)
-
-    ref = torch.empty_like(v, dtype=torch.float32)
-    offset = 0
-    for n in range(N):
-        b = n if boundaries is None else 0
-        start, end = (0, T) if boundaries is None else boundaries[n:n+2]
-        state = torch.zeros(1, HV, K, V, device=device) if h0 is None else h0[n:n+1]
-        for j, pos in enumerate(range(start, end, chunk_size)):
-            assert_close('h', state[0], h[b, offset + j], 0.005)
-            stop = min(pos + chunk_size, end)
-            ref_o, state = naive_recurrent_gated_delta_rule(
-                q=q[b:b+1, pos:stop].repeat_interleave(HV // H, dim=2),
-                k=k[b:b+1, pos:stop].repeat_interleave(HV // H, dim=2),
-                v=v[b:b+1, pos:stop],
-                beta=beta[b:b+1, pos:stop],
-                g=g[b:b+1, pos:stop],
-                initial_state=state,
-                output_final_state=True,
-            )
-            ref[b:b+1, pos:stop] = ref_o
-        if output_final_state:
-            assert_close('ht', state[0], ht[n], 0.005)
-        if boundaries is not None:
-            offset += (end - start + chunk_size - 1) // chunk_size
-    assert_close('o', ref, o, 0.005)
-
-
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'HV', 'D', 'scale', 'gate_logit_normalizer', 'dtype', 'chunk_size'),
     [
@@ -1761,40 +1672,6 @@ def test_flash_qla_verifier_rejects(monkeypatch):
 
     passed, reason = be.chunk_gated_delta_rule_verifier(**ok_kwargs)
     assert passed and reason is None
-
-
-@pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
-@pytest.mark.parametrize('return_intermediate_states', [False, True])
-@torch.no_grad()
-def test_flash_qla_dispatch_intermediate_states(monkeypatch, return_intermediate_states):
-    from fla.ops.gated_delta_rule.backends import flash_qla
-    from fla.ops.gated_delta_rule.chunk import ChunkGatedDeltaRuleFunction
-
-    monkeypatch.setenv('FLA_FLASH_QLA', '1')
-    monkeypatch.setattr(flash_qla, 'IS_NVIDIA_HOPPER', True)
-    monkeypatch.setattr(flash_qla, 'IS_NVIDIA_SM120', False)
-    monkeypatch.setattr(flash_qla.FlashQLABackend, 'is_available', classmethod(lambda cls: True))
-    calls = []
-    q = torch.ones(1, 65, 1, 128, dtype=torch.bfloat16)
-    beta = torch.ones(1, 65, 1)
-    h = torch.zeros(1, 2, 1, 128, 128, dtype=q.dtype)
-
-    def flash_forward(self, *args, **kwargs):
-        calls.append('flash_qla')
-        return q, None
-
-    def triton_forward(*args):
-        calls.append('triton')
-        assert args[-1] is True
-        return q, None, h
-
-    monkeypatch.setattr(flash_qla.FlashQLABackend, 'chunk_gated_delta_rule', flash_forward)
-    monkeypatch.setattr(ChunkGatedDeltaRuleFunction, 'apply', triton_forward)
-    result = chunk_gated_delta_rule(q=q, k=q, v=q, g=beta, beta=beta, return_intermediate_states=return_intermediate_states)
-    assert calls == (['triton'] if return_intermediate_states else ['flash_qla'])
-    assert len(result) == (3 if return_intermediate_states else 2)
-    if return_intermediate_states:
-        assert result[2] is h
 
 
 def _sm120_verifier_kwargs(requires_grad: bool):

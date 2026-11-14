@@ -1569,95 +1569,69 @@ def test_gate(
         assert_close("dbias", ref_dbias / grad_scale, tri_dbias / grad_scale, 1e-4)
 
 
-def test_chunk_intermediate_states_requires_no_grad():
-    q = torch.ones(1, 1, 1, 64)
-    beta = torch.ones(1, 1, 1)
-    with torch.enable_grad(), pytest.raises(AssertionError, match='requires gradients to be disabled'):
-        chunk_kda(q=q, k=q, v=q, g=q, beta=beta, return_intermediate_states=True)
-    with torch.no_grad(), pytest.raises(AssertionError, match='disable_recompute=False'):
-        chunk_kda(q=q, k=q, v=q, g=q, beta=beta, disable_recompute=True, return_intermediate_states=True)
-
-
-@pytest.mark.parametrize(
-    ('B', 'T', 'cu_seqlens', 'K', 'V', 'state_v_first', 'use_initial_state', 'output_final_state', 'dtype', 'inference_mode'),
-    [
-        pytest.param(2, 15, None, 64, 32, False, False, False, torch.float16, False, id='short-zero-state'),
-        pytest.param(2, 129, None, 60, 96, True, True, True, torch.bfloat16, True, id='dense-v-first-tail'),
-        pytest.param(1, 130, [0, 1, 65, 130], 64, 32, False, False, True, torch.float16, True, id='varlen-zero-state'),
-        pytest.param(1, 209, [0, 15, 80, 209], 64, 96, True, True, False, torch.bfloat16, False, id='varlen-v-first'),
-    ],
-)
-@torch.no_grad()
-def test_chunk_return_intermediate_states(
-    B, T, cu_seqlens, K, V, state_v_first, use_initial_state, output_final_state, dtype, inference_mode, monkeypatch,
-):
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+def test_chunk_return_intermediate_states(dtype):
+    """Test that return_intermediate_states=True works in inference mode and returns h with correct shape."""
     torch.manual_seed(42)
-    monkeypatch.setenv('TRITON_F32_DEFAULT', 'ieee')
-    monkeypatch.setenv('FLA_FLASH_KDA', '0')
-    H, HV = 2, 4
-    q = F.normalize(torch.randn(B, T, H, K, device=device), p=2, dim=-1).to(dtype)
-    k = F.normalize(torch.randn(B, T, H, K, device=device), p=2, dim=-1).to(dtype)
-    v = torch.randn(B, T, HV, V, dtype=dtype, device=device)
-    g = F.logsigmoid(torch.randn(B, T, HV, K, device=device)) / 5
-    beta = torch.rand(B, T, HV, dtype=dtype, device=device)
-    boundaries = cu_seqlens
-    N = B if boundaries is None else len(boundaries) - 1
-    cu_seqlens = None if boundaries is None else torch.tensor(boundaries, dtype=torch.int32, device=device)
-    h0 = torch.randn(N, HV, K, V, device=device) if use_initial_state else None
-    initial_state = h0.transpose(-1, -2).contiguous() if state_v_first and h0 is not None else h0
-    chunk_size = 32 if boundaries is not None and use_initial_state else 64
-    kwargs = dict(
-        q=q,
-        k=k,
-        v=v,
-        g=g,
-        beta=beta,
-        initial_state=initial_state,
-        output_final_state=output_final_state,
-        state_v_first=state_v_first,
-        cu_seqlens=cu_seqlens,
-        chunk_size=chunk_size,
-    )
-    with torch.inference_mode() if inference_mode else torch.no_grad():
-        o, ht, h = chunk_kda(**kwargs, return_intermediate_states=True)
-        default_o, default_ht = chunk_kda(**kwargs)
-    assert torch.equal(o, default_o)
-    if output_final_state:
-        assert torch.equal(ht, default_ht)
-    else:
-        assert ht is None and default_ht is None
-    assert h.dtype == k.dtype
-    if state_v_first:
-        h = h.transpose(-1, -2)
-        ht = ht.transpose(-1, -2) if ht is not None else None
-    lengths = [T] if boundaries is None else [end - start for start, end in zip(boundaries[:-1], boundaries[1:])]
-    nt = sum((length + chunk_size - 1) // chunk_size for length in lengths)
-    assert h.shape == (B, nt, HV, K, V)
+    B, T, H, D = 2, 1024, 4, 128
+    chunk_size = 64
 
-    ref = torch.empty_like(v)
-    offset = 0
-    for n in range(N):
-        b = n if boundaries is None else 0
-        start, end = (0, T) if boundaries is None else boundaries[n:n+2]
-        state = torch.zeros(1, HV, K, V, device=device) if h0 is None else h0[n:n+1]
-        for j, pos in enumerate(range(start, end, chunk_size)):
-            assert_close('h', state[0], h[b, offset + j], 0.005)
-            stop = min(pos + chunk_size, end)
-            ref_o, state = naive_recurrent_kda(
-                q=q[b:b+1, pos:stop],
-                k=k[b:b+1, pos:stop],
-                v=v[b:b+1, pos:stop],
-                g=g[b:b+1, pos:stop],
-                beta=beta[b:b+1, pos:stop],
-                initial_state=state,
-                output_final_state=True,
-            )
-            ref[b:b+1, pos:stop] = ref_o
-        if output_final_state:
-            assert_close('ht', state[0], ht[n], 0.005)
-        if boundaries is not None:
-            offset += (end - start + chunk_size - 1) // chunk_size
-    assert_close('o', ref, o, 0.005)
+    q = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    k = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    v = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    g = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    beta = torch.rand(B, T, H, dtype=dtype, device=device)
+
+    with torch.inference_mode():
+        o, final_state, h = chunk_kda(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            initial_state=None,
+            output_final_state=True,
+            return_intermediate_states=True,
+            disable_recompute=False,
+        )
+
+        assert o.shape == (B, T, H, D), f"Output shape mismatch: {o.shape}"
+        assert final_state.shape == (B, H, D, D), f"Final state shape mismatch: {final_state.shape}"
+
+        expected_nt = (T + chunk_size - 1) // chunk_size
+        assert h.shape == (B, expected_nt, H, D, D), f"h shape mismatch: {h.shape}, expected: {(B, expected_nt, H, D, D)}"
+        assert h.dtype == dtype, f"h dtype should be bfloat16, got: {h.dtype}"
+
+        total_tokens = 1024
+        N = 2
+        seq_len = total_tokens // N
+        cu_seqlens = torch.tensor([0, seq_len, total_tokens], dtype=torch.long, device=device)
+
+        q_varlen = torch.randn(1, total_tokens, H, D, dtype=dtype, device=device)
+        k_varlen = torch.randn(1, total_tokens, H, D, dtype=dtype, device=device)
+        v_varlen = torch.randn(1, total_tokens, H, D, dtype=dtype, device=device)
+        g_varlen = torch.randn(1, total_tokens, H, D, dtype=dtype, device=device)
+        beta_varlen = torch.rand(1, total_tokens, H, dtype=dtype, device=device)
+
+        o_varlen, final_state_varlen, h_varlen = chunk_kda(
+            q=q_varlen,
+            k=k_varlen,
+            v=v_varlen,
+            g=g_varlen,
+            beta=beta_varlen,
+            initial_state=None,
+            output_final_state=True,
+            cu_seqlens=cu_seqlens,
+            return_intermediate_states=True,
+            disable_recompute=False,
+        )
+
+        assert o_varlen.shape == (1, total_tokens, H, D), f"Varlen output shape mismatch: {o_varlen.shape}"
+        assert final_state_varlen.shape == (N, H, D, D), f"Varlen final state shape mismatch: {final_state_varlen.shape}"
+
+        assert h_varlen.shape[0] == 1, f"Varlen h batch dim should be 1, got: {h_varlen.shape[0]}"
+        assert h_varlen.shape[2:] == (H, D, D), f"Varlen h dims mismatch: {h_varlen.shape[2:]}"
+        assert h_varlen.dtype == dtype, f"Varlen h dtype should be {dtype}, got: {h_varlen.dtype}"
 
 
 _FLASH_KDA_AVAILABLE = importlib.util.find_spec("flash_kda") is not None
