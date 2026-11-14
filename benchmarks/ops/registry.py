@@ -756,6 +756,22 @@ register_op(OpConfig(
     category='hgrn',
 ))
 
+register_op(OpConfig(
+    name='chunk_lact',
+    import_path='fla.ops.lact',
+    inputs={
+        **_simple_qkv,
+        # fast weights of a SwiGLU network with a hidden size of D
+        'w0': TensorSpec(lambda B, T, H, D, **kw: (H, D, D), transform=lambda t: t / t.shape[-1] ** 0.5),
+        'w1': TensorSpec(lambda B, T, H, D, **kw: (H, D, D), transform=lambda t: t / t.shape[-1] ** 0.5),
+        'w2': TensorSpec(lambda B, T, H, D, **kw: (H, D, D), transform=lambda t: t / t.shape[-1] ** 0.5),
+        'lr': TensorSpec(lambda B, T, H, D, **kw: (B, T, H, 3), transform=lambda t: F.softplus(t - 6)),
+    },
+    extra_kwargs={'chunk_size': 512},
+    category='ttt',
+    test_file='tests/ops/test_lact.py',
+))
+
 # --- Generalized delta rule (DPLR) ---
 
 register_op(OpConfig(
