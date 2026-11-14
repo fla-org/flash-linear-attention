@@ -5,12 +5,14 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+from unittest.mock import Mock
+
 import pytest
 import torch
 import torch.nn.functional as F
 
 from fla.ops.gka import chunk_gka, fused_recurrent_gka, naive_recurrent_gka, naive_recurrent_gka_chebyshev
-from fla.utils import assert_close, device
+from fla.utils import IS_NPU, assert_close, device
 
 
 def tol(base: float, dtype: torch.dtype) -> float:
@@ -36,6 +38,7 @@ def make_inputs(B, T, H, K, V, gates, use_alpha, use_initial_state, dtype, N=Non
     return q, k, v, g, gk, alpha, initial_state
 
 
+@pytest.mark.parametrize('num_iter', [5, 30])
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'K', 'V', 'gates', 'use_alpha', 'use_initial_state', 'dtype'),
     [
@@ -64,17 +67,29 @@ def test_chunk_fwd(
     use_alpha: bool,
     use_initial_state: bool,
     dtype: torch.dtype,
+    num_iter: int,
+    monkeypatch,
 ):
     """`chunk_gka`'s outputs and final states must match `naive_recurrent_gka_chebyshev` at the same `num_iter`."""
+    if IS_NPU:
+        from fla.ops.gka.backends.triton_ascend import chunk_solve_fwd
+
+        solve_fwd = Mock(wraps=chunk_solve_fwd._run_chunk_solve)
+        monkeypatch.setattr(chunk_solve_fwd, '_run_chunk_solve', solve_fwd)
+
     torch.manual_seed(42)
     q, k, v, g, gk, alpha, initial_state = make_inputs(B, T, H, K, V, gates, use_alpha, use_initial_state, dtype)
 
     with torch.no_grad():
         tri, (tri_hkk, tri_hkv) = chunk_gka(
             q=q, k=k, v=v, g=g, gk=gk, alpha=alpha, initial_state=initial_state, output_final_state=True,
+            num_iter=num_iter,
         )
+        if IS_NPU:
+            solve_fwd.assert_called_once()
         ref, (ref_hkk, ref_hkv) = naive_recurrent_gka_chebyshev(
             q=q, k=k, v=v, g=g, gk=gk, alpha=alpha, initial_state=initial_state, output_final_state=True,
+            num_iter=num_iter,
         )
 
     # compare in float32: the RMS in `assert_close` overflows when taken in float16
@@ -103,8 +118,15 @@ def test_chunk_varlen_fwd(
     gates: str,
     cu_seqlens: list[int],
     dtype: torch.dtype,
+    monkeypatch,
 ):
     """Packed sequences must match `naive_recurrent_gka_chebyshev` run on each sequence separately."""
+    if IS_NPU:
+        from fla.ops.gka.backends.triton_ascend import chunk_solve_fwd
+
+        solve_fwd = Mock(wraps=chunk_solve_fwd._run_chunk_solve)
+        monkeypatch.setattr(chunk_solve_fwd, '_run_chunk_solve', solve_fwd)
+
     torch.manual_seed(42)
     T, N = cu_seqlens[-1], len(cu_seqlens) - 1
     q, k, v, g, gk, alpha, initial_state = make_inputs(1, T, H, K, K, gates, True, True, dtype, N=N)
@@ -115,6 +137,8 @@ def test_chunk_varlen_fwd(
             q=q, k=k, v=v, g=g, gk=gk, alpha=alpha, initial_state=initial_state, output_final_state=True,
             cu_seqlens=cu_seqlens,
         )
+        if IS_NPU:
+            solve_fwd.assert_called_once()
         refs, ref_hkks, ref_hkvs = [], [], []
         for i in range(N):
             bos, eos = cu_seqlens[i].item(), cu_seqlens[i + 1].item()
@@ -326,6 +350,7 @@ def test_chunk_state_chaining(
         ]
     ],
 )
+@pytest.mark.skipif(IS_NPU, reason='Ascend dispatch uses the same implementation for split and fused')
 def test_chunk_bwd_split_matches_fused(
     B: int,
     T: int,
@@ -357,6 +382,40 @@ def test_chunk_bwd_split_matches_fused(
             assert_close(name, ref, tri, 1e-5)
 
 
+@pytest.mark.skipif(not IS_NPU, reason='Ascend dispatch requires NPU')
+@pytest.mark.parametrize(
+    ('K', 'gates'),
+    [
+        pytest.param(60, 'tied', id='K60-tied'),
+        pytest.param(64, 'tied', id='K64-tied'),
+        pytest.param(65, 'tied', id='K65-tied'),
+        pytest.param(128, 'tied', id='K128-tied'),
+        pytest.param(128, 'none', id='K128-none'),
+    ],
+)
+def test_ascend_chunk_bwd_against_naive(K, gates, monkeypatch):
+    """Check chunk GKA states and gradients on NPU against the naive reference."""
+    from fla.ops.gka.backends.triton_ascend import chunk_solve_bwd
+
+    solve_bwd = Mock(wraps=chunk_solve_bwd.chunk_gka_solve_bwd_npu)
+    monkeypatch.setattr(chunk_solve_bwd, 'chunk_gka_solve_bwd_npu', solve_bwd)
+
+    torch.manual_seed(42)
+    B, T, H = 1, 65, 1
+    inputs = make_inputs(B, T, H, K, K, gates, True, True, torch.float)
+    do = torch.randn(B, T, H, K, device=device)
+    dht = _random_dht(B, H, K, K)
+    _, (tri_hkk, tri_hkv), tri = _grads(chunk_gka, *inputs, do, dht)
+    solve_bwd.assert_called_once()
+    _, (ref_hkk, ref_hkv), ref = _grads(naive_recurrent_gka, *inputs, do, dht)
+
+    assert_close('h_kk_final', ref_hkk, tri_hkk, 0.005)
+    assert_close('h_kv_final', ref_hkv, tri_hkv, 0.005)
+    assert ref.keys() == tri.keys()
+    for name in ref:
+        assert_close(name, ref[name].float(), tri[name].float(), 0.02 if name in ('dg', 'dgk', 'dh0_kk') else 0.01)
+
+
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'K', 'V', 'gates', 'use_alpha', 'use_initial_state', 'dtype'),
     [
@@ -382,14 +441,23 @@ def test_fused_recurrent(
     use_alpha: bool,
     use_initial_state: bool,
     dtype: torch.dtype,
+    monkeypatch,
 ):
     """`fused_recurrent_gka`'s outputs and final states must match `naive_recurrent_gka_chebyshev` at the same `num_iter`."""
+    if IS_NPU:
+        from fla.ops.gka.backends.triton_ascend import fused_recurrent
+
+        fused_solve = Mock(wraps=fused_recurrent._run_fused_solve)
+        monkeypatch.setattr(fused_recurrent, '_run_fused_solve', fused_solve)
+
     torch.manual_seed(42)
     q, k, v, g, gk, alpha, initial_state = make_inputs(B, T, H, K, V, gates, use_alpha, use_initial_state, dtype)
 
     tri, (tri_hkk, tri_hkv) = fused_recurrent_gka(
         q=q, k=k, v=v, g=g, gk=gk, alpha=alpha, initial_state=initial_state, output_final_state=True,
     )
+    if IS_NPU:
+        fused_solve.assert_called_once()
     ref, (ref_hkk, ref_hkv) = naive_recurrent_gka_chebyshev(
         q=q, k=k, v=v, g=g, gk=gk, alpha=alpha, initial_state=initial_state, output_final_state=True,
     )
@@ -418,8 +486,15 @@ def test_fused_recurrent_varlen(
     gates: str,
     cu_seqlens: list[int],
     dtype: torch.dtype,
+    monkeypatch,
 ):
     """Packed sequences must match `naive_recurrent_gka_chebyshev` run on each sequence separately."""
+    if IS_NPU:
+        from fla.ops.gka.backends.triton_ascend import fused_recurrent
+
+        fused_solve = Mock(wraps=fused_recurrent._run_fused_solve)
+        monkeypatch.setattr(fused_recurrent, '_run_fused_solve', fused_solve)
+
     torch.manual_seed(42)
     T, N = cu_seqlens[-1], len(cu_seqlens) - 1
     q, k, v, g, gk, alpha, initial_state = make_inputs(1, T, H, K, K, gates, True, True, dtype, N=N)
@@ -428,6 +503,8 @@ def test_fused_recurrent_varlen(
         q=q, k=k, v=v, g=g, gk=gk, alpha=alpha, initial_state=initial_state, output_final_state=True,
         cu_seqlens=torch.tensor(cu_seqlens, dtype=torch.long, device=device),
     )
+    if IS_NPU:
+        fused_solve.assert_called_once()
     refs, ref_hkks, ref_hkvs = [], [], []
     for i in range(N):
         bos, eos = cu_seqlens[i], cu_seqlens[i + 1]

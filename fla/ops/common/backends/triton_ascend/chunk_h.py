@@ -7,8 +7,9 @@
 
 """GLA state kernels for Ascend NPU.
 
-Ascend requires host-specialized `NT` with `tl.static_range(NT)`;
-a dynamic loop under-iterates when `T` is unspecialized.
+The host specializes the loop bound `NT`; the non-unrolled loop avoids
+generating code proportional to the number of chunks. A loop bounded by
+unspecialized `T` can under-iterate on Ascend.
 The host wrappers split packed variable-length inputs into individual sequences.
 """
 
@@ -96,7 +97,7 @@ def chunk_h_fwd_kernel(
             p_h0 = h0 + h0_base + o_k[:, None].to(tl.int64) * V + o_v[None, :]
             b_h = tl.load(p_h0, mask=(o_k[:, None] < K) & (o_v[None, :] < V), other=0.0).to(tl.float32)
 
-    for i_t in tl.static_range(NT):
+    for i_t in tl.range(0, NT, loop_unroll_factor=1):
         i_s = i_t // NTS
         o_t = (i_t * BT + tl.arange(0, BT)).to(tl.int64)
         m_t = o_t < T
@@ -222,7 +223,7 @@ def chunk_h_bwd_kernel(
             p_dht = dht + dht_base + o_k[:, None].to(tl.int64) * V + o_v[None, :]
             b_dh += tl.load(p_dht, mask=(o_k[:, None] < K) & (o_v[None, :] < V), other=0.0).to(tl.float32)
 
-    for step in tl.static_range(NT):
+    for step in tl.range(0, NT, loop_unroll_factor=1):
         i_t = NT - 1 - step
         i_s = i_t // (BS // BT)
         o_dh = ((boh + i_s) * H + i_h) * K * V
