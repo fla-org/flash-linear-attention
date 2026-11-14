@@ -5,12 +5,13 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+import inspect
 from types import SimpleNamespace
 
 import pytest
 import torch
 
-from fla.ops.cp import context
+from fla.ops.cp import chunk_delta_h, context
 from fla.ops.cp.context import build_cp_context, get_cp_cu_seqlens
 
 
@@ -98,3 +99,47 @@ def test_device_requirement(is_nvidia, is_npu, device_name, capability, supporte
         with pytest.raises(RuntimeError, match='compute capability >= 8.0'):
             context._check_cp_device(device)
     assert checked_devices == ([1] if is_nvidia else [])
+
+
+@pytest.mark.parametrize('operation', ['forward', 'backward', 'compress', 'expand'])
+def test_zigzag_graph_requires_npu(operation, monkeypatch):
+    monkeypatch.setattr(chunk_delta_h, 'IS_NPU', False)
+    monkeypatch.setattr(chunk_delta_h, '_check_cp_device', lambda device: None)
+    monkeypatch.setattr(chunk_delta_h.dist, 'get_rank', lambda group: 0)
+    cu = torch.tensor([0, 1, 2, 3, 4])
+    cp_context = SimpleNamespace(
+        group=object(),
+        layout='zigzag',
+        front_num_seqs=2,
+        cu_seqlens=cu,
+        pre_num_ranks_dev=torch.zeros(2, dtype=torch.int32),
+        post_num_ranks_dev=torch.zeros(2, dtype=torch.int32),
+    )
+    x = torch.empty(1, 4, 1, 16)
+    with pytest.raises(NotImplementedError, match='zigzag CP graph.*Ascend NPU'):
+        if operation == 'forward':
+            inspect.unwrap(chunk_delta_h.chunk_gated_delta_rule_fwd_h_pre_process)(
+                k=x, w=x, u=x, cu_seqlens=cu, context=cp_context, use_graph=True,
+            )
+        elif operation == 'backward':
+            inspect.unwrap(chunk_delta_h.chunk_gated_delta_rule_bwd_dhu_pre_process)(
+                q=x, k=x, w=x, do=x, dv=x, cu_seqlens=cu, context=cp_context, use_graph=True,
+            )
+        elif operation == 'compress':
+            chunk_delta_h.compress_h0(torch.empty(4, 1, 16, 16), context=cp_context, use_graph=True)
+        else:
+            chunk_delta_h.expand_h0(torch.empty(2, 1, 16, 16), context=cp_context, use_graph=True)
+
+
+@pytest.mark.parametrize(('layout', 'use_graph'), [('contiguous', False), ('contiguous', True), ('zigzag', False)])
+def test_state_compression_non_npu(layout, use_graph, monkeypatch):
+    monkeypatch.setattr(chunk_delta_h, 'IS_NPU', False)
+    cp_context = SimpleNamespace(layout=layout, front_num_seqs=2, cu_seqlens=torch.tensor([0, 1, 2, 3, 4]))
+    state = torch.arange(4).view(4, 1, 1, 1)
+    indices = [0] if layout == 'contiguous' else [0, 2]
+    compressed = chunk_delta_h.compress_h0(state, context=cp_context, use_graph=use_graph)
+    torch.testing.assert_close(compressed, state[indices])
+    expanded = chunk_delta_h.expand_h0(compressed, context=cp_context, use_graph=use_graph)
+    expected = torch.zeros_like(state)
+    expected[indices] = state[indices]
+    torch.testing.assert_close(expanded, expected)

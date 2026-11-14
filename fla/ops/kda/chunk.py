@@ -310,7 +310,8 @@ def chunk_kda(
             consistent with the FlashAttention API. Default: `None`.
         cu_seqlens_cpu (torch.LongTensor, Optional):
             Cumulative sequence lengths of shape ``[N+1]`` used for variable-length training,
-            consistent with the FlashAttention API. Default: `None`.
+            consistent with the FlashAttention API. Ignored in Ascend graph mode because device boundaries may change
+            between replays. Default: `None`.
         cp_context (FLACPContext, Optional):
             Context parallel context for distributed training across multiple devices.
             When provided, ``initial_state`` and ``output_final_state`` are not supported,
@@ -334,11 +335,12 @@ def chunk_kda(
             - Persistent int32 device tensors ``cp_context.pre_num_ranks_dev`` and ``post_num_ranks_dev``,
               refreshed in place before each replay.
               Contiguous layouts use one value; zigzag layouts use shape ``[2]`` in front/back order.
-            - Zigzag inputs pack equally sized front/back parts before unused token padding,
+            - On Ascend, zigzag inputs pack equally sized front/back parts before unused token padding,
               and local ``cu_seqlens`` must retain the boundary between these parts.
               The sequence capacity must account for both local parts.
 
-            Ascend requires flattened variable-length inputs. Context-parallel graphs support contiguous and zigzag layouts;
+            CUDA context-parallel graphs support contiguous layouts only.
+            Ascend requires flattened variable-length inputs and supports contiguous and zigzag context-parallel graphs;
             the process group, local token capacity, and sequence capacity must remain fixed.
             For Ascend CP graphed callables, synchronize forward/backward warmup and release its autograd graphs,
             then capture with ``torch.npu.make_graphed_callables(..., num_warmup_iters=0)``. Default: ``False``.
@@ -465,6 +467,10 @@ def chunk_kda(
         cu_seqlens = cp_context.cu_seqlens
         if cp_context.cu_seqlens_cpu is not None:
             cu_seqlens_cpu = cp_context.cu_seqlens_cpu
+
+    if use_graph and IS_NPU:
+        # replay may change device boundaries without refreshing the CPU snapshot.
+        cu_seqlens_cpu = None
 
     if cu_seqlens is not None:
         if q.shape[0] != 1:

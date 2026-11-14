@@ -40,12 +40,13 @@ def _cached_cu_seqlens_cpu(cu_seqlens, version):
 
 
 def _recurrence_cu_seqlens_cpu(cu_seqlens, cu_seqlens_cpu):
+    if cu_seqlens is not None and cu_seqlens.device.type != 'cpu' and torch.npu.is_current_stream_capturing():
+        # CPU hints cannot prove that future replay lengths remain aligned.
+        return None
     if cu_seqlens_cpu is not None or cu_seqlens is None:
         return cu_seqlens_cpu
     if cu_seqlens.device.type == 'cpu':
         return cu_seqlens
-    if torch.npu.is_current_stream_capturing():
-        return None
     # include the version so eager in-place length updates cannot reuse stale bounds.
     if cu_seqlens.is_inference():
         return cu_seqlens.cpu()

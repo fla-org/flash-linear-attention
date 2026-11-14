@@ -16,7 +16,9 @@ NPU eager-parity and global-reference checks use separate tests; the latter
 also exposes existing backend precision discrepancies against the recurrent oracle.
 """
 
+import inspect
 import logging
+from importlib import import_module
 
 import pytest
 import torch
@@ -654,3 +656,97 @@ def test_chunk_kda_single_rank(single_rank_group, monkeypatch):
         ref = _eager_cp(inputs, sequence_offsets, gate)
         for name, r, g in zip(names_out, ref, got):
             assert_close(f"cp_world1::{tag}::{name}", r, g, 2e-3)
+
+
+@pytest.mark.skipif(not IS_NPU, reason='requires Ascend NPU graphs')
+@pytest.mark.parametrize(
+    ('chunk_size', 'state_v_first', 'training'),
+    [
+        pytest.param(64, False, False, id='bt64-k-first-forward-tail'),
+        pytest.param(64, False, True, id='bt64-k-first-backward-tail'),
+        pytest.param(64, True, True, id='bt64-v-first-state-layout'),
+        pytest.param(32, True, True, id='bt32-v-first-multi-chunk-tail'),
+    ],
+)
+def test_chunk_kda_graph_cpu_snapshot(single_rank_group, monkeypatch, chunk_size, state_v_first, training):
+    """Replay changing sequence boundaries without stale CPU bounds or out-of-range writes."""
+    recurrence = import_module('fla.ops.common.backends.triton_ascend.chunk_delta_h')
+    torch.manual_seed(42)
+    tokens, width = 128, 64
+    q = torch.randn(1, tokens, 1, width, device=device, dtype=torch.float16)
+    k = F.normalize(torch.randn_like(q).float(), dim=-1).to(q.dtype)
+    inputs = [q, k, torch.randn_like(q), torch.full_like(q, -0.01, dtype=torch.float32)]
+    inputs.append(torch.full((1, tokens, 1), 0.5, device=device, dtype=q.dtype))
+    leaves = [x.detach().requires_grad_(training) for x in inputs]
+    do = torch.randn_like(q)
+    cpu = torch.tensor([0, 64, tokens], dtype=torch.long)
+    cu = cpu.to(device)
+    context = build_cp_context(cu, group=dist.group.WORLD)
+    cu = context.cu_seqlens
+    context.pre_num_ranks_dev = torch.zeros(1, device=device, dtype=torch.int32)
+    context.post_num_ranks_dev = torch.zeros(1, device=device, dtype=torch.int32)
+    cpu_snapshot = context.cu_seqlens_cpu
+    original_snapshot = cpu_snapshot.clone()
+    options = dict(chunk_size=chunk_size, state_v_first=state_v_first)
+    guards = []
+    empty_like = torch.empty_like
+
+    def guarded_empty_like(x, *args, **kwargs):
+        frame = inspect.currentframe().f_back
+        caller = frame.f_code.co_name
+        guarded = (frame.f_globals.get('__name__') == recurrence.__name__ and x.shape == q.shape
+                   and caller in ('chunk_gated_delta_rule_fwd_h_npu', 'chunk_gated_delta_rule_bwd_dhu_npu'))
+        del frame
+        if not guarded:
+            return empty_like(x, *args, **kwargs)
+        storage = torch.full((1, tokens + 2 * chunk_size, 1, width), -123., device=device, dtype=x.dtype)
+        storage[:, chunk_size:chunk_size + tokens].fill_(float('nan'))
+        guards.append((caller, storage))
+        return storage[:, chunk_size:chunk_size + tokens]
+
+    def step():
+        for x in leaves:
+            if x.grad is not None:
+                x.grad.zero_()
+        o, _ = chunk_kda(
+            *leaves,
+            cp_context=context,
+            use_graph=True,
+            max_num_seqs=2,
+            **options,
+        )
+        if training:
+            (o * do).sum().backward()
+        return o
+
+    with monkeypatch.context() as patch:
+        patch.setattr(torch, 'empty_like', guarded_empty_like)
+        for _ in range(3):
+            step()
+        graph = torch.npu.NPUGraph()
+        with torch.npu.graph(graph):
+            output = step()
+    guarded_callers = {caller for caller, _ in guards}
+    assert 'chunk_gated_delta_rule_fwd_h_npu' in guarded_callers
+    if training:
+        assert 'chunk_gated_delta_rule_bwd_dhu_npu' in guarded_callers
+
+    for offsets in ([0, 64, tokens], [0, 65, tokens], [0, tokens, tokens], [0, 64, tokens]):
+        cu.copy_(torch.tensor(offsets, device=device))
+        graph.replay()
+        torch.npu.synchronize()
+        for _, storage in guards:
+            assert (storage[:, :chunk_size] == -123).all(), 'write before recurrence buffer'
+            assert (storage[:, chunk_size + tokens:] == -123).all(), 'write after recurrence buffer'
+        ref_inputs = [x.detach().clone().requires_grad_(training) for x in inputs]
+        ref_context = build_cp_context(cu.clone(), group=dist.group.WORLD)
+        ref, _ = chunk_kda(*ref_inputs, cp_context=ref_context, **options)
+        if training:
+            (ref * do).sum().backward()
+        actual = [output] + ([x.grad for x in leaves] if training else [])
+        expected = [ref] + ([x.grad for x in ref_inputs] if training else [])
+        for name, r, g in zip(OUTPUT_NAMES, expected, actual):
+            assert torch.isfinite(g).all(), name
+            assert_close(f'cpu_snapshot::{offsets}::{name}', r.float(), g.float(), ratio=2e-3)
+        assert context.cu_seqlens_cpu is cpu_snapshot
+        torch.testing.assert_close(cpu_snapshot, original_snapshot, rtol=0, atol=0)

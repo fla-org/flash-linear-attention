@@ -18,12 +18,15 @@ from fla.ops.cp.chunk_fwd import chunk_cp_fwd_h
 from fla.ops.cp.chunk_merge import chunk_cp_merge
 from fla.ops.cp.comm import all_gather_into_tensor
 from fla.ops.cp.context import _check_cp_device
+from fla.utils import IS_NPU
 
 if TYPE_CHECKING:
     from fla.ops.cp.context import FLACPContext
 
 
 def _zigzag_graph_seq_indices(cu_seqlens: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    if not IS_NPU:
+        raise NotImplementedError('zigzag CP graph replay is currently supported only on Ascend NPU.')
     # each part has equal token length; the split is also a local sequence boundary.
     front_num_seqs = (cu_seqlens[:-1] < cu_seqlens[-1] // 2).sum()
     num_seqs = (cu_seqlens[1:] > cu_seqlens[:-1]).sum()
