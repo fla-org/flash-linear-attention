@@ -130,6 +130,7 @@
 | 2026 | CyFA                          | [CyFA: Linear Sequence Modeling with Relative-Time-Partitioned Memory](https://arxiv.org/abs/2609.36259)                                      | [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/models/cyfa)                    |
 | 2026 | Gated Slot Attention 2        | [Gated Slot Attention-2: Two-Sided Associative Memory Correction in Linear Attention](https://arxiv.org/abs/2610.02816)                       | [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/models/gsa2)                    |
 | 2026 | MemoryAttention               | [Memory Attention](https://arxiv.org/abs/2609.28399)                                                                                         | [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/models/memory_attn)             |
+| 2026 | SwiLA                         | [Switching Linear Attention](https://arxiv.org/abs/2609.39034)                                                                              | [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/models/swila)                  |
 
 ## Installation
 
@@ -152,6 +153,8 @@ See [INSTALL.md](INSTALL.md) for the full backend table, XPU / NPU (Ascend) / CP
 > Choose a backend extra to install the appropriate `torch` and `triton` dependencies. Bare `pip install flash-linear-attention` does not install them.
 
 ## Usage
+
+For SwiLA's four recurrent variants, MI objective and Hugging Face models on NVIDIA CUDA, see the [SwiLA usage guide](fla/models/swila/README.md).
 
 ### Token Mixing
 
