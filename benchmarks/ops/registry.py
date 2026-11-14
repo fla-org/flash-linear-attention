@@ -678,6 +678,18 @@ register_op(OpConfig(
 ))
 
 register_op(OpConfig(
+    name='chunk_block_causal_linear_attn',
+    import_path='fla.ops.block_causal_linear_attn',
+    inputs={
+        **_simple_qkv,
+        'g': TensorSpec(shape_BTH, transform=logsigmoid),
+    },
+    extra_kwargs={'block_size': 256},
+    category='head_gate',
+    test_file='tests/ops/test_block_causal_linear_attn.py',
+))
+
+register_op(OpConfig(
     name='chunk_gka',
     import_path='fla.ops.gka',
     inputs={
