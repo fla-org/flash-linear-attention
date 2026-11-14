@@ -338,8 +338,8 @@ def test_chunk_return_intermediate_states(
                 q=q[b:b+1, pos:stop].repeat_interleave(HV // H, dim=2),
                 k=k[b:b+1, pos:stop].repeat_interleave(HV // H, dim=2),
                 v=v[b:b+1, pos:stop],
-                g=g[b:b+1, pos:stop],
                 beta=beta[b:b+1, pos:stop],
+                g=g[b:b+1, pos:stop],
                 initial_state=state,
                 output_final_state=True,
             )

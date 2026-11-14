@@ -1408,10 +1408,10 @@ class ChunkGLAFunction(torch.autograd.Function):
             scale=scale,
             initial_state=initial_state,
             output_final_state=output_final_state,
+            state_v_first=state_v_first,
             cu_seqlens=cu_seqlens,
             chunk_size=chunk_size,
             chunk_indices=chunk_indices,
-            state_v_first=state_v_first,
         )
         if return_intermediate_states:
             return o, ht, h
@@ -1439,15 +1439,15 @@ class ChunkGLAFunction(torch.autograd.Function):
             g=g,
             g_cumsum=g_cumsum,
             scale=scale,
+            initial_state=initial_state,
             h=None,
             A=A,
-            initial_state=initial_state,
             do=do,
             dht=dht,
+            state_v_first=ctx.state_v_first,
             cu_seqlens=cu_seqlens,
             chunk_size=chunk_size,
             chunk_indices=chunk_indices,
-            state_v_first=ctx.state_v_first,
         )
         return dq.to(q), dk.to(k), dv.to(v), dg, None, dh0, None, None, None, None, None
 
