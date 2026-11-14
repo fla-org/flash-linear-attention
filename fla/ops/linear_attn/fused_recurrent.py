@@ -7,10 +7,12 @@
 
 import torch
 
+from fla.backends import dispatch
 from fla.ops.linear_attn.utils import normalize_with_z_state
 from fla.ops.simple_gla.fused_recurrent import fused_recurrent_simple_gla
 
 
+@dispatch('linear_attn')
 def fused_recurrent_linear_attn(
     q: torch.Tensor,
     k: torch.Tensor,
