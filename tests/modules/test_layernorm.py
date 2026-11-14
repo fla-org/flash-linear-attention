@@ -114,6 +114,59 @@ def test_rmsnorm(B: int, H: int, T: int, D: int):
     assert_close('dw', ref_dw, tri_dw, 1e-3)
 
 
+
+def zero_centered_rms_norm_ref(x, weight, eps):
+    """The zero-centered RMSNorm of Gemma3 and Qwen3.5 in transformers."""
+    output = x.float()
+    output = output * torch.rsqrt(output.pow(2).mean(-1, keepdim=True) + eps)
+    output = output * (1.0 + weight.float())
+    return output.type_as(x)
+
+
+@pytest.mark.parametrize(
+    ('T', 'D', 'prenorm', 'dtype'),
+    [
+        pytest.param(*test, id="T{}-D{}-prenorm{}-{}".format(*test))
+        for test in [
+            (512, 64, False, torch.float),
+            (300, 50, True, torch.float),
+            (512, 128, False, torch.bfloat16),
+            (512, 128, True, torch.bfloat16),
+        ]
+    ],
+)
+def test_rmsnorm_zero_centered(T: int, D: int, prenorm: bool, dtype: torch.dtype):
+    torch.manual_seed(42)
+    tri = RMSNorm(D, eps=1e-6, zero_centered_weight=True).to(device=device, dtype=dtype)
+    assert (tri.weight == 0).all()
+    nn.init.normal_(tri.weight, std=0.1)
+    weight = tri.weight.detach().clone().requires_grad_(True)
+    x = torch.randn(2, T, D, device=device, dtype=dtype).requires_grad_(True)
+    residual = torch.randn(2, T, D, device=device, dtype=dtype).requires_grad_(True) if prenorm else None
+    do = torch.randn(2, T, D, device=device, dtype=dtype)
+
+    h = x + residual if prenorm else x
+    ref = zero_centered_rms_norm_ref(h, weight, 1e-6)
+    (ref * do).sum().backward()
+    ref_dx, ref_dw = x.grad, weight.grad
+    ref_dr = residual.grad if prenorm else None
+    x.grad = None
+    tol = 1e-3 if dtype == torch.float else 5e-3
+    if prenorm:
+        residual.grad = None
+        tri_y, tri_h = tri(x, residual, prenorm=True)
+        assert_close(' h', h, tri_h, tol)
+    else:
+        tri_y = tri(x)
+    (tri_y * do).sum().backward()
+
+    assert_close(' y', ref, tri_y, tol)
+    assert_close('dx', ref_dx, x.grad, tol)
+    assert_close('dw', ref_dw, tri.weight.grad, tol)
+    if prenorm:
+        assert_close('dr', ref_dr, residual.grad, tol)
+    assert tri.weight.grad.dtype == dtype
+
 @pytest.mark.parametrize("N", [1, 16, 128])
 @pytest.mark.parametrize("D", [50, 64, 128])
 def test_layernorm_linear(N: int, D: int):
