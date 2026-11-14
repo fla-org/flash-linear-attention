@@ -44,6 +44,7 @@ from .precond_gated_deltanet import PrecondGatedDeltaNet
 from .precond_kda import PrecondKDA
 from .raven import Raven
 from .rebased import ReBasedLinearAttention
+from .rglru import RGLRU
 from .rodimus import RodimusAttention, SlidingWindowSharedKeyAttention
 from .rwkv6 import RWKV6Attention
 from .rwkv7 import RWKV7Attention
@@ -52,6 +53,7 @@ from .wall_attn import WallAttention
 from .yoco import YOCOCrossAttention, YOCOGatedRetention, YOCOSharedKVBuilder
 
 __all__ = [
+    'RGLRU',
     'ABCAttention',
     'Attention',
     'BasedLinearAttention',
