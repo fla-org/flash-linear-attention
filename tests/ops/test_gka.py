@@ -5,12 +5,14 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+from unittest.mock import Mock
+
 import pytest
 import torch
 import torch.nn.functional as F
 
 from fla.ops.gka import chunk_gka, fused_recurrent_gka, naive_recurrent_gka, naive_recurrent_gka_chebyshev
-from fla.utils import assert_close, device
+from fla.utils import IS_NPU, assert_close, device
 
 
 def tol(base: float, dtype: torch.dtype) -> float:
@@ -326,6 +328,7 @@ def test_chunk_state_chaining(
         ]
     ],
 )
+@pytest.mark.skipif(IS_NPU, reason='Ascend dispatch uses the same implementation for split and fused')
 def test_chunk_bwd_split_matches_fused(
     B: int,
     T: int,
@@ -355,6 +358,40 @@ def test_chunk_bwd_split_matches_fused(
             assert tri is None
         else:
             assert_close(name, ref, tri, 1e-5)
+
+
+@pytest.mark.skipif(not IS_NPU, reason='Ascend dispatch requires NPU')
+@pytest.mark.parametrize(
+    ('K', 'gates'),
+    [
+        pytest.param(60, 'tied', id='K60-tied'),
+        pytest.param(64, 'tied', id='K64-tied'),
+        pytest.param(65, 'tied', id='K65-tied'),
+        pytest.param(128, 'tied', id='K128-tied'),
+        pytest.param(128, 'none', id='K128-none'),
+    ],
+)
+def test_ascend_chunk_bwd_against_naive(K, gates, monkeypatch):
+    """Check chunk GKA states and gradients on NPU against the naive reference."""
+    from fla.ops.gka.backends.triton_ascend import chunk_solve_bwd
+
+    solve_bwd = Mock(wraps=chunk_solve_bwd.chunk_gka_solve_bwd_npu)
+    monkeypatch.setattr(chunk_solve_bwd, 'chunk_gka_solve_bwd_npu', solve_bwd)
+
+    torch.manual_seed(42)
+    B, T, H = 1, 65, 1
+    inputs = make_inputs(B, T, H, K, K, gates, True, True, torch.float)
+    do = torch.randn(B, T, H, K, device=device)
+    dht = _random_dht(B, H, K, K)
+    _, (tri_hkk, tri_hkv), tri = _grads(chunk_gka, *inputs, do, dht)
+    solve_bwd.assert_called_once()
+    _, (ref_hkk, ref_hkv), ref = _grads(naive_recurrent_gka, *inputs, do, dht)
+
+    assert_close('h_kk_final', ref_hkk, tri_hkk, 0.005)
+    assert_close('h_kv_final', ref_hkv, tri_hkv, 0.005)
+    assert ref.keys() == tri.keys()
+    for name in ref:
+        assert_close(name, ref[name].float(), tri[name].float(), 0.02 if name in ('dg', 'dgk', 'dh0_kk') else 0.01)
 
 
 @pytest.mark.parametrize(
