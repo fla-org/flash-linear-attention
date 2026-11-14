@@ -1150,3 +1150,31 @@ register_op(OpConfig(
     category='nsa',
     test_file='tests/ops/test_nsa.py',
 ))
+
+
+def _v4_post_init(inputs, B, T, H, D, **kw):
+    """CSA of DeepSeek-V4: one entry per 4 tokens, each query selecting 512 of the entries it can see."""
+    N = T // 4
+    x = inputs['q']
+    inputs['compressed_kv'] = torch.randn(B, N, D, device=x.device, dtype=x.dtype).requires_grad_()
+    visible = (torch.arange(T, device=x.device) + 1) // 4
+    scores = torch.rand(B, T, N, device=x.device).masked_fill(torch.arange(N, device=x.device) >= visible[:, None], -1.)
+    values, indices = scores.topk(min(512, N), dim=-1)
+    inputs['indices'] = indices.masked_fill(values < 0, -1)
+
+
+register_op(OpConfig(
+    name='parallel_v4_attention',
+    import_path='fla.ops.deepseek_v4',
+    inputs={
+        'q': TensorSpec(shape_BTHD),
+        # keys and values share one head, as in DeepSeek-V4
+        'kv': TensorSpec(lambda B, T, H, D, **kw: (B, T, D)),
+        'sinks': TensorSpec(shape_H),
+    },
+    extra_kwargs={'window_size': 128, 'compress_rate': 4},
+    post_init=_v4_post_init,
+    output_is_tuple=False,
+    category='nsa',
+    test_file='tests/ops/test_deepseek_v4.py',
+))
