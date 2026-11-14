@@ -228,6 +228,36 @@ def test_fused_recurrent_output_buffer(packed, supplied_output, state_v_first):
     assert_close('ht', torch.cat(expected_states), state.transpose(-1, -2) if state_v_first else state, 0.005)
 
 
+@pytest.mark.parametrize(
+    ('packed', 'layout'),
+    [
+        pytest.param(False, 'row', id='dense-padded-row'),
+        pytest.param(False, 'column', id='dense-strided-column'),
+        pytest.param(True, 'row', id='packed-padded-row'),
+        pytest.param(True, 'column', id='packed-strided-column'),
+    ],
+)
+def test_fused_recurrent_rejects_strided_output(packed, layout):
+    B, T, H, HV, K, V = (1, 5, 2, 4, 32, 24) if packed else (2, 3, 2, 4, 32, 24)
+    q, k = [torch.randn(B, T, H, K, device=device) for _ in range(2)]
+    v = torch.randn(B, T, HV, V, device=device)
+    g = F.logsigmoid(torch.randn(B, T, HV, K, device=device))
+    beta = torch.rand(B, T, HV, device=device)
+    state = torch.randn(2, HV, K, V, device=device)
+    original_state = state.clone()
+    backing = torch.full((B, T, HV, V * 2), -123.0, device=device)
+    out = backing[..., :V] if layout == 'row' else backing[..., ::2]
+    cu_seqlens = torch.tensor([0, 2, 5], device=device, dtype=torch.int32) if packed else None
+
+    with pytest.raises(ValueError, match='`out` must be contiguous'):
+        fused_recurrent_kda_fwd(
+            q=q, k=k, v=v, g=g, beta=beta, initial_state=state,
+            inplace_final_state=True, cu_seqlens=cu_seqlens, out=out,
+        )
+    assert torch.all(backing == -123.0)
+    assert torch.equal(state, original_state)
+
+
 @pytest.mark.parametrize('state_v_first', [False, True], ids=['kv', 'vk'])
 def test_fused_recurrent_empty_varlen_state(state_v_first):
     torch.manual_seed(42)
