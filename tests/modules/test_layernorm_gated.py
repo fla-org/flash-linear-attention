@@ -17,7 +17,8 @@ from fla.modules import (
     FusedRMSNormSwishGateLinear,
 )
 from fla.modules.layernorm_gated import layernorm_fn
-from fla.utils import IS_NVIDIA_BLACKWELL, assert_close, device
+from fla.modules.norm import fused_norm_gate
+from fla.utils import IS_NPU, IS_NVIDIA_BLACKWELL, assert_close, device
 
 
 @pytest.mark.parametrize(
@@ -29,6 +30,8 @@ from fla.utils import IS_NVIDIA_BLACKWELL, assert_close, device
             (2, 2, 512,  128, True,  "silu",   True),
             (2, 2, 2048, 1200, True,  "sigmoid", False),
             (2, 2, 50,   50,  False, "sigmoid", False),
+            (1, 1, 131073, 128, True, "silu", True),
+            (1, 1, 327681, 50, False, "sigmoid", False),
         ]
     ],
 )
@@ -56,7 +59,8 @@ def test_layernorm_gated(B: int, H: int, T: int, D: int, elementwise_affine: boo
         ref_dw = torch.autograd.grad((ref(x) * act_fn(g)).sum(), ref.weight)[0]
         tri_dw = torch.autograd.grad(tri(x, g).sum(), tri.weight)[0]
     if ref.bias is not None:
-        ref_db = torch.autograd.grad((ref(x) * act_fn(g)).sum(), ref.bias)[0]
+        # avoid the native LayerNorm bias-only backward path at large row counts.
+        ref_db = torch.autograd.grad((ref(x) * act_fn(g)).sum(), (x, ref.weight, ref.bias))[2]
         tri_db = torch.autograd.grad(tri(x, g).sum(), tri.bias)[0]
 
     assert_close(' y', ref_y, tri_y, 1e-3)
@@ -77,6 +81,8 @@ def test_layernorm_gated(B: int, H: int, T: int, D: int, elementwise_affine: boo
             (2, 2, 512,  128, "sigmoid"),
             (2, 2, 2048, 1200, "silu"),
             (2, 2, 50,   50,  "sigmoid"),
+            (1, 1, 131073, 128, "silu"),
+            (1, 1, 327681, 50, "sigmoid"),
         ]
     ],
 )
@@ -102,6 +108,39 @@ def test_rmsnorm_gated(B: int, H: int, T: int, D: int, activation: str):
     assert_close('dx', ref_dx, tri_dx, 1e-3)
     assert_close('dg', ref_dg, tri_dg, 1e-3)
     assert_close('dw', ref_dw, tri_dw, 1e-3)
+
+
+@pytest.mark.skipif(IS_NPU, reason="Ascend has independent norm kernels without the mainline NB tuning key")
+def test_gated_norm_autotune_bucket_reuse(monkeypatch):
+    buckets = {"fwd": [], "bwd": []}
+
+    class RecordLaunch:
+        def __init__(self, kernel, direction):
+            self.kernel = kernel
+            self.direction = direction
+
+        def __getitem__(self, grid):
+            launch = self.kernel[grid]
+
+            def record(**kwargs):
+                buckets[self.direction].append(kwargs["NB"])
+                return launch(**kwargs)
+
+            return record
+
+    for direction in buckets:
+        name = f"layer_norm_gated_{direction}_kernel"
+        monkeypatch.setattr(fused_norm_gate, name, RecordLaunch(getattr(fused_norm_gate, name), direction))
+
+    norm = FusedRMSNormGated(128).to(device)
+    for rows in (131073, 196609, 131073):
+        x = torch.randn(rows, 128, device=device, requires_grad=True)
+        g = torch.randn_like(x, requires_grad=True)
+        norm(x, g).sum().backward()
+        norm.zero_grad(set_to_none=True)
+
+    assert buckets["fwd"] == [4, 4, 4]
+    assert buckets["bwd"] == [4, 4, 4]
 
 
 @pytest.mark.parametrize(
