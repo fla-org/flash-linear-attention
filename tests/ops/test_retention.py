@@ -10,6 +10,8 @@ import os
 import pytest
 import torch
 
+from fla.ops.common.backends.triton_ascend import chunk_h as triton_ascend_chunk_h
+from fla.ops.common.backends.triton_ascend import chunk_o as triton_ascend_chunk_o
 from fla.ops.retention import chunk_retention, fused_chunk_retention, fused_recurrent_retention, parallel_retention
 from fla.utils import assert_close, device
 
@@ -440,3 +442,104 @@ def test_no_host_sync(fn):
         fn(q, k, v)
     finally:
         torch.cuda.set_sync_debug_mode('default')
+
+
+@pytest.mark.parametrize(
+    ('module', 'is_npu', 'arch', 'expected'),
+    [
+        pytest.param(triton_ascend_chunk_h, False, 'Ascend950', False, id='h-off-npu'),
+        pytest.param(triton_ascend_chunk_h, True, 'Ascend910_9382', False, id='h-a2'),
+        pytest.param(triton_ascend_chunk_h, True, 'Ascend950', True, id='h-950'),
+        pytest.param(triton_ascend_chunk_o, False, 'Ascend950', False, id='o-off-npu'),
+        pytest.param(triton_ascend_chunk_o, True, 'Ascend910_9382', False, id='o-a2'),
+        pytest.param(triton_ascend_chunk_o, True, 'Ascend950', True, id='o-950'),
+    ],
+)
+def test_triton_ascend_portable_lowering_predicate(monkeypatch, module, is_npu, arch, expected):
+    monkeypatch.setattr(module, 'IS_NPU', is_npu)
+    monkeypatch.setattr(module, 'get_device_arch', lambda: arch)
+    assert module._use_portable_lowering() is expected
+
+
+@pytest.mark.parametrize(
+    ('K', 'V', 'T', 'expected'),
+    [
+        (32, 32, 16, (16, 16)),
+        (64, 128, 256, (64, 64)),
+        (64, 128, 1024, (32, 32)),
+        (256, 64, 256, (16, 16)),
+    ],
+)
+def test_triton_ascend_chunk_h_portable_tile_selection(monkeypatch, K, V, T, expected):
+    monkeypatch.setattr(triton_ascend_chunk_h, '_use_portable_lowering', lambda: True)
+    assert triton_ascend_chunk_h._chunk_h_tile_size(K=K, V=V, T=T) == expected
+
+
+@pytest.mark.parametrize(
+    ('portable', 'expected_flags', 'expected_tiles'),
+    [
+        (False, (False, False, False), (64, 64)),
+        (True, (False, True, True), (16, 16)),
+    ],
+)
+def test_triton_ascend_chunk_h_guarded_flags_and_launch(monkeypatch, portable, expected_flags, expected_tiles):
+    """Capture the state launch so the guarded path is checked on an A2-shaped test host."""
+    calls = []
+    monkeypatch.setattr(triton_ascend_chunk_h, '_use_portable_lowering', lambda: portable)
+    monkeypatch.setattr(triton_ascend_chunk_h, 'get_device_arch', lambda: 'Ascend910_9382')
+    monkeypatch.setattr(
+        triton_ascend_chunk_h,
+        'ascend_compile_kwargs',
+        lambda **kwargs: {'sentinel': True} if portable else {},
+    )
+    monkeypatch.setattr(triton_ascend_chunk_h, 'launch_grid_chunked', lambda **kwargs: calls.append(kwargs))
+
+    k = torch.zeros(1, 16, 1, 16, dtype=torch.float16)
+    v = torch.zeros_like(k)
+    g_gamma = torch.zeros(1, dtype=torch.float32)
+    h, ht = triton_ascend_chunk_h.chunk_fwd_h_npu(k=k, v=v, g_gamma=g_gamma, chunk_size=16)
+
+    assert h.shape == (1, 1, 1, 16, 16)
+    assert ht is None
+    assert len(calls) == 1
+    call = calls[0]
+    assert call['compile_kwargs'] == (
+        {'sentinel': True, 'compile_mode': 'simd', 'disable_tightly_coupled_buffer_reuse': True}
+        if portable else {}
+    )
+    flags = tuple(call['kernel_kwargs'][name] for name in ('USE_NATIVE_DOT', 'USE_SAFE_DOT', 'MANUAL_DOT'))
+    assert flags == expected_flags
+    assert (call['kernel_kwargs']['BK'], call['kernel_kwargs']['BV']) == expected_tiles
+
+
+class _CapturedKernel:
+    def __init__(self):
+        self.calls = []
+
+    def __getitem__(self, grid):
+        def launch(**kwargs):
+            self.calls.append((grid, kwargs))
+
+        return launch
+
+
+@pytest.mark.parametrize('portable', [False, True], ids=['a2-default', 'guarded'])
+def test_triton_ascend_chunk_o_score_materialization_launch(monkeypatch, portable):
+    capture = _CapturedKernel()
+    monkeypatch.setattr(triton_ascend_chunk_o, '_use_portable_lowering', lambda: portable)
+    monkeypatch.setattr(triton_ascend_chunk_o, 'chunk_bwd_kernel_dv_npu', capture)
+
+    q = torch.zeros(1, 16, 1, 16, dtype=torch.float16)
+    k = torch.zeros_like(q)
+    do = torch.zeros_like(q)
+    dh = torch.zeros(1, 1, 1, 16, 16, dtype=torch.float32)
+    g_gamma = torch.zeros(1, dtype=torch.float32)
+    dv = triton_ascend_chunk_o.chunk_bwd_dv_npu(q=q, k=k, do=do, dh=dh, g_gamma=g_gamma, chunk_size=16)
+
+    assert dv.shape == do.shape
+    assert len(capture.calls) == 1
+    grid, kwargs = capture.calls[0]
+    assert grid == (1, 1)
+    assert kwargs['MATERIALIZE_SCORE'] is portable
+    assert kwargs['SCORE_STRIDE'] == (1 if portable else 0)
+    assert (kwargs['score_sink'] is not kwargs['dv']) is portable
