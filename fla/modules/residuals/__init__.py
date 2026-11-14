@@ -9,6 +9,9 @@ from fla.modules.residuals.attnres import AttentionResidual
 from fla.modules.residuals.base import BaseResidual
 from fla.modules.residuals.standard import StandardResidual
 
+BaseResidual.register('standard', StandardResidual)
+BaseResidual.register('attnres', AttentionResidual)
+
 __all__ = [
     'AttentionResidual',
     'BaseResidual',

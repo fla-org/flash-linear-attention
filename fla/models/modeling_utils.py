@@ -8,12 +8,18 @@
 from __future__ import annotations
 
 import math
+import re
 import warnings
 from copy import copy
+from functools import partial
+from inspect import signature
 
 import torch
 from torch import nn
+from torch.utils._pytree import tree_flatten, tree_unflatten
 from transformers.configuration_utils import PretrainedConfig
+from transformers.conversion_mapping import get_checkpoint_conversion_mapping, register_checkpoint_conversion_mapping
+from transformers.core_model_loading import WeightRenaming
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils.deprecation import deprecate_kwarg
@@ -25,6 +31,26 @@ from fla.models.configuration_utils import get_attention_spec
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
 from fla.modules.l2warp import l2_warp
 from fla.ops.attnres import fused_attnres
+
+LEGACY_RESIDUAL_KEY_MAPPING = {
+    r'layers\.(\d+)\.attn_norm\.': r'layers.\1.attn_residual.norm.',
+    r'layers\.(\d+)\.attn_res_proj\.': r'layers.\1.attn_residual.query.',
+    r'layers\.(\d+)\.attn_res_norm\.': r'layers.\1.attn_residual.attnres_norm.',
+    r'layers\.(\d+)\.mlp_norm\.': r'layers.\1.mlp_residual.norm.',
+    r'layers\.(\d+)\.mlp_res_proj\.': r'layers.\1.mlp_residual.query.',
+    r'layers\.(\d+)\.mlp_res_norm\.': r'layers.\1.mlp_residual.attnres_norm.',
+    r'^(model\.|)norm\.': r'\1output_residual.norm.',
+    r'^(model\.|)res_proj\.': r'\1output_residual.query.',
+    r'^(model\.|)res_norm\.': r'\1output_residual.attnres_norm.',
+}
+
+
+def register_residual_key_mapping(model_type: str, key_mapping: dict[str, str]) -> None:
+    """Register legacy residual parameter names for Transformers loading and saving."""
+    if key_mapping and get_checkpoint_conversion_mapping(model_type) is None:
+        register_checkpoint_conversion_mapping(model_type, [
+            WeightRenaming(source_patterns=source, target_patterns=target) for source, target in key_mapping.items()
+        ])
 
 
 def get_attention(config: PretrainedConfig, layer_idx: int) -> Attention | None:
@@ -44,11 +70,75 @@ def get_attention(config: PretrainedConfig, layer_idx: int) -> Attention | None:
     )
 
 
+def checkpoint_residual_state(function, *args, checkpoint_func):
+    """Expose tensors inside residual state to reentrant checkpointing."""
+    flat_args, input_spec = tree_flatten(args)
+    output_spec = None
+
+    def forward(*flat_args):
+        nonlocal output_spec
+        outputs = function(*tree_unflatten(flat_args, input_spec))
+        flat_outputs, output_spec = tree_flatten(outputs)
+        return tuple(flat_outputs)
+
+    outputs = checkpoint_func(forward, *flat_args)
+    return tree_unflatten(outputs, output_spec)
+
+
 class FLAPreTrainedModel(PreTrainedModel):
     """Shared Transformers integration without changing model parameter paths."""
 
     _is_stateful = True
     _input_embed_layer = "embeddings"
+    _residual_block_types: tuple[type[nn.Module], ...] = ()
+    _residual_key_mapping: dict[str, str] = {}
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        if cls._residual_key_mapping:
+            register_residual_key_mapping(cls.config_class.model_type, cls._residual_key_mapping)
+
+    def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None, *args, **kwargs):
+        if not self._residual_block_types:
+            return super().gradient_checkpointing_enable(gradient_checkpointing_kwargs, *args, **kwargs)
+
+        checkpoint_kwargs = {'use_reentrant': False, **(gradient_checkpointing_kwargs or {})}
+        if checkpoint_kwargs['use_reentrant'] is None:
+            checkpoint_kwargs['use_reentrant'] = False
+
+        residual = self.base_model.output_residual
+        if checkpoint_kwargs['use_reentrant'] and not residual.supports_reentrant_checkpointing:
+            raise ValueError(f'{type(residual).__name__} requires gradient checkpointing with use_reentrant=False')
+
+        super().gradient_checkpointing_enable(checkpoint_kwargs, *args, **kwargs)
+        if checkpoint_kwargs['use_reentrant']:
+            for module in self.modules():
+                if isinstance(module, self._residual_block_types):
+                    module._gradient_checkpointing_func = partial(
+                        checkpoint_residual_state,
+                        checkpoint_func=module._gradient_checkpointing_func,
+                    )
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        if self._residual_key_mapping:
+            for name in list(state_dict):
+                if not name.startswith(prefix):
+                    continue
+                converted = name[len(prefix):]
+                for source, target in self._residual_key_mapping.items():
+                    converted = re.sub(source, target, converted)
+                converted = prefix + converted
+                if converted != name:
+                    state_dict.setdefault(converted, state_dict.pop(name))
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+
+    def save_pretrained(self, *args, **kwargs):
+        if self._residual_key_mapping and 'save_original_format' not in kwargs:
+            # Keep new parameter names by default while honoring explicitly supplied positional save options.
+            arguments = signature(super().save_pretrained).bind_partial(*args, **kwargs).arguments
+            if 'save_original_format' not in arguments:
+                kwargs['save_original_format'] = False
+        return super().save_pretrained(*args, **kwargs)
 
     def set_output_embeddings(self, new_embeddings):
         # allow reattaching a head after set_output_embeddings(None)
@@ -184,43 +274,69 @@ class FLAModel(FLAPreTrainedModel):
         if use_cache and not isinstance(past_key_values, Cache):
             past_key_values = Cache.from_legacy_cache(past_key_values)
 
-        attnres_states: list[torch.Tensor] | None = None
+        if self._residual_block_types:
+            residual_state = self.output_residual.initialize(hidden_states)
 
-        all_hidden_states = () if output_hidden_states else None
-        all_attns = () if output_attentions else None
-        for layer in self.layers:
+            all_hidden_states = () if output_hidden_states else None
+            all_attns = () if output_attentions else None
+            for layer in self.layers:
+                if output_hidden_states:
+                    all_hidden_states += (residual_state.hidden_states,)
+
+                residual_state, attentions, past_key_values = layer(
+                    residual_state,
+                    attention_mask=attention_mask,
+                    past_key_values=past_key_values,
+                    use_cache=use_cache,
+                    output_attentions=output_attentions,
+                    **kwargs,
+                )
+
+                if output_attentions:
+                    all_attns += (attentions,)
+
+            hidden_states = self.output_residual(residual_state)
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
-            hidden_states, attentions, past_key_values, attnres_states = layer(
-                hidden_states,
-                attention_mask=attention_mask,
-                past_key_values=past_key_values,
-                use_cache=use_cache,
-                output_attentions=output_attentions,
-                attnres_states=attnres_states,
-                **kwargs,
-            )
-
-            if output_attentions:
-                all_attns += (attentions,)
-
-        if self.use_attnres:
-            # top-level attnres aggregation; `self.norm` is folded into the
-            # kernel via `output_rms_weight` so we don't double-norm.
-            residuals = [*attnres_states, hidden_states]
-            hidden_states = fused_attnres(
-                query=self.res_proj.weight,
-                residuals=residuals,
-                rms_weight=self.res_norm.weight,
-                output_rms_weight=self.norm.weight,
-                rms_eps=self.res_norm.eps,
-            )
         else:
-            hidden_states = self.norm(hidden_states)
+            attnres_states: list[torch.Tensor] | None = None
 
-        if output_hidden_states:
-            all_hidden_states += (hidden_states,)
+            all_hidden_states = () if output_hidden_states else None
+            all_attns = () if output_attentions else None
+            for layer in self.layers:
+                if output_hidden_states:
+                    all_hidden_states += (hidden_states,)
+
+                hidden_states, attentions, past_key_values, attnres_states = layer(
+                    hidden_states,
+                    attention_mask=attention_mask,
+                    past_key_values=past_key_values,
+                    use_cache=use_cache,
+                    output_attentions=output_attentions,
+                    attnres_states=attnres_states,
+                    **kwargs,
+                )
+
+                if output_attentions:
+                    all_attns += (attentions,)
+
+            if self.use_attnres:
+                # top-level attnres aggregation; `self.norm` is folded into the
+                # kernel via `output_rms_weight` so we don't double-norm.
+                residuals = [*attnres_states, hidden_states]
+                hidden_states = fused_attnres(
+                    query=self.res_proj.weight,
+                    residuals=residuals,
+                    rms_weight=self.res_norm.weight,
+                    output_rms_weight=self.norm.weight,
+                    rms_eps=self.res_norm.eps,
+                )
+            else:
+                hidden_states = self.norm(hidden_states)
+
+            if output_hidden_states:
+                all_hidden_states += (hidden_states,)
 
         if not return_dict:
             return tuple(i for i in [hidden_states, past_key_values, all_hidden_states, all_attns] if i is not None)

@@ -5,12 +5,19 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+import re
+
 import pytest
 import torch
+from safetensors.torch import load_file, save_file
 from torch import nn
 from transformers import AutoConfig, AutoModelForCausalLM
+from transformers.conversion_mapping import get_checkpoint_conversion_mapping
 
 from fla import models
+from fla.models.gla.modeling_gla import GLAForCausalLM, GLAModel
+from fla.models.modeling_utils import FLAPreTrainedModel
+from fla.modules.residuals import AttentionResidual, BaseResidual
 from fla.utils import find_spec_cached
 
 CONFIG_CLASSES = [getattr(models, name) for name in models.__all__ if name.endswith('Config')]
@@ -94,6 +101,8 @@ def test_initialization(config_class, block_size, make_model):
         pytest.skip('MLA initialization requires flash-attn.')
     torch.manual_seed(42)
     kwargs = {'expand_ratio': 16} if config_class is models.HGRN2Config else {}
+    if config_class is models.GLAConfig:
+        kwargs['residual_type'] = 'standard' if block_size is None else 'attnres'
     model = make_model(
         config_class,
         num_heads=4,
@@ -106,6 +115,13 @@ def test_initialization(config_class, block_size, make_model):
     )
     assert model.get_input_embeddings().weight[0].count_nonzero() == model.config.hidden_size
     assert all(torch.isfinite(parameter).all() for parameter in model.parameters())
+    queries = {module.query for module in model.modules() if isinstance(module, AttentionResidual)}
+    if config_class is models.GLAConfig:
+        residuals = [module for module in model.modules() if isinstance(module, BaseResidual)]
+        assert len(residuals) == 2 * model.config.num_hidden_layers + 1
+        assert len(queries) == (len(residuals) if block_size is not None else 0)
+    for query in queries:
+        assert query.weight.count_nonzero() == 0
     for module in model.modules():
         if isinstance(module, (nn.Linear, nn.Conv1d)):
             if getattr(module, '_is_attnres_proj', False):
@@ -128,3 +144,103 @@ def test_initialization(config_class, block_size, make_model):
             assert bool(expected.count_nonzero()) == (strategy == 'rescale')
         with pytest.raises(ValueError, match='Invalid prenorm_residual_strategy'):
             model._init_weights(module, prenorm_residual_strategy='invalid')
+
+
+@pytest.mark.parametrize(('model_class', 'block_size', 'fuse_norm', 'save_original_format'), [
+    pytest.param(GLAModel, None, True, True, id='standard-fused'),
+    pytest.param(GLAForCausalLM, None, False, False, id='standard-unfused-lm'),
+    pytest.param(GLAForCausalLM, 1, True, True, id='full-attnres-lm'),
+    pytest.param(GLAModel, 4, False, False, id='block-attnres'),
+    pytest.param(GLAModel, None, False, None, id='standard-default'),
+    pytest.param(GLAForCausalLM, 4, False, None, id='block-attnres-default-lm'),
+])
+def test_gla_checkpoint(model_class, block_size, fuse_norm, save_original_format, tmp_path):
+    """Load legacy weights through both PyTorch and Transformers, then preserve the requested save format."""
+    torch.manual_seed(42)
+    config = models.GLAConfig(
+        hidden_size=64,
+        num_heads=2,
+        num_hidden_layers=2,
+        intermediate_size=128,
+        vocab_size=64,
+        fuse_norm=fuse_norm,
+        attnres_block_size=block_size,
+    )
+    model = model_class(config)
+    fresh_path = tmp_path / 'fresh'
+    model.save_pretrained(fresh_path)
+    fresh_state = load_file(fresh_path / 'model.safetensors')
+    assert fresh_state.keys() == model.state_dict().keys()
+    state = {name: torch.randn_like(value) for name, value in model.state_dict().items()}
+    saved = {}
+    for name, value in state.items():
+        name = re.sub(r'(attn|mlp)_residual\.norm\.', r'\1_norm.', name)
+        name = re.sub(r'(attn|mlp)_residual\.query\.', r'\1_res_proj.', name)
+        name = re.sub(r'(attn|mlp)_residual\.attnres_norm\.', r'\1_res_norm.', name)
+        name = name.replace('output_residual.norm.', 'norm.')
+        name = name.replace('output_residual.query.', 'res_proj.')
+        name = name.replace('output_residual.attnres_norm.', 'res_norm.')
+        saved[name] = value
+    model.load_state_dict(saved, strict=True)
+    config.save_pretrained(tmp_path)
+    save_file(saved, tmp_path / 'model.safetensors', metadata={'format': 'pt'})
+    restored, info = model_class.from_pretrained(tmp_path, output_loading_info=True)
+    assert restored.config.attnres_block_size == block_size
+    assert not info['missing_keys'] and not info['unexpected_keys'] and not info['mismatched_keys']
+    for name, value in restored.state_dict().items():
+        torch.testing.assert_close(value, state[name], rtol=0, atol=0)
+        torch.testing.assert_close(model.state_dict()[name], state[name], rtol=0, atol=0)
+
+    resaved_path = tmp_path / 'resaved'
+    if save_original_format is None:
+        restored.save_pretrained(resaved_path)
+    else:
+        restored.save_pretrained(resaved_path, save_original_format=save_original_format)
+    resaved_state = load_file(resaved_path / 'model.safetensors')
+    assert resaved_state.keys() == (saved.keys() if save_original_format else state.keys())
+    reloaded, info = model_class.from_pretrained(resaved_path, output_loading_info=True)
+    assert not info['missing_keys'] and not info['unexpected_keys'] and not info['mismatched_keys']
+    reloaded.load_state_dict(reloaded.state_dict(), strict=True)
+    for name, value in reloaded.state_dict().items():
+        torch.testing.assert_close(value, state[name], rtol=0, atol=0)
+
+
+def test_residual_key_mapping_registration():
+    """Register subclass mappings automatically and preserve them across inheritance and repeated registration."""
+    class CustomConfig(models.GLAConfig):
+        model_type = 'fla-test-residual-key-mapping'
+
+    class CustomModel(FLAPreTrainedModel):
+        config_class = CustomConfig
+        _residual_key_mapping = {'old.weight': 'new.weight'}
+
+    registered = get_checkpoint_conversion_mapping(CustomConfig.model_type)
+    assert registered is not None
+    expected = [(item.source_patterns, item.target_patterns) for item in registered]
+    assert expected == [(['old.weight'], ['new.weight'])]
+
+    class InheritedModel(CustomModel):
+        pass
+
+    class OverrideModel(CustomModel):
+        _residual_key_mapping = {'custom.weight': 'converted.weight'}
+
+    actual = get_checkpoint_conversion_mapping(CustomConfig.model_type)
+    assert [(item.source_patterns, item.target_patterns) for item in actual] == expected
+
+
+def test_gla_key_mapping(make_model, tmp_path):
+    torch.manual_seed(42)
+    model = make_model(models.GLAConfig, num_hidden_layers=1)
+    state = model.state_dict()
+    state['model.layers.0.attn_norm.weight'] = state.pop('model.layers.0.attn.q_proj.weight')
+    model.config.save_pretrained(tmp_path)
+    save_file(state, tmp_path / 'model.safetensors', metadata={'format': 'pt'})
+    restored, info = GLAForCausalLM.from_pretrained(
+        tmp_path,
+        key_mapping={r'layers\.0\.attn_norm\.weight': 'layers.0.attn.q_proj.weight'},
+        output_loading_info=True,
+    )
+    assert not info['missing_keys'] and not info['unexpected_keys'] and not info['mismatched_keys']
+    for name, value in restored.state_dict().items():
+        torch.testing.assert_close(value, model.state_dict()[name], rtol=0, atol=0)
