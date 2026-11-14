@@ -128,7 +128,8 @@ def chunk_fwd_kernel_h(
         if USE_G_GAMMA:
             b_g_last = b_gamma * min(BT, T - i_t_int64 * BT)
             b_h *= exp2(b_g_last)
-            b_v = (b_v * exp2(b_g_last - b_g)[:, None]).to(b_v.dtype)
+            # past the end of a partial chunk b_g_last - b_g is positive and exp2 can overflow, 0 * inf = nan
+            b_v = (b_v * tl.where(m_t, exp2(b_g_last - b_g), 0)[:, None]).to(b_v.dtype)
 
         # vector decay, h = Diag(gk) @ h
         if USE_GK:

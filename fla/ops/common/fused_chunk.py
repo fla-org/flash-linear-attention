@@ -140,7 +140,8 @@ def fused_chunk_fwd_kernel(
             b_gn = exp2(b_g_last)
         if USE_G_GAMMA:
             b_g_last = b_gamma * min(BT, T - i_t_int64 * BT)
-            b_gk = exp2(b_g_last - b_g)
+            # mask the rows past the end of a partial chunk, where exp2 can overflow
+            b_gk = tl.where(m_t, exp2(b_g_last - b_g), 0)
             b_gn = exp2(b_g_last)
         if USE_G or USE_G_GAMMA:
             b_gs = tl.where(m_s & m_t, exp2(b_g[:, None] - b_g[None, :]), 0)
@@ -301,7 +302,8 @@ def fused_chunk_bwd_kernel(
 
         elif USE_G_GAMMA:
             b_g_last = b_gamma * min(BT, T - i_t_int64 * BT)
-            b_gk = exp2(b_g_last - b_g)
+            # mask the rows past the end of a partial chunk, where exp2 can overflow
+            b_gk = tl.where(m_t, exp2(b_g_last - b_g), 0)
             b_gn = exp2(b_g_last)
 
             # [BT, BT]
@@ -395,7 +397,8 @@ def fused_chunk_bwd_kernel(
 
         elif USE_G_GAMMA:
             b_g_last = b_gamma * min(BT, T - i_t_int64 * BT)
-            b_gk = exp2(b_g_last - b_g)
+            # mask the rows past the end of a partial chunk, where exp2 can overflow
+            b_gk = tl.where(m_t, exp2(b_g_last - b_g), 0)
             b_gn = exp2(b_g_last)
             b_gs = tl.trans(tl.where(m_s & (m_t[:, None] & m_t), exp2(b_g[:, None] - b_g[None, :]), 0)) * scale
 
