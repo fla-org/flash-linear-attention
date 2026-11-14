@@ -575,7 +575,9 @@ def _recurrent_triadic_gdn_post_init(inputs, B, T, H, D, packed=False, **kw):
         for name in ('q', 'k', 'v', 'k2', 'q2', 'g', 'beta'):
             tensor = inputs[name]
             inputs[name] = tensor.reshape(1, B * T, *tensor.shape[2:])
-        inputs['cu_seqlens'] = torch.arange(B + 1, dtype=torch.long, device=inputs['q'].device) * T
+        offsets = torch.arange(B + 1, dtype=torch.long, device=inputs['q'].device) * T
+        offsets[1:-1] -= torch.arange(1, B, device=offsets.device) % 2 * (T // 2)
+        inputs['cu_seqlens'] = offsets
 
 
 for _name, _packed in (('fused_recurrent_triadic_gdn', False), ('fused_recurrent_triadic_gdn_varlen', True)):

@@ -249,25 +249,29 @@ def test_chunk_varlen(H: int, K: int, V: int, E: int, cu_seqlens: list[int], dty
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'K', 'V', 'E', 'scale', 'gate_logit_normalizer', 'use_state', 'dtype'),
+    ('B', 'T', 'H', 'K', 'V', 'E', 'scale', 'gate_logit_normalizer', 'use_initial_state', 'output_final_state', 'dtype'),
     [
         pytest.param(
             *test,
-            id="B{}-T{}-H{}-K{}-V{}-E{}-scale{}-gate_logit_normalizer{}-use_state{}-{}".format(*test),
+            id="B{}-T{}-H{}-K{}-V{}-E{}-scale{}-gate_logit_normalizer{}-use_initial_state{}-output_final_state{}-{}".format(
+                *test,
+            ),
         )
         for test in [
-            (1, 63, 1, 64, 64, 1, 1, 1, True, torch.float),
+            (1, 63, 1, 64, 64, 1, 1, 1, True, True, torch.float),
             # one and four decoding steps
-            (8, 1, 4, 128, 128, 8, 1, 1, True, torch.bfloat16),
-            (4, 4, 2, 128, 128, 4, 1, 1, True, torch.bfloat16),
-            (2, 500, 3, 60, 64, 2, 1, 1, False, torch.float16),
+            (8, 1, 4, 128, 128, 8, 1, 1, True, True, torch.bfloat16),
+            (4, 4, 2, 128, 128, 4, 1, 1, True, False, torch.bfloat16),
+            (2, 500, 3, 60, 64, 2, 1, 1, False, False, torch.float16),
             # strong decay
-            (2, 1000, 2, 128, 128, 4, 1, 0.1, True, torch.float),
+            (2, 1000, 2, 128, 128, 4, 1, 0.1, True, True, torch.float),
             # E, K and V that are not powers of two
-            (1, 256, 2, 100, 96, 12, 0.1, 1, True, torch.float),
-            (1, 512, 2, 128, 128, 16, 1, 10, False, torch.bfloat16),
-            (2, 100, 2, 8, 12, 2, 1, 1, True, torch.float16),
-            (1, 128, 2, 256, 256, 4, 1, 1, True, torch.bfloat16),
+            (1, 256, 2, 100, 96, 12, 0.1, 1, True, True, torch.float),
+            (1, 512, 2, 128, 128, 16, 1, 10, False, True, torch.bfloat16),
+            (2, 100, 2, 8, 12, 2, 1, 1, True, True, torch.float16),
+            # the largest head dims, and a state block narrowed to BV=8
+            (1, 128, 2, 256, 256, 4, 1, 1, True, True, torch.bfloat16),
+            (1, 64, 1, 256, 128, 16, 1, 1, True, True, torch.bfloat16),
         ]
     ],
 )
@@ -280,12 +284,13 @@ def test_fused_recurrent(
     E: int,
     scale: float,
     gate_logit_normalizer: float,
-    use_state: bool,
+    use_initial_state: bool,
+    output_final_state: bool,
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
     q, k, v, k2, q2, g, beta = _make_inputs(B, T, H, K, V, E, gate_logit_normalizer, dtype)
-    h0 = torch.randn(B, H, E, K, V, dtype=torch.float32, device=device) if use_state else None
+    h0 = torch.randn(B, H, E, K, V, dtype=torch.float32, device=device) if use_initial_state else None
 
     ref, ref_ht = naive_recurrent_triadic_gdn(
         q=q,
@@ -297,7 +302,7 @@ def test_fused_recurrent(
         beta=beta,
         scale=scale,
         initial_state=h0,
-        output_final_state=use_state,
+        output_final_state=output_final_state,
     )
     tri, tri_ht = fused_recurrent_triadic_gdn(
         q=q,
@@ -309,10 +314,10 @@ def test_fused_recurrent(
         beta=beta,
         scale=scale,
         initial_state=h0,
-        output_final_state=use_state,
+        output_final_state=output_final_state,
     )
     assert_close('o', ref, tri, 0.002)
-    if use_state:
+    if output_final_state:
         assert_close('ht', ref_ht, tri_ht, 0.002)
     else:
         assert tri_ht is None
@@ -369,3 +374,26 @@ def test_fused_recurrent_varlen(H: int, K: int, V: int, E: int, cu_seqlens: list
     )
     assert_close('o', ref, tri, 0.002)
     assert_close('ht', ref_ht, tri_ht, 0.002)
+
+
+@pytest.mark.parametrize(
+    ('B', 'T0', 'T1', 'H', 'K', 'V', 'E', 'dtype'),
+    [
+        pytest.param(*test, id="B{}-T0{}-T1{}-H{}-K{}-V{}-E{}-{}".format(*test))
+        for test in [
+            (2, 100, 4, 2, 128, 128, 4, torch.bfloat16),
+            (1, 63, 1, 2, 64, 64, 8, torch.float16),
+        ]
+    ],
+)
+def test_chunk_then_fused_recurrent(B: int, T0: int, T1: int, H: int, K: int, V: int, E: int, dtype: torch.dtype):
+    # prefill with the chunk kernel, then decode from its final state
+    torch.manual_seed(42)
+    inputs = _make_inputs(B, T0 + T1, H, K, V, E, 1, dtype)
+    h0 = torch.randn(B, H, E, K, V, dtype=torch.float32, device=device)
+
+    ref, ref_ht = naive_recurrent_triadic_gdn(*inputs, initial_state=h0, output_final_state=True)
+    o0, h = chunk_triadic_gdn(*(x[:, :T0] for x in inputs), initial_state=h0, output_final_state=True)
+    o1, ht = fused_recurrent_triadic_gdn(*(x[:, T0:] for x in inputs), initial_state=h, output_final_state=True)
+    assert_close('o', ref, torch.cat((o0, o1), 1), 0.005)
+    assert_close('ht', ref_ht, ht, 0.005)
