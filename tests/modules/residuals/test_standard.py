@@ -32,7 +32,13 @@ def test_standard(dtype: torch.dtype, input_dtype: torch.dtype, fuse_norm: bool,
     """Check a connected residual chain, including fused rounding and gradients across six branches."""
     torch.manual_seed(42)
     modules = nn.ModuleList([
-        StandardResidual(hidden_size=128, fuse_norm=fuse_norm, fuse_residual=fuse_residual) for _ in range(7)
+        StandardResidual(
+            hidden_size=128,
+            fuse_norm=fuse_norm,
+            fuse_residual=fuse_residual,
+            sub_layer_idx=i,
+            num_sublayers=6,
+        ) for i in range(7)
     ]).to(device=device, dtype=dtype)
     x = torch.randn(2, 7, 128, device=device, dtype=input_dtype, requires_grad=True)
 
