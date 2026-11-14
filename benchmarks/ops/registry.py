@@ -1150,3 +1150,19 @@ register_op(OpConfig(
     category='nsa',
     test_file='tests/ops/test_nsa.py',
 ))
+
+register_op(OpConfig(
+    name='dsa_indexer',
+    import_path='fla.ops.dsa',
+    inputs={
+        # H indexer heads sharing one index key, as in DeepSeek-V3.2
+        'q_idx': TensorSpec(shape_BTHD, requires_grad=False),
+        'k_idx': TensorSpec(lambda B, T, H, D, **kw: (B, T, D), requires_grad=False),
+        'w_idx': TensorSpec(shape_BTH, requires_grad=False),
+    },
+    extra_kwargs={'topk': 2048, 'activation': 'relu'},
+    output_is_tuple=False,
+    skip_backward=True,
+    category='nsa',
+    test_file='tests/ops/test_dsa_indexer.py',
+))
