@@ -106,7 +106,8 @@ class MambaPreTrainedModel(FLAPreTrainedModel):
     def _init_weights(self, module):
         """Initialize the weights."""
         if isinstance(module, nn.Linear):
-            nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
+            # mamba_ssm keeps the PyTorch default initialization of linear weights and zeros their biases
+            nn.init.kaiming_uniform_(module.weight, a=math.sqrt(5))
             if module.bias is not None:
                 if not getattr(module.bias, "_no_reinit", False):
                     nn.init.zeros_(module.bias)
