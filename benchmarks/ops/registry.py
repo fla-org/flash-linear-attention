@@ -166,7 +166,7 @@ class OpConfig:
             Grouping label used in reports. Default: `''`.
         dim_constraints (dict, Optional):
             Shape constraints, such as `{'D': [64, 128]}`. Shapes that do not match are skipped. Default: None.
-        default_shapes (dict[str, dict[str, int]], Optional):
+        default_shapes (dict[str, dict[str, Any]], Optional):
             Per-op shape configs used instead of the global `SHAPE_CONFIGS`.
             This is useful when the op's shape semantics differ from `B/T/H/D`,
             for example when AttnRes uses an extra `L` residual-source axis.
@@ -191,7 +191,7 @@ class OpConfig:
     post_init: Callable | None = None
     category: str = ''
     dim_constraints: dict | None = None
-    default_shapes: dict[str, dict[str, int]] | None = None
+    default_shapes: dict[str, dict[str, Any]] | None = None
     test_file: str | None = None
     backend_env: dict[str, str] | None = None
 
@@ -242,10 +242,10 @@ def generate_inputs(
     dtype: torch.dtype = torch.bfloat16,
     device: str | torch.device = 'cuda',
     **extra_shape_kw,
-) -> dict[str, torch.Tensor]:
+) -> dict[str, Any]:
     """Create input tensors for *config* at the given shape.
 
-    Returns a dict mapping parameter names to tensors.
+    Returns tensor inputs and any host geometry added by post_init.
     Raises ValueError if dim_constraints are not satisfied (caller should skip).
     """
     # Check dim constraints
@@ -1149,4 +1149,34 @@ register_op(OpConfig(
     default_shapes=_nsa_shapes,
     category='nsa',
     test_file='tests/ops/test_nsa.py',
+))
+
+
+def shape_phba_gate(B, T, H, D, M=128, **kw):
+    return (B, T, H, M)
+
+
+def init_phba_inputs(inputs, B, T, lengths=None, **kwargs):
+    if lengths is not None:
+        from fla.ops.phba import SequenceLengthPlan
+
+        lengths = tuple(int(value) for value in lengths.split(','))
+
+        if B != 1 or sum(lengths) != T:
+            raise ValueError('Packed PHBA benchmark lengths require B=1 and must sum to T')
+        inputs['length_plan'] = SequenceLengthPlan.from_host(lengths, inputs['q'].device)
+
+
+register_op(OpConfig(
+    name='chunk_phba',
+    import_path='fla.ops.phba',
+    inputs={name: TensorSpec(shape_phba_gate if name == 'gate' else shape_BTHD)
+            for name in ('q', 'k', 'v', 'q_rope', 'k_rope', 'gate')},
+    extra_kwargs={'chunk_size': 128, 'topk': 8},
+    post_init=init_phba_inputs,
+    dim_constraints={'D': list(range(16, 129, 8))},
+    default_shapes={
+        'dense_B1_T8192_H16_D128': {'B': 1, 'T': 8192, 'H': 16, 'D': 128, 'M': 128},
+        'packed_T8192_H16_D128': {'B': 1, 'T': 8192, 'H': 16, 'D': 128, 'M': 128, 'lengths': '2048,3072,3072'},
+    },
 ))
