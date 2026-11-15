@@ -18,6 +18,11 @@ on:
         required: true
         type: boolean
         default: true
+      clean_npm_cache:
+        description: 'Run npm cache clean --force; Node installations under .nvm are not removed'
+        required: true
+        type: boolean
+        default: true
       clean_conda_cache:
         description: 'Run conda clean --all for package/index caches; environments are not removed'
         required: true
@@ -55,6 +60,7 @@ jobs:
       DRY_RUN: ${{ inputs.dry_run }}
       MAX_AGE_DAYS: ${{ inputs.max_age_days }}
       CLEAN_PIP: ${{ inputs.clean_pip_cache }}
+      CLEAN_NPM: ${{ inputs.clean_npm_cache }}
       CLEAN_CONDA: ${{ inputs.clean_conda_cache }}
       CLEAN_TRITON_STALE: ${{ inputs.clean_triton_stale }}
       CLEAN_TRITON_ALL: ${{ inputs.clean_triton_all }}
@@ -67,7 +73,7 @@ jobs:
         run: |
           echo "== context =="
           whoami; echo "HOME=$HOME"; echo "dry_run=$DRY_RUN max_age_days=$MAX_AGE_DAYS"
-          echo "pip=$CLEAN_PIP conda=$CLEAN_CONDA triton_stale=$CLEAN_TRITON_STALE triton_all=$CLEAN_TRITON_ALL pytest=$CLEAN_PYTEST"
+          echo "pip=$CLEAN_PIP npm=$CLEAN_NPM conda=$CLEAN_CONDA triton_stale=$CLEAN_TRITON_STALE triton_all=$CLEAN_TRITON_ALL pytest=$CLEAN_PYTEST"
           echo "== df =="
           df -h /
           echo "== docker =="
@@ -132,6 +138,20 @@ jobs:
                 "$pip" cache purge || { echo "::warning::pip cache purge failed for $pip"; FAILED=1; }
               fi
             done
+          fi
+
+          if [ "$CLEAN_NPM" = "true" ]; then
+            echo "== npm cache =="
+            if command -v npm >/dev/null 2>&1; then
+              if [ "$DRY_RUN" = "true" ]; then
+                echo "[dry-run] would run npm cache clean --force"
+              else
+                echo "cleaning npm cache"
+                npm cache clean --force || { echo "::warning::npm cache clean failed"; FAILED=1; }
+              fi
+            else
+              echo "npm not found; skipping npm cache clean"
+            fi
           fi
 
           if [ "$CLEAN_CONDA" = "true" ]; then
