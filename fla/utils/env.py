@@ -103,6 +103,7 @@ def supports_transformers_next_sequence_length() -> bool:
 
 
 TRITON_ABOVE_3_4_0 = package_version.parse(triton.__version__) >= package_version.parse("3.4.0")
+TRITON_ABOVE_3_5_0 = package_version.parse(triton.__version__) >= package_version.parse("3.5.0")
 TRITON_ABOVE_3_5_1 = package_version.parse(triton.__version__) >= package_version.parse("3.5.1")
 TRITON_ABOVE_3_6_0 = package_version.parse(triton.__version__) >= package_version.parse("3.6.0")
 TRITON_ABOVE_3_7_1 = package_version.parse(triton.__version__) >= package_version.parse("3.7.1")

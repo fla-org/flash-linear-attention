@@ -39,6 +39,8 @@ def test_chunk_kda_cache(monkeypatch):
     """Reuse the intracard precompute cache for repeated calls with the same cu_seqlens object."""
     # intracard CP is disabled by default.
     monkeypatch.setenv("FLA_INTRACARD_CP", "1")
+    # Ascend fwd_h is priority 0. Raise intra-card above it for this test only.
+    monkeypatch.setattr(IntraCardCPBackend, 'priority', -1)
     torch.manual_seed(0)
     dtype = torch.bfloat16
 
@@ -119,6 +121,8 @@ def test_backend_enabled(monkeypatch, enabled: bool):
 def test_chunk_gdn_grouped_heads(monkeypatch):
     """Compare intra-card splitting with the ordinary chunk path when query heads are shared by value heads."""
     monkeypatch.setenv("FLA_INTRACARD_CP", "1")
+    # Ascend fwd_h is priority 0. Raise intra-card above it for this test only.
+    monkeypatch.setattr(IntraCardCPBackend, 'priority', -1)
     monkeypatch.setenv("FLA_FLASH_QLA", "0")
     monkeypatch.setenv("FLA_TILELANG", "0")
     torch.manual_seed(0)

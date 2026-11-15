@@ -41,7 +41,11 @@ class SambaBlock(GradientCheckpointingLayer):
         self.config = config
         self.layer_idx = layer_idx
 
-        self.mixer_norm = RMSNorm(hidden_size=config.hidden_size, eps=config.norm_eps, dtype=torch.float32)
+        self.mixer_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(
+            config.hidden_size,
+            eps=config.norm_eps,
+            dtype=torch.float32,
+        )
         self.mixer = get_attention(config=config, layer_idx=layer_idx)
         if self.mixer is None:
             self.mixer = Mamba(
@@ -53,7 +57,11 @@ class SambaBlock(GradientCheckpointingLayer):
                 use_bias=config.use_bias,
                 layer_idx=layer_idx,
             )
-        self.mlp_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
+        self.mlp_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(
+            config.hidden_size,
+            eps=config.norm_eps,
+            dtype=torch.float32,
+        )
         self.mlp = SambaMLP(
             hidden_size=config.hidden_size,
             hidden_ratio=config.hidden_ratio,
@@ -232,7 +240,11 @@ class SambaModel(SambaPreTrainedModel):
         self.layers = nn.ModuleList([SambaBlock(config, layer_idx=idx) for idx in range(config.num_hidden_layers)])
 
         self.gradient_checkpointing = False
-        self.norm_f = RMSNorm(config.hidden_size, eps=config.norm_eps, dtype=torch.float32)
+        self.norm_f = (RMSNorm if config.fuse_norm else nn.RMSNorm)(
+            config.hidden_size,
+            eps=config.norm_eps,
+            dtype=torch.float32,
+        )
 
         self.use_attnres = config.attnres_block_size is not None
         if self.use_attnres:

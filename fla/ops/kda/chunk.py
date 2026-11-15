@@ -114,8 +114,6 @@ class ChunkKDAFunction(torch.autograd.Function):
         )
 
         if return_intermediate_states:
-            assert torch.is_inference_mode_enabled(), "return_intermediate_states is only allowed in inference mode"
-            assert disable_recompute is False, "return_intermediate_states must be used with disable_recompute=False"
             return o.type_as(q), final_state, h
 
         ctx.save_for_backward(
@@ -300,9 +298,9 @@ def chunk_kda(
             the kernel will save all intermediate activations for backward pass,
             which is beneficial for training small models at the cost of increased memory usage. Default: ``False``.
         return_intermediate_states (bool, Optional):
-            If ``True``, returns intermediate state ``h`` for inference scenarios (e.g., vLLM).
-            Must be used within ``torch.inference_mode()`` and will return a 3-tuple instead of 2-tuple.
-            This is not intended for training as it bypasses autograd. Default: ``False``.
+            Return the recurrent state entering each chunk as a third output.
+            Requires ``torch.no_grad()`` or ``torch.inference_mode()``, and ``disable_recompute=False``;
+            backward is unsupported. Default: ``False``.
         state_v_first (bool, Optional):
             Store the recurrent state in V-first ``[V, K]`` layout instead of the default ``[K, V]``. Default: ``False``.
         cu_seqlens (torch.LongTensor, Optional):
@@ -352,10 +350,15 @@ def chunk_kda(
             final_state (torch.Tensor):
                 Final state of shape ``[N, HV, K, V]`` if ``output_final_state=True`` else ``None``.
             h (torch.Tensor):
-                Intermediate states of shape ``[B, NT, HV, K, V]`` and dtype ``bfloat16``.
-                - For equal-length sequences: ``NT = ceil(T / chunk_size)``
-                - For variable-length sequences (cu_seqlens): B is always 1 (flattened),
-                  NT is the total number of chunks across all sequences.
+                Intermediate states of shape ``[B, NT, HV, K, V]``
+                (or ``[B, NT, HV, V, K]`` if ``state_v_first=True``) and dtype ``k.dtype``.
+                Each entry is the state before its chunk. Sequences start from their initial state or zero,
+                or from the incoming cross-rank state with context parallelism.
+                ``NT = ceil(T / chunk_size)``, where ``chunk_size`` defaults to 64.
+                For variable-length inputs, ``B=1`` and ``NT`` is the sum of per-sequence chunk counts,
+                with entries ordered by sequence and then chunk. The final state is returned separately.
+                With ``use_graph=True``, ``NT`` is the static chunk capacity;
+                only entries corresponding to actual chunks contain valid states.
 
     Examples::
         >>> import torch
@@ -426,6 +429,9 @@ def chunk_kda(
         ...     dt_bias=dt_bias,
         ... )
     """
+    if return_intermediate_states:
+        assert not torch.is_grad_enabled(), "return_intermediate_states requires gradients to be disabled"
+        assert disable_recompute is False, "return_intermediate_states must be used with disable_recompute=False"
     if 'transpose_state_layout' in kwargs:
         if state_v_first:
             raise ValueError("Cannot pass both `state_v_first` and the deprecated `transpose_state_layout`.")
