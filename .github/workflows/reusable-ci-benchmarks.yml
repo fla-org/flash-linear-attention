@@ -160,9 +160,12 @@ jobs:
           if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
             exit 0
           fi
-          git gc --auto || echo "::warning::git gc --auto failed"
+          if ! git -c gc.autoDetach=false gc --auto; then
+            echo "::warning::git gc --auto failed; skipping forced gc"
+            exit 0
+          fi
           size_kb=$(git count-objects -v | awk '/^size-pack:/ {print $2}')
           if [ "${size_kb:-0}" -gt 1048576 ]; then
             echo "git size-pack ${size_kb}KiB exceeds 1GiB; running git gc --prune=now"
-            git gc --prune=now || echo "::warning::git gc --prune=now failed"
+            git -c gc.autoDetach=false gc --prune=now || echo "::warning::git gc --prune=now failed"
           fi
