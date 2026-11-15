@@ -37,8 +37,6 @@ on:
           tests/ops/utils/test_pack.py
           tests/ops/utils/test_pooling.py
           tests/ops/utils/test_rounding.py
-          tests/ops/utils/test_sinkhorn.py
-          tests/ops/utils/test_tma.py
       dispatch:
         required: false
         type: string
