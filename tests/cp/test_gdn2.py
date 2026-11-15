@@ -14,6 +14,7 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 import triton
+from torch.utils.checkpoint import checkpoint
 
 from fla.ops.cp import build_cp_context
 from fla.ops.gdn2 import chunk_gdn2
@@ -22,7 +23,7 @@ from fla.ops.kda.gate import naive_kda_lowerbound_gate
 from fla.utils import IS_NPU, IS_TF32_SUPPORTED, assert_close, device
 from tests.cp.utils import gather_global, shard_tensor
 
-pytestmark = pytest.mark.skipif(IS_NPU or not IS_TF32_SUPPORTED, reason="requires NVIDIA Ampere or newer")
+pytestmark = pytest.mark.skipif(not (IS_TF32_SUPPORTED or IS_NPU), reason="requires NVIDIA Ampere or newer, or Ascend")
 
 
 def _make_inputs(rank, T, H, D, dtype):
@@ -82,8 +83,8 @@ def _reference(q, k, v, g, b, w, do, offsets, A_log, dt_bias):
         w_seq = w[:, start:end].clone().detach().requires_grad_(True)
         do_seq = do[:, start:end].clone()
 
-        q_seq_norm = F.normalize(q_seq, p=2, dim=-1)
-        k_seq_norm = F.normalize(k_seq, p=2, dim=-1)
+        q_seq_norm = F.normalize(q_seq.float(), p=2, dim=-1).to(q_seq.dtype)
+        k_seq_norm = F.normalize(k_seq.float(), p=2, dim=-1).to(k_seq.dtype)
         g_processed = naive_kda_lowerbound_gate(
             g=g_seq.to(torch.float),
             A_log=A_log[:H].contiguous(),
@@ -91,16 +92,24 @@ def _reference(q, k, v, g, b, w, do, offsets, A_log, dt_bias):
             lower_bound=-5.0,
         )
 
-        o_seq, _ = naive_recurrent_gdn2(
-            q=q_seq_norm,
-            k=k_seq_norm,
-            v=v_seq,
-            g=g_processed,
-            b=b_seq,
-            w=w_seq,
-            initial_state=None,
-            output_final_state=False,
-        )
+        # bound saved-state memory for the 64K-token recurrent reference.
+        o_chunks, state = [], None
+        for chunk_start in range(0, end - start, 1024):
+            chunk_end = chunk_start + 1024
+            o_chunk, state = checkpoint(
+                naive_recurrent_gdn2,
+                q_seq_norm[:, chunk_start:chunk_end],
+                k_seq_norm[:, chunk_start:chunk_end],
+                v_seq[:, chunk_start:chunk_end],
+                g_processed[:, chunk_start:chunk_end],
+                b_seq[:, chunk_start:chunk_end],
+                w_seq[:, chunk_start:chunk_end],
+                initial_state=state,
+                output_final_state=True,
+                use_reentrant=False,
+            )
+            o_chunks.append(o_chunk)
+        o_seq = torch.cat(o_chunks, dim=1)
         (o_seq * do_seq).sum().backward()
         results.append((
             o_seq.detach(),
@@ -195,9 +204,8 @@ def _run_chunk(
     dw_cp_global = gather_global(w_local.grad, world_size=world_size)
 
     if rank == 0:
-        # per-dim gating and L2 normalization of k ~ N(-50, 10) amplify bf16 state-communication error;
-        # baseline ratios reach ~0.9-1.6%, above the strict 8e-3 threshold.
-        # db also includes a cross-rank reduction (~2.3% error) and remains a warning-only diagnostic.
+        # correlated BF16 inputs stress normalization and chunk-intermediate precision.
+        # db retains its warning-only diagnostic for existing baseline gradient error.
         assert_close("Output", ref_out, o_cp_global, ratio=8e-3, warning=False)
         assert_close("dq", ref_dq, dq_cp_global, ratio=8e-3, warning=False)
         assert_close("dk", ref_dk, dk_cp_global, ratio=8e-3, warning=False)
