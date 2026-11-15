@@ -131,7 +131,7 @@ def chunk_gsa_bwd_kernel_dA(
         for num_warps in [2, 4]
         for num_stages in [2, 3, 4]
     ],
-    key=['H', 'K', 'V', 'BT', 'IS_VARLEN'],
+    key=['H', 'K', 'V', 'BT', 'IS_VARLEN', 'STATE_V_FIRST'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -161,6 +161,7 @@ def chunk_gsa_bwd_kernel_dqkvg(
     BT: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
+    STATE_V_FIRST: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
     i_k, i_t = unflatten_program_id(tl.cdiv(K, BK))
@@ -216,8 +217,12 @@ def chunk_gsa_bwd_kernel_dqkvg(
         p_dv = dv + ((i_k*all+bos)*H+i_h)*V + o_q[:, None] * (H*V) + o_v[None, :]
         p_dg = dg + (bos*H+i_h)*V + o_q[:, None] * (H*V) + o_v[None, :]
         p_dgv = dgv+((i_k*all+bos)*H+i_h)*V + o_q[:, None] * (H*V) + o_v[None, :]
-        p_h = h + (i_tg * H + i_h) * K*V + o_v[:, None] + o_k[None, :] * V
-        p_dh = dh + (i_tg * H + i_h) * K*V + o_k[:, None] * V + o_v[None, :]
+        if STATE_V_FIRST:
+            p_h = h + (i_tg * H + i_h) * K*V + o_v[:, None] * K + o_k[None, :]
+            p_dh = dh + (i_tg * H + i_h) * K*V + o_k[:, None] + o_v[None, :] * K
+        else:
+            p_h = h + (i_tg * H + i_h) * K*V + o_v[:, None] + o_k[None, :] * V
+            p_dh = dh + (i_tg * H + i_h) * K*V + o_k[:, None] * V + o_v[None, :]
 
         # [BV,]
         b_gn = tl.load(p_gn, mask=m_v, other=0)
@@ -376,6 +381,7 @@ def chunk_gsa_bwd_k(
     dht: torch.Tensor,
     dg: torch.Tensor,
     scale: float = 1.,
+    state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
@@ -402,6 +408,7 @@ def chunk_gsa_bwd_k(
             gv=g,
             h0=h0,
             output_final_state=False,
+            state_v_first=state_v_first,
             cu_seqlens=cu_seqlens,
             chunk_size=BT,
             states_in_fp32=False,
@@ -417,6 +424,7 @@ def chunk_gsa_bwd_k(
         h0=h0,
         dht=dht,
         scale=scale,
+        state_v_first=state_v_first,
         cu_seqlens=cu_seqlens,
         chunk_size=BT,
         states_in_fp32=True,
@@ -474,6 +482,7 @@ def chunk_gsa_bwd_k(
         BT=BT,
         BK=BK,
         BV=BV,
+        STATE_V_FIRST=state_v_first,
     )
     A = A.sum(0, dtype=A.dtype) if NK > 1 else A.squeeze(0)
     dv = dv.sum(0, dtype=dv.dtype) if NK > 1 else dv.squeeze(0)
@@ -527,6 +536,7 @@ def chunk_gsa_bwd(
     scale: float,
     do: torch.Tensor,
     dht: tuple[torch.Tensor, torch.Tensor],
+    state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
@@ -551,6 +561,7 @@ def chunk_gsa_bwd(
         A=A,
         do=do,
         dht=dhvt,
+        state_v_first=state_v_first,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
@@ -570,6 +581,7 @@ def chunk_gsa_bwd(
         dht=dhkt,
         dg=dg,
         scale=scale,
+        state_v_first=state_v_first,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,

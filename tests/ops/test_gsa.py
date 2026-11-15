@@ -17,25 +17,25 @@ from fla.utils import assert_close, check_shared_mem, device, device_platform
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'D', 'V', 'M', 'gate_logit_normalizer', 'dtype'),
+    ('B', 'T', 'H', 'D', 'V', 'M', 'gate_logit_normalizer', 'dtype', 'state_v_first'),
     [
-        pytest.param(*test, id="B{}-T{}-H{}-D{}-V{}-M{}-gate_logit_normalizer{}-{}".format(*test))
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-V{}-M{}-gate_logit_normalizer{}-{}-state_v_first{}".format(*test))
         for test in [
-            (1, 63, 1, 64, 64, 32, 1, torch.float),
-            (1, 1, 2, 32, 32, 32, 8, torch.float16),
-            (1, 65, 2, 60, 60, 96, 8, torch.float),
-            (1, 65, 2, 60, 60, 32, 8, torch.bfloat16),
-            (2, 1024, 4, 60, 60, 64, 1, torch.float),
-            (2, 1024, 8, 128, 128, 64, 0.1, torch.float),
-            (2, 1024, 8, 128, 128, 32, 1, torch.float),
-            (2, 1024, 8, 128, 128, 64, 1, torch.float),
-            (2, 1024, 8, 128, 128, 64, 10, torch.float),
-            (4, 2048, 8, 64, 64, 64, 1, torch.float),
-            (2, 1024, 8, 128, 128, 64, 0.1, torch.float16),
-            (2, 1024, 8, 128, 128, 64, 10, torch.float16),
-            (2, 65, 2, 32, 48, 32, None, torch.float32),
-            (2, 65, 2, 32, 48, 32, None, torch.float16),
-            (2, 65, 2, 32, 48, 32, None, torch.bfloat16),
+            (1, 63, 1, 64, 64, 32, 1, torch.float, False),
+            (1, 1, 2, 32, 32, 32, 8, torch.float16, True),
+            (1, 65, 2, 60, 60, 96, 8, torch.float, True),
+            (1, 65, 2, 60, 60, 32, 8, torch.bfloat16, True),
+            (2, 1024, 4, 60, 60, 64, 1, torch.float, False),
+            (2, 1024, 8, 128, 128, 64, 0.1, torch.float, True),
+            (2, 1024, 8, 128, 128, 32, 1, torch.float, False),
+            (2, 1024, 8, 128, 128, 64, 1, torch.float, False),
+            (2, 1024, 8, 128, 128, 64, 10, torch.float, False),
+            (4, 2048, 8, 64, 64, 64, 1, torch.float, False),
+            (2, 1024, 8, 128, 128, 64, 0.1, torch.float16, True),
+            (2, 1024, 8, 128, 128, 64, 10, torch.float16, False),
+            (2, 65, 2, 32, 48, 32, None, torch.float32, False),
+            (2, 65, 2, 32, 48, 32, None, torch.float16, True),
+            (2, 65, 2, 32, 48, 32, None, torch.bfloat16, True),
         ]
     ],
 )
@@ -52,6 +52,7 @@ def test_fused_recurrent(
     M: int,
     gate_logit_normalizer: float | None,
     dtype: torch.dtype,
+    state_v_first: bool,
 ):
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
@@ -93,15 +94,21 @@ def test_fused_recurrent(
     ref_dhk0, hk0.grad = hk0.grad.clone(), None
     ref_dhv0, hv0.grad = hv0.grad.clone(), None
 
+    initial_state = (hk0, hv0)
+    if state_v_first:
+        initial_state = tuple(h.transpose(-1, -2).contiguous() for h in initial_state)
     tri, (tri_hkt, tri_hvt) = fused_recurrent_gsa(
         q=q,
         k=k,
         v=v,
         s=s,
         g=g,
-        initial_state=(hk0, hv0),
+        initial_state=initial_state,
         output_final_state=True,
+        state_v_first=state_v_first,
     )
+    if state_v_first:
+        tri_hkt, tri_hvt = tri_hkt.transpose(-1, -2), tri_hvt.transpose(-1, -2)
     ((tri * do).sum() + (tri_hkt * dhkt).sum() + (tri_hvt * dhvt).sum()).backward()
     tri_dq, q.grad = q.grad.clone(), None
     tri_dk, k.grad = k.grad.clone(), None
@@ -126,19 +133,19 @@ def test_fused_recurrent(
 
 
 @pytest.mark.parametrize(
-    ('H', 'D', 'V', 'M', 'cu_seqlens', 'gate_logit_normalizer', 'dtype'),
+    ('H', 'D', 'V', 'M', 'cu_seqlens', 'gate_logit_normalizer', 'dtype', 'state_v_first'),
     [
-        pytest.param(*test, id="H{}-D{}-V{}-M{}-cu_seqlens{}-gate_logit_normalizer{}-{}".format(*test))
+        pytest.param(*test, id="H{}-D{}-V{}-M{}-cu_seqlens{}-gate_logit_normalizer{}-{}-state_v_first{}".format(*test))
         for test in [
-            (4, 64, 64, 64, [0, 15], 1, torch.float),
-            (2, 60, 60, 32, [0, 1, 17, 65], 1, torch.bfloat16),
-            (4, 64, 64, 64, [0, 256, 500, 1000], 1, torch.float),
-            (4, 100, 100, 64, [0, 15, 100, 300, 1200, 2000], 1, torch.float),
-            (4, 64, 64, 64, [0, 1, 100, 300, 1200, 2048], 1, torch.float16),
-            (4, 128, 128, 64, [0, 200, 512, 1200, 2048], 1, torch.float16),
-            (2, 32, 48, 32, [0, 1, 17, 65], None, torch.float32),
-            (2, 32, 48, 32, [0, 1, 17, 65], None, torch.float16),
-            (2, 32, 48, 32, [0, 1, 17, 65], None, torch.bfloat16),
+            (4, 64, 64, 64, [0, 15], 1, torch.float, False),
+            (2, 60, 60, 32, [0, 1, 17, 65], 1, torch.bfloat16, True),
+            (4, 64, 64, 64, [0, 256, 500, 1000], 1, torch.float, False),
+            (4, 100, 100, 64, [0, 15, 100, 300, 1200, 2000], 1, torch.float, True),
+            (4, 64, 64, 64, [0, 1, 100, 300, 1200, 2048], 1, torch.float16, True),
+            (4, 128, 128, 64, [0, 200, 512, 1200, 2048], 1, torch.float16, False),
+            (2, 32, 48, 32, [0, 1, 17, 65], None, torch.float32, False),
+            (2, 32, 48, 32, [0, 1, 17, 65], None, torch.float16, True),
+            (2, 32, 48, 32, [0, 1, 17, 65], None, torch.bfloat16, True),
         ]
     ],
 )
@@ -154,6 +161,7 @@ def test_fused_recurrent_varlen(
     cu_seqlens: list[int],
     gate_logit_normalizer: float | None,
     dtype: torch.dtype,
+    state_v_first: bool,
 ):
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
@@ -206,16 +214,22 @@ def test_fused_recurrent_varlen(
     ref_dhk0, hk0.grad = hk0.grad.clone(), None
     ref_dhv0, hv0.grad = hv0.grad.clone(), None
 
+    initial_state = (hk0, hv0)
+    if state_v_first:
+        initial_state = tuple(h.transpose(-1, -2).contiguous() for h in initial_state)
     tri, (tri_hkt, tri_hvt) = fused_recurrent_gsa(
         q=q,
         k=k,
         v=v,
         s=s,
         g=g,
-        initial_state=(hk0, hv0),
+        initial_state=initial_state,
         output_final_state=True,
         cu_seqlens=torch.tensor(cu_seqlens, dtype=torch.int32, device=device),
+        state_v_first=state_v_first,
     )
+    if state_v_first:
+        tri_hkt, tri_hvt = tri_hkt.transpose(-1, -2), tri_hvt.transpose(-1, -2)
     ((tri * do).sum() + (tri_hkt * dhkt).sum() + (tri_hvt * dhvt).sum()).backward()
     tri_dq, q.grad = q.grad.clone(), None
     tri_dk, k.grad = k.grad.clone(), None
@@ -240,31 +254,31 @@ def test_fused_recurrent_varlen(
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'HQ', 'D', 'V', 'M', 'gate_logit_normalizer', 'dtype', 'checkpoint_level', 'chunk_size'),
+    ('B', 'T', 'H', 'HQ', 'D', 'V', 'M', 'gate_logit_normalizer', 'dtype', 'checkpoint_level', 'chunk_size', 'state_v_first'),
     [
-        pytest.param(*test, id="B{}-T{}-H{}-HQ{}-D{}-V{}-M{}-gate{}-{}-checkpoint{}-chunk{}".format(*test))
+        pytest.param(*test, id="B{}-T{}-H{}-HQ{}-D{}-V{}-M{}-gate{}-{}-checkpoint{}-chunk{}-state_v_first{}".format(*test))
         for test in [
-            (1, 63, 1, 1, 64, 64, 32, 1, torch.float16, 2, 64),
-            (2, 1024, 4, 4, 60, 60, 64, 1, torch.float16, 2, 64),
-            (2, 1024, 4, 4, 256, 256, 64, 1, torch.float16, 2, 64),
-            (2, 1024, 4, 4, 128, 128, 64, 0.1, torch.float, 2, 64),
-            (2, 1024, 4, 4, 128, 128, 128, 1, torch.float16, 2, 64),
-            (2, 1024, 4, 4, 128, 128, 64, 10, torch.float16, 2, 64),
-            (2, 65, 2, 2, 32, 48, 32, None, torch.float32, 2, 64),
-            (2, 65, 2, 2, 32, 48, 32, None, torch.float16, 2, 64),
-            (2, 65, 2, 2, 32, 48, 32, None, torch.bfloat16, 2, 64),
-            (1, 65, 2, 4, 32, 48, 32, 1, torch.float16, 0, 64),
-            (1, 65, 2, 4, 32, 48, 32, 1, torch.float16, 1, 64),
-            (1, 65, 2, 4, 32, 48, 32, 1, torch.float16, 2, 64),
-            (1, 64, 2, 2, 32, 32, 32, 1, torch.float32, 0, 16),
-            (1, 64, 2, 2, 32, 32, 32, 1, torch.float32, 1, 16),
-            (1, 64, 2, 2, 32, 32, 32, 1, torch.float32, 2, 16),
-            (1, 64, 2, 2, 32, 32, 32, 1, torch.float32, 0, 32),
-            (1, 64, 2, 2, 32, 32, 32, 1, torch.float32, 1, 32),
-            (1, 64, 2, 2, 32, 32, 32, 1, torch.float32, 2, 32),
-            (1, 64, 2, 2, 32, 32, 32, 1, torch.float32, 0, 64),
-            (1, 64, 2, 2, 32, 32, 32, 1, torch.float32, 1, 64),
-            (1, 64, 2, 2, 32, 32, 32, 1, torch.float32, 2, 64),
+            (1, 63, 1, 1, 64, 64, 32, 1, torch.float16, 2, 64, True),
+            (2, 1024, 4, 4, 60, 60, 64, 1, torch.float16, 2, 64, True),
+            (2, 1024, 4, 4, 256, 256, 64, 1, torch.float16, 2, 64, False),
+            (2, 1024, 4, 4, 128, 128, 64, 0.1, torch.float, 2, 64, True),
+            (2, 1024, 4, 4, 128, 128, 128, 1, torch.float16, 2, 64, True),
+            (2, 1024, 4, 4, 128, 128, 64, 10, torch.float16, 2, 64, False),
+            (2, 65, 2, 2, 32, 48, 32, None, torch.float32, 2, 64, False),
+            (2, 65, 2, 2, 32, 48, 32, None, torch.float16, 2, 64, True),
+            (2, 65, 2, 2, 32, 48, 32, None, torch.bfloat16, 2, 64, True),
+            (1, 65, 2, 4, 32, 48, 32, 1, torch.float16, 0, 64, True),
+            (1, 65, 2, 4, 32, 48, 32, 1, torch.float16, 1, 64, True),
+            (1, 65, 2, 4, 32, 48, 32, 1, torch.float16, 2, 64, True),
+            (1, 64, 2, 2, 32, 32, 32, 1, torch.float32, 0, 16, True),
+            (1, 64, 2, 2, 32, 32, 32, 1, torch.float32, 1, 16, False),
+            (1, 64, 2, 2, 32, 32, 32, 1, torch.float32, 2, 16, False),
+            (1, 64, 2, 2, 32, 32, 32, 1, torch.float32, 0, 32, False),
+            (1, 64, 2, 2, 32, 32, 32, 1, torch.float32, 1, 32, True),
+            (1, 64, 2, 2, 32, 32, 32, 1, torch.float32, 2, 32, False),
+            (1, 64, 2, 2, 32, 32, 32, 1, torch.float32, 0, 64, False),
+            (1, 64, 2, 2, 32, 32, 32, 1, torch.float32, 1, 64, False),
+            (1, 64, 2, 2, 32, 32, 32, 1, torch.float32, 2, 64, True),
         ]
     ],
 )
@@ -284,6 +298,7 @@ def test_chunk(
     dtype: torch.dtype,
     checkpoint_level: int,
     chunk_size: int,
+    state_v_first: bool,
 ):
     if (D > 64 or M > 64) and check_shared_mem('hopper') is False:
         pytest.skip(reason='Current CI do not support this config')
@@ -328,6 +343,9 @@ def test_chunk(
     ref_dhk0, hk0.grad = hk0.grad.clone(), None
     ref_dhv0, hv0.grad = hv0.grad.clone(), None
 
+    initial_state = (hk0, hv0)
+    if state_v_first:
+        initial_state = tuple(h.transpose(-1, -2).contiguous() for h in initial_state)
     tri, (tri_hkt, tri_hvt) = chunk_gsa(
         q=q,
         k=k,
@@ -335,11 +353,14 @@ def test_chunk(
         s=s,
         g=g,
         scale=D**-0.5,
-        initial_state=(hk0, hv0),
+        initial_state=initial_state,
         output_final_state=True,
         checkpoint_level=checkpoint_level,
         chunk_size=chunk_size,
+        state_v_first=state_v_first,
     )
+    if state_v_first:
+        tri_hkt, tri_hvt = tri_hkt.transpose(-1, -2), tri_hvt.transpose(-1, -2)
     ((tri * do).sum() + (tri_hkt * dhkt).sum() + (tri_hvt * dhvt).sum()).backward()
     tri_dq, q.grad = q.grad.clone(), None
     tri_dk, k.grad = k.grad.clone(), None
@@ -364,19 +385,19 @@ def test_chunk(
 
 
 @pytest.mark.parametrize(
-    ('H', 'HQ', 'D', 'V', 'M', 'cu_seqlens', 'gate_logit_normalizer', 'dtype', 'checkpoint_level'),
+    ('H', 'HQ', 'D', 'V', 'M', 'cu_seqlens', 'gate_logit_normalizer', 'dtype', 'checkpoint_level', 'state_v_first'),
     [
-        pytest.param(*test, id="H{}-HQ{}-D{}-V{}-M{}-cu_seqlens{}-gate_logit_normalizer{}-{}-checkpoint_level{}".format(*test))
+        pytest.param(*test, id="H{}-HQ{}-D{}-V{}-M{}-cu_seqlens{}-gate{}-{}-checkpoint{}-state_v_first{}".format(*test))
         for test in [
-            (4, 4, 64, 64, 64, [0, 15], 1, torch.float16, 2),
-            (4, 4, 64, 64, 64, [0, 256, 500, 1000], 1, torch.float16, 2),
-            (4, 4, 100, 100, 64, [0, 15, 100, 300, 1200, 2000], 1, torch.float16, 2),
-            (2, 2, 32, 48, 32, [0, 1, 17, 65], None, torch.float32, 2),
-            (2, 2, 32, 48, 32, [0, 1, 17, 65], None, torch.float16, 2),
-            (2, 2, 32, 48, 32, [0, 1, 17, 65], None, torch.bfloat16, 2),
-            (2, 4, 32, 48, 32, [0, 1, 17, 65], 1, torch.float16, 0),
-            (2, 4, 32, 48, 32, [0, 1, 17, 65], 1, torch.float16, 1),
-            (2, 4, 32, 48, 32, [0, 1, 17, 65], 1, torch.float16, 2),
+            (4, 4, 64, 64, 64, [0, 15], 1, torch.float16, 2, False),
+            (4, 4, 64, 64, 64, [0, 256, 500, 1000], 1, torch.float16, 2, True),
+            (4, 4, 100, 100, 64, [0, 15, 100, 300, 1200, 2000], 1, torch.float16, 2, True),
+            (2, 2, 32, 48, 32, [0, 1, 17, 65], None, torch.float32, 2, False),
+            (2, 2, 32, 48, 32, [0, 1, 17, 65], None, torch.float16, 2, True),
+            (2, 2, 32, 48, 32, [0, 1, 17, 65], None, torch.bfloat16, 2, True),
+            (2, 4, 32, 48, 32, [0, 1, 17, 65], 1, torch.float16, 0, True),
+            (2, 4, 32, 48, 32, [0, 1, 17, 65], 1, torch.float16, 1, True),
+            (2, 4, 32, 48, 32, [0, 1, 17, 65], 1, torch.float16, 2, True),
         ]
     ],
 )
@@ -399,6 +420,7 @@ def test_chunk_varlen(
     gate_logit_normalizer: float | None,
     dtype: torch.dtype,
     checkpoint_level: int,
+    state_v_first: bool,
 ):
     if (D > 64 or M > 64) and check_shared_mem('hopper') is False:
         pytest.skip(reason='Current CI do not support this config')
@@ -454,6 +476,9 @@ def test_chunk_varlen(
     ref_dhk0, hk0.grad = hk0.grad.clone(), None
     ref_dhv0, hv0.grad = hv0.grad.clone(), None
 
+    initial_state = (hk0, hv0)
+    if state_v_first:
+        initial_state = tuple(h.transpose(-1, -2).contiguous() for h in initial_state)
     tri, (tri_hkt, tri_hvt) = chunk_gsa(
         q=q,
         k=k,
@@ -461,11 +486,14 @@ def test_chunk_varlen(
         s=s,
         g=g,
         scale=D**-0.5,
-        initial_state=(hk0, hv0),
+        initial_state=initial_state,
         output_final_state=True,
         checkpoint_level=checkpoint_level,
         cu_seqlens=torch.tensor(cu_seqlens, dtype=torch.int32, device=device),
+        state_v_first=state_v_first,
     )
+    if state_v_first:
+        tri_hkt, tri_hvt = tri_hkt.transpose(-1, -2), tri_hvt.transpose(-1, -2)
     ((tri * do).sum() + (tri_hkt * dhkt).sum() + (tri_hvt * dhvt).sum()).backward()
     tri_dq, q.grad = q.grad.clone(), None
     tri_dk, k.grad = k.grad.clone(), None
@@ -490,18 +518,18 @@ def test_chunk_varlen(
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'HQ', 'D', 'M', 'dtype', 'has_initial_state', 'output_final_state'),
+    ('B', 'T', 'H', 'HQ', 'D', 'M', 'dtype', 'has_initial_state', 'output_final_state', 'state_v_first'),
     [
-        pytest.param(*test, id="B{}-T{}-H{}-HQ{}-D{}-M{}-{}-initial{}-final{}".format(*test))
+        pytest.param(*test, id="B{}-T{}-H{}-HQ{}-D{}-M{}-{}-initial{}-final{}-state_v_first{}".format(*test))
         for test in [
-            (2, 63, 1, 2, 64, 32, torch.float, True, True),
-            (2, 17, 2, 4, 60, 48, torch.float, True, True),
-            (2, 200, 2, 8, 64, 64, torch.float, True, True),
-            (2, 256, 4, 16, 128, 64, torch.float, True, True),
-            (2, 1, 2, 2, 16, 8, torch.float, False, False),
-            (2, 1, 2, 2, 16, 8, torch.float, False, True),
-            (2, 1, 2, 2, 16, 8, torch.float, True, False),
-            (2, 1, 2, 2, 16, 8, torch.float, True, True),
+            (2, 63, 1, 2, 64, 32, torch.float, True, True, False),
+            (2, 17, 2, 4, 60, 48, torch.float, True, True, True),
+            (2, 200, 2, 8, 64, 64, torch.float, True, True, False),
+            (2, 256, 4, 16, 128, 64, torch.float, True, True, True),
+            (2, 1, 2, 2, 16, 8, torch.float, False, False, True),
+            (2, 1, 2, 2, 16, 8, torch.float, False, True, True),
+            (2, 1, 2, 2, 16, 8, torch.float, True, False, True),
+            (2, 1, 2, 2, 16, 8, torch.float, True, True, True),
         ]
     ],
 )
@@ -520,6 +548,7 @@ def test_fused_recurrent_inference(
     dtype: torch.dtype,
     has_initial_state: bool,
     output_final_state: bool,
+    state_v_first: bool,
 ):
     torch.manual_seed(42)
 
@@ -533,7 +562,6 @@ def test_fused_recurrent_inference(
         hk0 = torch.randn(B, H, D, M, dtype=dtype, device=device)
         hv0 = torch.randn(B, H, M, D, dtype=dtype, device=device)
         h0 = (hk0, hv0)
-        hk0_copy, hv0_copy = hk0.clone(), hv0.clone()
 
     ref, ref_state = naive_recurrent_gsa(
         q=q,
@@ -544,6 +572,11 @@ def test_fused_recurrent_inference(
         initial_state=h0,
         output_final_state=output_final_state,
     )
+    if h0 is not None:
+        if state_v_first:
+            h0 = tuple(h.transpose(-1, -2).contiguous() for h in h0)
+        hk0, hv0 = h0
+        hk0_copy, hv0_copy = hk0.clone(), hv0.clone()
     ht = h0
     for i in range(T):
         tri, ht = fused_recurrent_gsa(
@@ -554,12 +587,14 @@ def test_fused_recurrent_inference(
             g=g[:, i:i+1],
             initial_state=ht,
             output_final_state=output_final_state,
+            state_v_first=state_v_first,
         )
         assert_close('o', ref[:, i:i+1], tri, 0.005)
 
     if output_final_state:
-        assert_close('hkt', ref_state[0], ht[0], 0.005)
-        assert_close('hvt', ref_state[1], ht[1], 0.005)
+        hkt, hvt = (h.transpose(-1, -2) for h in ht) if state_v_first else ht
+        assert_close('hkt', ref_state[0], hkt, 0.005)
+        assert_close('hvt', ref_state[1], hvt, 0.005)
     else:
         assert ht == [None, None]
     if has_initial_state:
@@ -568,3 +603,45 @@ def test_fused_recurrent_inference(
         if output_final_state:
             assert ht[0].data_ptr() != hk0.data_ptr()
             assert ht[1].data_ptr() != hv0.data_ptr()
+
+
+@pytest.mark.parametrize(
+    ('D', 'V', 'M', 'dtype'),
+    [(32, 48, 16, torch.float16), (60, 48, 40, torch.bfloat16)],
+)
+@pytest.mark.skipif(device_platform == 'intel', reason='Intel Triton Failure')
+@torch.no_grad()
+def test_state_v_first_prefill_decode(D: int, V: int, M: int, dtype: torch.dtype):
+    torch.manual_seed(42)
+    B, T, H = 2, 65, 2
+    q = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    k = torch.randn_like(q)
+    v = torch.randn(B, T, H, V, dtype=dtype, device=device)
+    s = torch.randn(B, T, H, M, dtype=dtype, device=device)
+    g = F.logsigmoid(torch.randn_like(s))
+    ref, ref_state = naive_recurrent_gsa(q=q, k=k, v=v, s=s, g=g, output_final_state=True)
+
+    prefill, state = chunk_gsa(
+        q=q[:, :63],
+        k=k[:, :63],
+        v=v[:, :63],
+        s=s[:, :63],
+        g=g[:, :63],
+        output_final_state=True,
+        state_v_first=True,
+    )
+    assert_close('prefill', ref[:, :63], prefill, 0.005)
+    for i in range(63, T):
+        out, state = fused_recurrent_gsa(
+            q=q[:, i:i+1],
+            k=k[:, i:i+1],
+            v=v[:, i:i+1],
+            s=s[:, i:i+1],
+            g=g[:, i:i+1],
+            initial_state=state,
+            output_final_state=True,
+            state_v_first=True,
+        )
+        assert_close('decode', ref[:, i:i+1], out, 0.005)
+    assert_close('hkt', ref_state[0], state[0].transpose(-1, -2), 0.005)
+    assert_close('hvt', ref_state[1], state[1].transpose(-1, -2), 0.005)
