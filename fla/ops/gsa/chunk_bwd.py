@@ -128,7 +128,7 @@ def chunk_gsa_bwd_kernel_dA(
 @fla_cache_autotune(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [2, 4]
+        for num_warps in [2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
     key=['H', 'K', 'V', 'BT', 'IS_VARLEN', 'STATE_V_FIRST'],
@@ -219,7 +219,7 @@ def chunk_gsa_bwd_kernel_dqkvg(
         p_dgv = dgv+((i_k*all+bos)*H+i_h)*V + o_q[:, None] * (H*V) + o_v[None, :]
         if STATE_V_FIRST:
             p_h = h + (i_tg * H + i_h) * K*V + o_v[:, None] * K + o_k[None, :]
-            p_dh = dh + (i_tg * H + i_h) * K*V + o_k[:, None] + o_v[None, :] * K
+            p_dh = dh + (i_tg * H + i_h) * K*V + o_v[:, None] * K + o_k[None, :]
         else:
             p_h = h + (i_tg * H + i_h) * K*V + o_v[:, None] + o_k[None, :] * V
             p_dh = dh + (i_tg * H + i_h) * K*V + o_k[:, None] * V + o_v[None, :]
@@ -235,17 +235,22 @@ def chunk_gsa_bwd_kernel_dqkvg(
         # [BT, BV]
         b_do = tl.load(p_do, mask=m_qv, other=0.0)
         b_do = (b_do * exp2(b_g)).to(b_do.dtype)
-        # [BK, BV]
-        b_dh = tl.load(p_dh, mask=m_kv, other=0.0)
-        # [BV]
-        b_dg = tl.sum(tl.trans(b_h) * b_dh, 0) * exp2(b_gn)
+        if STATE_V_FIRST:
+            b_dh = tl.load(p_dh, mask=m_vk, other=0.0)
+            b_dg = tl.sum(b_h * b_dh, 1) * exp2(b_gn)
+        else:
+            b_dh = tl.load(p_dh, mask=m_kv, other=0.0)
+            b_dg = tl.sum(tl.trans(b_h) * b_dh, 0) * exp2(b_gn)
 
         b_dh = b_dh.to(b_k.dtype)
         # [BT, BK]
         b_dq += tl.dot(b_do, b_h.to(b_k.dtype)) * scale
-        b_dk = tl.dot((b_v * b_gv).to(b_v.dtype), tl.trans(b_dh), b_dk)
-        # [BT, BV]
-        b_dv = tl.dot(b_k, b_dh) * b_gv
+        if STATE_V_FIRST:
+            b_dk = tl.dot((b_v * b_gv).to(b_v.dtype), b_dh, b_dk)
+            b_dv = tl.dot(b_k, tl.trans(b_dh)) * b_gv
+        else:
+            b_dk = tl.dot((b_v * b_gv).to(b_v.dtype), tl.trans(b_dh), b_dk)
+            b_dv = tl.dot(b_k, b_dh) * b_gv
         # [BV]
         b_dg += tl.sum(b_dv * b_v, 0)
 
