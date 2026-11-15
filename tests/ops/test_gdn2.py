@@ -896,9 +896,10 @@ def test_chunk_bwd_intra_npu_saved_state(monkeypatch):
     [
         (48, torch.float16, 64, True, 192, True),
         (256, torch.bfloat16, 64, True, 192, True),
-        (32, torch.float32, 64, True, 64, True),
-        (256, torch.float32, 64, True, 32, True),
-        (256, torch.float32, 64, True, 31, False),
+        (32, torch.float32, 64, True, 96, True),
+        (256, torch.float32, 64, True, 96, True),
+        (256, torch.float32, 64, True, 95, False),
+        (256, torch.float32, 64, True, 64, False),
         (257, torch.float32, 64, True, 192, False),
         (0, torch.float32, 64, True, 192, False),
         (32, torch.int32, 64, True, 192, False),
@@ -926,7 +927,7 @@ def test_chunk_bwd_intra_npu_verifier(K, dtype, chunk_size, on_npu, ub_kib, expe
     assert (reason is None) == expected
     if expected:
         inspect.signature(chunk_gdn2_bwd_intra_npu).bind(**kwargs)
-        assert _get_bwd_bk(K) == (16 if ub_kib == 32 else 32)
+        assert _get_bwd_bk(K) == (16 if ub_kib == 96 else 32)
 
 
 @pytest.mark.skipif(not (IS_NVIDIA or IS_AMD or IS_NPU), reason="CUDA/ROCm or Ascend NPU required")

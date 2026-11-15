@@ -806,13 +806,13 @@ def chunk_gdn2_fwd_intra_npu(
 
 
 def _get_bwd_bk(K: int) -> int:
-    # budget 24 fp32 BC*BK equivalents for backward, with 25% headroom.
-    if get_ub_manager().ub_capacity_bytes * 0.75 < SUB_CHUNK_SIZE * 16 * 4 * 24:
-        raise ValueError('GDN-2 Ascend bwd intra requires at least 32 KiB UB')
+    # budget dot operands and masks at 72 fp32 BC*BK equivalents, with 25% headroom.
+    if get_ub_manager().ub_capacity_bytes * 0.75 < SUB_CHUNK_SIZE * 16 * 4 * 72:
+        raise ValueError('GDN-2 Ascend bwd intra requires at least 96 KiB UB')
     return compute_row_tile_block_size(
         SUB_CHUNK_SIZE,
         K,
-        24.0,
+        72.0,
         tiling_row=False,
         safety_margin=0.75,
         fallback=16,
