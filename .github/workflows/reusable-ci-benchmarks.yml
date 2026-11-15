@@ -145,3 +145,10 @@ jobs:
             benchmark_meta.json
           if-no-files-found: ignore
           retention-days: 30
+
+      - name: Clean job-local test caches
+        if: always()
+        shell: bash
+        run: |
+          rm -rf .pytest_cache
+          find . -maxdepth 3 -type d -name .pytest_cache -prune -exec rm -rf {} + 2>/dev/null || true

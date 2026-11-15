@@ -1,0 +1,141 @@
+name: runner-maintenance
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Print candidate paths without deleting them'
+        required: true
+        type: boolean
+        default: true
+      max_age_days:
+        description: 'Delete Triton cache entries and old runner work dirs older than this many days'
+        required: true
+        type: string
+        default: '7'
+      aggressive:
+        description: 'Also remove all Triton cache entries and prune Docker build cache/images'
+        required: true
+        type: boolean
+        default: false
+
+permissions: {}
+
+jobs:
+  cleanup:
+    name: H100 runner cache maintenance
+    runs-on: nvidia-h100-1
+    timeout-minutes: 30
+    env:
+      DRY_RUN: ${{ inputs.dry_run }}
+      MAX_AGE_DAYS: ${{ inputs.max_age_days }}
+      AGGRESSIVE: ${{ inputs.aggressive }}
+
+    steps:
+      - name: Diagnose before cleanup
+        shell: bash
+        run: |
+          echo "== context =="
+          whoami; echo "HOME=$HOME"; echo "dry_run=$DRY_RUN max_age_days=$MAX_AGE_DAYS aggressive=$AGGRESSIVE"
+          echo "== df =="
+          df -h /
+          echo "== docker =="
+          docker system df 2>/dev/null || echo "no docker access"
+          echo "== home top =="
+          du -x -d1 -h "$HOME" 2>/dev/null | sort -rh | head -12 || true
+          echo "== known caches =="
+          du -sh "$HOME/.cache/pip" "$HOME/.triton" "$HOME"/miniforge3/pkgs "$HOME"/miniconda3/pkgs "$HOME"/anaconda3/pkgs 2>/dev/null || true
+          echo "== runner work =="
+          du -x -d1 -h /home/ubuntu/actions-runner/_work 2>/dev/null | sort -rh | head -10 || true
+
+      - name: Clean historical caches
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cleanup_path() {
+            local path="$1"
+            [ -e "$path" ] || return 0
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "[dry-run] rm -rf -- $path"
+            else
+              rm -rf -- "$path"
+            fi
+          }
+
+          echo "== pip cache =="
+          cleanup_path "$HOME/.cache/pip"
+          shopt -s nullglob
+          for pip in "$HOME"/*/envs/*/bin/pip; do
+            [ -x "$pip" ] || continue
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "[dry-run] $pip cache purge"
+            else
+              "$pip" cache purge || true
+            fi
+          done
+
+          echo "== conda package/index cache =="
+          CONDA_BASE=$(conda info --base 2>/dev/null || true)
+          if [ -z "$CONDA_BASE" ]; then
+            for name in miniforge3 miniconda3 anaconda3; do
+              if [ -x "$HOME/$name/bin/conda" ]; then
+                CONDA_BASE="$HOME/$name"
+                break
+              fi
+            done
+          fi
+          if [ -n "$CONDA_BASE" ]; then
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "[dry-run] $CONDA_BASE/bin/conda clean --all -y"
+            else
+              "$CONDA_BASE/bin/conda" clean --all -y || true
+            fi
+          else
+            echo "no conda installation found"
+          fi
+
+          echo "== triton cache =="
+          if [ "$AGGRESSIVE" = "true" ]; then
+            cleanup_path "$HOME/.triton/cache"
+          elif [ -d "$HOME/.triton/cache" ]; then
+            while IFS= read -r -d '' path; do
+              cleanup_path "$path"
+            done < <(find "$HOME/.triton/cache" -mindepth 1 -maxdepth 1 -mtime "+$MAX_AGE_DAYS" -print0)
+          fi
+
+          echo "== pytest caches =="
+          while IFS= read -r -d '' path; do
+            cleanup_path "$path"
+          done < <(find /home/ubuntu/actions-runner/_work "$HOME" /tmp -maxdepth 5 -type d -name .pytest_cache -prune -print0 2>/dev/null)
+
+          echo "== old runner work dirs =="
+          while IFS= read -r -d '' path; do
+            case "$path" in
+              "$GITHUB_WORKSPACE"|"$GITHUB_WORKSPACE"/*) continue ;;
+            esac
+            cleanup_path "$path"
+          done < <(find /home/ubuntu/actions-runner/_work -mindepth 1 -maxdepth 1 -type d -mtime "+$MAX_AGE_DAYS" -print0 2>/dev/null)
+
+          echo "== docker prune =="
+          if [ "$AGGRESSIVE" = "true" ]; then
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "[dry-run] docker system prune -af"
+            else
+              docker system prune -af || true
+            fi
+          else
+            echo "skipped (set aggressive=true to prune docker)"
+          fi
+
+      - name: Diagnose after cleanup
+        shell: bash
+        run: |
+          echo "== df =="
+          df -h /
+          echo "== home top =="
+          du -x -d1 -h "$HOME" 2>/dev/null | sort -rh | head -12 || true
+          echo "== known caches =="
+          du -sh "$HOME/.cache/pip" "$HOME/.triton" "$HOME"/miniforge3/pkgs "$HOME"/miniconda3/pkgs "$HOME"/anaconda3/pkgs 2>/dev/null || true
+          echo "== runner work =="
+          du -x -d1 -h /home/ubuntu/actions-runner/_work 2>/dev/null | sort -rh | head -10 || true
