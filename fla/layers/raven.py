@@ -310,6 +310,7 @@ class Raven(nn.Module):
                 scale=self.scale,
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
+                state_v_first=True,
                 cu_seqlens=cu_seqlens,
             )
         elif mode == 'chunk':
@@ -322,6 +323,7 @@ class Raven(nn.Module):
                 scale=self.scale,
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
+                state_v_first=True,
                 cu_seqlens=cu_seqlens,
             )
         else:
