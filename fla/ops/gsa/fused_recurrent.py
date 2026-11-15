@@ -354,8 +354,8 @@ def fused_recurrent_gsa(
     initial_state: tuple[torch.Tensor, torch.Tensor] | None = None,
     output_final_state: bool = False,
     reverse: bool = False,
-    cu_seqlens: torch.LongTensor | None = None,
     state_v_first: bool = False,
+    cu_seqlens: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
@@ -383,12 +383,12 @@ def fused_recurrent_gsa(
             Default: `False`.
         reverse (Optional[bool]):
             If `True`, process the state passing in reverse order. Default: `False`.
-        cu_seqlens (torch.LongTensor):
-            Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
-            consistent with the FlashAttention API.
         state_v_first (bool, Optional):
             Store the recurrent states in V-first `[M, K]` and `[V, M]` layouts.
             Initial/final states and their gradients follow the selected layout. Default: `False`.
+        cu_seqlens (torch.LongTensor):
+            Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
+            consistent with the FlashAttention API.
 
     Returns:
         o (torch.Tensor):

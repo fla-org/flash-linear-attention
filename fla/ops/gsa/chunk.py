@@ -161,10 +161,10 @@ def chunk_gsa(
     scale: float | None = None,
     initial_state: tuple[torch.Tensor, torch.Tensor] | None = None,
     output_final_state: bool = False,
+    state_v_first: bool = False,
     checkpoint_level: int = 2,
     cu_seqlens: torch.LongTensor | None = None,
     cu_seqlens_cpu: torch.LongTensor | None = None,
-    state_v_first: bool = False,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
@@ -192,6 +192,9 @@ def chunk_gsa(
         output_final_state (Optional[bool]):
             Whether to output the final states in the layout selected by `state_v_first`.
             Default: `False`.
+        state_v_first (bool, Optional):
+            Store the recurrent states in V-first `[M, K]` and `[V, M]` layouts.
+            Initial/final states and their gradients follow the selected layout. Default: `False`.
         checkpoint_level (Optional[int]):
             Checkpointing level; higher values will save more memory and do more recomputations during backward.
             Default: `2`.
@@ -203,9 +206,6 @@ def chunk_gsa(
             consistent with the FlashAttention API.
         cu_seqlens_cpu (torch.LongTensor):
             CPU copy of `cu_seqlens` to avoid unnecessary device synchronization. Default: `None`.
-        state_v_first (bool, Optional):
-            Store the recurrent states in V-first `[M, K]` and `[V, M]` layouts.
-            Initial/final states and their gradients follow the selected layout. Default: `False`.
 
     Returns:
         o (torch.Tensor):

@@ -225,8 +225,8 @@ def test_fused_recurrent_varlen(
         g=g,
         initial_state=initial_state,
         output_final_state=True,
-        cu_seqlens=torch.tensor(cu_seqlens, dtype=torch.int32, device=device),
         state_v_first=state_v_first,
+        cu_seqlens=torch.tensor(cu_seqlens, dtype=torch.int32, device=device),
     )
     if state_v_first:
         tri_hkt, tri_hvt = tri_hkt.transpose(-1, -2), tri_hvt.transpose(-1, -2)
@@ -355,8 +355,8 @@ def test_chunk(
         scale=D**-0.5,
         initial_state=initial_state,
         output_final_state=True,
-        checkpoint_level=checkpoint_level,
         state_v_first=state_v_first,
+        checkpoint_level=checkpoint_level,
         chunk_size=chunk_size,
     )
     if state_v_first:
@@ -488,9 +488,9 @@ def test_chunk_varlen(
         scale=D**-0.5,
         initial_state=initial_state,
         output_final_state=True,
+        state_v_first=state_v_first,
         checkpoint_level=checkpoint_level,
         cu_seqlens=torch.tensor(cu_seqlens, dtype=torch.int32, device=device),
-        state_v_first=state_v_first,
     )
     if state_v_first:
         tri_hkt, tri_hvt = tri_hkt.transpose(-1, -2), tri_hvt.transpose(-1, -2)
