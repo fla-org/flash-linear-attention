@@ -15,7 +15,7 @@ import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path, PurePosixPath
 
-PLATFORMS = {"h100", "ascend-a2"}
+PLATFORMS = {"h100", "ascend-a2", "ascend-a5"}
 
 
 class AgentCIError(ValueError):
@@ -97,7 +97,7 @@ def require_evidence(result: dict) -> None:
 def run_targets(catalog: dict, repo: Path, platform: str, suite: str, targets: list[str], dispatch: str, results: Path) -> dict:
     records = []
     pytest_args = []
-    if platform == "ascend-a2" and suite != "cp":
+    if platform in {"ascend-a2", "ascend-a5"} and suite != "cp":
         pytest_args = ["-n", "8", "--dist", "load"]
     for mode in validate_dispatch(catalog, suite, dispatch):
         for index, target in enumerate(targets):
