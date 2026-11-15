@@ -40,6 +40,7 @@ from fla.models.mom import MomConfig, MomForCausalLM, MomModel
 from fla.models.nsa import NSAConfig, NSAForCausalLM, NSAModel
 from fla.models.parallax import ParallaxConfig, ParallaxForCausalLM, ParallaxModel
 from fla.models.path_attn import PaTHAttentionConfig, PaTHAttentionForCausalLM, PaTHAttentionModel
+from fla.models.phba import PHBAConfig, PHBAForCausalLM, PHBAModel
 from fla.models.precond_gated_deltanet import (
     PrecondGatedDeltaNetConfig,
     PrecondGatedDeltaNetForCausalLM,
@@ -153,6 +154,9 @@ __all__ = [
     'NSAConfig',
     'NSAForCausalLM',
     'NSAModel',
+    'PHBAConfig',
+    'PHBAForCausalLM',
+    'PHBAModel',
     'PaTHAttentionConfig',
     'PaTHAttentionForCausalLM',
     'PaTHAttentionModel',
