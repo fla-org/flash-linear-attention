@@ -1,8 +1,6 @@
 name: runner-maintenance
 
 on:
-  pull_request:
-    types: [opened, synchronize]
   workflow_dispatch:
     inputs:
       dry_run:
@@ -26,7 +24,6 @@ permissions: {}
 jobs:
   cleanup:
     name: H100 runner cache maintenance
-    if: github.event_name == 'workflow_dispatch' || github.head_ref == 'ci/h100-cache-maintenance'
     runs-on: nvidia-h100-1
     timeout-minutes: 30
     env:
