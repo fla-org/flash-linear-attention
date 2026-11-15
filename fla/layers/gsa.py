@@ -208,9 +208,10 @@ class GatedSlotAttention(nn.Module):
                 v=v,
                 s=s,
                 g=f,
+                scale=self.scale,
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
-                scale=self.scale,
+                state_v_first=True,
                 cu_seqlens=cu_seqlens,
             )
         elif mode == 'chunk':
@@ -220,9 +221,10 @@ class GatedSlotAttention(nn.Module):
                 v=v,
                 s=s,
                 g=f,
+                scale=self.scale,
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
-                scale=self.scale,
+                state_v_first=True,
                 cu_seqlens=cu_seqlens,
             )
         else:

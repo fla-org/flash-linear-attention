@@ -174,7 +174,7 @@ def chunk_fwd_kernel_h(
         for num_warps in [1, 2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
-    key=['BT', 'USE_G', 'USE_GK', 'USE_GV', 'STATE_V_FIRST', 'K', 'V'],
+    key=['HQ', 'H', 'K', 'V', 'BT', 'USE_G', 'USE_GK', 'USE_GV', 'IS_VARLEN', 'STATE_V_FIRST'],
     **autotune_cache_kwargs,
 )
 # keep scale=1 dynamic to avoid a Hopper masked-load shared-memory miscompile.
