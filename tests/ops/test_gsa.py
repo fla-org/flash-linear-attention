@@ -356,8 +356,8 @@ def test_chunk(
         initial_state=initial_state,
         output_final_state=True,
         checkpoint_level=checkpoint_level,
-        chunk_size=chunk_size,
         state_v_first=state_v_first,
+        chunk_size=chunk_size,
     )
     if state_v_first:
         tri_hkt, tri_hvt = tri_hkt.transpose(-1, -2), tri_hvt.transpose(-1, -2)

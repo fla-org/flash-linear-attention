@@ -111,26 +111,33 @@ def fused_recurrent_gsa_inference(
     v: torch.Tensor,
     s: torch.Tensor,
     g: torch.Tensor,
+    scale: float = 1.,
     initial_state: tuple[torch.Tensor, torch.Tensor] | None = None,
     output_final_state: bool = False,
-    scale: float = 1.,
     state_v_first: bool = False,
 ) -> torch.Tensor:
     B, T, H, K, V, M = *k.shape, v.shape[-1], s.shape[-1]
     HQ = q.shape[2]
     BK, BV = min(triton.next_power_of_2(K), 64), min(triton.next_power_of_2(V), 64)
     NG = HQ // H
-    hk_shape = (B, H, M, K) if state_v_first else (B, H, K, M)
-    hv_shape = (B, H, V, M) if state_v_first else (B, H, M, V)
 
     if initial_state is not None and initial_state[0] is not None:
         hk0, hv0 = initial_state
+    elif state_v_first:
+        hk0 = q.new_zeros(B, H, M, K, dtype=torch.float)
+        hv0 = q.new_zeros(B, H, V, M, dtype=torch.float)
     else:
-        hk0, hv0 = q.new_zeros(hk_shape, dtype=torch.float), q.new_zeros(hv_shape, dtype=torch.float)
+        hk0 = q.new_zeros(B, H, K, M, dtype=torch.float)
+        hv0 = q.new_zeros(B, H, M, V, dtype=torch.float)
 
     hkt, hvt = None, None
     if output_final_state:
-        hkt, hvt = q.new_empty(hk_shape, dtype=torch.float), q.new_empty(hv_shape, dtype=torch.float)
+        if state_v_first:
+            hkt = q.new_empty(B, H, M, K, dtype=torch.float)
+            hvt = q.new_empty(B, H, V, M, dtype=torch.float)
+        else:
+            hkt = q.new_empty(B, H, K, M, dtype=torch.float)
+            hvt = q.new_empty(B, H, M, V, dtype=torch.float)
 
     o = v.new_empty(B, T, HQ, V)
     grid = (B * HQ,)
@@ -164,12 +171,12 @@ def fused_recurrent_gsa_fwd(
     v: torch.Tensor,
     s: torch.Tensor,
     g: torch.Tensor,
+    scale: float = 1.,
     initial_state: tuple[torch.Tensor, torch.Tensor] | None = None,
     output_final_state: bool = False,
-    scale: float = 1.,
     reverse: bool = False,
-    cu_seqlens: torch.LongTensor | None = None,
     state_v_first: bool = False,
+    cu_seqlens: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, tuple[torch.Tensor]]:
     if q.shape[2] != k.shape[2]:
         raise ValueError("GQA is only supported for single-token inference.")
@@ -183,8 +190,8 @@ def fused_recurrent_gsa_fwd(
         initial_state=hk0,
         output_final_state=output_final_state,
         reverse=reverse,
-        cu_seqlens=cu_seqlens,
         state_v_first=state_v_first,
+        cu_seqlens=cu_seqlens,
     )
     qv = ok.softmax(-1, dtype=torch.float32)
     ov, hvt = fused_recurrent_fwd(
@@ -196,8 +203,8 @@ def fused_recurrent_gsa_fwd(
         initial_state=hv0,
         output_final_state=output_final_state,
         reverse=reverse,
-        cu_seqlens=cu_seqlens,
         state_v_first=state_v_first,
+        cu_seqlens=cu_seqlens,
     )
     return ok, hkt, qv, ov, hvt
 
@@ -217,8 +224,8 @@ def fused_recurrent_gsa_bwd(
     dhvt: torch.Tensor | None = None,
     scale: float = 1.,
     reverse: bool = False,
-    cu_seqlens: torch.LongTensor | None = None,
     state_v_first: bool = False,
+    cu_seqlens: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor]:
     dqv, dsv, dv, _, dgv, _, dhv0 = fused_recurrent_bwd(
         q=qv,
@@ -230,8 +237,8 @@ def fused_recurrent_gsa_bwd(
         scale=1.,
         initial_state=hv0,
         reverse=reverse,
-        cu_seqlens=cu_seqlens,
         state_v_first=state_v_first,
+        cu_seqlens=cu_seqlens,
     )
     dok = softmax_bwd(qv, dqv, dtype=torch.float32)
     dq, dk, dsk, _, _, dgk, dhk0 = fused_recurrent_bwd(
@@ -245,8 +252,8 @@ def fused_recurrent_gsa_bwd(
         scale=scale,
         initial_state=hk0,
         reverse=reverse,
-        cu_seqlens=cu_seqlens,
         state_v_first=state_v_first,
+        cu_seqlens=cu_seqlens,
     )
     return dq, dk, dv, dsk.add_(dsv), dgk.add_(dgv), dhk0, dhv0
 
@@ -268,8 +275,8 @@ class FusedRecurrentGSAFunction(torch.autograd.Function):
         hv0: torch.Tensor | None = None,
         output_final_state: bool = False,
         reverse: bool = False,
-        cu_seqlens: torch.LongTensor | None = None,
         state_v_first: bool = False,
+        cu_seqlens: torch.LongTensor | None = None,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor]]:
         T = q.shape[1]
         # the decode kernel assumes one token per dense sequence and does not save tensors for backward.
@@ -280,9 +287,9 @@ class FusedRecurrentGSAFunction(torch.autograd.Function):
                 v=v,
                 s=s,
                 g=g,
+                scale=scale,
                 initial_state=(hk0, hv0),
                 output_final_state=output_final_state,
-                scale=scale,
                 state_v_first=state_v_first,
             )
             return o, hkt, hvt
@@ -292,12 +299,12 @@ class FusedRecurrentGSAFunction(torch.autograd.Function):
             v=v,
             s=s,
             g=g,
+            scale=scale,
             initial_state=(hk0, hv0),
             output_final_state=output_final_state,
-            scale=scale,
             reverse=reverse,
-            cu_seqlens=cu_seqlens,
             state_v_first=state_v_first,
+            cu_seqlens=cu_seqlens,
         )
         ctx.save_for_backward(q, k, v, s, g, qv, hk0, hv0, ok)
         ctx.scale = scale
@@ -331,8 +338,8 @@ class FusedRecurrentGSAFunction(torch.autograd.Function):
             dhvt=dhvt,
             scale=scale,
             reverse=reverse,
-            cu_seqlens=cu_seqlens,
             state_v_first=state_v_first,
+            cu_seqlens=cu_seqlens,
         )
         return dq.to(q), dk.to(k), dv.to(v), ds.to(s), dg.to(g), None, dhk0, dhv0, None, None, None, None
 
@@ -372,7 +379,7 @@ def fused_recurrent_gsa(
             For equal-length input sequences, `N` equals the batch size `B`.
             Default: `None`.
         output_final_state (Optional[bool]):
-            Whether to output the final states in the same layout as `initial_state`.
+            Whether to output the final states in the layout selected by `state_v_first`.
             Default: `False`.
         reverse (Optional[bool]):
             If `True`, process the state passing in reverse order. Default: `False`.
@@ -380,14 +387,16 @@ def fused_recurrent_gsa(
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
         state_v_first (bool, Optional):
-            Store both recurrent states with their last two dimensions transposed.
-            Initial/final states and their gradients follow this layout. Default: `False`.
+            Store the recurrent states in V-first `[M, K]` and `[V, M]` layouts.
+            Initial/final states and their gradients follow the selected layout. Default: `False`.
 
     Returns:
         o (torch.Tensor):
             Outputs of shape `[B, T, H, V]`.
         final_state (Tuple[torch.Tensor]):
-            Final states in the same layout as `initial_state`.
+            Final states of shape `[N, H, K, M]` and `[N, H, M, V]`,
+            or `[N, H, M, K]` and `[N, H, V, M]` if `state_v_first=True`.
+            Both entries are `None` if `output_final_state=False`.
 
     Examples::
         >>> import torch
@@ -453,7 +462,7 @@ def fused_recurrent_gsa(
         *initial_state,
         output_final_state,
         reverse,
-        cu_seqlens,
         state_v_first,
+        cu_seqlens,
     )
     return o, final_state

@@ -30,11 +30,11 @@ class ChunkGSAFunction(torch.autograd.Function):
         hk0: torch.Tensor | None,
         hv0: torch.Tensor | None,
         output_final_state: bool,
+        state_v_first: bool,
         checkpoint_level: int,
         cu_seqlens: torch.LongTensor | None,
         cu_seqlens_cpu: torch.LongTensor | None,
         chunk_size: int | None = None,
-        state_v_first: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if chunk_size is None:
             chunk_size = 64
@@ -63,9 +63,9 @@ class ChunkGSAFunction(torch.autograd.Function):
             v=v,
             s=s,
             g=g,
+            scale=scale,
             initial_state=(hk0, hv0),
             output_final_state=output_final_state,
-            scale=scale,
             state_v_first=state_v_first,
             cu_seqlens=cu_seqlens,
             chunk_size=chunk_size,
@@ -190,7 +190,7 @@ def chunk_gsa(
             For equal-length input sequences, `N` equals the batch size `B`.
             Default: `None`.
         output_final_state (Optional[bool]):
-            Whether to output the final states in the same layout as `initial_state`.
+            Whether to output the final states in the layout selected by `state_v_first`.
             Default: `False`.
         checkpoint_level (Optional[int]):
             Checkpointing level; higher values will save more memory and do more recomputations during backward.
@@ -204,15 +204,16 @@ def chunk_gsa(
         cu_seqlens_cpu (torch.LongTensor):
             CPU copy of `cu_seqlens` to avoid unnecessary device synchronization. Default: `None`.
         state_v_first (bool, Optional):
-            Store both recurrent states with their last two dimensions transposed.
-            Initial/final states and their gradients follow this layout. Default: `False`.
+            Store the recurrent states in V-first `[M, K]` and `[V, M]` layouts.
+            Initial/final states and their gradients follow the selected layout. Default: `False`.
 
     Returns:
         o (torch.Tensor):
             Outputs of shape `[B, T, HQ, V]`.
         final_state (Tuple[torch.Tensor]):
-            Final states in the same layout as `initial_state` if `output_final_state=True`.
-            Both entries are `None` otherwise.
+            Final states of shape `[N, H, K, M]` and `[N, H, M, V]`,
+            or `[N, H, M, K]` and `[N, H, V, M]` if `state_v_first=True`.
+            Both entries are `None` if `output_final_state=False`.
 
     Examples::
         >>> import torch
@@ -295,11 +296,11 @@ def chunk_gsa(
         hk0,
         hv0,
         output_final_state,
+        state_v_first,
         checkpoint_level,
         cu_seqlens,
         cu_seqlens_cpu,
         chunk_size,
-        state_v_first,
     )
     if NG > 1 and output_final_state:
         final_state = [x[:, ::NG].contiguous() for x in final_state]
