@@ -9,7 +9,7 @@ on:
         type: boolean
         default: true
       max_age_days:
-        description: 'Delete stale Triton cache entries and old runner work dirs older than this many days'
+        description: 'Delete stale Triton cache entries older than this many days'
         required: true
         type: string
         default: '7'
@@ -19,7 +19,7 @@ on:
         type: boolean
         default: true
       clean_conda_cache:
-        description: 'Run conda clean --all for package/index caches'
+        description: 'Run conda clean --all for package/index caches; environments are not removed'
         required: true
         type: boolean
         default: true
@@ -34,20 +34,10 @@ on:
         type: boolean
         default: false
       clean_pytest_cache:
-        description: 'Delete .pytest_cache directories under runner work, HOME and /tmp'
+        description: 'Delete .pytest_cache directories under HOME, runner work and /tmp'
         required: true
         type: boolean
         default: true
-      clean_workdirs:
-        description: 'Delete old runner _work directories, never the current job workspace'
-        required: true
-        type: boolean
-        default: true
-      clean_docker:
-        description: 'Run docker system prune -af'
-        required: true
-        type: boolean
-        default: false
       confirm:
         description: 'Type DELETE to allow non-dry-run deletion'
         required: false
@@ -69,8 +59,6 @@ jobs:
       CLEAN_TRITON_STALE: ${{ inputs.clean_triton_stale }}
       CLEAN_TRITON_ALL: ${{ inputs.clean_triton_all }}
       CLEAN_PYTEST: ${{ inputs.clean_pytest_cache }}
-      CLEAN_WORKDIRS: ${{ inputs.clean_workdirs }}
-      CLEAN_DOCKER: ${{ inputs.clean_docker }}
       CONFIRM: ${{ inputs.confirm }}
 
     steps:
@@ -79,8 +67,7 @@ jobs:
         run: |
           echo "== context =="
           whoami; echo "HOME=$HOME"; echo "dry_run=$DRY_RUN max_age_days=$MAX_AGE_DAYS"
-          echo "pip=$CLEAN_PIP conda=$CLEAN_CONDA triton_stale=$CLEAN_TRITON_STALE triton_all=$CLEAN_TRITON_ALL"
-          echo "pytest=$CLEAN_PYTEST workdirs=$CLEAN_WORKDIRS docker=$CLEAN_DOCKER"
+          echo "pip=$CLEAN_PIP conda=$CLEAN_CONDA triton_stale=$CLEAN_TRITON_STALE triton_all=$CLEAN_TRITON_ALL pytest=$CLEAN_PYTEST"
           echo "== df =="
           df -h /
           echo "== docker =="
@@ -161,7 +148,7 @@ jobs:
               if [ "$DRY_RUN" = "true" ]; then
                 echo "[dry-run] would run $CONDA_BASE/bin/conda clean --all -y"
               else
-                echo "cleaning conda caches for $CONDA_BASE"
+                echo "cleaning conda package/index caches for $CONDA_BASE"
                 "$CONDA_BASE/bin/conda" clean --all -y || true
               fi
             else
@@ -184,28 +171,6 @@ jobs:
             while IFS= read -r -d '' path; do
               cleanup_path "$path"
             done < <(find /home/ubuntu /tmp -maxdepth 5 -type d -name .pytest_cache -prune -print0 2>/dev/null)
-          fi
-
-          if [ "$CLEAN_WORKDIRS" = "true" ]; then
-            echo "== old runner work dirs =="
-            while IFS= read -r -d '' path; do
-              case "$GITHUB_WORKSPACE/" in
-                "$path"/*) continue ;;
-              esac
-              case "$path/" in
-                "$GITHUB_WORKSPACE"/*) continue ;;
-              esac
-              cleanup_path "$path"
-            done < <(find /home/ubuntu/actions-runner/_work -mindepth 1 -maxdepth 1 -type d ! -name '_*' -mtime "+$MAX_AGE_DAYS" -print0 2>/dev/null)
-          fi
-
-          if [ "$CLEAN_DOCKER" = "true" ]; then
-            echo "== docker prune =="
-            if [ "$DRY_RUN" = "true" ]; then
-              echo "[dry-run] would run docker system prune -af"
-            else
-              docker system prune -af || true
-            fi
           fi
 
       - name: Diagnose after cleanup
