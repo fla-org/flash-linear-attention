@@ -152,3 +152,17 @@ jobs:
         run: |
           rm -rf .pytest_cache
           find . -maxdepth 3 -type d -name .pytest_cache -prune -exec rm -rf {} + 2>/dev/null || true
+
+      - name: Prune benchmark git objects when large
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+            exit 0
+          fi
+          git gc --auto || echo "::warning::git gc --auto failed"
+          size_kb=$(git count-objects -v | awk '/^size-pack:/ {print $2}')
+          if [ "${size_kb:-0}" -gt 1048576 ]; then
+            echo "git size-pack ${size_kb}KiB exceeds 1GiB; running git gc --prune=now"
+            git gc --prune=now || echo "::warning::git gc --prune=now failed"
+          fi

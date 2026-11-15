@@ -9,7 +9,7 @@ on:
         type: boolean
         default: true
       max_age_days:
-        description: 'Delete stale Triton cache entries older than this many days'
+        description: 'Delete Triton cache entries modified more than this many days ago'
         required: true
         type: string
         default: '7'
@@ -24,7 +24,7 @@ on:
         type: boolean
         default: true
       clean_triton_stale:
-        description: 'Delete Triton cache entries older than max_age_days'
+        description: 'Delete Triton cache entries modified more than max_age_days ago'
         required: true
         type: boolean
         default: true
@@ -34,7 +34,7 @@ on:
         type: boolean
         default: false
       clean_pytest_cache:
-        description: 'Delete .pytest_cache directories under HOME, runner work and /tmp'
+        description: 'Delete .pytest_cache directories under runner work and /tmp'
         required: true
         type: boolean
         default: true
@@ -89,7 +89,7 @@ jobs:
           echo "== tmp top =="
           du -xh --max-depth=2 /tmp 2>/dev/null | sort -h | tail -30 || true
           echo "== large files =="
-          find /home/ubuntu /tmp -xdev -type f -size +500M -printf '%s %p\n' 2>/dev/null | sort -nr | head -30 | awk '{printf "%.1fG %s\n", $1/1073741824, $2}' || true
+          find "$HOME/.cache" "$HOME/.triton" /home/ubuntu/actions-runner/_work /tmp -xdev -type f -size +500M -printf '%s %p\n' 2>/dev/null | sort -nr | head -30 | awk '{printf "%.1fG %s\n", $1/1073741824, $2}' || true
 
       - name: Clean whitelisted caches
         shell: bash
@@ -105,11 +105,12 @@ jobs:
             exit 1
           fi
 
+          FAILED=0
           cleanup_path() {
             local path="$1"
             [ -e "$path" ] || return 0
             local size
-            size=$(du -sh "$path" 2>/dev/null | awk '{print $1}')
+            size=$(du -sh "$path" 2>/dev/null | awk '{print $1}') || size=unknown
             if [ "$DRY_RUN" = "true" ]; then
               echo "[dry-run] would remove ${size:-unknown} $path"
             else
@@ -128,7 +129,7 @@ jobs:
                 echo "[dry-run] would run $pip cache purge"
               else
                 echo "purging pip cache for $pip"
-                "$pip" cache purge || true
+                "$pip" cache purge || { echo "::warning::pip cache purge failed for $pip"; FAILED=1; }
               fi
             done
           fi
@@ -149,7 +150,7 @@ jobs:
                 echo "[dry-run] would run $CONDA_BASE/bin/conda clean --all -y"
               else
                 echo "cleaning conda package/index caches for $CONDA_BASE"
-                "$CONDA_BASE/bin/conda" clean --all -y || true
+                "$CONDA_BASE/bin/conda" clean --all -y || { echo "::warning::conda clean failed for $CONDA_BASE"; FAILED=1; }
               fi
             else
               echo "no conda installation found"
@@ -160,20 +161,38 @@ jobs:
             echo "== triton cache (all) =="
             cleanup_path "$HOME/.triton/cache"
           elif [ "$CLEAN_TRITON_STALE" = "true" ] && [ -d "$HOME/.triton/cache" ]; then
-            echo "== triton cache (older than $MAX_AGE_DAYS days) =="
+            echo "== triton cache (modified more than $MAX_AGE_DAYS days ago) =="
+            candidates=$(mktemp)
+            if ! find "$HOME/.triton/cache" -mindepth 1 -maxdepth 1 -mtime "+$MAX_AGE_DAYS" -print0 > "$candidates"; then
+              echo "::warning::failed to list Triton cache candidates"
+              FAILED=1
+            fi
             while IFS= read -r -d '' path; do
               cleanup_path "$path"
-            done < <(find "$HOME/.triton/cache" -mindepth 1 -maxdepth 1 -mtime "+$MAX_AGE_DAYS" -print0)
+            done < "$candidates"
+            rm -f "$candidates"
           fi
 
           if [ "$CLEAN_PYTEST" = "true" ]; then
             echo "== pytest caches =="
+            candidates=$(mktemp)
+            if ! find /home/ubuntu/actions-runner/_work /tmp -maxdepth 5 -type d -name .pytest_cache -prune -print0 > "$candidates" 2>/dev/null; then
+              echo "::warning::failed to list pytest cache candidates"
+              FAILED=1
+            fi
             while IFS= read -r -d '' path; do
               cleanup_path "$path"
-            done < <(find /home/ubuntu /tmp -maxdepth 5 -type d -name .pytest_cache -prune -print0 2>/dev/null)
+            done < "$candidates"
+            rm -f "$candidates"
+          fi
+
+          if [ "$FAILED" -ne 0 ]; then
+            echo "::error::One or more requested cleanup operations failed"
+            exit 1
           fi
 
       - name: Diagnose after cleanup
+        if: always()
         shell: bash
         run: |
           echo "== df =="
@@ -193,4 +212,4 @@ jobs:
           echo "== tmp top =="
           du -xh --max-depth=2 /tmp 2>/dev/null | sort -h | tail -30 || true
           echo "== large files =="
-          find /home/ubuntu /tmp -xdev -type f -size +500M -printf '%s %p\n' 2>/dev/null | sort -nr | head -30 | awk '{printf "%.1fG %s\n", $1/1073741824, $2}' || true
+          find "$HOME/.cache" "$HOME/.triton" /home/ubuntu/actions-runner/_work /tmp -xdev -type f -size +500M -printf '%s %p\n' 2>/dev/null | sort -nr | head -30 | awk '{printf "%.1fG %s\n", $1/1073741824, $2}' || true
