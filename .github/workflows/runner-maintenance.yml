@@ -186,7 +186,7 @@ jobs:
             echo "== pytest caches =="
             while IFS= read -r -d '' path; do
               cleanup_path "$path"
-            done < <(find /home/ubuntu/actions-runner/_work "$HOME" /tmp -maxdepth 5 -type d -name .pytest_cache -prune -print0 2>/dev/null)
+            done < <(find /home/ubuntu /tmp -maxdepth 5 -type d -name .pytest_cache -prune -print0 2>/dev/null)
           fi
 
           if [ "$CLEAN_WORKDIRS" = "true" ]; then
@@ -199,7 +199,7 @@ jobs:
                 "$GITHUB_WORKSPACE"/*) continue ;;
               esac
               cleanup_path "$path"
-            done < <(find /home/ubuntu/actions-runner/_work -mindepth 1 -maxdepth 1 -type d -mtime "+$MAX_AGE_DAYS" -print0 2>/dev/null)
+            done < <(find /home/ubuntu/actions-runner/_work -mindepth 1 -maxdepth 1 -type d ! -name '_*' -mtime "+$MAX_AGE_DAYS" -print0 2>/dev/null)
           fi
 
           if [ "$CLEAN_DOCKER" = "true" ]; then
