@@ -1,9 +1,6 @@
 name: runner-maintenance
 
 on:
-  push:
-    branches:
-      - ci/h100-cache-maintenance
   workflow_dispatch:
     inputs:
       dry_run:
@@ -65,16 +62,16 @@ jobs:
     runs-on: nvidia-h100-1
     timeout-minutes: 30
     env:
-      DRY_RUN: ${{ github.event_name == 'push' && 'true' || inputs.dry_run }}
-      MAX_AGE_DAYS: ${{ github.event_name == 'push' && '7' || inputs.max_age_days }}
-      CLEAN_PIP: ${{ github.event_name == 'push' && 'true' || inputs.clean_pip_cache }}
-      CLEAN_CONDA: ${{ github.event_name == 'push' && 'true' || inputs.clean_conda_cache }}
-      CLEAN_TRITON_STALE: ${{ github.event_name == 'push' && 'true' || inputs.clean_triton_stale }}
-      CLEAN_TRITON_ALL: ${{ github.event_name == 'push' && 'false' || inputs.clean_triton_all }}
-      CLEAN_PYTEST: ${{ github.event_name == 'push' && 'true' || inputs.clean_pytest_cache }}
-      CLEAN_WORKDIRS: ${{ github.event_name == 'push' && 'true' || inputs.clean_workdirs }}
-      CLEAN_DOCKER: ${{ github.event_name == 'push' && 'false' || inputs.clean_docker }}
-      CONFIRM: ${{ github.event_name == 'push' && '' || inputs.confirm }}
+      DRY_RUN: ${{ inputs.dry_run }}
+      MAX_AGE_DAYS: ${{ inputs.max_age_days }}
+      CLEAN_PIP: ${{ inputs.clean_pip_cache }}
+      CLEAN_CONDA: ${{ inputs.clean_conda_cache }}
+      CLEAN_TRITON_STALE: ${{ inputs.clean_triton_stale }}
+      CLEAN_TRITON_ALL: ${{ inputs.clean_triton_all }}
+      CLEAN_PYTEST: ${{ inputs.clean_pytest_cache }}
+      CLEAN_WORKDIRS: ${{ inputs.clean_workdirs }}
+      CLEAN_DOCKER: ${{ inputs.clean_docker }}
+      CONFIRM: ${{ inputs.confirm }}
 
     steps:
       - name: Diagnose before cleanup
