@@ -823,19 +823,23 @@ def test_fused_recurrent_npu_verifier(case, dtype, reason):
 @pytest.mark.skipif(not IS_NPU, reason='Ascend dispatch and launch splitting require NPU')
 @pytest.mark.parametrize('varlen', [False, True], ids=['dense', 'varlen'])
 def test_chunk_npu_launch_splits(varlen, monkeypatch):
-    """Split launches must retain native-reference numerics and dispatch both leaf stages."""
+    """Split launches retain reference numerics and select each Ascend intra/WY stage."""
+    monkeypatch.setattr(testing, 'FLA_CI_ENV', False)
     from fla.ops.gdn2.backends.triton_ascend import chunk_intra
     from fla.ops.gdn2.chunk_bwd import chunk_gdn2_bwd_wy_dqkg_fused
-    from fla.ops.gdn2.chunk_intra import chunk_gdn2_fwd_intra
+    from fla.ops.gdn2.chunk_intra import chunk_gdn2_bwd_intra, chunk_gdn2_fwd_intra
 
     # exercise multiple launches and packed sequence boundaries with a small reference workload.
     monkeypatch.setattr(chunk_intra, 'LAUNCH_BLOCK_BUDGET', 4)
     fwd = backends._function_registries[inspect.unwrap(chunk_gdn2_fwd_intra)]._backends['triton_ascend']
     bwd = backends._function_registries[inspect.unwrap(chunk_gdn2_bwd_wy_dqkg_fused)]._backends['triton_ascend']
+    intra = backends._function_registries[inspect.unwrap(chunk_gdn2_bwd_intra)]._backends['triton_ascend']
     fwd_spy = Mock(wraps=fwd.implementation)
     bwd_spy = Mock(wraps=bwd.implementation)
+    intra_spy = Mock(wraps=intra.implementation)
     monkeypatch.setattr(fwd, 'implementation', fwd_spy)
     monkeypatch.setattr(bwd, 'implementation', bwd_spy)
+    monkeypatch.setattr(intra, 'implementation', intra_spy)
     if varlen:
         test_chunk_varlen(
             cu_seqlens=[0, 15, 100, 257],
@@ -862,6 +866,67 @@ def test_chunk_npu_launch_splits(varlen, monkeypatch):
         )
     fwd_spy.assert_called_once()
     bwd_spy.assert_called_once()
+    intra_spy.assert_called_once()
+
+
+@pytest.mark.skipif(not IS_NPU, reason='Ascend intra backward routing')
+def test_chunk_bwd_intra_npu_saved_state(monkeypatch):
+    """Saved forward intermediates still dispatch intra backward for ragged BF16 training."""
+    from fla.ops.gdn2.chunk_intra import chunk_gdn2_bwd_intra
+
+    monkeypatch.setattr(testing, 'FLA_CI_ENV', False)
+    candidate = backends._function_registries[inspect.unwrap(chunk_gdn2_bwd_intra)]._backends['triton_ascend']
+    spy = Mock(wraps=candidate.implementation)
+    monkeypatch.setattr(candidate, 'implementation', spy)
+    test_chunk_varlen(
+        cu_seqlens=[0, 15, 80],
+        H=1,
+        K=32,
+        V=48,
+        use_gate_in_kernel=False,
+        dtype=torch.bfloat16,
+        state_v_first=True,
+        disable_recompute=True,
+    )
+    spy.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    ('K', 'dtype', 'chunk_size', 'on_npu', 'ub_kib', 'expected'),
+    [
+        (48, torch.float16, 64, True, 192, True),
+        (256, torch.bfloat16, 64, True, 192, True),
+        (32, torch.float32, 64, True, 64, True),
+        (256, torch.float32, 64, True, 32, True),
+        (256, torch.float32, 64, True, 31, False),
+        (257, torch.float32, 64, True, 192, False),
+        (0, torch.float32, 64, True, 192, False),
+        (32, torch.int32, 64, True, 192, False),
+        (32, torch.float32, 32, True, 192, False),
+        (32, torch.float32, 64, False, 192, False),
+    ],
+)
+def test_chunk_bwd_intra_npu_verifier(K, dtype, chunk_size, on_npu, ub_kib, expected, monkeypatch):
+    """Check device, dtype, chunk and K/UB boundaries without an accelerator."""
+    from fla.ops.gdn2.backends.triton_ascend.chunk_intra import (
+        _get_bwd_bk,
+        chunk_gdn2_bwd_intra_npu,
+        chunk_gdn2_bwd_intra_verifier,
+    )
+    from fla.utils import ascend_ub_manager
+
+    monkeypatch.setattr(ascend_ub_manager, '_ub_manager', ascend_ub_manager.UBManager(ub_kib * 1024 * 8))
+    tensor_device = SimpleNamespace(type='npu' if on_npu else 'cpu', index=0)
+    x = SimpleNamespace(shape=(1, 65, 2, K), ndim=4, dtype=dtype, device=tensor_device)
+    a = SimpleNamespace(shape=(1, 65, 2, 64), ndim=4, dtype=dtype, device=tensor_device)
+    kwargs = dict.fromkeys(('q', 'k', 'g', 'b', 'dq', 'dk', 'db', 'dg'), x)
+    kwargs.update(dAqk=a, dAkk=a, chunk_size=chunk_size, safe_gate=True, lower_bound=-2.0)
+    accepted, reason = chunk_gdn2_bwd_intra_verifier(**kwargs)
+    assert accepted == expected
+    assert (reason is None) == expected
+    if expected:
+        inspect.signature(chunk_gdn2_bwd_intra_npu).bind(**kwargs)
+        assert _get_bwd_bk(K) == (16 if ub_kib == 32 else 32)
 
 
 @pytest.mark.skipif(not (IS_NVIDIA or IS_AMD or IS_NPU), reason="CUDA/ROCm or Ascend NPU required")
