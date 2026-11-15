@@ -1,6 +1,9 @@
 name: runner-maintenance
 
 on:
+  push:
+    branches:
+      - ci/h100-cache-maintenance
   workflow_dispatch:
     inputs:
       dry_run:
@@ -62,16 +65,16 @@ jobs:
     runs-on: nvidia-h100-1
     timeout-minutes: 30
     env:
-      DRY_RUN: ${{ inputs.dry_run }}
-      MAX_AGE_DAYS: ${{ inputs.max_age_days }}
-      CLEAN_PIP: ${{ inputs.clean_pip_cache }}
-      CLEAN_CONDA: ${{ inputs.clean_conda_cache }}
-      CLEAN_TRITON_STALE: ${{ inputs.clean_triton_stale }}
-      CLEAN_TRITON_ALL: ${{ inputs.clean_triton_all }}
-      CLEAN_PYTEST: ${{ inputs.clean_pytest_cache }}
-      CLEAN_WORKDIRS: ${{ inputs.clean_workdirs }}
-      CLEAN_DOCKER: ${{ inputs.clean_docker }}
-      CONFIRM: ${{ inputs.confirm }}
+      DRY_RUN: ${{ github.event_name == 'push' && 'true' || inputs.dry_run }}
+      MAX_AGE_DAYS: ${{ github.event_name == 'push' && '7' || inputs.max_age_days }}
+      CLEAN_PIP: ${{ github.event_name == 'push' && 'true' || inputs.clean_pip_cache }}
+      CLEAN_CONDA: ${{ github.event_name == 'push' && 'true' || inputs.clean_conda_cache }}
+      CLEAN_TRITON_STALE: ${{ github.event_name == 'push' && 'true' || inputs.clean_triton_stale }}
+      CLEAN_TRITON_ALL: ${{ github.event_name == 'push' && 'false' || inputs.clean_triton_all }}
+      CLEAN_PYTEST: ${{ github.event_name == 'push' && 'true' || inputs.clean_pytest_cache }}
+      CLEAN_WORKDIRS: ${{ github.event_name == 'push' && 'true' || inputs.clean_workdirs }}
+      CLEAN_DOCKER: ${{ github.event_name == 'push' && 'false' || inputs.clean_docker }}
+      CONFIRM: ${{ github.event_name == 'push' && '' || inputs.confirm }}
 
     steps:
       - name: Diagnose before cleanup
@@ -85,12 +88,24 @@ jobs:
           df -h /
           echo "== docker =="
           docker system df 2>/dev/null || echo "no docker access"
+          echo "== docker images =="
+          docker images --size --format '{{.Repository}}:{{.Tag}} {{.Size}}' 2>/dev/null | head -30 || true
           echo "== home top =="
           du -x -d1 -h "$HOME" 2>/dev/null | sort -rh | head -12 || true
+          echo "== cache dirs =="
+          du -xh --max-depth=2 "$HOME/.cache" 2>/dev/null | sort -h | tail -30 || true
+          echo "== triton dirs =="
+          du -xh --max-depth=2 "$HOME/.triton" 2>/dev/null | sort -h | tail -30 || true
+          echo "== conda envs =="
+          du -sh "$HOME"/*/envs/* 2>/dev/null | sort -h | tail -30 || true
           echo "== known caches =="
           du -sh "$HOME/.cache/pip" "$HOME/.triton" "$HOME"/miniforge3/pkgs "$HOME"/miniconda3/pkgs "$HOME"/anaconda3/pkgs 2>/dev/null || true
           echo "== runner work =="
-          du -x -d1 -h /home/ubuntu/actions-runner/_work 2>/dev/null | sort -rh | head -10 || true
+          du -xh --max-depth=3 /home/ubuntu/actions-runner/_work 2>/dev/null | sort -h | tail -40 || true
+          echo "== tmp top =="
+          du -xh --max-depth=2 /tmp 2>/dev/null | sort -h | tail -30 || true
+          echo "== large files =="
+          find /home/ubuntu /tmp -xdev -type f -size +500M -printf '%s %p\n' 2>/dev/null | sort -nr | head -30 | awk '{printf "%.1fG %s\n", $1/1073741824, $2}' || true
 
       - name: Clean whitelisted caches
         shell: bash
@@ -203,7 +218,17 @@ jobs:
           df -h /
           echo "== home top =="
           du -x -d1 -h "$HOME" 2>/dev/null | sort -rh | head -12 || true
+          echo "== cache dirs =="
+          du -xh --max-depth=2 "$HOME/.cache" 2>/dev/null | sort -h | tail -30 || true
+          echo "== triton dirs =="
+          du -xh --max-depth=2 "$HOME/.triton" 2>/dev/null | sort -h | tail -30 || true
+          echo "== conda envs =="
+          du -sh "$HOME"/*/envs/* 2>/dev/null | sort -h | tail -30 || true
           echo "== known caches =="
           du -sh "$HOME/.cache/pip" "$HOME/.triton" "$HOME"/miniforge3/pkgs "$HOME"/miniconda3/pkgs "$HOME"/anaconda3/pkgs 2>/dev/null || true
           echo "== runner work =="
-          du -x -d1 -h /home/ubuntu/actions-runner/_work 2>/dev/null | sort -rh | head -10 || true
+          du -xh --max-depth=3 /home/ubuntu/actions-runner/_work 2>/dev/null | sort -h | tail -40 || true
+          echo "== tmp top =="
+          du -xh --max-depth=2 /tmp 2>/dev/null | sort -h | tail -30 || true
+          echo "== large files =="
+          find /home/ubuntu /tmp -xdev -type f -size +500M -printf '%s %p\n' 2>/dev/null | sort -nr | head -30 | awk '{printf "%.1fG %s\n", $1/1073741824, $2}' || true
