@@ -14,11 +14,10 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 import triton
-from torch.utils.checkpoint import checkpoint
 
 from fla.ops.cp import build_cp_context
 from fla.ops.gdn2 import chunk_gdn2
-from fla.ops.gdn2.naive import naive_recurrent_gdn2
+from fla.ops.gdn2.naive import naive_recurrent_gdn2_checkpointed
 from fla.ops.kda.gate import naive_kda_lowerbound_gate
 from fla.utils import IS_NPU, IS_TF32_SUPPORTED, assert_close, device
 from tests.cp.utils import gather_global, shard_tensor
@@ -92,24 +91,14 @@ def _reference(q, k, v, g, b, w, do, offsets, A_log, dt_bias):
             lower_bound=-5.0,
         )
 
-        # bound saved-state memory for the 64K-token recurrent reference.
-        o_chunks, state = [], None
-        for chunk_start in range(0, end - start, 1024):
-            chunk_end = chunk_start + 1024
-            o_chunk, state = checkpoint(
-                naive_recurrent_gdn2,
-                q_seq_norm[:, chunk_start:chunk_end],
-                k_seq_norm[:, chunk_start:chunk_end],
-                v_seq[:, chunk_start:chunk_end],
-                g_processed[:, chunk_start:chunk_end],
-                b_seq[:, chunk_start:chunk_end],
-                w_seq[:, chunk_start:chunk_end],
-                initial_state=state,
-                output_final_state=True,
-                use_reentrant=False,
-            )
-            o_chunks.append(o_chunk)
-        o_seq = torch.cat(o_chunks, dim=1)
+        o_seq, _ = naive_recurrent_gdn2_checkpointed(
+            q=q_seq_norm,
+            k=k_seq_norm,
+            v=v_seq,
+            g=g_processed,
+            b=b_seq,
+            w=w_seq,
+        )
         (o_seq * do_seq).sum().backward()
         results.append((
             o_seq.detach(),
