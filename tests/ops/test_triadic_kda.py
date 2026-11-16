@@ -16,8 +16,11 @@ from fla.ops.triadic_gdn import naive_recurrent_triadic_gdn
 from fla.ops.triadic_kda import chunk_triadic_kda, naive_chunk_triadic_kda, naive_recurrent_triadic_kda
 from fla.utils import assert_close, device_name
 
+# some PyTorch ops used by the FP64 references are unsupported on Ascend.
+REFERENCE_DEVICE = 'cpu' if device_name == 'npu' else device_name
 
-def _make_inputs(B: int, T: int, H: int, K: int, V: int, E: int, gate_scale: float, dtype: torch.dtype):
+
+def _make_inputs(B: int, T: int, H: int, K: int, V: int, E: int, gate_scale: float, dtype: torch.dtype, *, device=device_name):
     q = F.normalize(torch.randn(B, T, H, K, dtype=torch.float32), p=2, dim=-1).to(dtype)
     k = F.normalize(torch.randn(B, T, H, K, dtype=torch.float32), p=2, dim=-1).to(dtype)
     v = torch.randn(B, T, H, V, dtype=dtype)
@@ -26,7 +29,17 @@ def _make_inputs(B: int, T: int, H: int, K: int, V: int, E: int, gate_scale: flo
     gk = F.logsigmoid(torch.rand(B, T, H, K, dtype=torch.float32)) * gate_scale
     g2 = F.logsigmoid(torch.rand(B, T, H, E, dtype=torch.float32)) * gate_scale
     beta = torch.rand(B, T, H, dtype=torch.float32).sigmoid()
-    return [x.to(device_name) for x in (q, k, v, k2, q2, gk, g2, beta)]
+    return [x.to(device) for x in (q, k, v, k2, q2, gk, g2, beta)]
+
+
+def _run_reference(op, *, q: torch.Tensor, **kwargs):
+    if q.device.type == REFERENCE_DEVICE:
+        return op(q=q, **kwargs)
+
+    # preserve autograd across the copies so the reference checks the same inputs and gradients.
+    ref_kwargs = {name: x.to(REFERENCE_DEVICE) if isinstance(x, torch.Tensor) else x for name, x in kwargs.items()}
+    o, ht = op(q=q.to(REFERENCE_DEVICE), **ref_kwargs)
+    return o.to(q.device), ht.to(q.device) if ht is not None else None
 
 
 @pytest.mark.parametrize(
@@ -43,8 +56,8 @@ def _make_inputs(B: int, T: int, H: int, K: int, V: int, E: int, gate_scale: flo
 )
 def test_naive(B: int, T: int, H: int, K: int, V: int, E: int, gate_scale: float, chunk_size: int):
     torch.manual_seed(42)
-    q, k, v, k2, q2, gk, g2, beta = _make_inputs(B, T, H, K, V, E, gate_scale, torch.float32)
-    h0 = torch.randn(B, H, E, K, V, dtype=torch.float32, device=device_name)
+    q, k, v, k2, q2, gk, g2, beta = _make_inputs(B, T, H, K, V, E, gate_scale, torch.float32, device=REFERENCE_DEVICE)
+    h0 = torch.randn(B, H, E, K, V, dtype=torch.float32, device=REFERENCE_DEVICE)
     scale = K ** -0.5
     # the references return outputs in v.dtype, so keep FP64 for the direct comparison
     v_fp64 = v.double()
@@ -137,9 +150,9 @@ def test_naive(B: int, T: int, H: int, K: int, V: int, E: int, gate_scale: float
 def test_naive_varlen(lengths: tuple[int, ...], gate_scale: float, cu_dtype: torch.dtype):
     torch.manual_seed(42)
     H, K, V, E = 2, 32, 32, 16
-    inputs = _make_inputs(1, sum(lengths), H, K, V, E, gate_scale, torch.float32)
-    h0 = torch.randn(len(lengths), H, E, K, V, dtype=torch.float32, device=device_name)
-    cu_seqlens = torch.tensor(list(accumulate(lengths, initial=0)), dtype=cu_dtype, device=device_name)
+    inputs = _make_inputs(1, sum(lengths), H, K, V, E, gate_scale, torch.float32, device=REFERENCE_DEVICE)
+    h0 = torch.randn(len(lengths), H, E, K, V, dtype=torch.float32, device=REFERENCE_DEVICE)
+    cu_seqlens = torch.tensor(list(accumulate(lengths, initial=0)), dtype=cu_dtype, device=REFERENCE_DEVICE)
 
     ref_outputs, ref_states = [], []
     segments = zip(*(x.split(lengths, dim=1) for x in inputs))
@@ -165,7 +178,7 @@ def test_naive_varlen(lengths: tuple[int, ...], gate_scale: float, cu_dtype: tor
 )
 def test_naive_beta_default(op):
     torch.manual_seed(42)
-    *inputs, beta = _make_inputs(1, 35, 2, 8, 8, 4, 0.5, torch.float64)
+    *inputs, beta = _make_inputs(1, 35, 2, 8, 8, 4, 0.5, torch.float64, device=REFERENCE_DEVICE)
     o, ht = op(*inputs, output_final_state=True)
     ref_o, ref_ht = op(*inputs, beta=torch.ones_like(beta), output_final_state=True)
     torch.testing.assert_close(o, ref_o, rtol=0, atol=0)
@@ -177,11 +190,11 @@ def test_naive_beta_default(op):
 )
 def test_naive_varlen_rejects_multiple_batches(op):
     torch.manual_seed(42)
-    inputs = _make_inputs(2, 3, 1, 4, 4, 2, 0.5, torch.float32)
+    inputs = _make_inputs(2, 3, 1, 4, 4, 2, 0.5, torch.float32, device=REFERENCE_DEVICE)
     with pytest.raises(ValueError, match='The batch size is expected to be 1'):
         op(
             *inputs,
-            cu_seqlens=torch.tensor([0, 1, 3], dtype=torch.int32, device=device_name),
+            cu_seqlens=torch.tensor([0, 1, 3], dtype=torch.int32, device=REFERENCE_DEVICE),
         )
 
 
@@ -249,7 +262,8 @@ def test_chunk(
     dht = torch.randn(B, H, E, K, V, dtype=torch.float32, device=device_name) if use_state else None
 
     oracle = naive_recurrent_triadic_kda if T <= 256 else naive_chunk_triadic_kda
-    ref, ref_ht = oracle(
+    ref, ref_ht = _run_reference(
+        oracle,
         q=q,
         k=k,
         v=v,
@@ -329,7 +343,8 @@ def test_chunk_strong_decay(
     q, k, v, k2, q2, gk, g2, beta, h0 = inputs
     do, dht = torch.randn_like(v), torch.randn_like(h0)
 
-    ref, ref_ht = naive_recurrent_triadic_kda(
+    ref, ref_ht = _run_reference(
+        naive_recurrent_triadic_kda,
         q=q,
         k=k,
         v=v,
@@ -470,7 +485,8 @@ def test_chunk_varlen_and_in_kernel_gates(
             gk_eff = lower_bound * torch.sigmoid(a1 * gk_pre)
             g2_eff = lower_bound * torch.sigmoid(a2 * g2_pre)
         beta_eff = 2.0 * beta.float().sigmoid()
-        ref, ref_ht = naive_recurrent_triadic_kda(
+        ref, ref_ht = _run_reference(
+            naive_recurrent_triadic_kda,
             q=q_n,
             k=k_n,
             v=v,
@@ -509,7 +525,8 @@ def test_chunk_varlen_and_in_kernel_gates(
         seg_os, seg_hts = [], []
         for idx in range(N):
             bos, eos = cu_seqlens[idx], cu_seqlens[idx + 1]
-            seg_o, seg_ht = naive_recurrent_triadic_kda(
+            seg_o, seg_ht = _run_reference(
+                naive_recurrent_triadic_kda,
                 q=q[:, bos:eos],
                 k=k[:, bos:eos],
                 v=v[:, bos:eos],
