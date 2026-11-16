@@ -20,7 +20,7 @@ def naive_recurrent_triadic_kda(
     scale: float | None = None,
     initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
-    cu_seqlens: torch.LongTensor | None = None,
+    cu_seqlens: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """
     Reference recurrence for Triadic Kimi Delta Attention in FP64.
@@ -48,8 +48,9 @@ def naive_recurrent_triadic_kda(
             Initial state of shape `[N, H, E, K, V]`. Default: `None`.
         output_final_state (bool, Optional):
             Whether to return the final state of shape `[N, H, E, K, V]`. Default: `False`.
-        cu_seqlens (torch.LongTensor, Optional):
+        cu_seqlens (torch.Tensor, Optional):
             Cumulative sequence lengths of shape `[N + 1]` for variable-length inputs (`B == 1`). Default: `None`.
+            Supports `torch.int32` and `torch.int64`.
 
     Returns:
         o (torch.Tensor):
@@ -58,6 +59,8 @@ def naive_recurrent_triadic_kda(
             FP32 final state of shape `[N, H, E, K, V]` if `output_final_state=True`, else `None`.
     """
     B, T, H, K = q.shape
+    if cu_seqlens is not None and B != 1:
+        raise ValueError(f"The batch size is expected to be 1 rather than {B} when using `cu_seqlens`.")
     E, V = k2.shape[-1], v.shape[-1]
     scale = K ** -0.5 if scale is None else scale
     orig_dtype = v.dtype
@@ -101,7 +104,7 @@ def naive_chunk_triadic_kda(
     scale: float | None = None,
     initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
-    cu_seqlens: torch.LongTensor | None = None,
+    cu_seqlens: torch.Tensor | None = None,
     chunk_size: int = 64,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """
@@ -130,8 +133,9 @@ def naive_chunk_triadic_kda(
             Initial state of shape `[N, H, E, K, V]`. Default: `None`.
         output_final_state (bool, Optional):
             Whether to return the final state of shape `[N, H, E, K, V]`. Default: `False`.
-        cu_seqlens (torch.LongTensor, Optional):
+        cu_seqlens (torch.Tensor, Optional):
             Cumulative sequence lengths of shape `[N + 1]` for variable-length inputs (`B == 1`). Default: `None`.
+            Supports `torch.int32` and `torch.int64`.
         chunk_size (int, Optional):
             Number of tokens per chunk. Default: 64.
 
@@ -142,6 +146,8 @@ def naive_chunk_triadic_kda(
             FP32 final state of shape `[N, H, E, K, V]` if `output_final_state=True`, else `None`.
     """
     B, T, H, K = q.shape
+    if cu_seqlens is not None and B != 1:
+        raise ValueError(f"The batch size is expected to be 1 rather than {B} when using `cu_seqlens`.")
     E, V = k2.shape[-1], v.shape[-1]
     scale = K ** -0.5 if scale is None else scale
     orig_dtype = v.dtype
