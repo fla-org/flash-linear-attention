@@ -903,6 +903,7 @@ def chunk_gdn2_bwd_kernel_intra_npu(
     IS_VARLEN: tl.constexpr,
     IS_ALIGNED: tl.constexpr,
 ):
+    UNROLL: tl.constexpr = 2 if IS_ALIGNED else None
     NC = tl.cdiv(BT, BC)
     T_seq = tl.cast(T, tl.int64)
     nt_total = tl.cast(NT_TOTAL, tl.int64)
@@ -1022,7 +1023,7 @@ def chunk_gdn2_bwd_kernel_intra_npu(
                 b_dk2 += tl.dot(b_dAkk, b_k_exp, allow_tf32=False) * b_gate_pos
             else:
                 n_rows = BC if IS_ALIGNED else min(BC, T_cur - i_ti)
-                for j in range(0, n_rows):
+                for j in tl.range(0, n_rows, loop_unroll_factor=UNROLL):
                     j64 = tl.cast(j, tl.int64)
                     p_dAqk = dAqk_l + o_c * (H * BT) + i_i64 * BC + j64
                     p_dAkk = dAkk_l + o_c * (H * BT) + i_i64 * BC + j64
@@ -1105,7 +1106,7 @@ def chunk_gdn2_bwd_kernel_intra_npu(
                 b_dkt += tl.dot(b_dAkk, b_kb_exp, allow_tf32=False) * b_gate_neg
             else:
                 n_rows = BC if IS_ALIGNED else min(BC, T_cur - i_ti)
-                for j in range(0, n_rows):
+                for j in tl.range(0, n_rows, loop_unroll_factor=UNROLL):
                     row_j = i_ti + j
                     p_dAqk = dAqk_l + row_j * (H * BT) + i_i64 * BC + o_i64
                     p_dAkk = dAkk_l + row_j * (H * BT) + i_i64 * BC + o_i64
