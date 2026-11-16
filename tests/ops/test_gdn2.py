@@ -821,8 +821,8 @@ def test_fused_recurrent_npu_verifier(case, dtype, reason):
 
 
 @pytest.mark.skipif(not IS_NPU, reason='Ascend dispatch and launch splitting require NPU')
-@pytest.mark.parametrize('varlen', [False, True], ids=['dense', 'varlen'])
-def test_chunk_npu_launch_splits(varlen, monkeypatch):
+@pytest.mark.parametrize(('varlen', 'aligned'), [(False, False), (True, False), (False, True)], ids=['dense', 'varlen', 'aligned'])
+def test_chunk_npu_launch_splits(varlen, aligned, monkeypatch):
     """Split launches retain reference numerics and select each Ascend intra/WY stage."""
     monkeypatch.setattr(testing, 'FLA_CI_ENV', False)
     from fla.ops.gdn2.backends.triton_ascend import chunk_intra
@@ -840,6 +840,9 @@ def test_chunk_npu_launch_splits(varlen, monkeypatch):
     monkeypatch.setattr(fwd, 'implementation', fwd_spy)
     monkeypatch.setattr(bwd, 'implementation', bwd_spy)
     monkeypatch.setattr(intra, 'implementation', intra_spy)
+    kernel = chunk_intra.chunk_gdn2_bwd_kernel_intra_npu.fn
+    kernel_spy = Mock(wraps=kernel.run)
+    monkeypatch.setattr(kernel, 'run', kernel_spy)
     if varlen:
         test_chunk_varlen(
             cu_seqlens=[0, 15, 100, 257],
@@ -854,9 +857,9 @@ def test_chunk_npu_launch_splits(varlen, monkeypatch):
     else:
         test_chunk(
             B=2,
-            T=257,
+            T=256 if aligned else 257,
             H=2,
-            K=48,
+            K=64 if aligned else 48,
             V=32,
             scale=1.0,
             use_qk_l2norm_in_kernel=True,
@@ -867,6 +870,7 @@ def test_chunk_npu_launch_splits(varlen, monkeypatch):
     fwd_spy.assert_called_once()
     bwd_spy.assert_called_once()
     intra_spy.assert_called_once()
+    assert kernel_spy.call_args.kwargs['IS_ALIGNED'] is aligned
 
 
 @pytest.mark.skipif(not IS_NPU, reason='Ascend intra backward routing')

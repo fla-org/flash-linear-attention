@@ -867,6 +867,7 @@ def chunk_gdn2_bwd_intra_verifier(
 
 @triton.heuristics({
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
+    'IS_ALIGNED': lambda args: args['cu_seqlens'] is None and args['T'] % args['BT'] == 0 and args['K'] % args['BK'] == 0,
 })
 @triton.jit(do_not_specialize=['B', 'T', 'NT_TOTAL', 'task_num', 'num_core'])
 def chunk_gdn2_bwd_kernel_intra_npu(
@@ -898,6 +899,7 @@ def chunk_gdn2_bwd_kernel_intra_npu(
     SAFE_GATE: tl.constexpr,
     GATE_SHIFT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    IS_ALIGNED: tl.constexpr,
 ):
     NC = tl.cdiv(BT, BC)
     T_seq = tl.cast(T, tl.int64)
@@ -929,15 +931,15 @@ def chunk_gdn2_bwd_kernel_intra_npu(
         i_t64 = tl.cast(i_t, tl.int64)
         i_i64 = tl.cast(i_i, tl.int64)
         i_k64 = tl.cast(i_k, tl.int64)
-        nc_cur = min(NC, tl.cdiv(tl.cast(T_cur, tl.int64) - i_t64 * BT, BC))
+        nc_cur = NC if IS_ALIGNED else min(NC, tl.cdiv(tl.cast(T_cur, tl.int64) - i_t64 * BT, BC))
         if i_i < nc_cur:
             i_ti = i_t64 * BT + i_i64 * BC
             o_i = tl.arange(0, BC)
             o_i64 = tl.cast(o_i, tl.int64)
             o_k64 = i_k64 * BK + tl.cast(tl.arange(0, BK), tl.int64)
             o_c = i_ti + o_i64
-            m_row = o_c < T_cur
-            m_k = o_k64 < K
+            m_row = tl.full((BC,), True, tl.int1) if IS_ALIGNED else o_c < T_cur
+            m_k = tl.full((BK,), True, tl.int1) if IS_ALIGNED else o_k64 < K
             m_ik = m_row[:, None] & m_k[None, :]
             a_row = i_i64 * BC + o_i64
 
@@ -976,7 +978,7 @@ def chunk_gdn2_bwd_kernel_intra_npu(
                     i_j64 = tl.cast(i_j, tl.int64)
                     row_j = i_t64 * BT + i_j64 * BC
                     o_j = row_j + o_i64
-                    m_row_j = o_j < T_cur
+                    m_row_j = tl.full((BC,), True, tl.int1) if IS_ALIGNED else o_j < T_cur
                     m_jk = m_row_j[:, None] & m_k[None, :]
                     p_kj = k_l + o_j[:, None] * (H * K) + o_k64[None, :]
                     p_gkj = g_l + o_j[:, None] * (H * K) + o_k64[None, :]
@@ -985,7 +987,8 @@ def chunk_gdn2_bwd_kernel_intra_npu(
                     b_gate = tl.where(m_jk, b_gn - b_gkj, 0.0)
                     b_kg = tl.where(m_jk, b_kj * exp2(b_gate), 0.0)
 
-                    m_dA = m_row[:, None] & ((i_j64 * BC + o_i64)[None, :] < BT)
+                    m_dA = tl.full((BC, BC), True, tl.int1) if IS_ALIGNED else m_row[:, None] & (
+                        (i_j64 * BC + o_i64)[None, :] < BT)
                     p_dAqk = dAqk_l + o_c[:, None] * (H * BT) + (i_j64 * BC + o_i64)[None, :]
                     p_dAkk = dAkk_l + o_c[:, None] * (H * BT) + (i_j64 * BC + o_i64)[None, :]
                     b_dAqk = tl.load(p_dAqk, mask=m_dA, other=0.0).to(tl.float32)
@@ -1000,7 +1003,8 @@ def chunk_gdn2_bwd_kernel_intra_npu(
             if SAFE_GATE:
                 b_gm = tl.load(g_l + i_ti * (H * K) + o_k64, mask=m_k, other=0.0).to(tl.float32)[None, :]
                 b_gm -= 0.5 * (BC - 1) * GATE_SHIFT
-                m_dA = m_row[:, None] & ((i_i64 * BC + o_i64)[None, :] < BT)
+                m_dA = tl.full((BC, BC), True, tl.int1) if IS_ALIGNED else m_row[:, None] & (
+                    (i_i64 * BC + o_i64)[None, :] < BT)
                 p_dAqk = dAqk_l + o_c[:, None] * (H * BT) + (i_i64 * BC + o_i64)[None, :]
                 p_dAkk = dAkk_l + o_c[:, None] * (H * BT) + (i_i64 * BC + o_i64)[None, :]
                 b_dAqk = tl.load(p_dAqk, mask=m_dA, other=0.0).to(tl.float32)
@@ -1015,7 +1019,7 @@ def chunk_gdn2_bwd_kernel_intra_npu(
                 b_dq2 += tl.dot(b_dAqk, b_k_exp, allow_tf32=False) * b_gate_pos
                 b_dk2 += tl.dot(b_dAkk, b_k_exp, allow_tf32=False) * b_gate_pos
             else:
-                n_rows = min(BC, T_cur - i_ti)
+                n_rows = BC if IS_ALIGNED else min(BC, T_cur - i_ti)
                 for j in range(0, n_rows):
                     j64 = tl.cast(j, tl.int64)
                     p_dAqk = dAqk_l + o_c * (H * BT) + i_i64 * BC + j64
@@ -1053,7 +1057,7 @@ def chunk_gdn2_bwd_kernel_intra_npu(
                 for i_j in range(i_i + 1, nc_cur):
                     row_j = i_t64 * BT + tl.cast(i_j, tl.int64) * BC
                     o_j = row_j + o_i64
-                    m_row_j = o_j < T_cur
+                    m_row_j = tl.full((BC,), True, tl.int1) if IS_ALIGNED else o_j < T_cur
                     m_jk = m_row_j[:, None] & m_k[None, :]
                     p_qj = q_l + o_j[:, None] * (H * K) + o_k64[None, :]
                     p_kj = k_l + o_j[:, None] * (H * K) + o_k64[None, :]
@@ -1064,7 +1068,7 @@ def chunk_gdn2_bwd_kernel_intra_npu(
                     b_gkj = tl.load(p_gkj, mask=m_jk, other=0.0).to(tl.float32)
                     b_bj = tl.load(p_bj, mask=m_jk, other=0.0)
 
-                    m_dA = (a_row[:, None] < BT) & m_row_j[None, :]
+                    m_dA = tl.full((BC, BC), True, tl.int1) if IS_ALIGNED else (a_row[:, None] < BT) & m_row_j[None, :]
                     p_dAqk = dAqk_l + o_j[None, :] * (H * BT) + a_row[:, None]
                     p_dAkk = dAkk_l + o_j[None, :] * (H * BT) + a_row[:, None]
                     b_dAqk = tl.load(p_dAqk, mask=m_dA, other=0.0).to(tl.float32)
@@ -1082,7 +1086,7 @@ def chunk_gdn2_bwd_kernel_intra_npu(
                 b_gm = tl.load(g_l + i_ti * (H * K) + o_k64, mask=m_k, other=0.0).to(tl.float32)[None, :]
                 b_gm -= 0.5 * (BC - 1) * GATE_SHIFT
                 b_col = i_ti + o_i64
-                m_dA = (a_row[:, None] < BT) & (b_col[None, :] < T_cur)
+                m_dA = tl.full((BC, BC), True, tl.int1) if IS_ALIGNED else (a_row[:, None] < BT) & (b_col[None, :] < T_cur)
                 p_dAqk = dAqk_l + b_col[None, :] * (H * BT) + a_row[:, None]
                 p_dAkk = dAkk_l + b_col[None, :] * (H * BT) + a_row[:, None]
                 b_dAqk = tl.load(p_dAqk, mask=m_dA, other=0.0).to(tl.float32)
@@ -1098,7 +1102,7 @@ def chunk_gdn2_bwd_kernel_intra_npu(
                 b_dkt += tl.dot(b_dAqk, b_q_exp, allow_tf32=False) * b_gate_neg
                 b_dkt += tl.dot(b_dAkk, b_kb_exp, allow_tf32=False) * b_gate_neg
             else:
-                n_rows = min(BC, T_cur - i_ti)
+                n_rows = BC if IS_ALIGNED else min(BC, T_cur - i_ti)
                 for j in range(0, n_rows):
                     row_j = i_ti + j
                     p_dAqk = dAqk_l + row_j * (H * BT) + i_i64 * BC + o_i64
