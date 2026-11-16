@@ -17,7 +17,7 @@ import triton
 
 from fla.ops.cp import build_cp_context
 from fla.ops.gdn2 import chunk_gdn2
-from fla.ops.gdn2.naive import naive_recurrent_gdn2_checkpointed
+from fla.ops.gdn2.naive import naive_recurrent_gdn2, naive_recurrent_gdn2_checkpointed
 from fla.ops.kda.gate import naive_kda_lowerbound_gate
 from fla.utils import IS_NPU, IS_TF32_SUPPORTED, assert_close, device
 from tests.cp.utils import gather_global, shard_tensor
@@ -82,8 +82,12 @@ def _reference(q, k, v, g, b, w, do, offsets, A_log, dt_bias):
         w_seq = w[:, start:end].clone().detach().requires_grad_(True)
         do_seq = do[:, start:end].clone()
 
-        q_seq_norm = F.normalize(q_seq.float(), p=2, dim=-1).to(q_seq.dtype)
-        k_seq_norm = F.normalize(k_seq.float(), p=2, dim=-1).to(k_seq.dtype)
+        if IS_NPU:
+            q_seq_norm = F.normalize(q_seq.float(), p=2, dim=-1).to(q_seq.dtype)
+            k_seq_norm = F.normalize(k_seq.float(), p=2, dim=-1).to(k_seq.dtype)
+        else:
+            q_seq_norm = F.normalize(q_seq, p=2, dim=-1)
+            k_seq_norm = F.normalize(k_seq, p=2, dim=-1)
         g_processed = naive_kda_lowerbound_gate(
             g=g_seq.to(torch.float),
             A_log=A_log[:H].contiguous(),
@@ -91,7 +95,8 @@ def _reference(q, k, v, g, b, w, do, offsets, A_log, dt_bias):
             lower_bound=-5.0,
         )
 
-        o_seq, _ = naive_recurrent_gdn2_checkpointed(
+        reference = naive_recurrent_gdn2_checkpointed if IS_NPU else naive_recurrent_gdn2
+        o_seq, _ = reference(
             q=q_seq_norm,
             k=k_seq_norm,
             v=v_seq,
