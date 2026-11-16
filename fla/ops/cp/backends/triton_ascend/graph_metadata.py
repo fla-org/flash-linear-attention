@@ -24,24 +24,40 @@ def zigzag_graph_metadata_kernel(
     BLOCK: tl.constexpr,
 ):
     total = tl.load(cu_seqlens + tl.cast(N, tl.int64) * CU_STRIDE).to(tl.int64)
-    front_num_seqs = tl.full((), 0, tl.int64)
-    num_seqs = tl.full((), 0, tl.int64)
+    first_front = tl.full((), N, tl.int64)
+    first_back = tl.full((), N, tl.int64)
+    last_front = tl.full((), -1, tl.int64)
+    last_back = tl.full((), -1, tl.int64)
     for block in range(triton.cdiv(N, BLOCK)):
-        offsets = tl.cast(block, tl.int64) * BLOCK + tl.arange(0, BLOCK)
+        base = tl.cast(block, tl.int64) * BLOCK
+        lanes = tl.arange(0, BLOCK)
+        offsets = base + lanes
         starts = tl.load(cu_seqlens + offsets * CU_STRIDE, offsets < N, other=0).to(tl.int64)
         ends = tl.load(cu_seqlens + (offsets + 1) * CU_STRIDE, offsets < N, other=0).to(tl.int64)
-        front_num_seqs += tl.sum(((offsets < N) & (starts < total // 2)).to(tl.int32), 0).to(tl.int64)
-        num_seqs += tl.sum(((offsets < N) & (ends > starts)).to(tl.int32), 0).to(tl.int64)
+        active = (offsets < N) & (ends > starts)
+        front = active & (starts < total // 2)
+        back = active & (starts >= total // 2)
+        # empty sequences retain their row IDs, so counts cannot locate part boundaries.
+        local_first_front = tl.min(tl.where(front, lanes, BLOCK), 0)
+        local_first_back = tl.min(tl.where(back, lanes, BLOCK), 0)
+        local_last_front = tl.max(tl.where(front, lanes, -1), 0)
+        local_last_back = tl.max(tl.where(back, lanes, -1), 0)
+        first_front = tl.minimum(first_front, tl.where(local_first_front < BLOCK, base + local_first_front, N))
+        first_back = tl.minimum(first_back, tl.where(local_first_back < BLOCK, base + local_first_back, N))
+        last_front = tl.maximum(last_front, tl.where(local_last_front >= 0, base + local_last_front, -1))
+        last_back = tl.maximum(last_back, tl.where(local_last_back >= 0, base + local_last_back, -1))
 
+    first_front = tl.where(first_front < N, first_front, 0)
+    first_back = tl.where(first_back < N, first_back, 0)
     parts = tl.arange(0, 2)
-    first = tl.where(parts == 0, 0, front_num_seqs)
-    last = tl.where(parts == 0, front_num_seqs - 1, num_seqs - 1)
+    first = tl.where(parts == 0, first_front, first_back)
+    last = tl.where(parts == 0, last_front, last_back)
     tl.store(indices + parts, first)
     tl.store(indices + 2 + parts, last)
 
     lanes = tl.arange(0, 8)
     row = lanes // 2
-    seq = tl.where(row == 0, 0, tl.where(row == 1, front_num_seqs, tl.where(row == 2, front_num_seqs - 1, num_seqs - 1)))
+    seq = tl.where(row == 0, first_front, tl.where(row == 1, first_back, tl.where(row == 2, last_front, last_back)))
     # empty metadata has no final segment; do not read before the sequence buffer.
     bounds = tl.load(cu_seqlens + (seq + lanes % 2) * CU_STRIDE, (seq >= 0) & (seq < N), other=0)
     tl.store(windows + lanes, bounds)

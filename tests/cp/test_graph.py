@@ -262,8 +262,11 @@ def _run_npu_graph(
     pre_dev = torch.zeros(2 if layout == 'zigzag' else 1, dtype=torch.int32, device=device)
     post_dev = torch.zeros_like(pre_dev)
 
-    def refresh(base):
+    def refresh(base, empty_sequence=None):
         local = base.cu_seqlens
+        if empty_sequence is not None:
+            index = 0 if empty_sequence == 'leading' else base.front_num_seqs
+            local = torch.cat((local[:index], local[index:index + 1], local[index:]))
         cu_static[: len(local)] = local
         cu_static[len(local):] = local[-1]
         if layout == 'zigzag':
@@ -370,6 +373,8 @@ def _run_npu_graph(
         replay_cases += [
             ('four-front-sequences', [0, 1, 2, 3, total_tokens]),
             ('part-one-token-boundary', [0, part // 2 - 1, part // 2 + 1, total_tokens, total_tokens]),
+            ('leading-empty-sequence', [0, total_tokens]),
+            ('split-empty-sequence', [0, total_tokens]),
         ]
     replay_cases += [
         ('half-capacity', [0, 1, part // 2 + 1, total_tokens // 2, total_tokens // 2]),
@@ -390,7 +395,8 @@ def _run_npu_graph(
         do.copy_(shard_tensor(inputs['do'], rank, world_size, layout))
         do[:, :actual_part].copy_(shard_tensor(inputs['do'][:, :actual_tokens], rank, world_size, layout))
         cu = torch.tensor(sequence_offsets, dtype=torch.long, device=device)
-        refresh(build_cp_context(cu, group=group, layout=layout))
+        empty_sequence = {'leading-empty-sequence': 'leading', 'split-empty-sequence': 'split'}.get(tag)
+        refresh(build_cp_context(cu, group=group, layout=layout), empty_sequence)
 
         dist.barrier()
         logger.info('rank=%d: replay %s', rank, tag)
@@ -539,6 +545,11 @@ def test_chunk_kda_npu_graph(run_distributed, capture, training, dtype, options,
             {'use_gate_in_kernel': True, 'state_v_first': True, 'chunk_size': 32},
             torch.int32, 8, 'zigzag', (1024, 3, 3, 100, 80),
             id='cp8-zigzag-fp16-unaligned-k100-v80-global',
+        ),
+        pytest.param(
+            'direct', True, torch.float16, {'chunk_size': 64},
+            torch.int64, 2, 'zigzag', (1024, 1, 1, 64, 64),
+            id='cp2-zigzag-fp16-pregated-global',
         ),
     ],
 )
@@ -754,13 +765,13 @@ def test_chunk_kda_graph_cpu_snapshot(single_rank_group, monkeypatch, chunk_size
 
 @pytest.mark.skipif(not IS_NPU, reason='requires Ascend NPU graphs')
 @pytest.mark.parametrize(
-    ('cu_dtype', 'cu_stride', 'state_v_first', 'disable_recompute'),
+    ('cu_dtype', 'cu_stride', 'state_v_first', 'disable_recompute', 'chunk_size'),
     [
-        pytest.param(torch.int64, 1, False, False, id='int64-k-first-recompute'),
-        pytest.param(torch.int32, 2, True, True, id='int32-strided-v-first-saved-state'),
+        pytest.param(torch.int64, 1, False, False, 64, id='int64-k-first-recompute'),
+        pytest.param(torch.int32, 2, True, True, 32, id='int32-strided-v-first-saved-state'),
     ],
 )
-def test_chunk_kda_graph_metadata(single_rank_group, monkeypatch, cu_dtype, cu_stride, state_v_first, disable_recompute):
+def test_chunk_kda_graph_metadata(single_rank_group, monkeypatch, cu_dtype, cu_stride, state_v_first, disable_recompute, chunk_size):
     """Keep packed metadata private to each autograd invocation and captured graph."""
     metadata_module = import_module('fla.ops.cp.backends.triton_ascend.graph_metadata')
     prepare = metadata_module.prepare_zigzag_graph_metadata
@@ -783,7 +794,7 @@ def test_chunk_kda_graph_metadata(single_rank_group, monkeypatch, cu_dtype, cu_s
     context.cu_seqlens = cu
     context.pre_num_ranks_dev = torch.tensor(context.pre_num_ranks_by_part, device=device, dtype=torch.int32)
     context.post_num_ranks_dev = torch.tensor(context.post_num_ranks_by_part, device=device, dtype=torch.int32)
-    options = dict(state_v_first=state_v_first, disable_recompute=disable_recompute)
+    options = dict(state_v_first=state_v_first, disable_recompute=disable_recompute, chunk_size=chunk_size)
 
     def inputs(seed):
         torch.manual_seed(seed)
@@ -797,9 +808,10 @@ def test_chunk_kda_graph_metadata(single_rank_group, monkeypatch, cu_dtype, cu_s
     def forward(*leaves):
         return chunk_kda(*leaves, cp_context=context, use_graph=True, max_num_seqs=len(cu) - 1, **options)[0]
 
-    def check(leaves, output):
+    def check(leaves, output, sequence_offsets=None):
         reference_leaves = [x.detach().clone().requires_grad_() for x in leaves]
-        reference_context = build_cp_context(cu.clone(), group=dist.group.WORLD, layout='zigzag')
+        boundaries = cu.clone() if sequence_offsets is None else torch.tensor(sequence_offsets, device=device)
+        reference_context = build_cp_context(boundaries, group=dist.group.WORLD, layout='zigzag')
         reference, _ = chunk_kda(*reference_leaves, cp_context=reference_context, **options)
         reference.sum().backward()
         for name, got, want in zip(('o', 'dq', 'dk', 'dv', 'dg', 'db'),
@@ -842,8 +854,24 @@ def test_chunk_kda_graph_metadata(single_rank_group, monkeypatch, cu_dtype, cu_s
         live_inputs.append([x.detach().clone().requires_grad_() for x in capture])
     assert graph_buffers[0] != graph_buffers[1]
     before_replay = len(created)
-    for offsets in ([0, 32, 64, 128, 128], [0, 64, 65, 128, 128], [0, 1, 64, 65, 128]):
+    replay_cases = [(offsets, offsets) for offsets in ([0, 32, 64, 128, 128], [0, 64, 65, 128, 128], [0, 1, 64, 65, 128])]
+    replay_cases += [(offsets, [0, 128]) for offsets in (
+        [0, 64, 128, 128, 128], [0, 0, 64, 128, 128], [0, 64, 64, 128, 128],
+        [0, 0, 64, 64, 128], [0, 64, 128, 128, 128],
+    )]
+    for offsets, sequence_offsets in replay_cases:
         cu.copy_(torch.tensor(offsets, device=device, dtype=cu_dtype))
+        reference_context = build_cp_context(
+            cu_seqlens=torch.tensor(sequence_offsets, device=device),
+            group=dist.group.WORLD,
+            layout='zigzag',
+        )
+        context.pre_num_ranks_dev.copy_(
+            torch.tensor(reference_context.pre_num_ranks_by_part, device=device, dtype=torch.int32),
+        )
+        context.post_num_ranks_dev.copy_(
+            torch.tensor(reference_context.post_num_ranks_by_part, device=device, dtype=torch.int32),
+        )
         for index in (1, 0):
             leaves = live_inputs[index]
             for x in leaves:
@@ -851,6 +879,6 @@ def test_chunk_kda_graph_metadata(single_rank_group, monkeypatch, cu_dtype, cu_s
             output = callables[index](*leaves)
             output.sum().backward()
             torch.npu.synchronize()
-            check(leaves, output)
+            check(leaves, output, sequence_offsets)
         assert len(created) == before_replay
         assert not hasattr(context, '_zigzag_graph_metadata')

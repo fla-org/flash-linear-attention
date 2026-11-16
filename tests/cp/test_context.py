@@ -180,7 +180,12 @@ def test_zigzag_graph_metadata(cu_dtype, capacity, total, stride):
     pointers = tuple(x.data_ptr() for x in tensors)
     layouts = [[0, total // 2, total], [0, total // 4, total // 2]]
     if capacity >= 4:
-        layouts += [[0, 1, total // 2, total // 2 + 1, total], [0, total // 4, total // 2, total]]
+        layouts += [
+            [0, 1, total // 2, total // 2 + 1, total], [0, total // 4, total // 2, total],
+            [0, 0, total // 2, total], [0, total // 2, total // 2, total],
+        ]
+    if capacity >= 6:
+        layouts.append([0, 0, total // 4, total // 4, total // 2, total // 2, total])
     if capacity >= 1023:
         active = capacity - capacity % 2
         layouts.append(list(range(active + 1)))
@@ -188,9 +193,11 @@ def test_zigzag_graph_metadata(cu_dtype, capacity, total, stride):
         cpu = refresh(offsets)
         graph.replay()
         torch.npu.synchronize()
-        front = int((cpu[:-1] < cpu[-1] // 2).sum())
-        count = int((cpu[1:] > cpu[:-1]).sum())
-        first, last = torch.tensor([0, front]), torch.tensor([front - 1, count - 1])
+        boundaries = cpu.tolist()
+        intervals = [(index, start) for index, (start, end) in enumerate(zip(boundaries, boundaries[1:])) if end > start]
+        parts = [[index for index, start in intervals if (start < boundaries[-1] // 2) == front] for front in (True, False)]
+        first = torch.tensor([part[0] if part else 0 for part in parts])
+        last = torch.tensor([part[-1] if part else -1 for part in parts])
         windows = tuple(cpu[index:index + 2] if 0 <= index < capacity else torch.zeros(2, dtype=cu_dtype)
                         for index in (*first, *last))
         expected = (first, last, *windows)
