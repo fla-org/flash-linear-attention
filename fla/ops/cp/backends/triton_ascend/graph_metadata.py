@@ -90,7 +90,3 @@ def prepare_cp_graph_metadata(cu_seqlens: torch.Tensor, layout: str = 'contiguou
     )
     return (indices[:num_parts], indices[num_parts:],
             tuple(windows[i] for i in range(num_parts)), tuple(windows[num_parts + i] for i in range(num_parts)))
-
-
-def prepare_zigzag_graph_metadata(cu_seqlens: torch.Tensor):
-    return prepare_cp_graph_metadata(cu_seqlens, layout='zigzag')

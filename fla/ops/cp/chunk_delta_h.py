@@ -47,14 +47,6 @@ def _graph_metadata(cu_seqlens: torch.Tensor, context: FLACPContext | None = Non
     return first, last, (first_window,), (last_window,)
 
 
-def _zigzag_graph_metadata(cu_seqlens: torch.Tensor, context: FLACPContext | None = None):
-    return _graph_metadata(cu_seqlens, context, layout='zigzag')
-
-
-def _zigzag_graph_seq_indices(cu_seqlens: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    return _zigzag_graph_metadata(cu_seqlens)[:2]
-
-
 @dispatch('cp')
 def chunk_gated_delta_rule_fwd_h_pre_process(
     k: torch.Tensor,
@@ -86,7 +78,7 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
     if context.layout == 'zigzag':
         if use_graph:
             assert context.pre_num_ranks_dev is not None, "use_graph with CP requires context.pre_num_ranks_dev"
-            first, last, _, cu_parts = _zigzag_graph_metadata(cu_seqlens, context)
+            first, _, _, cu_parts = _graph_metadata(cu_seqlens, context)
         else:
             cu_parts = (cu_seqlens[context.front_num_seqs - 1: context.front_num_seqs + 1], cu_seqlens[-2:])
         front_num_seqs = context.front_num_seqs
@@ -207,7 +199,7 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
     if context.layout == 'zigzag':
         if use_graph:
             assert context.post_num_ranks_dev is not None, "use_graph with CP requires context.post_num_ranks_dev"
-            first, last, cu_parts, _ = _zigzag_graph_metadata(cu_seqlens, context)
+            _, last, cu_parts, _ = _graph_metadata(cu_seqlens, context)
         else:
             cu_parts = (cu_seqlens[:2], cu_seqlens[context.front_num_seqs: context.front_num_seqs + 2])
         front_num_seqs = context.front_num_seqs

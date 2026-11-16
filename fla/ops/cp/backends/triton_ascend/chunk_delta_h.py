@@ -947,8 +947,8 @@ def chunk_gated_delta_rule_fwd_h_pre_process_npu(
     if context.layout == 'zigzag':
         fns = context.front_num_seqs
         if use_graph:
-            from fla.ops.cp.chunk_delta_h import _zigzag_graph_metadata
-            first, last, _, cu_parts = _zigzag_graph_metadata(cu_seqlens, context)
+            from fla.ops.cp.chunk_delta_h import _graph_metadata
+            first, _, _, cu_parts = _graph_metadata(cu_seqlens, context)
         else:
             cu_parts = (cu_seqlens[fns - 1: fns + 1], cu_seqlens[-2:])
         hm = k.new_zeros(2, HV, K, V + K, dtype=torch.float32)
@@ -1107,8 +1107,8 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process_npu(
     if context.layout == 'zigzag':
         fns = context.front_num_seqs
         if use_graph:
-            from fla.ops.cp.chunk_delta_h import _zigzag_graph_metadata
-            first, last, cu_parts, _ = _zigzag_graph_metadata(cu_seqlens, context)
+            from fla.ops.cp.chunk_delta_h import _graph_metadata
+            _, last, cu_parts, _ = _graph_metadata(cu_seqlens, context)
         else:
             cu_parts = (cu_seqlens[:2], cu_seqlens[fns: fns + 2])
         dhm = q.new_zeros(2, HV, K, V + K, dtype=torch.float32)
