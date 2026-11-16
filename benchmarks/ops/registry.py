@@ -564,6 +564,43 @@ register_op(OpConfig(
     category='gate_beta',
 ))
 
+
+def init_triadic_kda_inputs(inputs, packed=False, **kw):
+    init_triadic_gdn_inputs(inputs)
+    if packed:
+        B, T = inputs['q'].shape[:2]
+        for name, tensor in inputs.items():
+            inputs[name] = tensor.detach().reshape(1, B * T, *tensor.shape[2:]).requires_grad_(tensor.requires_grad)
+        inputs['cu_seqlens'] = torch.arange(B + 1, dtype=torch.int32, device=inputs['q'].device) * T
+
+
+_triadic_kda = OpConfig(
+    name='chunk_triadic_kda',
+    import_path='fla.ops.triadic_kda',
+    inputs={
+        **_simple_qkv,
+        'k2': TensorSpec(shape_BTHE, dtype='float32'),
+        'q2': TensorSpec(shape_BTHE, dtype='float32'),
+        'gk': TensorSpec(shape_BTHD, dtype='float32', transform=logsigmoid_clamp),
+        'g2': TensorSpec(shape_BTHE, dtype='float32', transform=logsigmoid_clamp),
+        'beta': TensorSpec(shape_BTH, dtype='float32', transform=sigmoid_transform),
+    },
+    post_init=init_triadic_kda_inputs,
+    category='gate_beta',
+    test_file='tests/ops/test_triadic_kda.py',
+)
+register_op(_triadic_kda)
+register_op(OpConfig(
+    name='chunk_triadic_kda_cached',
+    import_path=_triadic_kda.import_path,
+    func_name='chunk_triadic_kda',
+    inputs=_triadic_kda.inputs,
+    extra_kwargs={'disable_recompute': True},
+    post_init=_triadic_kda.post_init,
+    category=_triadic_kda.category,
+    test_file='tests/ops/test_triadic_kda.py',
+))
+
 register_op(OpConfig(
     name='fused_recurrent_gdn2',
     import_path='fla.ops.gdn2',
