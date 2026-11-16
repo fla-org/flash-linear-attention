@@ -7,18 +7,22 @@
 
 import inspect
 import math
+import re
 from functools import partial
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 import torch
 import torch.nn.functional as F
+import triton
 
 from fla import backends
 from fla.ops.gdn2 import chunk_gdn2, fused_recurrent_gdn2, naive_recurrent_gdn2
 from fla.ops.gdn2.fused_recurrent import fused_recurrent_gdn2_fwd
+from fla.ops.gdn2.wy_fast import recompute_w_u_fwd_gdn2
 from fla.ops.kda.gate import naive_kda_gate, naive_kda_lowerbound_gate
-from fla.utils import IS_AMD, IS_NPU, IS_NVIDIA, assert_close, device, device_platform
+from fla.utils import IS_AMD, IS_NPU, IS_NVIDIA, assert_close, device, device_platform, testing
 
 
 def _unwrap_autotuner(fn):
@@ -368,8 +372,13 @@ def test_chunk_invalid_chunk_size(chunk_size):
             id='32k',
             marks=pytest.mark.skipif(
                 not IS_NPU,
-                reason='32K GDN-2 output/gradient reference check requires Ascend NPU',
+                reason='long-sequence Ascend regression coverage',
             ),
+        ),
+        # aligned q-absent Ascend WY uses BK=128/BV=64, absent from the symmetric cases.
+        pytest.param(
+            1, 128, 2, 128, 64, 1.0, True, False, False, torch.bfloat16,
+            id='aligned-asymmetric-K128-V64-bfloat16',
         ),
     ],
 )
@@ -491,6 +500,11 @@ def test_chunk_state_v_first():
         pytest.param(
             [0, 15, 80, 145], 2, 48, 32, False, torch.float16, True, True,
             id='ragged-state-v-first-disable-recompute',
+        ),
+        # expanded values exercise multiple value tiles with saved V-first states.
+        pytest.param(
+            [0, 15, 80, 145], 2, 128, 256, False, torch.bfloat16, True, True,
+            id='saved-state-v-first-K128-V256-bfloat16',
         ),
     ],
 )
@@ -633,6 +647,146 @@ def test_chunk_npu_verifier(name, case, dtype, lower_bound, reason):
         assert actual_reason == reason
     else:
         assert reason in actual_reason
+
+
+def _wy_verifier_inputs():
+    npu = SimpleNamespace(type='npu', index=0)
+    shapes = dict.fromkeys(('q', 'k', 'b', 'gk'), (1, 65, 2, 256))
+    shapes.update(v=(1, 65, 2, 512), w_gate=(1, 65, 2, 512), A=(1, 65, 2, 64))
+    inputs = {
+        name: Mock(spec=torch.Tensor, shape=shape, ndim=4, device=npu, dtype=torch.float32 if name == 'gk' else torch.bfloat16)
+        for name, shape in shapes.items()
+    }
+    inputs['cu_seqlens'] = Mock(spec=torch.Tensor, shape=(3,), ndim=1, device=npu, dtype=torch.int32)
+    inputs['chunk_indices'] = Mock(spec=torch.Tensor, shape=(2, 2), ndim=2, device=npu, dtype=torch.int32)
+    return inputs
+
+
+@pytest.mark.parametrize(
+    ('case', 'reason'),
+    [
+        pytest.param('accept', None, id='accept-k256-packed-int32'),
+        pytest.param('oversized_k', 'K=257', id='reject-k257'),
+        pytest.param('chunk_size', 'chunk_size=64', id='reject-chunk32'),
+        pytest.param('q_shape', 'shapes to match k', id='reject-q-shape'),
+        pytest.param('chunk_indices', 'shape [NT, 2]', id='reject-index-shape'),
+    ],
+)
+def test_recompute_w_u_fwd_gdn2_npu_verifier_shapes(case, reason):
+    """Check the WY verifier's shape and indexing boundaries."""
+    from fla.ops.gdn2.backends.triton_ascend.wy_fast import recompute_w_u_fwd_gdn2_verifier
+
+    inputs = _wy_verifier_inputs()
+    if case == 'oversized_k':
+        for name in ('q', 'k', 'b', 'gk'):
+            inputs[name].shape = (1, 65, 2, 257)
+    elif case == 'chunk_size':
+        inputs['A'].shape = (1, 65, 2, 32)
+    elif case == 'q_shape':
+        inputs['q'].shape = (1, 65, 2, 128)
+    elif case == 'chunk_indices':
+        inputs['chunk_indices'].shape = (2, 3)
+    accepted, actual_reason = recompute_w_u_fwd_gdn2_verifier(**inputs)
+    assert accepted == (reason is None)
+    if reason is None:
+        assert actual_reason is None
+    else:
+        assert reason in actual_reason
+
+
+@pytest.mark.parametrize(
+    ('case', 'reason'),
+    [
+        pytest.param('cpu', 'same NPU device', id='reject-cpu'),
+        pytest.param('mixed_device', 'same NPU device', id='reject-mixed-npu'),
+        pytest.param('dtype', 'unsupported dtype', id='reject-integer-gate'),
+        pytest.param('index_dtype', 'int32 or int64', id='reject-floating-indices'),
+        pytest.param('missing_gk', 'requires gk', id='reject-missing-gk'),
+    ],
+)
+def test_recompute_w_u_fwd_gdn2_npu_verifier_metadata(case, reason):
+    """Reject WY calls with unsupported device, dtype, or gate metadata."""
+    from fla.ops.gdn2.backends.triton_ascend.wy_fast import recompute_w_u_fwd_gdn2_verifier
+
+    inputs = _wy_verifier_inputs()
+    if case == 'cpu':
+        for tensor in inputs.values():
+            tensor.device = torch.device('cpu')
+    elif case == 'mixed_device':
+        inputs['q'].device = SimpleNamespace(type='npu', index=1)
+    elif case == 'dtype':
+        inputs['b'].dtype = torch.int32
+    elif case == 'index_dtype':
+        inputs['cu_seqlens'].dtype = torch.float32
+    elif case == 'missing_gk':
+        inputs['gk'] = None
+    accepted, actual_reason = recompute_w_u_fwd_gdn2_verifier(**inputs)
+    assert not accepted
+    assert reason in actual_reason
+
+
+@pytest.mark.parametrize('mode', ['accepted', 'mixed', 'rejected', 'disabled'])
+def test_recompute_w_u_fwd_gdn2_npu_routing(mode, run_python):
+    """Check public WY selection and fallback without launching accelerator kernels."""
+    # the global disable flag is read at import; an in-process patch would miss that contract.
+    run_python(
+        f"""
+        import inspect
+        from types import SimpleNamespace
+        from unittest.mock import Mock, patch
+
+        import torch
+
+        from fla import backends
+        from fla.ops.gdn2 import wy_fast
+        from fla.ops.gdn2.backends.triton_ascend import wy_fast as ascend_wy_fast
+
+        mode = {mode!r}
+        entry = wy_fast.recompute_w_u_fwd_gdn2
+        implementation = Mock(return_value=object())
+        verifier = Mock(wraps=ascend_wy_fast.recompute_w_u_fwd_gdn2_verifier)
+        if mode == 'disabled':
+            assert inspect.unwrap(entry) not in backends._function_registries
+            ascend_wy_fast.recompute_w_u_fwd_gdn2_npu = implementation
+        else:
+            registry = backends._function_registries[inspect.unwrap(entry)]
+            candidate = registry._backends['triton_ascend']
+            candidate.implementation = implementation
+            candidate.verifier = verifier
+            registry._backends = {{'triton_ascend': candidate}}
+
+        dtype = torch.bfloat16 if mode == 'mixed' else torch.float32
+        inputs = {{name: torch.zeros(1, 2, 1, 32, dtype=dtype) for name in ('k', 'v', 'b', 'w_gate', 'gk')}}
+        inputs['A'] = torch.zeros(1, 2, 1, 64)
+        if mode in ('accepted', 'mixed'):
+            npu = SimpleNamespace(type='npu', index=0)
+            inputs = {{name: Mock(spec=torch.Tensor, shape=tensor.shape, ndim=4, dtype=tensor.dtype, device=npu)
+                       for name, tensor in inputs.items()}}
+
+        launcher = Mock()
+        with (
+            patch.object(backends.TritonAscendBackend, 'is_available', return_value=True),
+            patch.object(wy_fast, 'recompute_w_u_fwd_gdn2_kernel', new={{(1, 1): launcher}}),
+        ):
+            result = entry(**inputs)
+        if mode in ('accepted', 'mixed'):
+            verifier.assert_called_once()
+            implementation.assert_called_once_with(**inputs)
+            assert result is implementation.return_value
+            launcher.assert_not_called()
+        else:
+            implementation.assert_not_called()
+            launcher.assert_called_once()
+            assert result[0].shape == result[1].shape == result[3].shape == inputs['k'].shape
+            assert result[2] is None
+            if mode == 'rejected':
+                verifier.assert_called_once()
+            else:
+                verifier.assert_not_called()
+        """,
+        FLA_DISABLE_BACKEND_DISPATCH='1' if mode == 'disabled' else '0',
+        FLA_TRITON_ASCEND='1',
+    )
 
 
 @pytest.mark.parametrize(
@@ -1016,3 +1170,333 @@ def test_chunk_intra_default_shift(use_gate_in_kernel, monkeypatch):
     for ref, tri in zip((default,) + default_grads, (explicit,) + explicit_grads):
         assert torch.isfinite(ref).all() and torch.isfinite(tri).all()
         assert torch.equal(ref, tri)
+
+
+_WY_BT = 64
+
+
+def _sequence_spans(B: int, T: int, lengths: tuple[int, ...] | None) -> list[tuple[int, int, int]]:
+    if lengths is None:
+        return [(i_b, 0, T) for i_b in range(B)]
+    offsets = [0]
+    for length in lengths:
+        offsets.append(offsets[-1] + length)
+    return [(0, offsets[i], offsets[i + 1]) for i in range(len(lengths))]
+
+
+def _make_wy_inputs(
+    *,
+    B: int,
+    T: int,
+    H: int,
+    K: int,
+    V: int,
+    dtype: torch.dtype,
+    spans: list[tuple[int, int, int]],
+    has_q: bool,
+    a_dtype: torch.dtype | None = None,
+) -> tuple[torch.Tensor | None, ...]:
+    torch.manual_seed(42)
+    q = torch.randn(B, T, H, K, dtype=dtype, device=device) * 0.25 if has_q else None
+    k = torch.randn(B, T, H, K, dtype=dtype, device=device) * 0.25
+    v = torch.randn(B, T, H, V, dtype=dtype, device=device) * 0.25
+    b = torch.rand(B, T, H, K, dtype=dtype, device=device) * 0.5
+    w_gate = torch.rand(B, T, H, V, dtype=dtype, device=device) * 0.5
+    gk = torch.empty(B, T, H, K, dtype=torch.float32, device=device)
+    A = torch.zeros(B, T, H, _WY_BT, dtype=torch.float32, device=device)
+
+    for i_b, seq_start, seq_end in spans:
+        for chunk_start in range(seq_start, seq_end, _WY_BT):
+            chunk_end = min(chunk_start + _WY_BT, seq_end)
+            chunk_len = chunk_end - chunk_start
+            increments = -(torch.rand(chunk_len, H, K, device=device) * 0.02 + 0.01)
+            gk[i_b, chunk_start:chunk_end] = increments.cumsum(0)
+
+            eye = torch.eye(_WY_BT, dtype=torch.float32, device=device).expand(H, -1, -1)
+            noise = torch.randn(H, _WY_BT, _WY_BT, dtype=torch.float32, device=device) * 0.01
+            block = eye + torch.tril(noise, diagonal=-1)
+            A[i_b, chunk_start:chunk_end] = block[:, :chunk_len].permute(1, 0, 2)
+
+    return q, k, v, b, w_gate, A.to(a_dtype or dtype), gk.to(dtype)
+
+
+def _wy_reference(
+    *,
+    q: torch.Tensor | None,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    b: torch.Tensor,
+    w_gate: torch.Tensor,
+    A: torch.Tensor,
+    gk: torch.Tensor,
+    spans: list[tuple[int, int, int]],
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor]:
+    """Isolate WY auxiliaries from the intra-chunk solver and state recurrence."""
+    w = torch.empty_like(k)
+    u = torch.empty_like(v)
+    kg = torch.empty_like(k)
+    gk_exp = torch.exp2(gk.float())
+    qg = (q.float() * gk_exp).to(q.dtype) if q is not None else None
+
+    for i_b, seq_start, seq_end in spans:
+        for chunk_start in range(seq_start, seq_end, _WY_BT):
+            chunk_end = min(chunk_start + _WY_BT, seq_end)
+            chunk_len = chunk_end - chunk_start
+            A_chunk = A[i_b, chunk_start:chunk_end].permute(1, 0, 2).float()[..., :chunk_len]
+
+            vb = (v[i_b, chunk_start:chunk_end].float() *
+                  w_gate[i_b, chunk_start:chunk_end].float()).to(v.dtype)
+            u_chunk = torch.matmul(A_chunk, vb.permute(1, 0, 2).float())
+            u[i_b, chunk_start:chunk_end] = u_chunk.permute(1, 0, 2).to(v.dtype)
+
+            kb = (k[i_b, chunk_start:chunk_end].float() *
+                  b[i_b, chunk_start:chunk_end].float() *
+                  gk_exp[i_b, chunk_start:chunk_end]).to(k.dtype)
+            w_chunk = torch.matmul(A_chunk, kb.permute(1, 0, 2).float())
+            w[i_b, chunk_start:chunk_end] = w_chunk.permute(1, 0, 2).to(k.dtype)
+
+            g_last = gk[i_b, chunk_end - 1].float()
+            decay = torch.exp2(g_last[None, :, :] - gk[i_b, chunk_start:chunk_end].float())
+            kg[i_b, chunk_start:chunk_end] = (k[i_b, chunk_start:chunk_end].float() * decay).to(k.dtype)
+
+    return w, u, qg, kg
+
+
+@pytest.mark.skipif(not IS_NPU, reason="Ascend NPU required")
+@pytest.mark.parametrize(
+    ("layout", "dtype", "K", "V", "has_q", "a_dtype"),
+    [
+        pytest.param("dense", torch.float32, 32, 48, True, None, id="dense-fp32-k32-v48-q"),
+        pytest.param("dense", torch.bfloat16, 256, 256, True, None, id="dense-bf16-k256-v256-q"),
+        pytest.param("varlen", torch.bfloat16, 48, 32, False, None, id="varlen-bf16-k48-v32-no-q"),
+        pytest.param("varlen", torch.float16, 32, 48, True, None, id="varlen-fp16-k32-v48-q"),
+        pytest.param("varlen", torch.bfloat16, 48, 32, True, torch.float32, id="varlen-fp32-a-bf16-inputs"),
+    ],
+)
+def test_recompute_w_u_fwd_gdn2_npu(layout, dtype, K, V, has_q, a_dtype, monkeypatch):
+    """The Ascend WY leaf must match its channel-wise Torch definition."""
+    monkeypatch.setattr(testing, 'FLA_CI_ENV', False)
+    # assert native dispatch because numerical parity also permits the generic fallback.
+    candidate = backends._function_registries[inspect.unwrap(recompute_w_u_fwd_gdn2)]._backends['triton_ascend']
+    spy = Mock(wraps=candidate.implementation)
+    monkeypatch.setattr(candidate, 'implementation', spy)
+
+    lengths = None if layout == "dense" else (15, 65, 65)
+    B = 2 if layout == "dense" and K < 256 else 1
+    H = 2 if K < 256 else 1
+    T = 65 if lengths is None else sum(lengths)
+    spans = _sequence_spans(B, T, lengths)
+    q, k, v, b, w_gate, A, gk = _make_wy_inputs(
+        B=B,
+        T=T,
+        H=H,
+        K=K,
+        V=V,
+        dtype=dtype,
+        spans=spans,
+        has_q=has_q,
+        a_dtype=a_dtype,
+    )
+    cu_seqlens = None
+    if lengths is not None:
+        cu_seqlens = torch.tensor((0, *torch.tensor(lengths).cumsum(0).tolist()), device=device)
+
+    ref_inputs = dict(q=q, k=k, v=v, b=b, w_gate=w_gate, A=A, gk=gk)
+    if a_dtype is not None:
+        ref_inputs = {name: tensor.float() if tensor is not None else None for name, tensor in ref_inputs.items()}
+    expected = _wy_reference(**ref_inputs, spans=spans)
+    actual = recompute_w_u_fwd_gdn2(
+        k=k,
+        v=v,
+        b=b,
+        w_gate=w_gate,
+        A=A,
+        q=q,
+        gk=gk,
+        cu_seqlens=cu_seqlens,
+    )
+
+    spy.assert_called_once()
+    for name, ref, tri in zip(("w", "u", "qg", "kg"), expected, actual):
+        if ref is None:
+            assert tri is None
+        else:
+            assert tri is not None
+            assert tri.dtype == ref.dtype
+            assert_close(name, ref, tri, 0.005)
+
+
+@pytest.mark.skipif(not IS_NPU, reason='Ascend WY address lowering')
+@pytest.mark.parametrize(
+    ('dtype', 'has_q'),
+    [
+        pytest.param(torch.bfloat16, True, id='bf16-q'),
+        pytest.param(torch.float32, False, id='fp32-no-q'),
+    ],
+)
+def test_recompute_w_u_fwd_gdn2_npu_large_offsets(dtype, has_q):
+    """Compile value offsets beyond int32 without allocating or launching a huge tensor."""
+    from triton.runtime.jit import MockTensor
+
+    from fla.ops.gdn2.backends.triton_ascend.wy_fast import recompute_w_u_fwd_gdn2_kernel_npu
+    from fla.utils import ascend_compile_kwargs
+
+    pointer = MockTensor(dtype)
+    compiled = recompute_w_u_fwd_gdn2_kernel_npu.fn.warmup(
+        q=pointer if has_q else None,
+        k=pointer,
+        qg=pointer if has_q else None,
+        kg=pointer,
+        v=pointer,
+        b=pointer,
+        w_gate=pointer,
+        w=pointer,
+        u=pointer,
+        A=pointer,
+        gk=MockTensor(torch.float32),
+        cu_seqlens=None,
+        chunk_indices=None,
+        T=65,
+        B=1,
+        task_num=2,
+        num_core=1,
+        H=1,
+        K=256,
+        V=2**31 + 1,
+        BT=64,
+        BK=64 if has_q else 128,
+        BV=128,
+        STORE_QG=has_q,
+        IS_VARLEN=False,
+        IS_ALIGNED=False,
+        grid=(1,),
+        **ascend_compile_kwargs(),
+    )
+    # H=1 leaves only address products; a late int64 cast would preserve an overflowing int32 multiply.
+    ttir = compiled.asm['ttir']
+    assert re.search(r'arith\.muli\b[^\n]*: i64\b', ttir)
+    assert not re.search(r'arith\.muli\b[^\n]*: (?:i32\b|tensor<[^>]*xi32>)', ttir)
+
+
+@pytest.mark.skipif(not IS_NPU, reason='Ascend compiler options')
+def test_chunk_npu_compile_options():
+    """Validate launch-option values parsed by the installed Ascend compiler."""
+    # a dataclass field can exist without accepting a launch argument.
+    from triton.backends.ascend.compiler import AscendBackend
+    from triton.runtime import driver
+
+    from fla.ops.gdn2.backends.triton_ascend.chunk_intra import INTER_COMPILE_KWARGS
+    from fla.utils import ascend_compile_kwargs
+
+    backend = AscendBackend(driver.active.get_current_target())
+    for kwargs in (ascend_compile_kwargs(), INTER_COMPILE_KWARGS):
+        options = backend.parse_options(kwargs.copy())
+        for name, value in kwargs.items():
+            assert getattr(options, name) == value
+
+
+@pytest.mark.skipif(not IS_NPU, reason='Ascend kernel regression')
+@pytest.mark.parametrize(
+    ('K', 'dtype', 'varlen'),
+    [
+        pytest.param(48, torch.float16, True, id='varlen-K48-fp16'),
+        pytest.param(256, torch.bfloat16, False, id='dense-K256-bf16'),
+    ],
+)
+def test_chunk_fwd_intra_grouped_npu(K, dtype, varlen, monkeypatch):
+    """Check causal score rows and structural zeros across dense and ragged chunk tails."""
+    monkeypatch.setattr(testing, 'FLA_CI_ENV', False)
+    # causal consumers can mask missing upper-triangle stores, so inspect the score buffers directly.
+    from fla.ops.gdn2.backends.triton_ascend.chunk_intra import (
+        chunk_gdn2_fwd_kernel_intra_grouped_npu,
+        launch_diag_kernel,
+    )
+    from fla.ops.utils import prepare_chunk_indices
+
+    torch.manual_seed(42)
+    T, H, BT, BC = 145, 16, 64, 16
+    bounds = [0, 15, 80, T] if varlen else [0, T]
+    q = F.normalize(torch.randn(1, T, H, K, device=device), dim=-1).to(dtype)
+    k = F.normalize(torch.randn_like(q, dtype=torch.float32), dim=-1).to(dtype)
+    b = torch.rand_like(q)
+    g = -torch.rand_like(q, dtype=torch.float32)
+    for bos, eos in zip(bounds[:-1], bounds[1:]):
+        for start in range(bos, eos, BT):
+            end = min(start + BT, eos)
+            g[:, start:end] = g[:, start:end].cumsum(dim=1)
+    cu_seqlens = torch.tensor(bounds, device=device, dtype=torch.int64) if varlen else None
+    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if varlen else None
+    nt = len(chunk_indices) if varlen else (T + BT - 1) // BT
+    Aqk = torch.full((1, T, H, BT), float('nan'), device=device, dtype=dtype)
+    Akk = torch.full((1, T, H, BC), float('nan'), device=device, dtype=torch.float32)
+    inputs = [q, k, g, b] if varlen else [x.transpose(1, 2).contiguous() for x in (q, k, g, b)]
+    scale = K ** -0.5
+    kwargs = dict(
+        q=inputs[0],
+        k=inputs[1],
+        g=inputs[2],
+        b=inputs[3],
+        Aqk=Aqk,
+        Akk=Akk,
+        scale=scale,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        T=T,
+        H=H,
+        K=K,
+        BT=BT,
+        BC=BC,
+        BK=triton.next_power_of_2(K),
+        BR=8,
+        IS_HEAD_MAJOR=not varlen,
+        IS_VARLEN=varlen,
+        MASK_DMA=True,
+    )
+    for row_group in range(BC // 8):
+        launch_diag_kernel(
+            chunk_gdn2_fwd_kernel_intra_grouped_npu,
+            nt=nt,
+            nc=BT // BC,
+            bh_total=H,
+            kernel_kwargs={**kwargs, 'ROW_GROUP': row_group},
+        )
+
+    q_ref, k_ref, g_ref, b_ref = [x[0].detach().float().cpu() for x in (q, k, g, b)]
+    ref_qk = torch.zeros(1, T, H, BT)
+    ref_kk = torch.zeros(1, T, H, BC)
+    diagonal_rows = torch.zeros_like(ref_qk, dtype=torch.bool)
+    for bos, eos in zip(bounds[:-1], bounds[1:]):
+        for start in range(bos, eos, BC):
+            end = min(start + BC, eos)
+            qi, ki, gi, bi = [x[start:end].transpose(0, 1) for x in (q_ref, k_ref, g_ref, b_ref)]
+            decay = torch.exp2(gi[:, :, None, :] - gi[:, None, :, :])
+            qk = (qi[:, :, None, :] * ki[:, None, :, :] * decay).sum(dim=-1) * scale
+            kk = ((ki * bi)[:, :, None, :] * ki[:, None, :, :] * decay).sum(dim=-1)
+            col = (start - bos) % BT
+            diagonal_rows[0, start:end, :, col:col + BC] = True
+            ref_qk[0, start:end, :, col:col + end - start] = qk.tril().transpose(0, 1)
+            ref_kk[0, start:end, :, :end - start] = kk.tril(diagonal=-1).transpose(0, 1)
+    actual_qk = Aqk.cpu()
+    assert torch.isfinite(actual_qk[diagonal_rows]).all()
+    assert torch.isfinite(Akk).all()
+    assert_close('Aqk', ref_qk[diagonal_rows].to(dtype), actual_qk[diagonal_rows], 0.005)
+    assert_close('Akk', ref_kk, Akk.cpu(), 0.005)
+
+
+@pytest.mark.parametrize(
+    ('store_qg', 'expected'),
+    [
+        pytest.param(True, [(64, 128), (16, 32), (64, 128)], id='q-enabled'),
+        pytest.param(False, [(128, 128), (32, 32), (128, 128)], id='q-absent'),
+    ],
+)
+def test_recompute_w_u_fwd_gdn2_ub_budget(store_qg, expected, monkeypatch):
+    """Check tile selection and cache isolation across simulated UB capacities."""
+    from fla.ops.gdn2.backends.triton_ascend.wy_fast import _get_fwd_tiles
+    from fla.utils import ascend_ub_manager
+
+    plans = []
+    for capacity in (192 * 1024 * 8, 64 * 1024 * 8, 192 * 1024 * 8):
+        monkeypatch.setattr(ascend_ub_manager, '_ub_manager', ascend_ub_manager.UBManager(capacity))
+        plans.append(_get_fwd_tiles(64, 256, 512, store_qg=store_qg, ub_capacity_bits=capacity))
+    assert plans == expected

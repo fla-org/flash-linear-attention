@@ -28,7 +28,7 @@ from fla.utils import autotune_cache_kwargs
         for num_warps in [2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
-    key=['H', 'K', 'V', 'BT', 'IS_VARLEN'],
+    key=['H', 'K', 'V', 'BT', 'IS_VARLEN', 'STATE_V_FIRST'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -49,6 +49,7 @@ def chunk_gsa_fwd_kernel_inter(
     BT: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
+    STATE_V_FIRST: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
     i_v, i_t = unflatten_program_id(tl.cdiv(V, BV))
@@ -83,7 +84,10 @@ def chunk_gsa_fwd_kernel_inter(
         m_kv = m_k[:, None] & m_v[None, :]
         p_q = q + (bos * H + i_h) * K + o_t[:, None] * (H*K) + o_k[None, :]
         p_k = k + (bos * H + i_h) * K + o_k[:, None] + o_t[None, :] * (H*K)
-        p_h = h + (i_tg * H + i_h) * K*V + o_k[:, None] * V + o_v[None, :]
+        if STATE_V_FIRST:
+            p_h = h + (i_tg * H + i_h) * K*V + o_v[None, :] * K + o_k[:, None]
+        else:
+            p_h = h + (i_tg * H + i_h) * K*V + o_k[:, None] * V + o_v[None, :]
 
         # [BT, BK]
         b_q = tl.load(p_q, mask=m_qk, other=0.0)
@@ -201,9 +205,10 @@ def chunk_gsa_fwd_k(
     k: torch.Tensor,
     v: torch.Tensor,
     g: torch.Tensor,
+    scale: float = 1.,
     h0: torch.Tensor | None = None,
     output_final_state: bool = False,
-    scale: float = 1.,
+    state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
@@ -226,6 +231,7 @@ def chunk_gsa_fwd_k(
         gv=g,
         h0=h0,
         output_final_state=output_final_state,
+        state_v_first=state_v_first,
         cu_seqlens=cu_seqlens,
         chunk_size=BT,
         states_in_fp32=False,
@@ -248,6 +254,7 @@ def chunk_gsa_fwd_k(
         K=K,
         V=V,
         BT=BT,
+        STATE_V_FIRST=state_v_first,
     )
 
     def grid(meta): return (triton.cdiv(V, meta['BV']) * NT * NC, B * H)
@@ -277,9 +284,10 @@ def chunk_gsa_fwd(
     v: torch.Tensor,
     s: torch.Tensor,
     g: torch.Tensor,
+    scale: float = 1.,
     initial_state: tuple[torch.Tensor, torch.Tensor] | None = None,
     output_final_state: bool = False,
-    scale: float = 1.,
+    state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
@@ -292,9 +300,10 @@ def chunk_gsa_fwd(
         k=k,
         v=s,
         g=g,
+        scale=scale,
         h0=hk0,
         output_final_state=output_final_state,
-        scale=scale,
+        state_v_first=state_v_first,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
@@ -313,6 +322,7 @@ def chunk_gsa_fwd(
         scale=1.,
         initial_state=hv0,
         output_final_state=output_final_state,
+        state_v_first=state_v_first,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
