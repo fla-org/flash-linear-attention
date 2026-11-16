@@ -12,7 +12,7 @@ import triton.language as tl
 from fla.backends import dispatch
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp2
-from fla.utils import IS_NVIDIA_HOPPER, autotune_cache_kwargs, check_shared_mem
+from fla.utils import IS_NVIDIA_HOPPER, IS_NVIDIA_SM100, autotune_cache_kwargs, check_shared_mem
 
 BK_LIST = [32, 64] if check_shared_mem() else [16, 32]
 BV_LIST = [64, 128] if check_shared_mem('ampere') else [16, 32]
@@ -175,6 +175,7 @@ def chunk_precond_kda_bwd_dAv(
         for num_warps in NUM_WARPS
         for num_stages in [2, 3, 4]
         if not (IS_NVIDIA_HOPPER and BK == 32 and num_warps == 4)
+        if not (IS_NVIDIA_SM100 and BK == 32 and num_warps in (4, 8))
     ],
     key=['BT', 'TRANSPOSE_STATE', 'K', 'V'],
     **autotune_cache_kwargs,
