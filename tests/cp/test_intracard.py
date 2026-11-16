@@ -23,7 +23,7 @@ from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_fwd_h
 from fla.ops.common.intracard_cp import _intracard_cache
 from fla.ops.gated_delta_rule import chunk_gated_delta_rule
 from fla.ops.kda import chunk_kda
-from fla.utils import IS_NPU, IS_TF32_SUPPORTED, device
+from fla.utils import IS_NPU, IS_NVIDIA, IS_TF32_SUPPORTED, device
 
 
 @pytest.fixture(autouse=True)
@@ -100,6 +100,74 @@ def test_chunk_kda_cache(monkeypatch):
     assert key[0] == id(cu_seqlens)
     assert entry.cu_seqlens_ref() is cu_seqlens
     assert torch.allclose(o1, o2, atol=1e-4, rtol=1e-4)
+
+
+@pytest.mark.skipif(os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") == "1", reason="backend dispatch disabled")
+@pytest.mark.skipif(not IS_NVIDIA, reason="the compact state layout requires NVIDIA")
+@pytest.mark.parametrize("T, splits", [(4096, False), (32768, True)], ids=["unsplit", "split"])
+def test_chunk_kda_compact_states(monkeypatch, T, splits):
+    """A split sequence stores the state of each subsequence's first chunk in the compact layout."""
+    monkeypatch.setenv("FLA_INTRACARD_CP", "1")
+    monkeypatch.setenv("FLA_TILELANG", "0")
+    torch.manual_seed(0)
+    dtype = torch.bfloat16
+
+    B, H, D = 1, 1, 32
+    q = torch.randn(B, T, H, D, device=device, dtype=dtype)
+    k = torch.randn(B, T, H, D, device=device, dtype=dtype)
+    v = torch.randn(B, T, H, D, device=device, dtype=dtype)
+    g = torch.full((B, T, H, D), -0.05, device=device, dtype=dtype)
+    beta = torch.sigmoid(torch.randn(B, T, H, device=device, dtype=dtype))
+    A_log = torch.log(torch.randn(1, 1, H, 1, dtype=torch.float32, device=device).uniform_(1, 16))
+    dt_bias = torch.randn(H * D, dtype=torch.float32, device=device)
+
+    split_calls = 0
+    original_precompute = intracard_cp._precompute_intracard_indices
+
+    def counted_precompute(*args, **kwargs):
+        nonlocal split_calls
+        split_calls += 1
+        return original_precompute(*args, **kwargs)
+
+    monkeypatch.setattr(intracard_cp, "_precompute_intracard_indices", counted_precompute)
+
+    backend_calls = 0
+    original_fwd_h = intracard_cp.intracard_fwd_h
+
+    def counted_fwd_h(*args, **kwargs):
+        nonlocal backend_calls
+        backend_calls += 1
+        return original_fwd_h(*args, **kwargs)
+
+    monkeypatch.setattr(intracard_cp, "intracard_fwd_h", counted_fwd_h)
+
+    outputs = {}
+    for compact_h in (False, True):
+        monkeypatch.setenv("FLA_KDA_COMPACT_H", str(int(compact_h)))
+        # a fresh boundary tensor per run misses the intra-card index cache
+        cu_seqlens = torch.tensor([0, T], device=device, dtype=torch.int32)
+        before, before_backend = split_calls, backend_calls
+        with torch.inference_mode():
+            o, ht = chunk_kda(
+                q=q,
+                k=k,
+                v=v,
+                g=g,
+                beta=beta,
+                use_gate_in_kernel=True,
+                cu_seqlens=cu_seqlens,
+                cu_seqlens_cpu=cu_seqlens.cpu(),
+                A_log=A_log,
+                dt_bias=dt_bias,
+                output_final_state=True,
+            )
+        assert backend_calls == before_backend + 1, "both layouts must keep the intra-card route"
+        assert split_calls == before + (1 if splits else 0)
+        outputs[compact_h] = (o, ht)
+
+    # the two runs differ only in where the states are stored
+    assert torch.equal(outputs[True][0], outputs[False][0])
+    assert torch.equal(outputs[True][1], outputs[False][1])
 
 
 def test_backend_default():

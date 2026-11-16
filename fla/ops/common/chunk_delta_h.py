@@ -69,6 +69,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     ht,
     cu_seqlens,
     chunk_offsets,
+    first_chunks,
     T,
     H: tl.constexpr,
     HV: tl.constexpr,
@@ -86,6 +87,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     USE_FIRST_INITIAL_STATE: tl.constexpr = False,
     COMPACT_H: tl.constexpr = False,
     H_CHUNKS: tl.constexpr = 0,
+    COMPACT_FIRST_CHUNK: tl.constexpr = False,
 ):
     pid = tl.program_id(0).to(tl.int64)
     NV = tl.cdiv(V, BV)
@@ -195,8 +197,13 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
         o_t = i_t_int64 * BT + tl.arange(0, BT)
         store_h = True
         if COMPACT_H:
-            i_t_int64 = compact_chunk_state_index(bos, i_t, i_n, H_CHUNKS, BT, USE_INITIAL_STATE)
-            store_h = i_t_int64 >= 0
+            if COMPACT_FIRST_CHUNK:
+                # a subsequence that starts inside its document stores that first chunk as well
+                i_t_int64 = bos.to(tl.int64) // BT + i_t_int64 - 1
+                store_h = (i_t > 0) | (tl.load(first_chunks + i_n) != 0)
+            else:
+                i_t_int64 = compact_chunk_state_index(bos, i_t, i_n, H_CHUNKS, BT, USE_INITIAL_STATE)
+                store_h = i_t_int64 >= 0
             i_t_int64 = tl.maximum(i_t_int64, 0)
         m_t = o_t < T
         if STATE_V_FIRST:
@@ -793,6 +800,7 @@ def chunk_gated_delta_rule_fwd_h(
         ht=final_state,
         cu_seqlens=cu_seqlens,
         chunk_offsets=chunk_offsets,
+        first_chunks=None,
         T=T,
         H=H,
         HV=HV,

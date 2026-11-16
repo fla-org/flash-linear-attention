@@ -84,6 +84,9 @@ def _raw_chunk_gated_delta_rule_fwd_h(
     state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
+    compact_h: bool = False,
+    h_chunks: int = 0,
+    first_chunks: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     B, T, H, K, V, HV = *k.shape, u.shape[-1], u.shape[2]
     BT = chunk_size
@@ -96,10 +99,10 @@ def _raw_chunk_gated_delta_rule_fwd_h(
         N, NT, chunk_offsets = len(cu_seqlens) - 1, len(chunk_indices), prepare_chunk_offsets(cu_seqlens, BT)
 
     if state_v_first:
-        h = k.new_empty(B, NT, HV, V, K)
+        h = k.new_empty(B, h_chunks if compact_h else NT, HV, V, K)
         final_state = k.new_zeros(N, HV, V, K, dtype=torch.float32) if output_final_state else None
     else:
-        h = k.new_empty(B, NT, HV, K, V)
+        h = k.new_empty(B, h_chunks if compact_h else NT, HV, K, V)
         final_state = k.new_zeros(N, HV, K, V, dtype=torch.float32) if output_final_state else None
     v_new = torch.empty_like(u) if save_new_value else None
 
@@ -118,6 +121,7 @@ def _raw_chunk_gated_delta_rule_fwd_h(
         ht=final_state,
         cu_seqlens=cu_seqlens,
         chunk_offsets=chunk_offsets,
+        first_chunks=first_chunks,
         T=T,
         H=H,
         HV=HV,
@@ -125,6 +129,9 @@ def _raw_chunk_gated_delta_rule_fwd_h(
         V=V,
         BT=BT,
         STATE_V_FIRST=state_v_first,
+        COMPACT_H=compact_h,
+        H_CHUNKS=T // BT if compact_h else 0,
+        COMPACT_FIRST_CHUNK=first_chunks is not None,
     )
     return h, v_new, final_state
 
@@ -414,6 +421,7 @@ def intracard_fwd_h(
     cu_seqlens: torch.LongTensor | None = None,
     cu_seqlens_cpu: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
+    compact_h: bool = False,
     max_splits: int = 32,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
@@ -502,6 +510,8 @@ def intracard_fwd_h(
             state_v_first=state_v_first,
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
+            compact_h=compact_h,
+            h_chunks=k.shape[1] // chunk_size + int(initial_state is not None) if compact_h else 0,
         )
 
     num_seqs = len(cu_seqlens_cpu) - 1
@@ -582,6 +592,16 @@ def intracard_fwd_h(
 
     chunk_indices_subseq = prepare_chunk_indices(cu_seqlens_subseq_gpu, chunk_size)
 
+    first_chunks = None
+    if compact_h:
+        # a subsequence whose start is not its document's first chunk still stores that chunk's state
+        doc_starts = set(cu_seqlens_cpu.tolist())
+        first_chunks = torch.tensor(
+            [int(start not in doc_starts) for start in cu_seqlens_subseq_values[:-1]],
+            dtype=torch.int32,
+            device=device,
+        )
+
     h, v_new, final_state_subseq = _raw_chunk_gated_delta_rule_fwd_h(
         k=k,
         w=w,
@@ -595,6 +615,9 @@ def intracard_fwd_h(
         state_v_first=state_v_first,
         cu_seqlens=cu_seqlens_subseq_gpu,
         chunk_indices=chunk_indices_subseq,
+        compact_h=compact_h,
+        h_chunks=k.shape[1] // chunk_size,
+        first_chunks=first_chunks,
     )
 
     # expose one final state per original sequence, taken from its last subsequence

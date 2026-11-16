@@ -23,6 +23,18 @@ def _assert_bitwise(actual, expected):
     assert torch.equal(actual, expected)
 
 
+@pytest.fixture
+def triton_route(monkeypatch):
+    """Compare the two layouts on the same implementation.
+
+    A backend that takes the dense call and declines the compact one would otherwise make the
+    comparison measure the implementation rather than the layout.
+    """
+    from fla.backends import BaseBackend
+
+    monkeypatch.setattr(BaseBackend, "is_enabled", lambda self: False)
+
+
 def _make_inputs(total=130, key_dim=64, value_dim=64):
     torch.manual_seed(42)
     q, k = [torch.randn(1, total, 1, key_dim, device=device, dtype=torch.bfloat16) * 0.1 for _ in range(2)]
@@ -34,7 +46,7 @@ def _make_inputs(total=130, key_dim=64, value_dim=64):
 
 @pytest.mark.parametrize("chunk_size", [32, 64])
 @pytest.mark.parametrize("state_v_first", [False, True])
-def test_compact_h_slots(chunk_size, state_v_first):
+def test_compact_h_slots(chunk_size, state_v_first, triton_route):
     q, k, v, g, beta = _make_inputs()
     for boundaries in ([0, 130], [0, 1, 70, 71, 130], [0, 32, 96, 130], [0, 1, 2, 3, 130]):
         cu_seqlens = torch.tensor(boundaries, dtype=torch.long, device=device)
@@ -75,7 +87,7 @@ def test_compact_h_slots(chunk_size, state_v_first):
 @pytest.mark.parametrize("state_v_first", [False, True])
 @pytest.mark.parametrize("disable_recompute", [False, True])
 @pytest.mark.parametrize("use_final_gradient", [False, True])
-def test_compact_state_matches_dense_backward(state_v_first, disable_recompute, use_final_gradient, monkeypatch):
+def test_compact_state_matches_dense_backward(state_v_first, disable_recompute, use_final_gradient, monkeypatch, triton_route):
     q, k, v, g, beta = _make_inputs()
     boundaries = [0, 1, 70, 71, 130]
     cu_seqlens = torch.tensor(boundaries, dtype=torch.long, device=device)
@@ -108,7 +120,7 @@ def test_compact_state_matches_dense_backward(state_v_first, disable_recompute, 
         _assert_bitwise(compact, dense)
 
 
-def test_compact_state_preserves_public_layouts(monkeypatch):
+def test_compact_state_preserves_public_layouts(monkeypatch, triton_route):
     monkeypatch.setenv("FLA_KDA_COMPACT_H", "1")
     q, k, v, g, beta = _make_inputs()
     cu_seqlens = torch.tensor([0, 1, 70, 71, 130], dtype=torch.long, device=device)
@@ -214,6 +226,29 @@ def test_cp_ascend_verifier_declines_singleton_state():
     accepted, reason = verifier(k=npu_tensor, use_singleton_state=True)
     assert not accepted
     assert "singleton" in reason, reason
+
+
+def test_intracard_verifier_names_compact_arguments():
+    """The intra-card route splits a sequence into subsequences, so it has to decide about the
+    compact layout itself instead of letting a signature mismatch hide behind dispatch."""
+    from fla.ops.common.backends.intracard import IntraCardCPBackend
+
+    q, k, v, _, _ = _make_inputs()
+    cu_seqlens = torch.tensor([0, 130], dtype=torch.long, device=device)
+    verifier = IntraCardCPBackend().chunk_gated_delta_rule_fwd_h_verifier
+    kwargs = dict(k=k, w=k, u=v, cu_seqlens=cu_seqlens)
+
+    with torch.inference_mode():
+        assert verifier(**kwargs) == (True, None)
+        assert verifier(**kwargs, compact_h=True) == (True, None)
+
+        accepted, reason = verifier(**kwargs, use_first_initial_state=True)
+        assert not accepted
+        assert "singleton" in reason, reason
+
+        accepted, reason = verifier(**kwargs, compact_h=True, initial_state=k, use_first_initial_state=False)
+        assert not accepted
+        assert "compact" in reason.lower(), reason
 
 
 def test_compact_layout_routes_away_from_tilelang(monkeypatch):
