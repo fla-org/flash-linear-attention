@@ -763,7 +763,7 @@ def chunk_gla_bwd_kernel_dv(
         for num_warps in [2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
-    key=['BT', 'STATE_V_FIRST', 'K', 'V'],
+    key=['H', 'K', 'V', 'BT', 'IS_VARLEN', 'STATE_V_FIRST'],
     prune_configs_by={'early_config_prune': _prune_gla_bwd_inter_configs},
     **autotune_cache_kwargs,
 )

@@ -108,8 +108,8 @@ def test_parallel(
     ],
 )
 @pytest.mark.skipif(
-    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
-    reason="Skipping test because TEST_CHUNK_VARLEN is enabled",
+    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "1",
+    reason="Skipping test because SKIP_TEST_CHUNK_VARLEN is set",
 )
 @pytest.mark.skipif(
     IS_INTEL_ALCHEMIST,

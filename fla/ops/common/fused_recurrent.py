@@ -12,7 +12,15 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils.op import exp
-from fla.utils import ascend_compile_kwargs, autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, input_guard
+from fla.utils import (
+    IS_NVIDIA,
+    ascend_compile_kwargs,
+    autocast_custom_bwd,
+    autocast_custom_fwd,
+    autotune_cache_kwargs,
+    get_multiprocessor_count,
+    input_guard,
+)
 
 
 @triton.heuristics({
@@ -155,14 +163,6 @@ def fused_recurrent_fwd_kernel(
     'USE_FINAL_STATE_GRADIENT': lambda args: args['dht'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
-@triton.autotune(
-    configs=[
-        triton.Config({}, num_warps=num_warps)
-        for num_warps in [4]
-    ],
-    key=['BK', 'BV', 'USE_G', 'USE_G_GAMMA', 'USE_GK', 'USE_GV', 'STATE_V_FIRST'],
-    **autotune_cache_kwargs,
-)
 @triton.jit(do_not_specialize=['B', 'T'])
 def fused_recurrent_bwd_kernel(
     q,
@@ -498,6 +498,13 @@ def fused_recurrent_bwd(
 
     BK, BV, NK, NV = _fused_recurrent_tiling(K, V)
 
+    num_warps = 4
+    # use single-warp state tiles when long recurrences leave multiprocessors idle.
+    if IS_NVIDIA and state_v_first and B * T >= 32 * N and get_multiprocessor_count(q.device.index) > N * H * NK * NV:
+        BK, BV = min(BK, 16), min(BV, 16)
+        NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
+        num_warps = 1
+
     h0 = initial_state
     dq = q.new_empty((NV, *q.shape) if NV > 1 else q.shape, dtype=torch.float32)
     dk = q.new_empty((NV, *k.shape) if NV > 1 else k.shape, dtype=torch.float32)
@@ -548,6 +555,7 @@ def fused_recurrent_bwd(
         USE_GV=gv is not None,
         REVERSE=reverse,
         STATE_V_FIRST=state_v_first,
+        num_warps=num_warps,
         **ascend_compile_kwargs(),
     )
     if NV > 1:
