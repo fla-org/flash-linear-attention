@@ -63,12 +63,16 @@ def _run_graph(rank, world_size):
     lo, hi = rank * part, (rank + 1) * part
     group = dist.group.WORLD
 
-    cu_static = torch.zeros(MAX_NUM_SEQS + 1, dtype=torch.long, device=device)
+    max_num_seqs = MAX_NUM_SEQS + 1
+    cu_static = torch.zeros(max_num_seqs + 1, dtype=torch.long, device=device)
     pre_dev = torch.zeros(1, dtype=torch.int32, device=device)
     post_dev = torch.zeros(1, dtype=torch.int32, device=device)
 
-    def refresh(base):
+    def refresh(base, empty_sequence=None):
         local = base.cu_seqlens
+        if empty_sequence is not None:
+            index = 0 if empty_sequence == 'leading' else 1
+            local = torch.cat((local[:index], local[index:index + 1], local[index:]))
         cu_static[: len(local)] = local
         cu_static[len(local):] = local[-1]
         pre_dev.fill_(base.pre_num_ranks)
@@ -112,7 +116,7 @@ def _run_graph(rank, world_size):
             use_gate_in_kernel=True,
             cp_context=ctx,
             use_graph=True,
-            max_num_seqs=MAX_NUM_SEQS,
+            max_num_seqs=max_num_seqs,
             A_log=leaves["A_log"],
             dt_bias=leaves["dt_bias"],
         )
@@ -131,7 +135,12 @@ def _run_graph(rank, world_size):
     with torch.cuda.graph(graph):
         o_captured = step()
 
-    for seed, (tag, sequence_offsets) in enumerate(VARLEN_CASES, start=1):
+    replay_cases = list(VARLEN_CASES) + [
+        ('leading-empty-sequence', [0, T]),
+        ('internal-empty-sequence', [0, part // 4, part + part // 2, T]),
+        VARLEN_CASES[0],
+    ]
+    for seed, (tag, sequence_offsets) in enumerate(replay_cases, start=1):
         inputs = _make_inputs(seed * 17, device)
         for n in TOKEN_NAMES:
             leaves[n].data.copy_(inputs[n][:, lo:hi])
@@ -139,7 +148,8 @@ def _run_graph(rank, world_size):
             leaves[n].data.copy_(inputs[n])
         do.copy_(inputs["do"][:, lo:hi])
         cu = torch.tensor(sequence_offsets, dtype=torch.long, device=device)
-        refresh(build_cp_context(cu, group=group))
+        empty_sequence = {'leading-empty-sequence': 'leading', 'internal-empty-sequence': 'internal'}.get(tag)
+        refresh(build_cp_context(cu, group=group), empty_sequence)
 
         dist.barrier()
         graph.replay()
@@ -257,7 +267,7 @@ def _run_npu_graph(
     varlen_cases = [(tag, [offset * total_tokens // T for offset in offsets]) for tag, offsets in VARLEN_CASES]
     group = dist.group.WORLD
 
-    max_num_seqs = MAX_NUM_SEQS + (layout == 'zigzag')
+    max_num_seqs = MAX_NUM_SEQS + 1
     cu_static = torch.zeros(max_num_seqs + 1, dtype=cu_dtype, device=device)
     pre_dev = torch.zeros(2 if layout == 'zigzag' else 1, dtype=torch.int32, device=device)
     post_dev = torch.zeros_like(pre_dev)
@@ -265,7 +275,7 @@ def _run_npu_graph(
     def refresh(base, empty_sequence=None):
         local = base.cu_seqlens
         if empty_sequence is not None:
-            index = 0 if empty_sequence == 'leading' else base.front_num_seqs
+            index = 0 if empty_sequence == 'leading' else base.front_num_seqs if empty_sequence == 'split' else 1
             local = torch.cat((local[:index], local[index:index + 1], local[index:]))
         cu_static[: len(local)] = local
         cu_static[len(local):] = local[-1]
@@ -373,10 +383,11 @@ def _run_npu_graph(
         replay_cases += [
             ('four-front-sequences', [0, 1, 2, 3, total_tokens]),
             ('part-one-token-boundary', [0, part // 2 - 1, part // 2 + 1, total_tokens, total_tokens]),
-            ('leading-empty-sequence', [0, total_tokens]),
             ('split-empty-sequence', [0, total_tokens]),
         ]
     replay_cases += [
+        ('leading-empty-sequence', [0, total_tokens]),
+        ('internal-empty-sequence', [0, part // 4, part + part // 2, total_tokens]),
         ('half-capacity', [0, 1, part // 2 + 1, total_tokens // 2, total_tokens // 2]),
         varlen_cases[0],
     ]
@@ -395,7 +406,9 @@ def _run_npu_graph(
         do.copy_(shard_tensor(inputs['do'], rank, world_size, layout))
         do[:, :actual_part].copy_(shard_tensor(inputs['do'][:, :actual_tokens], rank, world_size, layout))
         cu = torch.tensor(sequence_offsets, dtype=torch.long, device=device)
-        empty_sequence = {'leading-empty-sequence': 'leading', 'split-empty-sequence': 'split'}.get(tag)
+        empty_sequence = {
+            'leading-empty-sequence': 'leading', 'internal-empty-sequence': 'internal', 'split-empty-sequence': 'split',
+        }.get(tag)
         refresh(build_cp_context(cu, group=group, layout=layout), empty_sequence)
 
         dist.barrier()
@@ -771,29 +784,34 @@ def test_chunk_kda_graph_cpu_snapshot(single_rank_group, monkeypatch, chunk_size
         pytest.param(torch.int32, 2, True, True, 32, id='int32-strided-v-first-saved-state'),
     ],
 )
-def test_chunk_kda_graph_metadata(single_rank_group, monkeypatch, cu_dtype, cu_stride, state_v_first, disable_recompute, chunk_size):
+@pytest.mark.parametrize('layout', ['contiguous', 'zigzag'])
+def test_chunk_kda_graph_metadata(
+    single_rank_group, monkeypatch, layout, cu_dtype, cu_stride, state_v_first, disable_recompute, chunk_size,
+):
     """Keep packed metadata private to each autograd invocation and captured graph."""
     metadata_module = import_module('fla.ops.cp.backends.triton_ascend.graph_metadata')
-    prepare = metadata_module.prepare_zigzag_graph_metadata
+    prepare = metadata_module.prepare_cp_graph_metadata
     created = []
 
-    def track(cu_seqlens):
-        metadata = prepare(cu_seqlens)
+    def track(cu_seqlens, layout):
+        metadata = prepare(cu_seqlens, layout=layout)
         tensors = (metadata[0], metadata[1], *metadata[2], *metadata[3])
         bases = {x.untyped_storage().data_ptr() for x in tensors}
         assert len(bases) == 1
         created.append(next(iter(bases)))
         return metadata
 
-    monkeypatch.setattr(metadata_module, 'prepare_zigzag_graph_metadata', track)
+    monkeypatch.setattr(metadata_module, 'prepare_cp_graph_metadata', track)
     cu = torch.tensor([0, 1, 64, 65, 128], device=device, dtype=cu_dtype)
-    context = build_cp_context(cu, group=dist.group.WORLD, layout='zigzag')
+    context = build_cp_context(cu, group=dist.group.WORLD, layout=layout)
     storage = torch.empty(context.cu_seqlens.numel() * cu_stride, device=device, dtype=cu_dtype)
     cu = storage[::cu_stride]
     cu.copy_(context.cu_seqlens)
     context.cu_seqlens = cu
-    context.pre_num_ranks_dev = torch.tensor(context.pre_num_ranks_by_part, device=device, dtype=torch.int32)
-    context.post_num_ranks_dev = torch.tensor(context.post_num_ranks_by_part, device=device, dtype=torch.int32)
+    pre = context.pre_num_ranks_by_part if layout == 'zigzag' else [context.pre_num_ranks]
+    post = context.post_num_ranks_by_part if layout == 'zigzag' else [context.post_num_ranks]
+    context.pre_num_ranks_dev = torch.tensor(pre, device=device, dtype=torch.int32)
+    context.post_num_ranks_dev = torch.tensor(post, device=device, dtype=torch.int32)
     options = dict(state_v_first=state_v_first, disable_recompute=disable_recompute, chunk_size=chunk_size)
 
     def inputs(seed):
@@ -811,7 +829,7 @@ def test_chunk_kda_graph_metadata(single_rank_group, monkeypatch, cu_dtype, cu_s
     def check(leaves, output, sequence_offsets=None):
         reference_leaves = [x.detach().clone().requires_grad_() for x in leaves]
         boundaries = cu.clone() if sequence_offsets is None else torch.tensor(sequence_offsets, device=device)
-        reference_context = build_cp_context(boundaries, group=dist.group.WORLD, layout='zigzag')
+        reference_context = build_cp_context(boundaries, group=dist.group.WORLD, layout=layout)
         reference, _ = chunk_kda(*reference_leaves, cp_context=reference_context, **options)
         reference.sum().backward()
         for name, got, want in zip(('o', 'dq', 'dk', 'dv', 'dg', 'db'),
@@ -826,7 +844,7 @@ def test_chunk_kda_graph_metadata(single_rank_group, monkeypatch, cu_dtype, cu_s
     second_output.sum().backward()
     first_output.sum().backward()
     assert len(created) == 2
-    assert not hasattr(context, '_zigzag_graph_metadata')
+    assert not hasattr(context, '_cp_graph_metadata')
     check(first, first_output)
     check(second, second_output)
     del first_output, second_output
@@ -855,7 +873,7 @@ def test_chunk_kda_graph_metadata(single_rank_group, monkeypatch, cu_dtype, cu_s
     assert graph_buffers[0] != graph_buffers[1]
     before_replay = len(created)
     replay_cases = [(offsets, offsets) for offsets in ([0, 32, 64, 128, 128], [0, 64, 65, 128, 128], [0, 1, 64, 65, 128])]
-    replay_cases += [(offsets, [0, 128]) for offsets in (
+    replay_cases += [(offsets, [0, 128] if layout == 'zigzag' else [0, 64, 128]) for offsets in (
         [0, 64, 128, 128, 128], [0, 0, 64, 128, 128], [0, 64, 64, 128, 128],
         [0, 0, 64, 64, 128], [0, 64, 128, 128, 128],
     )]
@@ -864,14 +882,12 @@ def test_chunk_kda_graph_metadata(single_rank_group, monkeypatch, cu_dtype, cu_s
         reference_context = build_cp_context(
             cu_seqlens=torch.tensor(sequence_offsets, device=device),
             group=dist.group.WORLD,
-            layout='zigzag',
+            layout=layout,
         )
-        context.pre_num_ranks_dev.copy_(
-            torch.tensor(reference_context.pre_num_ranks_by_part, device=device, dtype=torch.int32),
-        )
-        context.post_num_ranks_dev.copy_(
-            torch.tensor(reference_context.post_num_ranks_by_part, device=device, dtype=torch.int32),
-        )
+        pre = reference_context.pre_num_ranks_by_part if layout == 'zigzag' else [reference_context.pre_num_ranks]
+        post = reference_context.post_num_ranks_by_part if layout == 'zigzag' else [reference_context.post_num_ranks]
+        context.pre_num_ranks_dev.copy_(torch.tensor(pre, device=device, dtype=torch.int32))
+        context.post_num_ranks_dev.copy_(torch.tensor(post, device=device, dtype=torch.int32))
         for index in (1, 0):
             leaves = live_inputs[index]
             for x in leaves:
@@ -881,4 +897,4 @@ def test_chunk_kda_graph_metadata(single_rank_group, monkeypatch, cu_dtype, cu_s
             torch.npu.synchronize()
             check(leaves, output, sequence_offsets)
         assert len(created) == before_replay
-        assert not hasattr(context, '_zigzag_graph_metadata')
+        assert not hasattr(context, '_cp_graph_metadata')

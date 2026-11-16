@@ -86,11 +86,11 @@ class ChunkKDAFunction(torch.autograd.Function):
                     cu_seqlens_cpu=cu_seqlens_cpu,
                 )
 
-        if use_graph and IS_NPU and cp_context is not None and cp_context.layout == 'zigzag':
-            from fla.ops.cp.backends.triton_ascend.graph_metadata import prepare_zigzag_graph_metadata
+        if use_graph and cp_context is not None:
+            from fla.ops.cp.chunk_delta_h import _graph_metadata
             # each autograd invocation owns its metadata; replay refreshes it before the corresponding backward.
             cp_context = copy(cp_context)
-            cp_context._zigzag_graph_metadata = prepare_zigzag_graph_metadata(cu_seqlens)
+            cp_context._cp_graph_metadata = _graph_metadata(cu_seqlens, layout=cp_context.layout)
 
         g_input = g
 

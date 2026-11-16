@@ -985,23 +985,23 @@ def chunk_gated_delta_rule_fwd_h_pre_process_npu(
     cu_last = cu_seqlens[-2:]
     if use_graph:
         assert context.pre_num_ranks_dev is not None, "use_graph with CP requires context.pre_num_ranks_dev"
-        # last non-empty sequence window, on-device; zero-length tail padding would
-        # otherwise make cu_seqlens[-2:] point at a padding sequence
-        i_last = (cu_seqlens[1:] > cu_seqlens[:-1]).sum() - 1
-        cu_last = cu_seqlens.index_select(0, torch.stack((i_last, i_last + 1)))
+        from fla.ops.cp.chunk_delta_h import _graph_metadata
+        first, _, _, last_windows = _graph_metadata(cu_seqlens, context)
+        cu_last = last_windows[0]
     # graph mode always launches: a last rank's hm is never read, but the all-gather
     # needs every rank, and host-side flags are frozen at capture
     if use_graph or not context.is_last_rank:
         launch_fwd(hm, cu_last)
     ag_hm, _ = all_gather_into_tensor(hm, group=context.group)
-    # a zero num_ranks merge just re-stores the zeros initial_state[0] already holds
+    # a zero num_ranks merge just re-stores the zeros initial_state already holds
     if use_graph or not context.is_first_rank:
         merge_fwd(
-            initial_state[0],
+            initial_state if use_graph else initial_state[0],
             ag_hm,
             context.pre_num_ranks_dev if use_graph else context.pre_num_ranks,
             rank,
             use_graph,
+            h_seq_idx=first if use_graph else None,
         )
     return initial_state
 
@@ -1143,10 +1143,16 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process_npu(
     else:
         dht = q.new_zeros(N, HV, K, V, dtype=torch.float32)
 
+    cu_first = cu_seqlens[:2]
+    if use_graph:
+        assert context.post_num_ranks_dev is not None, "use_graph with CP requires context.post_num_ranks_dev"
+        from fla.ops.cp.chunk_delta_h import _graph_metadata
+        _, last, first_windows, _ = _graph_metadata(cu_seqlens, context)
+        cu_first = first_windows[0]
     # graph mode always launches: a first rank's dhm is never read, but the all-gather
     # needs every rank, and host-side flags are frozen at capture
     if use_graph or not context.is_first_rank:
-        launch_bwd(dhm, cu_seqlens[:2])
+        launch_bwd(dhm, cu_first)
 
     ag_dhm, _ = all_gather_into_tensor(dhm, group=context.group)
 
@@ -1155,10 +1161,7 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process_npu(
         h_seq_idx = None
         h = dht[-1]
         if use_graph:
-            assert context.post_num_ranks_dev is not None, "use_graph with CP requires context.post_num_ranks_dev"
-            # merge target is the last non-empty sequence; zero-length tail padding
-            # would otherwise make dht[-1] a padding row
-            h_seq_idx = (cu_seqlens[1:] > cu_seqlens[:-1]).sum() - 1
+            h_seq_idx = last
             h = dht
         merge_bwd(
             h,

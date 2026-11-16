@@ -132,12 +132,15 @@ def test_zigzag_graph_requires_npu(operation, monkeypatch):
             chunk_delta_h.expand_h0(torch.empty(2, 1, 16, 16), context=cp_context, use_graph=True)
 
 
-@pytest.mark.parametrize(('layout', 'use_graph'), [('contiguous', False), ('contiguous', True), ('zigzag', False)])
-def test_state_compression_non_npu(layout, use_graph, monkeypatch):
+@pytest.mark.parametrize(
+    ('layout', 'use_graph', 'offsets', 'indices'),
+    [('contiguous', False, [0, 1, 2, 3, 4], [0]), ('contiguous', True, [0, 1, 2, 3, 4], [0]),
+     ('zigzag', False, [0, 1, 2, 3, 4], [0, 2]), ('contiguous', True, [0, 0, 2, 2, 4], [1])],
+)
+def test_state_compression_non_npu(layout, use_graph, offsets, indices, monkeypatch):
     monkeypatch.setattr(chunk_delta_h, 'IS_NPU', False)
-    cp_context = SimpleNamespace(layout=layout, front_num_seqs=2, cu_seqlens=torch.tensor([0, 1, 2, 3, 4]))
+    cp_context = SimpleNamespace(layout=layout, front_num_seqs=2, cu_seqlens=torch.tensor(offsets))
     state = torch.arange(4).view(4, 1, 1, 1)
-    indices = [0] if layout == 'contiguous' else [0, 2]
     compressed = chunk_delta_h.compress_h0(state, context=cp_context, use_graph=use_graph)
     torch.testing.assert_close(compressed, state[indices])
     expanded = chunk_delta_h.expand_h0(compressed, context=cp_context, use_graph=use_graph)
@@ -146,7 +149,42 @@ def test_state_compression_non_npu(layout, use_graph, monkeypatch):
     torch.testing.assert_close(expanded, expected)
 
 
+@pytest.mark.parametrize('cu_dtype', [torch.int32, torch.int64])
+def test_contiguous_graph_boundaries_non_npu(cu_dtype, monkeypatch):
+    """Check shared-wrapper routing without requiring a CUDA communicator or kernels."""
+    monkeypatch.setattr(chunk_delta_h, 'IS_NPU', False)
+    monkeypatch.setattr(chunk_delta_h, '_check_cp_device', lambda device: None)
+    monkeypatch.setattr(chunk_delta_h.dist, 'get_rank', lambda group: 1)
+    monkeypatch.setattr(chunk_delta_h, 'all_gather_into_tensor', lambda x, group: (x, None))
+    calls = {}
+    monkeypatch.setattr(chunk_delta_h, 'chunk_cp_fwd_h', lambda **kwargs: calls.update(fwd=kwargs))
+    monkeypatch.setattr(chunk_delta_h, 'chunk_cp_bwd_dh', lambda **kwargs: calls.update(bwd=kwargs))
+    monkeypatch.setattr(chunk_delta_h, 'chunk_cp_merge', lambda **kwargs: calls.update(merge=kwargs))
+    storage = torch.tensor([0, -1, 0, -1, 2, -1, 2, -1, 4, -1, 4, -1], dtype=cu_dtype)
+    # leading, internal and trailing empty rows, plus a non-unit stride
+    cu = storage[::2]
+    cp_context = SimpleNamespace(
+        group=object(), layout='contiguous', cu_seqlens=cu,
+        pre_num_ranks_dev=torch.ones(1, dtype=torch.int32),
+        post_num_ranks_dev=torch.ones(1, dtype=torch.int32),
+    )
+    x = torch.empty(1, 4, 1, 16)
+    initial = inspect.unwrap(chunk_delta_h.chunk_gated_delta_rule_fwd_h_pre_process)(
+        k=x, w=x, u=x, cu_seqlens=cu, context=cp_context, use_graph=True,
+    )
+    torch.testing.assert_close(calls['fwd']['cu_seqlens'], torch.tensor([2, 4], dtype=cu_dtype))
+    torch.testing.assert_close(calls['merge']['h_seq_idx'], torch.tensor([1]))
+    assert calls['merge']['h'] is initial
+    final, _ = inspect.unwrap(chunk_delta_h.chunk_gated_delta_rule_bwd_dhu_pre_process)(
+        q=x, k=x, w=x, do=x, dv=x, cu_seqlens=cu, context=cp_context, use_graph=True,
+    )
+    torch.testing.assert_close(calls['bwd']['cu_seqlens'], torch.tensor([0, 2], dtype=cu_dtype))
+    torch.testing.assert_close(calls['merge']['h_seq_idx'], torch.tensor([3]))
+    assert calls['merge']['h'] is final
+
+
 @pytest.mark.skipif(not IS_NPU, reason='requires Ascend graph metadata kernels')
+@pytest.mark.parametrize('layout', ['contiguous', 'zigzag'])
 @pytest.mark.parametrize(
     ('cu_dtype', 'capacity', 'total', 'stride'),
     [
@@ -157,7 +195,7 @@ def test_state_compression_non_npu(layout, use_graph, monkeypatch):
         pytest.param(torch.int64, 32768, 128, 1, id='int64-large-capacity'),
     ],
 )
-def test_zigzag_graph_metadata(cu_dtype, capacity, total, stride):
+def test_cp_graph_metadata(layout, cu_dtype, capacity, total, stride):
     """Replay sequence boundary changes across reduction tiles and integer layouts."""
     storage = torch.empty((capacity + 1) * stride, device=device, dtype=cu_dtype)
     cu = storage[::stride]
@@ -170,13 +208,14 @@ def test_zigzag_graph_metadata(cu_dtype, capacity, total, stride):
 
     refresh([0, total // 2, total])
     for _ in range(3):
-        chunk_delta_h._zigzag_graph_metadata(cu)
+        chunk_delta_h._graph_metadata(cu, layout=layout)
     graph = torch.npu.NPUGraph()
     with torch.npu.graph(graph):
-        actual = chunk_delta_h._zigzag_graph_metadata(cu)
+        actual = chunk_delta_h._graph_metadata(cu, layout=layout)
     tensors = (actual[0], actual[1], *actual[2], *actual[3])
     assert len({x.untyped_storage().data_ptr() for x in tensors}) == 1
-    assert actual[2][0].data_ptr() - actual[0].data_ptr() == 4 * 8
+    num_parts = 2 if layout == 'zigzag' else 1
+    assert actual[2][0].data_ptr() - actual[0].data_ptr() == 2 * num_parts * 8
     pointers = tuple(x.data_ptr() for x in tensors)
     layouts = [[0, total // 2, total], [0, total // 4, total // 2]]
     if capacity >= 4:
@@ -195,7 +234,8 @@ def test_zigzag_graph_metadata(cu_dtype, capacity, total, stride):
         torch.npu.synchronize()
         boundaries = cpu.tolist()
         intervals = [(index, start) for index, (start, end) in enumerate(zip(boundaries, boundaries[1:])) if end > start]
-        parts = [[index for index, start in intervals if (start < boundaries[-1] // 2) == front] for front in (True, False)]
+        parts = ([[index for index, start in intervals if (start < boundaries[-1] // 2) == front]
+                  for front in (True, False)] if layout == 'zigzag' else [[index for index, _ in intervals]])
         first = torch.tensor([part[0] if part else 0 for part in parts])
         last = torch.tensor([part[-1] if part else -1 for part in parts])
         windows = tuple(cpu[index:index + 2] if 0 <= index < capacity else torch.zeros(2, dtype=cu_dtype)
