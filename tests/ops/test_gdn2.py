@@ -821,8 +821,13 @@ def test_fused_recurrent_npu_verifier(case, dtype, reason):
 
 
 @pytest.mark.skipif(not IS_NPU, reason='Ascend dispatch and launch splitting require NPU')
-@pytest.mark.parametrize(('varlen', 'aligned'), [(False, False), (True, False), (False, True)], ids=['dense', 'varlen', 'aligned'])
-def test_chunk_npu_launch_splits(varlen, aligned, monkeypatch):
+@pytest.mark.parametrize(
+    ('varlen', 'aligned', 'K'),
+    [(False, False, 48), (True, False, 48), (False, True, 64), (False, True, 128), (True, False, 128), (False, True, 256)],
+    ids=['dense', 'varlen', 'aligned', 'aligned-K128', 'varlen-K128', 'aligned-K256'],
+)
+@pytest.mark.parametrize('disable_recompute', [False, True], ids=['recompute', 'saved-forward'])
+def test_chunk_npu_launch_splits(varlen, aligned, K, disable_recompute, monkeypatch):
     """Split launches retain reference numerics and select each Ascend intra/WY stage."""
     monkeypatch.setattr(testing, 'FLA_CI_ENV', False)
     from fla.ops.gdn2.backends.triton_ascend import chunk_intra
@@ -831,9 +836,16 @@ def test_chunk_npu_launch_splits(varlen, aligned, monkeypatch):
 
     # exercise multiple launches and packed sequence boundaries with a small reference workload.
     monkeypatch.setattr(chunk_intra, 'LAUNCH_BLOCK_BUDGET', 4)
+    monkeypatch.setitem(globals(), 'chunk_gdn2', partial(chunk_gdn2, disable_recompute=disable_recompute))
     fwd = backends._function_registries[inspect.unwrap(chunk_gdn2_fwd_intra)]._backends['triton_ascend']
     bwd = backends._function_registries[inspect.unwrap(chunk_gdn2_bwd_wy_dqkg_fused)]._backends['triton_ascend']
     intra = backends._function_registries[inspect.unwrap(chunk_gdn2_bwd_intra)]._backends['triton_ascend']
+    wy = backends._function_registries[inspect.unwrap(recompute_w_u_fwd_gdn2)]._backends['triton_ascend']
+    wy_spy = Mock(wraps=wy.implementation)
+    monkeypatch.setattr(wy, 'implementation', wy_spy)
+    inter_kernel = chunk_intra.chunk_gdn2_fwd_kernel_inter_products_npu
+    inter_spy = Mock(wraps=inter_kernel.run)
+    monkeypatch.setattr(inter_kernel, 'run', inter_spy)
     fwd_spy = Mock(wraps=fwd.implementation)
     bwd_spy = Mock(wraps=bwd.implementation)
     intra_spy = Mock(wraps=intra.implementation)
@@ -847,19 +859,19 @@ def test_chunk_npu_launch_splits(varlen, aligned, monkeypatch):
         test_chunk_varlen(
             cu_seqlens=[0, 15, 100, 257],
             H=2,
-            K=48,
+            K=K,
             V=32,
             use_gate_in_kernel=False,
             dtype=torch.float16,
             state_v_first=False,
-            disable_recompute=False,
+            disable_recompute=disable_recompute,
         )
     else:
         test_chunk(
             B=2,
             T=256 if aligned else 257,
             H=2,
-            K=64 if aligned else 48,
+            K=K,
             V=32,
             scale=1.0,
             use_qk_l2norm_in_kernel=True,
@@ -871,6 +883,11 @@ def test_chunk_npu_launch_splits(varlen, aligned, monkeypatch):
     bwd_spy.assert_called_once()
     intra_spy.assert_called_once()
     assert kernel_spy.call_args.kwargs['IS_ALIGNED'] is aligned
+    assert [call.kwargs['q'] is None for call in wy_spy.call_args_list] == (
+        [False] if disable_recompute else [True, False]
+    )
+    assert inter_spy.call_count > 0
+    assert {call.kwargs['BK'] for call in inter_spy.call_args_list} == {K if aligned and K >= 128 else 64}
 
 
 @pytest.mark.skipif(not IS_NPU, reason='Ascend intra backward routing')
@@ -932,6 +949,61 @@ def test_chunk_bwd_intra_npu_verifier(K, dtype, chunk_size, on_npu, ub_kib, expe
     if expected:
         inspect.signature(chunk_gdn2_bwd_intra_npu).bind(**kwargs)
         assert _get_bwd_bk(K) == (16 if ub_kib == 96 else 32)
+
+
+@pytest.mark.parametrize(
+    ('case', 'reason'),
+    [
+        ('q_shape', 'matching rank-4'),
+        ('score_shape', 'shaped [B, T, H, 64]'),
+        ('mixed_device', 'same NPU device'),
+        ('packed_batch', 'batch size 1'),
+        ('sequence_rank', 'rank-1 cu_seqlens'),
+        ('index_shape', 'shaped [NT, 2]'),
+        ('index_dtype', 'int32 or int64'),
+    ],
+)
+def test_chunk_bwd_intra_npu_verifier_metadata(case, reason):
+    """Reject malformed leaf metadata before the NPU launch."""
+    from fla.ops.gdn2.backends.triton_ascend.chunk_intra import chunk_gdn2_bwd_intra_verifier
+
+    npu = SimpleNamespace(type='npu', index=0)
+    batch = 2 if case == 'packed_batch' else 1
+    shapes = dict.fromkeys(('q', 'k', 'g', 'b', 'dq', 'dk', 'db', 'dg'), (batch, 65, 2, 32))
+    shapes.update(dAqk=(batch, 65, 2, 64), dAkk=(batch, 65, 2, 64))
+    inputs = {
+        name: SimpleNamespace(shape=shape, ndim=4, dtype=torch.float32, device=npu) for name, shape in shapes.items()
+    }
+    inputs['cu_seqlens'] = SimpleNamespace(shape=(3,), ndim=1, dtype=torch.int64, device=npu)
+    inputs['chunk_indices'] = SimpleNamespace(shape=(4, 2), ndim=2, dtype=torch.int64, device=npu)
+    if case == 'q_shape':
+        inputs['q'].shape = (batch, 65, 2, 31)
+    elif case == 'score_shape':
+        inputs['dAkk'].shape = (batch, 65, 2, 63)
+    elif case == 'mixed_device':
+        inputs['dq'].device = SimpleNamespace(type='npu', index=1)
+    elif case == 'sequence_rank':
+        inputs['cu_seqlens'].ndim = 2
+    elif case == 'index_shape':
+        inputs['chunk_indices'].shape = (4, 3)
+    elif case == 'index_dtype':
+        inputs['chunk_indices'].dtype = torch.float32
+    accepted, actual_reason = chunk_gdn2_bwd_intra_verifier(**inputs)
+    assert not accepted
+    assert reason in actual_reason
+
+
+@pytest.mark.parametrize(
+    ('ub_kib', 'K', 'expected'),
+    [(64, 256, 64), (96, 128, 128), (192, 32, 32), (192, 48, 64), (192, 128, 128), (192, 256, 256)],
+)
+def test_chunk_fwd_inter_npu_tile(ub_kib, K, expected, monkeypatch):
+    """Channel tiles respect both the device budget and the supported K range."""
+    from fla.ops.gdn2.backends.triton_ascend.chunk_intra import get_inter_bk
+    from fla.utils import ascend_ub_manager
+
+    monkeypatch.setattr(ascend_ub_manager, '_ub_manager', ascend_ub_manager.UBManager(ub_kib * 1024 * 8))
+    assert get_inter_bk(K) == expected
 
 
 @pytest.mark.skipif(not (IS_NVIDIA or IS_AMD or IS_NPU), reason="CUDA/ROCm or Ascend NPU required")
@@ -1471,6 +1543,8 @@ def test_chunk_npu_compile_options():
     [
         pytest.param(48, torch.float16, True, id='varlen-K48-fp16'),
         pytest.param(256, torch.bfloat16, False, id='dense-K256-bf16'),
+        pytest.param(32, torch.float32, False, id='dense-K32-fp32'),
+        pytest.param(256, torch.bfloat16, True, id='varlen-K256-bf16'),
     ],
 )
 def test_chunk_fwd_intra_grouped_npu(K, dtype, varlen, monkeypatch):

@@ -38,10 +38,10 @@ MAX_FWD_INTRA_BK = 256
 SUB_CHUNK_SIZE = 16
 _BC = SUB_CHUNK_SIZE
 TOKEN_GROUP_SIZE = 8
-INTER_MEM_MULT = 18.0
+INTER_MEM_MULT = 8.0
 SAFETY_MARGIN = 0.80
 FALLBACK_BK = 16
-MAX_INTER_BK = 64
+MAX_INTER_BK = 256
 LAUNCH_BLOCK_BUDGET = 4096
 INTER_COMPILE_KWARGS = ascend_compile_kwargs(blacklist_auto_blockify=True)
 
@@ -739,6 +739,8 @@ def chunk_gdn2_fwd_intra_npu(
         ),
     )
     inter_bk = _get_inter_bk(K)
+    if is_varlen or T % BT or K % inter_bk:
+        inter_bk = min(inter_bk, 64)
     mask_inter = need_dma_mask(T, BC, K, inter_bk, K, inter_bk, is_varlen, cu_seqlens)
     product_kwargs = dict(
         q=q_intra if use_head_major_intra else q,
