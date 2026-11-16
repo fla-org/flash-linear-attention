@@ -27,6 +27,9 @@ from fla.utils import assert_close, device, device_torch_lib
 def test_grouplinear(shape, out_features, groups, bias, strided, dtype):
     torch.manual_seed(42)
     test_device = device if device_torch_lib.is_available() else 'cpu'
+    # aclnnAddmm on Ascend accepts FP32, FP16, and BF16 matrix inputs.
+    if test_device == 'npu' and dtype == torch.float64:
+        test_device = 'cpu'
     layer = GroupLinear(in_features=shape[-1], out_features=out_features, groups=groups, bias=bias)
     layer = layer.to(device=test_device, dtype=dtype)
     if strided:

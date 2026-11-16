@@ -171,8 +171,10 @@ def _forward_chunk_summary_npu(
         k_val = tl.load(k_ptr, mask=mask_T[:, None] * mask_D[None, :], other=0.0).to(tl.float32)
 
         k_sq = k_val * k_val
-        U = beta_val[:, None] * k_sq
-        a_val = tl.sum(decays[:, None] * U, 0)
+        weights = beta_val * decays
+        weights_tile = tl.broadcast_to(weights[:, None], (CHUNK_LEN, 16))
+        a_acc = tl.dot(tl.trans(k_sq), weights_tile, allow_tf32=False)
+        a_val = tl.sum(a_acc, axis=1) * (1.0 / 16.0)
 
         a_ptr = a + b * a_stride_b + h * a_stride_h + chunk_id * a_stride_c + D_range * a_stride_d
         tl.store(a_ptr, a_val, mask=mask_D)
@@ -320,6 +322,9 @@ def _atk_fwd_stages_npu(
     B, T, H, D = k.shape
     CHUNK_LEN = _NPU_CHUNK_LEN
     BK = D if os.environ.get('ATK_NO_KTILE') else 32
+    # Output has no CHUNK_LEN x BK history buffer, so it can use a wider tile.
+    BK_out = D if os.environ.get('ATK_NO_KTILE') else min(256, triton.next_power_of_2(D))
+    summary_bk = max(16, min(256, triton.next_power_of_2(D)))
     is_varlen = cu_seqlens is not None
 
     if is_varlen:
@@ -364,7 +369,7 @@ def _atk_fwd_stages_npu(
         log_g.stride(0), log_g.stride(1), log_g.stride(2),
         a.stride(0), a.stride(1), a.stride(2), a.stride(3),
         sa.stride(0), sa.stride(1), sa.stride(2),
-        BK,
+        summary_bk,
     )
     out_args = (
         k, beta, log_g, ac, initial_A_state, k_precond,
@@ -376,7 +381,7 @@ def _atk_fwd_stages_npu(
         log_g.stride(0), log_g.stride(1), log_g.stride(2),
         ac.stride(0), ac.stride(1), ac.stride(2), ac.stride(3),
         k_precond.stride(0), k_precond.stride(1), k_precond.stride(2), k_precond.stride(3),
-        BK,
+        BK_out,
     )
 
     if is_varlen:
