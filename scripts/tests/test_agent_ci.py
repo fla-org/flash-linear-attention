@@ -54,6 +54,17 @@ class AgentCITest(unittest.TestCase):
         with self.assertRaises(agent_ci.AgentCIError):
             agent_ci.validate_targets(self.catalog, "ops", "tests/ops/missing.py", self.repo)
 
+    def test_accepts_suite_root_directory(self):
+        utils_catalog = {
+            "suites": {
+                "utils": {"root": "tests/utils", "platforms": ["ascend-a5"], "dispatch": ["on"]},
+            },
+        }
+        (self.repo / "tests/utils").mkdir(parents=True, exist_ok=True)
+        (self.repo / "tests/utils/test_ok.py").write_text("")
+        targets = agent_ci.validate_targets(utils_catalog, "utils", "tests/utils", self.repo)
+        self.assertEqual(targets, ["tests/utils"])
+
     def test_both_dispatch_modes(self):
         self.assertEqual(agent_ci.validate_dispatch(self.catalog, "ops", "both"), ["off", "on"])
 
@@ -73,10 +84,10 @@ class AgentCITest(unittest.TestCase):
         with self.assertRaises(agent_ci.AgentCIError):
             agent_ci.validate_platform(self.catalog, "ops", "amd-mi300")
 
-    def test_repository_catalog_limits_ascend_a5_to_op_utils(self):
+    def test_repository_catalog_limits_ascend_a5_to_utils(self):
         catalog = agent_ci.load_catalog(Path(__file__).parents[2] / ".github/agent-tests/catalog.json")
-        agent_ci.validate_platform(catalog, "op-utils", "ascend-a5")
-        for suite in ("ops", "modules", "scripts", "top-level", "utils", "benchmarks", "cp", "layers", "models"):
+        agent_ci.validate_platform(catalog, "utils", "ascend-a5")
+        for suite in ("ops", "modules", "scripts", "top-level", "op-utils", "benchmarks", "cp", "layers", "models"):
             with self.assertRaises(agent_ci.AgentCIError):
                 agent_ci.validate_platform(catalog, suite, "ascend-a5")
 

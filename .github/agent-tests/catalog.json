@@ -82,8 +82,7 @@
       "root": "tests/ops/utils",
       "platforms": [
         "h100",
-        "ascend-a2",
-        "ascend-a5"
+        "ascend-a2"
       ],
       "dispatch": [
         "off",
@@ -95,7 +94,8 @@
       "root": "tests/utils",
       "platforms": [
         "h100",
-        "ascend-a2"
+        "ascend-a2",
+        "ascend-a5"
       ],
       "dispatch": [
         "off",

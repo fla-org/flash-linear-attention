@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       agent_mode:
-        description: Run the reusable agent-selected A5 workflow instead of tests/ops/utils
+        description: Run the reusable agent-selected A5 workflow instead of tests/utils
         required: false
         type: boolean
         default: false
@@ -26,17 +26,11 @@ on:
       suite:
         required: false
         type: string
-        default: op-utils
+        default: utils
       targets:
         required: false
         type: string
-        default: >-
-          tests/ops/utils/test_csr.py
-          tests/ops/utils/test_cumsum.py
-          tests/ops/utils/test_index.py
-          tests/ops/utils/test_pack.py
-          tests/ops/utils/test_pooling.py
-          tests/ops/utils/test_rounding.py
+        default: tests/utils
       dispatch:
         required: false
         type: string
@@ -68,7 +62,7 @@ jobs:
             const files = await github.paginate(github.rest.pulls.listFiles, {
               owner, repo, pull_number: pr.number, per_page: 100,
             });
-            // Pytest currently runs tests/ops/utils. This detector still matches
+            // Pytest currently runs tests/utils. This detector still matches
             // the wider NPU file set used by A2, so later suite growth can reuse it.
             //   pyproject.toml    - pins the [npu] extra (torch_npu / triton-ascend)
             //   fla/backends.py   - shared dispatch machinery
@@ -192,7 +186,7 @@ jobs:
           assert IS_NPU, "Expected NPU backend (IS_NPU=True)"
           PY
 
-      - name: Run ops/utils tests
+      - name: Run utils tests
         id: pytest
         if: github.event_name != 'schedule' || steps.triton-cache.outputs.cache-hit != 'true'
         shell: bash
@@ -200,9 +194,9 @@ jobs:
           FLA_NPU_XDIST: "1"
         run: |
           source /usr/local/Ascend/ascend-toolkit/set_env.sh
-          # Scope is ops/utils until the remaining A5 suites have been verified.
+          # Scope is tests/utils until the remaining A5 suites have been verified.
           pytest -s -v --exitfirst -n 8 --dist load \
-            tests/ops/utils
+            tests/utils
 
       - name: Save A5 pytest Triton-Ascend kernel cache
         if: |

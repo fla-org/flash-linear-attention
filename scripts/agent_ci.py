@@ -56,14 +56,18 @@ def validate_targets(catalog: dict, suite_name: str, raw_targets: str, repo: Pat
     for target in targets:
         file_part = target.split("::", 1)[0]
         path = PurePosixPath(file_part)
-        if path.is_absolute() or ".." in path.parts or path.suffix != ".py":
+        if path.is_absolute() or ".." in path.parts:
             raise AgentCIError(f"Invalid test target: {target}")
-        if not file_part.startswith(f"{root}/"):
+        if file_part != root and not file_part.startswith(f"{root}/"):
             raise AgentCIError(f"Test target is outside {root}: {target}")
         if suite.get("top_level_only") and len(path.parts) != 2:
             raise AgentCIError(f"Test target is not a top-level test: {target}")
-        if not (repo / file_part).is_file():
-            raise AgentCIError(f"Test target does not exist: {target}")
+        repo_path = repo / file_part
+        if path.suffix == ".py":
+            if not repo_path.is_file():
+                raise AgentCIError(f"Test target does not exist: {target}")
+        elif not repo_path.is_dir():
+            raise AgentCIError(f"Invalid test target: {target}")
         if target.startswith("-"):
             raise AgentCIError(f"Pytest options are not test targets: {target}")
     return targets
