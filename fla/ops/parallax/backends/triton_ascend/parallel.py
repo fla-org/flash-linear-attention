@@ -7,7 +7,7 @@
 
 """Triton-Ascend kernels and launch wrappers for Parallax training.
 
-Two Ascend adaptations over the mainline kernels, kept in backend-owned
+Ascend adaptations over the mainline kernels, kept in backend-owned
 copies (the mainline stays platform-neutral):
 
 - UB budget: at ``D > 128`` (``BK >= 256``) the mainline ``BT = 64`` tiles
@@ -20,6 +20,16 @@ copies (the mainline stays platform-neutral):
   Ascend launch limits, so the kernels take ``NT_OFFSET``/``BH_OFFSET``
   (zero on the host's first chunk) and launch through
   ``launch_grid_chunked``.
+- Two-pass forward (non-SWA): the online-softmax running-max recurrence
+  serializes the accumulation loop and dominates the forward wall time, so
+  the forward is split into a max kernel (row max over the causal-safe
+  region, storing ``m``) and an accumulation kernel that accumulates against
+  the fixed ``m`` with no recurrence, merging the border blocks online.
+- Head-major per-token tensors: ``d1``/``bart``/``m``/``delta_t``/``delta_b``
+  are stored as ``(B, HQ, T)`` instead of ``(B, T, HQ)`` so each head's
+  ``(BT,)`` tile is one contiguous access in the backward kernels; the
+  contiguous addressing is also what lets the standalone accumulation kernel
+  fit UB at ``BK = 128``.
 """
 
 from __future__ import annotations
@@ -94,12 +104,17 @@ def parallel_parallax_fwd_kernel_npu(
     i_b, i_hq = i_bh // HQ, i_bh % HQ
     i_h = i_hq // G
 
+    # Head-major (B, HQ, T) per-token tensors; T_STOR is the packed storage
+    # length before the varlen overwrite.
+    T_STOR = T
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
+        tok_base = i_hq * T_STOR + bos
     else:
         bos = (i_b * T).to(tl.int64)
+        tok_base = (i_b * HQ + i_hq) * T_STOR
     RCP_LN2: tl.constexpr = 1.4426950216
 
     row_offset = i_t * BT
@@ -130,9 +145,9 @@ def parallel_parallax_fwd_kernel_npu(
     p_r = r + (bos * HQ + i_hq) * K + row_indices[:, None] * (HQ * K) + o_k[None, :]
     p_o = o + (bos * HQ + i_hq) * K + row_indices[:, None] * (HQ * K) + o_k[None, :]
     p_barv = barv + (bos * HQ + i_hq) * K + row_indices[:, None] * (HQ * K) + o_k[None, :]
-    p_d1 = d1 + bos * HQ + i_hq + row_indices[:, None] * HQ
-    p_bart = bart + bos * HQ + i_hq + row_indices[:, None] * HQ
-    p_m = m + bos * HQ + i_hq + row_indices[:, None] * HQ
+    p_d1 = d1 + tok_base + row_indices[:, None]
+    p_bart = bart + tok_base + row_indices[:, None]
+    p_m = m + tok_base + row_indices[:, None]
 
     b_q = tl.load(p_q, mask=m_qk, other=0.0)
     b_r = tl.load(p_r, mask=m_qk, other=0.0)
@@ -248,6 +263,276 @@ def parallel_parallax_fwd_kernel_npu(
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.jit(do_not_specialize=['T', 'NT_OFFSET', 'BH_OFFSET'])
+def parallel_parallax_fwd_max_kernel_npu(
+    q,
+    k,
+    m,
+    scale,
+    cu_seqlens,
+    chunk_indices,
+    T,
+    NT_OFFSET,
+    BH_OFFSET,
+    HQ: tl.constexpr,
+    H: tl.constexpr,
+    G: tl.constexpr,
+    K: tl.constexpr,
+    BK: tl.constexpr,
+    WINDOW_SIZE_LEFT: tl.constexpr,
+    BT: tl.constexpr,
+    BS: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+):
+    # Two-pass forward, max pass: row max over the causal-safe region.
+    # Border blocks are merged online by the accumulation kernel, which
+    # stores the final global max.
+    i_t = (tl.program_id(0) + NT_OFFSET).to(tl.int64)
+    i_bh = (tl.program_id(1) + BH_OFFSET).to(tl.int64)
+    i_b, i_hq = i_bh // HQ, i_bh % HQ
+    i_h = i_hq // G
+
+    T_STOR = T
+    if IS_VARLEN:
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = eos - bos
+        tok_base = i_hq * T_STOR + bos
+    else:
+        bos = (i_b * T).to(tl.int64)
+        tok_base = (i_b * HQ + i_hq) * T_STOR
+    RCP_LN2: tl.constexpr = 1.4426950216
+
+    row_offset = i_t * BT
+    row_indices = row_offset + tl.arange(0, BT)
+    row_mask = row_indices[:, None] < T
+    NUM_SAFE_BLOCKS = tl.minimum(row_offset, T) // BS
+
+    if WINDOW_SIZE_LEFT >= 0:
+        leftmost_valid = tl.maximum(0, row_offset - WINDOW_SIZE_LEFT + 1)
+        FIRST_COL_BLOCK = leftmost_valid // BS
+        safe_left_valid = tl.maximum(0, row_offset + BT - WINDOW_SIZE_LEFT)
+        SAFE_LEFT_START = (safe_left_valid + BS - 1) // BS
+    else:
+        FIRST_COL_BLOCK = 0
+        SAFE_LEFT_START = 0
+    SAFE_MIDDLE_START = tl.maximum(FIRST_COL_BLOCK, SAFE_LEFT_START)
+
+    o_k = tl.arange(0, BK)
+    m_k = o_k < K
+    p_q = q + (bos * HQ + i_hq) * K + row_indices[:, None] * (HQ * K) + o_k[None, :]
+    p_m = m + tok_base + row_indices[:, None]
+
+    b_q = tl.load(p_q, mask=row_mask & m_k[None, :], other=0.0)
+    m_acc = tl.zeros((BT, 1), dtype=tl.float32) - float("inf")
+    scale_log2 = scale * RCP_LN2
+
+    # The window bound applies per row; the causal bound is implicit in
+    # the block range.
+    for pb in range(SAFE_MIDDLE_START, NUM_SAFE_BLOCKS):
+        o_p = pb.to(tl.int64) * BS + tl.arange(0, BS)
+        m_pk = (o_p[:, None] < T) & m_k[None, :]
+        p_k = k + (bos * H + i_h) * K + o_p[:, None] * (H * K) + o_k[None, :]
+        b_k = tl.load(p_k, mask=m_pk, other=0.0)
+        qk = tl.dot(b_q, tl.trans(b_k), out_dtype=tl.float32) * scale_log2
+        pm = o_p[None, :] < row_offset
+        if WINDOW_SIZE_LEFT >= 0:
+            pm = pm & (o_p[None, :] >= row_indices[:, None] - WINDOW_SIZE_LEFT + 1)
+        qk = tl.where(pm, qk, -float("inf"))
+        m_acc = tl.maximum(m_acc, tl.max(qk, axis=1, keep_dims=True))
+
+    tl.store(p_m, m_acc, mask=row_mask)
+
+
+@triton.heuristics({
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
+})
+@triton.jit(do_not_specialize=['T', 'NT_OFFSET', 'BH_OFFSET'])
+def parallel_parallax_fwd_accum_kernel_npu(
+    q,
+    r,
+    k,
+    v,
+    o,
+    barv,
+    d1,
+    bart,
+    m,
+    scale,
+    cu_seqlens,
+    chunk_indices,
+    T,
+    NT_OFFSET,
+    BH_OFFSET,
+    HQ: tl.constexpr,
+    H: tl.constexpr,
+    G: tl.constexpr,
+    K: tl.constexpr,
+    BK: tl.constexpr,
+    WINDOW_SIZE_LEFT: tl.constexpr,
+    BT: tl.constexpr,
+    BS: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+):
+    # Two-pass forward, accumulation pass: accumulates the safe region
+    # against the fixed stored max; border blocks merge online and the final
+    # global max is written back to m.
+    i_t = (tl.program_id(0) + NT_OFFSET).to(tl.int64)
+    i_bh = (tl.program_id(1) + BH_OFFSET).to(tl.int64)
+    i_b, i_hq = i_bh // HQ, i_bh % HQ
+    i_h = i_hq // G
+
+    T_STOR = T
+    if IS_VARLEN:
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = eos - bos
+        tok_base = i_hq * T_STOR + bos
+    else:
+        bos = (i_b * T).to(tl.int64)
+        tok_base = (i_b * HQ + i_hq) * T_STOR
+    RCP_LN2: tl.constexpr = 1.4426950216
+
+    row_offset = i_t * BT
+    row_indices = row_offset + tl.arange(0, BT)
+    row_mask = row_indices[:, None] < T
+    NUM_TOTAL_BLOCKS = tl.cdiv(tl.minimum(T, row_offset + BT), BS)
+    NUM_SAFE_BLOCKS = tl.minimum(row_offset, T) // BS
+
+    # SWA col-block boundaries. WINDOW_SIZE_LEFT < 0 disables SWA.
+    if WINDOW_SIZE_LEFT >= 0:
+        leftmost_valid = tl.maximum(0, row_offset - WINDOW_SIZE_LEFT + 1)
+        FIRST_COL_BLOCK = leftmost_valid // BS
+        # The safe region is accumulated unmasked, so it must clear the window's
+        # left edge for the tile's LAST row (row_offset + BT - 1), not its first.
+        safe_left_valid = tl.maximum(0, row_offset + BT - WINDOW_SIZE_LEFT)
+        SAFE_LEFT_START = (safe_left_valid + BS - 1) // BS
+    else:
+        FIRST_COL_BLOCK = 0
+        SAFE_LEFT_START = 0
+    LEFT_BORDER_END = tl.minimum(SAFE_LEFT_START, NUM_SAFE_BLOCKS)
+    SAFE_MIDDLE_START = tl.maximum(FIRST_COL_BLOCK, SAFE_LEFT_START)
+    RIGHT_BORDER_START = tl.maximum(FIRST_COL_BLOCK, NUM_SAFE_BLOCKS)
+
+    o_k = tl.arange(0, BK)
+    m_k = o_k < K
+    m_qk = row_mask & m_k[None, :]
+    p_q = q + (bos * HQ + i_hq) * K + row_indices[:, None] * (HQ * K) + o_k[None, :]
+    p_r = r + (bos * HQ + i_hq) * K + row_indices[:, None] * (HQ * K) + o_k[None, :]
+    p_o = o + (bos * HQ + i_hq) * K + row_indices[:, None] * (HQ * K) + o_k[None, :]
+    p_barv = barv + (bos * HQ + i_hq) * K + row_indices[:, None] * (HQ * K) + o_k[None, :]
+    p_d1 = d1 + tok_base + row_indices[:, None]
+    p_bart = bart + tok_base + row_indices[:, None]
+    p_m = m + tok_base + row_indices[:, None]
+
+    b_q = tl.load(p_q, mask=m_qk, other=0.0)
+    b_r = tl.load(p_r, mask=m_qk, other=0.0)
+    m_acc = tl.load(p_m, mask=row_mask, other=0.0)
+    safe_m_p1 = tl.where(m_acc == -float("inf"), 0.0, m_acc)
+    d1_acc = tl.zeros((BT, 1), dtype=tl.float32)
+    d2_acc = tl.zeros((BT, 1), dtype=tl.float32)
+    barv_acc = tl.zeros((BT, BK), dtype=tl.float32)
+    Rv_acc = tl.zeros((BT, BK), dtype=tl.float32)
+    scale_log2 = scale * RCP_LN2
+
+    for _safe in range(SAFE_MIDDLE_START, NUM_SAFE_BLOCKS):
+        o_kv = _safe.to(tl.int64) * BS + tl.arange(0, BS)
+        m_kv = (o_kv[:, None] < T) & m_k[None, :]
+        p_k = k + (bos * H + i_h) * K + o_kv[:, None] * (H * K) + o_k[None, :]
+        p_v = v + (bos * H + i_h) * K + o_kv[:, None] * (H * K) + o_k[None, :]
+        b_k = tl.load(p_k, mask=m_kv, other=0.0)
+        b_v = tl.load(p_v, mask=m_kv, other=0.0)
+        qk = tl.dot(b_q, tl.trans(b_k), out_dtype=tl.float32) * scale_log2
+        w = exp2(qk - safe_m_p1)
+        rk = tl.dot(b_r, tl.trans(b_k), out_dtype=tl.float32)
+        wr = w * rk
+        d1_acc = d1_acc + tl.sum(w, axis=1, keep_dims=True)
+        d2_acc = d2_acc + tl.sum(wr, axis=1, keep_dims=True)
+        barv_acc = tl.dot(w.to(b_v.dtype), b_v, out_dtype=tl.float32, acc=barv_acc)
+        Rv_acc = tl.dot(wr.to(b_v.dtype), b_v, out_dtype=tl.float32, acc=Rv_acc)
+
+    # Phase 0: left-border blocks (SWA only); the online rescale absorbs
+    # border maxima beyond the loaded m.
+    for col_block_id in range(FIRST_COL_BLOCK, LEFT_BORDER_END):
+        col_indices = col_block_id.to(tl.int64) * BS + tl.arange(0, BS)
+        m_kv = (col_indices[:, None] < T) & m_k[None, :]
+        p_k = k + (bos * H + i_h) * K + col_indices[:, None] * (H * K) + o_k[None, :]
+        p_v = v + (bos * H + i_h) * K + col_indices[:, None] * (H * K) + o_k[None, :]
+        b_k = tl.load(p_k, mask=m_kv, other=0.0)
+        b_v = tl.load(p_v, mask=m_kv, other=0.0)
+        mask = (
+            (col_indices[None, :] >= row_indices[:, None] - WINDOW_SIZE_LEFT + 1)
+            & row_mask
+            & (col_indices[None, :] < T)
+        )
+        qk = tl.dot(b_q, tl.trans(b_k), out_dtype=tl.float32) * scale_log2
+        qk = tl.where(mask, qk, -float("inf"))
+        m_new = tl.maximum(m_acc, tl.max(qk, axis=1, keep_dims=True))
+        safe_m = tl.where(m_new == -float("inf"), 0.0, m_new)
+        alpha = exp2(m_acc - safe_m)
+        w = exp2(qk - safe_m)
+        rk = tl.dot(b_r, tl.trans(b_k), out_dtype=tl.float32)
+        wr = w * rk
+        d1_acc = alpha * d1_acc + tl.sum(w, axis=1, keep_dims=True)
+        d2_acc = alpha * d2_acc + tl.sum(wr, axis=1, keep_dims=True)
+        barv_acc = alpha * barv_acc
+        Rv_acc = alpha * Rv_acc
+        barv_acc = tl.dot(w.to(b_v.dtype), b_v, out_dtype=tl.float32, acc=barv_acc)
+        Rv_acc = tl.dot(wr.to(b_v.dtype), b_v, out_dtype=tl.float32, acc=Rv_acc)
+        m_acc = m_new
+
+    # Phase B: right-border blocks (causal + boundary + window mask).
+    for col_block_id in range(RIGHT_BORDER_START, NUM_TOTAL_BLOCKS):
+        col_indices = col_block_id.to(tl.int64) * BS + tl.arange(0, BS)
+        m_kv = (col_indices[:, None] < T) & m_k[None, :]
+        p_k = k + (bos * H + i_h) * K + col_indices[:, None] * (H * K) + o_k[None, :]
+        p_v = v + (bos * H + i_h) * K + col_indices[:, None] * (H * K) + o_k[None, :]
+        b_k = tl.load(p_k, mask=m_kv, other=0.0)
+        b_v = tl.load(p_v, mask=m_kv, other=0.0)
+        if WINDOW_SIZE_LEFT >= 0:
+            mask = (
+                (row_indices[:, None] >= col_indices[None, :])
+                & (col_indices[None, :] >= row_indices[:, None] - WINDOW_SIZE_LEFT + 1)
+                & row_mask
+                & (col_indices[None, :] < T)
+            )
+        else:
+            mask = (
+                (row_indices[:, None] >= col_indices[None, :])
+                & row_mask
+                & (col_indices[None, :] < T)
+            )
+        qk = tl.dot(b_q, tl.trans(b_k), out_dtype=tl.float32) * scale_log2
+        qk = tl.where(mask, qk, -float("inf"))
+        m_new = tl.maximum(m_acc, tl.max(qk, axis=1, keep_dims=True))
+        safe_m = tl.where(m_new == -float("inf"), 0.0, m_new)
+        alpha = exp2(m_acc - safe_m)
+        w = exp2(qk - safe_m)
+        rk = tl.dot(b_r, tl.trans(b_k), out_dtype=tl.float32)
+        wr = w * rk
+        d1_acc = alpha * d1_acc + tl.sum(w, axis=1, keep_dims=True)
+        d2_acc = alpha * d2_acc + tl.sum(wr, axis=1, keep_dims=True)
+        barv_acc = alpha * barv_acc
+        Rv_acc = alpha * Rv_acc
+        barv_acc = tl.dot(w.to(b_v.dtype), b_v, out_dtype=tl.float32, acc=barv_acc)
+        Rv_acc = tl.dot(wr.to(b_v.dtype), b_v, out_dtype=tl.float32, acc=Rv_acc)
+        m_acc = m_new
+
+    inv_d1 = tl.where(row_mask, 1.0 / d1_acc, 0.0)
+    b_barv = barv_acc * inv_d1
+    b_bart = d2_acc * inv_d1
+    b_o = b_barv + b_bart * b_barv - Rv_acc * inv_d1
+
+    tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=m_qk)
+    tl.store(p_barv, b_barv.to(p_barv.dtype.element_ty), mask=m_qk)
+    tl.store(p_d1, d1_acc, mask=row_mask)
+    tl.store(p_bart, b_bart, mask=row_mask)
+    tl.store(p_m, m_acc, mask=row_mask)
+
+
+@triton.heuristics({
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
+})
+@triton.jit(do_not_specialize=['T', 'NT_OFFSET', 'BH_OFFSET'])
 def parallel_parallax_bwd_kernel_preprocess_npu(
     grad_o,
     o,
@@ -269,12 +554,15 @@ def parallel_parallax_bwd_kernel_preprocess_npu(
     i_bh = (tl.program_id(1) + BH_OFFSET).to(tl.int64)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
 
+    T_STOR = T
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
+        tok_base = i_hq * T_STOR + bos
     else:
         bos = (i_b * T).to(tl.int64)
+        tok_base = (i_b * HQ + i_hq) * T_STOR
 
     row_offset = i_t * BT
     o_t = row_offset + tl.arange(0, BT)
@@ -284,8 +572,8 @@ def parallel_parallax_bwd_kernel_preprocess_npu(
     p_grad_o = grad_o + (bos * HQ + i_hq) * K + o_t[:, None] * (HQ * K) + o_k[None, :]
     p_o = o + (bos * HQ + i_hq) * K + o_t[:, None] * (HQ * K) + o_k[None, :]
     p_barv = barv + (bos * HQ + i_hq) * K + o_t[:, None] * (HQ * K) + o_k[None, :]
-    p_t = delta_t + bos * HQ + i_hq + o_t[:, None] * HQ
-    p_b = delta_b + bos * HQ + i_hq + o_t[:, None] * HQ
+    p_t = delta_t + tok_base + o_t[:, None]
+    p_b = delta_b + tok_base + o_t[:, None]
 
     b_grad_o = tl.load(p_grad_o, mask=m_tk, other=0.0).to(tl.float32)
     b_o = tl.load(p_o, mask=m_tk, other=0.0).to(tl.float32)
@@ -336,12 +624,15 @@ def parallel_parallax_bwd_kernel_dqr_npu(
     i_b, i_hq = i_bh // HQ, i_bh % HQ
     i_h = i_hq // G
 
+    T_STOR = T
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
+        tok_base = i_hq * T_STOR + bos
     else:
         bos = (i_b * T).to(tl.int64)
+        tok_base = (i_b * HQ + i_hq) * T_STOR
     RCP_LN2: tl.constexpr = 1.4426950216
 
     row_offset = i_t * BT
@@ -353,8 +644,8 @@ def parallel_parallax_bwd_kernel_dqr_npu(
     if WINDOW_SIZE_LEFT >= 0:
         leftmost_valid = tl.maximum(0, row_offset - WINDOW_SIZE_LEFT + 1)
         FIRST_COL_BLOCK = leftmost_valid // BS
-        # Phase A is unmasked, so the safe zone must clear the window's left edge for
-        # the tile's LAST row (row_offset + BT - 1), not its first.
+        # The safe region is accumulated unmasked, so it must clear the window's
+        # left edge for the tile's LAST row (row_offset + BT - 1), not its first.
         safe_left_valid = tl.maximum(0, row_offset + BT - WINDOW_SIZE_LEFT)
         SAFE_LEFT_START = (safe_left_valid + BS - 1) // BS
     else:
@@ -369,11 +660,11 @@ def parallel_parallax_bwd_kernel_dqr_npu(
     m_qk = row_mask & m_k[None, :]
     p_q = q + (bos * HQ + i_hq) * K + row_indices[:, None] * (HQ * K) + o_k[None, :]
     p_r = r + (bos * HQ + i_hq) * K + row_indices[:, None] * (HQ * K) + o_k[None, :]
-    p_d1 = d1 + bos * HQ + i_hq + row_indices[:, None] * HQ
-    p_bart = bart + bos * HQ + i_hq + row_indices[:, None] * HQ
-    p_m = m + bos * HQ + i_hq + row_indices[:, None] * HQ
-    p_t = delta_t + bos * HQ + i_hq + row_indices[:, None] * HQ
-    p_b = delta_b + bos * HQ + i_hq + row_indices[:, None] * HQ
+    p_d1 = d1 + tok_base + row_indices[:, None]
+    p_bart = bart + tok_base + row_indices[:, None]
+    p_m = m + tok_base + row_indices[:, None]
+    p_t = delta_t + tok_base + row_indices[:, None]
+    p_b = delta_b + tok_base + row_indices[:, None]
     p_grad_o = grad_o + (bos * HQ + i_hq) * K + row_indices[:, None] * (HQ * K) + o_k[None, :]
     p_grad_q = grad_q + (bos * HQ + i_hq) * K + row_indices[:, None] * (HQ * K) + o_k[None, :]
     p_grad_r = grad_r + (bos * HQ + i_hq) * K + row_indices[:, None] * (HQ * K) + o_k[None, :]
@@ -516,12 +807,15 @@ def parallel_parallax_bwd_kernel_dkv_npu(
     i_b, i_hq = i_bh // HQ, i_bh % HQ
     i_h = i_hq // G
 
+    T_STOR = T
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
+        tok_base = i_hq * T_STOR + bos
     else:
         bos = (i_b * T).to(tl.int64)
+        tok_base = (i_b * HQ + i_hq) * T_STOR
     RCP_LN2: tl.constexpr = 1.4426950216
 
     col_offset = i_t * BS
@@ -565,11 +859,11 @@ def parallel_parallax_bwd_kernel_dkv_npu(
         m_qk = row_mask & m_k[None, :]
         p_q = q + (bos * HQ + i_hq) * K + row_indices[:, None] * (HQ * K) + o_k[None, :]
         p_r = r + (bos * HQ + i_hq) * K + row_indices[:, None] * (HQ * K) + o_k[None, :]
-        p_d1 = d1 + bos * HQ + i_hq + row_indices[:, None] * HQ
-        p_bart = bart + bos * HQ + i_hq + row_indices[:, None] * HQ
-        p_m = m + bos * HQ + i_hq + row_indices[:, None] * HQ
-        p_t = delta_t + bos * HQ + i_hq + row_indices[:, None] * HQ
-        p_b = delta_b + bos * HQ + i_hq + row_indices[:, None] * HQ
+        p_d1 = d1 + tok_base + row_indices[:, None]
+        p_bart = bart + tok_base + row_indices[:, None]
+        p_m = m + tok_base + row_indices[:, None]
+        p_t = delta_t + tok_base + row_indices[:, None]
+        p_b = delta_b + tok_base + row_indices[:, None]
         p_grad_o = grad_o + (bos * HQ + i_hq) * K + row_indices[:, None] * (HQ * K) + o_k[None, :]
         b_q = tl.load(p_q, mask=m_qk, other=0.0)
         b_r = tl.load(p_r, mask=m_qk, other=0.0)
@@ -618,11 +912,11 @@ def parallel_parallax_bwd_kernel_dkv_npu(
         m_qk = row_mask & m_k[None, :]
         p_q = q + (bos * HQ + i_hq) * K + row_indices[:, None] * (HQ * K) + o_k[None, :]
         p_r = r + (bos * HQ + i_hq) * K + row_indices[:, None] * (HQ * K) + o_k[None, :]
-        p_d1 = d1 + bos * HQ + i_hq + row_indices[:, None] * HQ
-        p_bart = bart + bos * HQ + i_hq + row_indices[:, None] * HQ
-        p_m = m + bos * HQ + i_hq + row_indices[:, None] * HQ
-        p_t = delta_t + bos * HQ + i_hq + row_indices[:, None] * HQ
-        p_b = delta_b + bos * HQ + i_hq + row_indices[:, None] * HQ
+        p_d1 = d1 + tok_base + row_indices[:, None]
+        p_bart = bart + tok_base + row_indices[:, None]
+        p_m = m + tok_base + row_indices[:, None]
+        p_t = delta_t + tok_base + row_indices[:, None]
+        p_b = delta_b + tok_base + row_indices[:, None]
         p_grad_o = grad_o + (bos * HQ + i_hq) * K + row_indices[:, None] * (HQ * K) + o_k[None, :]
         b_q = tl.load(p_q, mask=m_qk, other=0.0)
         b_r = tl.load(p_r, mask=m_qk, other=0.0)
@@ -657,11 +951,11 @@ def parallel_parallax_bwd_kernel_dkv_npu(
         m_qk = row_mask & m_k[None, :]
         p_q = q + (bos * HQ + i_hq) * K + row_indices[:, None] * (HQ * K) + o_k[None, :]
         p_r = r + (bos * HQ + i_hq) * K + row_indices[:, None] * (HQ * K) + o_k[None, :]
-        p_d1 = d1 + bos * HQ + i_hq + row_indices[:, None] * HQ
-        p_bart = bart + bos * HQ + i_hq + row_indices[:, None] * HQ
-        p_m = m + bos * HQ + i_hq + row_indices[:, None] * HQ
-        p_t = delta_t + bos * HQ + i_hq + row_indices[:, None] * HQ
-        p_b = delta_b + bos * HQ + i_hq + row_indices[:, None] * HQ
+        p_d1 = d1 + tok_base + row_indices[:, None]
+        p_bart = bart + tok_base + row_indices[:, None]
+        p_m = m + tok_base + row_indices[:, None]
+        p_t = delta_t + tok_base + row_indices[:, None]
+        p_b = delta_b + tok_base + row_indices[:, None]
         p_grad_o = grad_o + (bos * HQ + i_hq) * K + row_indices[:, None] * (HQ * K) + o_k[None, :]
         b_q = tl.load(p_q, mask=m_qk, other=0.0)
         b_r = tl.load(p_r, mask=m_qk, other=0.0)
@@ -707,22 +1001,56 @@ def parallel_parallax_fwd_npu(
     chunk_indices: torch.LongTensor | None = None,
     window_size_left: int = -1,
 ):
-    # Mirror of the mainline forward orchestration; the BT comes from the
-    # UB budget and the launches are chunked to the Ascend grid limits.
+    # Mirror of the mainline orchestration with the UB-budgeted BT and
+    # chunked launches; the non-SWA forward runs the max kernel first, then
+    # the accumulation kernel.
     B, T, HQ, K = q.shape
     H = k.shape[2]
     G = HQ // H
     BK = triton.next_power_of_2(K)
     BT = _train_bt(BK)
+    # The standalone accumulation kernel cannot reuse the max pass's buffer
+    # slots, so BK=128 needs the column block halved (BS is loop-local; the
+    # row grid is unchanged).
+    accum_bs = BT if BK <= 64 or BK >= 256 else max(BT // 2, 16)
     o = torch.empty_like(q)
     barv = torch.empty_like(q)
-    d1 = torch.empty((B, T, HQ), device=q.device, dtype=torch.float32)
-    bart = torch.empty((B, T, HQ), device=q.device, dtype=torch.float32)
-    m = torch.empty((B, T, HQ), device=q.device, dtype=torch.float32)
+    # Internal-only; head-major layout, see module docstring.
+    d1 = torch.empty((B, HQ, T), device=q.device, dtype=torch.float32)
+    bart = torch.empty((B, HQ, T), device=q.device, dtype=torch.float32)
+    m = torch.empty((B, HQ, T), device=q.device, dtype=torch.float32)
 
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
+    if window_size_left >= 0:
+        launch_grid_chunked(
+            parallel_parallax_fwd_kernel_npu,
+            grid=(NT, B * HQ),
+            offset_keys=('NT_OFFSET', 'BH_OFFSET'),
+            kernel_kwargs=dict(
+                q=q, r=r, k=k, v=v, o=o, barv=barv, d1=d1, bart=bart, m=m,
+                scale=scale, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices, T=T,
+                NT_OFFSET=0, BH_OFFSET=0,
+                HQ=HQ, H=H, G=G, K=K, BK=BK,
+                WINDOW_SIZE_LEFT=window_size_left, BT=BT, BS=BT,
+            ),
+            compile_kwargs=ascend_compile_kwargs(),
+        )
+        return o, barv, d1, bart, m
     launch_grid_chunked(
-        parallel_parallax_fwd_kernel_npu,
+        parallel_parallax_fwd_max_kernel_npu,
+        grid=(NT, B * HQ),
+        offset_keys=('NT_OFFSET', 'BH_OFFSET'),
+        kernel_kwargs=dict(
+            q=q, k=k, m=m,
+            scale=scale, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices, T=T,
+            NT_OFFSET=0, BH_OFFSET=0,
+            HQ=HQ, H=H, G=G, K=K, BK=BK,
+            WINDOW_SIZE_LEFT=window_size_left, BT=BT, BS=BT,
+        ),
+        compile_kwargs=ascend_compile_kwargs(blacklist_auto_blockify=True),
+    )
+    launch_grid_chunked(
+        parallel_parallax_fwd_accum_kernel_npu,
         grid=(NT, B * HQ),
         offset_keys=('NT_OFFSET', 'BH_OFFSET'),
         kernel_kwargs=dict(
@@ -730,7 +1058,7 @@ def parallel_parallax_fwd_npu(
             scale=scale, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices, T=T,
             NT_OFFSET=0, BH_OFFSET=0,
             HQ=HQ, H=H, G=G, K=K, BK=BK,
-            WINDOW_SIZE_LEFT=window_size_left, BT=BT, BS=BT,
+            WINDOW_SIZE_LEFT=window_size_left, BT=BT, BS=accum_bs,
         ),
         compile_kwargs=ascend_compile_kwargs(),
     )
@@ -765,8 +1093,8 @@ def parallel_parallax_bwd_npu(
     # dK/dV are written per q-head, then folded back to the kv-head axis.
     grad_k_buf = torch.empty((B, T, HQ, K), device=q.device, dtype=q.dtype)
     grad_v_buf = torch.empty((B, T, HQ, K), device=q.device, dtype=q.dtype)
-    delta_t = torch.empty((B, T, HQ), device=q.device, dtype=torch.float32)
-    delta_b = torch.empty((B, T, HQ), device=q.device, dtype=torch.float32)
+    delta_t = torch.empty((B, HQ, T), device=q.device, dtype=torch.float32)
+    delta_b = torch.empty((B, HQ, T), device=q.device, dtype=torch.float32)
 
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     grid = (NT, B * HQ)
