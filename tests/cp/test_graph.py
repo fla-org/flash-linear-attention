@@ -750,3 +750,107 @@ def test_chunk_kda_graph_cpu_snapshot(single_rank_group, monkeypatch, chunk_size
             assert_close(f'cpu_snapshot::{offsets}::{name}', r.float(), g.float(), ratio=2e-3)
         assert context.cu_seqlens_cpu is cpu_snapshot
         torch.testing.assert_close(cpu_snapshot, original_snapshot, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not IS_NPU, reason='requires Ascend NPU graphs')
+@pytest.mark.parametrize(
+    ('cu_dtype', 'cu_stride', 'state_v_first', 'disable_recompute'),
+    [
+        pytest.param(torch.int64, 1, False, False, id='int64-k-first-recompute'),
+        pytest.param(torch.int32, 2, True, True, id='int32-strided-v-first-saved-state'),
+    ],
+)
+def test_chunk_kda_graph_metadata(single_rank_group, monkeypatch, cu_dtype, cu_stride, state_v_first, disable_recompute):
+    """Keep packed metadata private to each autograd invocation and captured graph."""
+    metadata_module = import_module('fla.ops.cp.backends.triton_ascend.graph_metadata')
+    prepare = metadata_module.prepare_zigzag_graph_metadata
+    created = []
+
+    def track(cu_seqlens):
+        metadata = prepare(cu_seqlens)
+        tensors = (metadata[0], metadata[1], *metadata[2], *metadata[3])
+        bases = {x.untyped_storage().data_ptr() for x in tensors}
+        assert len(bases) == 1
+        created.append(next(iter(bases)))
+        return metadata
+
+    monkeypatch.setattr(metadata_module, 'prepare_zigzag_graph_metadata', track)
+    cu = torch.tensor([0, 1, 64, 65, 128], device=device, dtype=cu_dtype)
+    context = build_cp_context(cu, group=dist.group.WORLD, layout='zigzag')
+    storage = torch.empty(context.cu_seqlens.numel() * cu_stride, device=device, dtype=cu_dtype)
+    cu = storage[::cu_stride]
+    cu.copy_(context.cu_seqlens)
+    context.cu_seqlens = cu
+    context.pre_num_ranks_dev = torch.tensor(context.pre_num_ranks_by_part, device=device, dtype=torch.int32)
+    context.post_num_ranks_dev = torch.tensor(context.post_num_ranks_by_part, device=device, dtype=torch.int32)
+    options = dict(state_v_first=state_v_first, disable_recompute=disable_recompute)
+
+    def inputs(seed):
+        torch.manual_seed(seed)
+        q = torch.randn(1, 128, 1, 64, device=device, dtype=torch.float16)
+        k = F.normalize(torch.randn_like(q).float(), dim=-1).to(q.dtype)
+        return [x.requires_grad_() for x in (
+            q, k, torch.randn_like(q), torch.full_like(q, -0.01, dtype=torch.float32),
+            torch.full((1, 128, 1), 0.5, device=device, dtype=q.dtype),
+        )]
+
+    def forward(*leaves):
+        return chunk_kda(*leaves, cp_context=context, use_graph=True, max_num_seqs=len(cu) - 1, **options)[0]
+
+    def check(leaves, output):
+        reference_leaves = [x.detach().clone().requires_grad_() for x in leaves]
+        reference_context = build_cp_context(cu.clone(), group=dist.group.WORLD, layout='zigzag')
+        reference, _ = chunk_kda(*reference_leaves, cp_context=reference_context, **options)
+        reference.sum().backward()
+        for name, got, want in zip(('o', 'dq', 'dk', 'dv', 'dg', 'db'),
+                                   [output] + [x.grad for x in leaves],
+                                   [reference] + [x.grad for x in reference_leaves]):
+            assert torch.isfinite(got).all(), name
+            assert_close('metadata::' + name, want.float(), got.float(), ratio=2e-3)
+
+    first, second = inputs(1), inputs(2)
+    first_output, second_output = forward(*first), forward(*second)
+    assert len(created) == 2 and created[0] != created[1]
+    second_output.sum().backward()
+    first_output.sum().backward()
+    assert len(created) == 2
+    assert not hasattr(context, '_zigzag_graph_metadata')
+    check(first, first_output)
+    check(second, second_output)
+    del first_output, second_output
+
+    callables, live_inputs, graph_buffers = [], [], []
+    for seed in (3, 4):
+        capture = inputs(seed)
+        stream = torch.npu.Stream()
+        stream.wait_stream(torch.npu.current_stream())
+        with torch.npu.stream(stream):
+            for _ in range(3):
+                for x in capture:
+                    x.grad = None
+                forward(*capture).sum().backward()
+        torch.npu.current_stream().wait_stream(stream)
+        torch.npu.synchronize()
+        for x in capture:
+            x.grad = None
+        before = len(created)
+        callables.append(torch.npu.make_graphed_callables(
+            forward, tuple(capture), num_warmup_iters=0, allow_unused_input=True,
+        ))
+        assert len(created) == before + 1
+        graph_buffers.append(created[-1])
+        live_inputs.append([x.detach().clone().requires_grad_() for x in capture])
+    assert graph_buffers[0] != graph_buffers[1]
+    before_replay = len(created)
+    for offsets in ([0, 32, 64, 128, 128], [0, 64, 65, 128, 128], [0, 1, 64, 65, 128]):
+        cu.copy_(torch.tensor(offsets, device=device, dtype=cu_dtype))
+        for index in (1, 0):
+            leaves = live_inputs[index]
+            for x in leaves:
+                x.grad = None
+            output = callables[index](*leaves)
+            output.sum().backward()
+            torch.npu.synchronize()
+            check(leaves, output)
+        assert len(created) == before_replay
+        assert not hasattr(context, '_zigzag_graph_metadata')

@@ -24,15 +24,18 @@ if TYPE_CHECKING:
     from fla.ops.cp.context import FLACPContext
 
 
-def _zigzag_graph_seq_indices(cu_seqlens: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+def _zigzag_graph_metadata(cu_seqlens: torch.Tensor, context: FLACPContext | None = None):
     if not IS_NPU:
         raise NotImplementedError('zigzag CP graph replay is currently supported only on Ascend NPU.')
-    # each part has equal token length; the split is also a local sequence boundary.
-    front_num_seqs = (cu_seqlens[:-1] < cu_seqlens[-1] // 2).sum()
-    num_seqs = (cu_seqlens[1:] > cu_seqlens[:-1]).sum()
-    first = torch.stack((torch.zeros_like(front_num_seqs), front_num_seqs))
-    last = torch.stack((front_num_seqs - 1, num_seqs - 1))
-    return first, last
+    metadata = getattr(context, '_zigzag_graph_metadata', None)
+    if metadata is not None:
+        return metadata
+    from fla.ops.cp.backends.triton_ascend.graph_metadata import prepare_zigzag_graph_metadata
+    return prepare_zigzag_graph_metadata(cu_seqlens)
+
+
+def _zigzag_graph_seq_indices(cu_seqlens: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    return _zigzag_graph_metadata(cu_seqlens)[:2]
 
 
 @dispatch('cp')
@@ -66,8 +69,7 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
     if context.layout == 'zigzag':
         if use_graph:
             assert context.pre_num_ranks_dev is not None, "use_graph with CP requires context.pre_num_ranks_dev"
-            first, last = _zigzag_graph_seq_indices(cu_seqlens)
-            cu_parts = tuple(cu_seqlens.index_select(0, torch.stack((index, index + 1))) for index in last.unbind())
+            first, last, _, cu_parts = _zigzag_graph_metadata(cu_seqlens, context)
         else:
             cu_parts = (cu_seqlens[context.front_num_seqs - 1: context.front_num_seqs + 1], cu_seqlens[-2:])
         front_num_seqs = context.front_num_seqs
@@ -189,8 +191,7 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
     if context.layout == 'zigzag':
         if use_graph:
             assert context.post_num_ranks_dev is not None, "use_graph with CP requires context.post_num_ranks_dev"
-            first, last = _zigzag_graph_seq_indices(cu_seqlens)
-            cu_parts = tuple(cu_seqlens.index_select(0, torch.stack((index, index + 1))) for index in first.unbind())
+            first, last, cu_parts, _ = _zigzag_graph_metadata(cu_seqlens, context)
         else:
             cu_parts = (cu_seqlens[:2], cu_seqlens[context.front_num_seqs: context.front_num_seqs + 2])
         front_num_seqs = context.front_num_seqs
@@ -293,7 +294,7 @@ def compress_h0(h0: torch.Tensor | None, context: FLACPContext, use_graph: bool 
         return h0
     if context.layout == 'zigzag':
         if use_graph:
-            first, _ = _zigzag_graph_seq_indices(context.cu_seqlens)
+            first, _, _, _ = _zigzag_graph_metadata(context.cu_seqlens, context)
             return h0.index_select(0, first)
         if len(context.cu_seqlens) == 3:
             # both parts can carry a cross-rank state
@@ -313,7 +314,7 @@ def expand_h0(h0: torch.Tensor | None, context: FLACPContext, use_graph: bool = 
             return h0
         expanded = h0.new_zeros(B, *h0.shape[1:])
         if use_graph:
-            first, _ = _zigzag_graph_seq_indices(context.cu_seqlens)
+            first, _, _, _ = _zigzag_graph_metadata(context.cu_seqlens, context)
             return expanded.index_copy_(0, first, h0)
         expanded[[0, context.front_num_seqs]] = h0
         return expanded

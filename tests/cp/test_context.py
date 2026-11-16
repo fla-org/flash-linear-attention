@@ -13,6 +13,7 @@ import torch
 
 from fla.ops.cp import chunk_delta_h, context
 from fla.ops.cp.context import build_cp_context, get_cp_cu_seqlens
+from fla.utils import IS_NPU, device
 
 
 @pytest.mark.parametrize(
@@ -143,3 +144,56 @@ def test_state_compression_non_npu(layout, use_graph, monkeypatch):
     expected = torch.zeros_like(state)
     expected[indices] = state[indices]
     torch.testing.assert_close(expanded, expected)
+
+
+@pytest.mark.skipif(not IS_NPU, reason='requires Ascend graph metadata kernels')
+@pytest.mark.parametrize(
+    ('cu_dtype', 'capacity', 'total', 'stride'),
+    [
+        pytest.param(torch.int32, 2, 128, 1, id='int32-two-sequences'),
+        pytest.param(torch.int64, 8, 128, 1, id='int64-tail-capacity'),
+        pytest.param(torch.int64, 1024, 1 << 34, 1, id='int64-reduction-tile-large-offsets'),
+        pytest.param(torch.int32, 1025, 128, 2, id='int32-strided-two-tiles'),
+        pytest.param(torch.int64, 32768, 128, 1, id='int64-large-capacity'),
+    ],
+)
+def test_zigzag_graph_metadata(cu_dtype, capacity, total, stride):
+    """Replay sequence boundary changes across reduction tiles and integer layouts."""
+    storage = torch.empty((capacity + 1) * stride, device=device, dtype=cu_dtype)
+    cu = storage[::stride]
+
+    def refresh(offsets):
+        cpu = torch.full((capacity + 1,), offsets[-1], dtype=cu_dtype)
+        cpu[:len(offsets)] = torch.tensor(offsets, dtype=cu_dtype)
+        cu.copy_(cpu)
+        return cpu
+
+    refresh([0, total // 2, total])
+    for _ in range(3):
+        chunk_delta_h._zigzag_graph_metadata(cu)
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        actual = chunk_delta_h._zigzag_graph_metadata(cu)
+    tensors = (actual[0], actual[1], *actual[2], *actual[3])
+    assert len({x.untyped_storage().data_ptr() for x in tensors}) == 1
+    assert actual[2][0].data_ptr() - actual[0].data_ptr() == 4 * 8
+    pointers = tuple(x.data_ptr() for x in tensors)
+    layouts = [[0, total // 2, total], [0, total // 4, total // 2]]
+    if capacity >= 4:
+        layouts += [[0, 1, total // 2, total // 2 + 1, total], [0, total // 4, total // 2, total]]
+    if capacity >= 1023:
+        active = capacity - capacity % 2
+        layouts.append(list(range(active + 1)))
+    for offsets in layouts + [[0], layouts[0]]:
+        cpu = refresh(offsets)
+        graph.replay()
+        torch.npu.synchronize()
+        front = int((cpu[:-1] < cpu[-1] // 2).sum())
+        count = int((cpu[1:] > cpu[:-1]).sum())
+        first, last = torch.tensor([0, front]), torch.tensor([front - 1, count - 1])
+        windows = tuple(cpu[index:index + 2] if 0 <= index < capacity else torch.zeros(2, dtype=cu_dtype)
+                        for index in (*first, *last))
+        expected = (first, last, *windows)
+        for got, want in zip(tensors, expected):
+            torch.testing.assert_close(got.cpu(), want, rtol=0, atol=0)
+        assert tuple(x.data_ptr() for x in tensors) == pointers

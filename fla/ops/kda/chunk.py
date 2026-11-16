@@ -8,6 +8,7 @@
 # related files are modified and supported by the Moonshot AI Team
 
 import warnings
+from copy import copy
 
 import torch
 
@@ -84,6 +85,12 @@ class ChunkKDAFunction(torch.autograd.Function):
                     chunk_size=chunk_size,
                     cu_seqlens_cpu=cu_seqlens_cpu,
                 )
+
+        if use_graph and IS_NPU and cp_context is not None and cp_context.layout == 'zigzag':
+            from fla.ops.cp.backends.triton_ascend.graph_metadata import prepare_zigzag_graph_metadata
+            # each autograd invocation owns its metadata; replay refreshes it before the corresponding backward.
+            cp_context = copy(cp_context)
+            cp_context._zigzag_graph_metadata = prepare_zigzag_graph_metadata(cu_seqlens)
 
         g_input = g
 
