@@ -22,6 +22,7 @@ from fla.ops.triadic_kda.chunk_fwd import (
     state_dot,
 )
 from fla.ops.utils import chunk_local_cumsum, prepare_chunk_offsets
+from fla.ops.utils.op import unflatten_program_id
 
 
 @triton.jit
@@ -207,7 +208,8 @@ def chunk_triadic_kda_bwd_kernel_inter(
     BV: tl.constexpr,
     VARLEN: tl.constexpr,
 ):
-    ik, c, bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    ik, c = unflatten_program_id(tl.cdiv(K, BK))
+    bh = tl.program_id(1).to(tl.int64)
     start, end, gc = chunk_position(c, bh // H, T, cu, indices, BT, VARLEN)
     h = bh % H
 
@@ -706,7 +708,7 @@ def chunk_triadic_kda_bwd(v, beta, q, k, q2, k2, gk, g2, Ai, Aqk, states, u, Lk,
 
     inter_k = [torch.empty_like(k, dtype=torch.float32) for _ in range(4)]
     inter_e = [k.new_empty(nk, B, T, H, E, dtype=torch.float32) for _ in range(4)]
-    chunk_triadic_kda_bwd_kernel_inter[(nk, nc, B * H)](
+    chunk_triadic_kda_bwd_kernel_inter[(nk * nc, B * H)](
         q=q,
         k=k,
         q2=q2,

@@ -6,6 +6,7 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 from itertools import accumulate
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -13,7 +14,9 @@ import torch.nn.functional as F
 
 from fla.ops.kda.naive import naive_recurrent_kda
 from fla.ops.triadic_gdn import naive_recurrent_triadic_gdn
-from fla.ops.triadic_kda import chunk_triadic_kda, naive_chunk_triadic_kda, naive_recurrent_triadic_kda
+from fla.ops.triadic_kda import chunk_bwd, chunk_triadic_kda, naive_chunk_triadic_kda, naive_recurrent_triadic_kda
+from fla.ops.triadic_kda.chunk_fwd import CHUNK_SIZE
+from fla.ops.utils import prepare_chunk_indices
 from fla.utils import assert_close, device_name
 
 # some PyTorch ops used by the FP64 references are unsupported on Ascend.
@@ -562,3 +565,57 @@ def test_chunk_validation():
         q2b, k2b, vb, k2_2b, q2_2b, gk2b, g2_2b, beta2b = _make_inputs(2, 16, 2, 32, 32, 4, 0.2, torch.bfloat16)
         cu = torch.tensor([0, 16, 32], dtype=torch.int32, device=device_name)
         chunk_triadic_kda(q2b, k2b, vb, k2_2b, q2_2b, gk2b, g2_2b, beta2b, cu_seqlens=cu)
+
+
+@pytest.mark.parametrize('varlen', [False, True], ids=['dense', 'varlen'])
+@pytest.mark.parametrize('nc', [65_535, 65_536])
+def test_chunk_bwd_inter_launch_grid(nc: int, varlen: bool, monkeypatch):
+    if varlen:
+        # each 65-token sequence contributes two chunks; an odd tail contributes one.
+        lengths = [CHUNK_SIZE + 1] * (nc // 2) + [1] * (nc % 2)
+        cu = torch.tensor(list(accumulate(lengths, initial=0)), dtype=torch.int32, device='cpu')
+        indices = prepare_chunk_indices(cu, CHUNK_SIZE)
+        B, T = 1, sum(lengths)
+    else:
+        cu = indices = None
+        B, T = 2, (nc - 1) * CHUNK_SIZE + 1
+    H, K, V, E = 1 if varlen else 2, 80, 32, 4
+
+    # capture the real host launch without allocating large tensors or requiring an accelerator.
+    inter_kernel = MagicMock()
+    monkeypatch.setattr(chunk_bwd, 'chunk_triadic_kda_bwd_kernel_inter', inter_kernel)
+    for stage in ('h', 'matrices', 'scores_e', 'scores_k'):
+        monkeypatch.setattr(chunk_bwd, f'chunk_triadic_kda_bwd_kernel_{stage}', MagicMock())
+    monkeypatch.setattr(chunk_bwd, 'chunk_local_cumsum', lambda x, **kwargs: x)
+
+    q = torch.empty(B, T, H, K, device='meta')
+    k2 = torch.empty(B, T, H, E, device='meta')
+    v = torch.empty(B, T, H, V, device='meta')
+    beta = torch.empty(B, T, H, device='meta')
+    matrix = torch.empty(B, T, H, CHUNK_SIZE, device='meta')
+    states = torch.empty(B * nc, H, E, K, V, device='meta')
+    chunk_bwd.chunk_triadic_kda_bwd(
+        v=v,
+        beta=beta,
+        q=q,
+        k=q,
+        q2=k2,
+        k2=k2,
+        gk=q,
+        g2=k2,
+        Ai=matrix,
+        Aqk=matrix,
+        states=states,
+        u=v,
+        Lk=matrix,
+        Mk=matrix,
+        h0=None,
+        cu=cu,
+        indices=indices,
+        do=v,
+        dht=None,
+        scale=1.0,
+        keys=(q, q, q),
+    )
+
+    inter_kernel.__getitem__.assert_called_once_with((3 * nc, B * H))
