@@ -1009,7 +1009,7 @@ def prepare_wy_repr_bwd_npu(
     BK_FIN = get_wy_block_size(BT, K, PREPARE_BWD_K_MEM_MULT, fin_max)
     use_g = g is not None
 
-    dk = k.new_empty(B, T, HV, K)
+    dk = k.new_empty(B, T, HV, K, dtype=k.dtype if H == HV else torch.float32)
     dv = torch.empty_like(v)
     db, db_t_contig = allocate_time_buffer(B, T, HV, dtype=beta.dtype, device=k.device)
     beta_arg, beta_t_contig = prepare_beta_input(beta, HV)
@@ -1120,7 +1120,7 @@ def prepare_wy_repr_bwd_npu(
             ),
         )
     if H != HV:
-        dk = dk.view(B, T, H, HV // H, K).sum(3)
+        dk = dk.view(B, T, H, HV // H, K).sum(3).to(k.dtype)
     if K_orig != K:
         dk = dk[..., :K_orig].contiguous()
     if V_orig != V:

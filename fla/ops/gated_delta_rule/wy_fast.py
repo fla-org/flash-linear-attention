@@ -315,7 +315,7 @@ def prepare_wy_repr_bwd(
     BK = min(max(triton.next_power_of_2(K), 16), CONST_TILING)
     BV = min(max(triton.next_power_of_2(V), 16), CONST_TILING)
 
-    dk = k.new_empty(B, T, HV, K)
+    dk = k.new_empty(B, T, HV, K, dtype=k.dtype if H == HV else torch.float32)
     dv = torch.empty_like(v)
     dg = torch.empty_like(g) if g is not None else None
     db = torch.empty_like(beta)
@@ -343,7 +343,7 @@ def prepare_wy_repr_bwd(
         BV=BV,
     )
     if H != HV:
-        dk = dk.view(B, T, H, HV // H, K).sum(3)
+        dk = dk.view(B, T, H, HV // H, K).sum(3).to(k.dtype)
     return dk, dv, db, dg
 
 

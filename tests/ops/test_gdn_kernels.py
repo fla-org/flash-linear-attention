@@ -1470,3 +1470,43 @@ def test_chunk_gated_delta_rule_bwd_dhu_varlen_many_documents():
     assert_close('dh', torch.cat([p[0] for p in parts], dim=1), dh_tri, 0.006)
     assert_close('dh0', torch.cat([p[1] for p in parts], dim=0), dh0_tri, 0.006)
     assert_close('dv2', torch.cat([p[2] for p in parts], dim=1), dv2_tri, 0.006)
+
+
+@pytest.mark.parametrize(
+    ('H', 'HV', 'output', 'dtype'),
+    [
+        pytest.param(*test, id="H{}-HV{}-{}-{}".format(*test))
+        for test in [
+            (2, 4, 'dq', torch.float16),
+            (2, 4, 'dq', torch.bfloat16),
+            (2, 4, 'dk', torch.float16),
+            (2, 4, 'dk', torch.bfloat16),
+            (2, 4, 'wy_dk', torch.float16),
+            (2, 4, 'wy_dk', torch.bfloat16),
+            (2, 2, 'dq', torch.float16),
+            (2, 2, 'dk', torch.bfloat16),
+            (2, 2, 'wy_dk', torch.bfloat16),
+        ]
+    ],
+)
+def test_grouped_dqk_round_once_after_head_sum(H: int, HV: int, output: str, dtype: torch.dtype):
+    B, T, D, BT = 2, 128, 64, 64
+    # the shares round in 16 bits, but their cancellation leaves an exactly representable sum
+    c = torch.tensor([1.015625, -1.0], dtype=dtype, device=device).repeat(HV // 2)
+    w = torch.tensor([1.015625, 1.0], dtype=dtype, device=device).repeat(HV // 2)
+    expected = (c.double() * w.double()).view(H, HV // H).sum(1)
+    k = torch.zeros(B, T, H, D, dtype=dtype, device=device)
+    v = c.view(1, 1, HV, 1).expand(B, T, HV, D).contiguous()
+    if output == 'wy_dk':
+        A = torch.eye(BT, dtype=dtype, device=device).repeat(T // BT, 1).view(1, T, 1, BT) * w.view(1, 1, HV, 1)
+        beta = torch.ones(B, T, HV, dtype=dtype, device=device)
+        actual, _, _, _ = prepare_wy_repr_bwd(
+            k=k, v=torch.zeros_like(v), beta=beta, A=A.expand(B, T, HV, BT).contiguous(), dw=v, du=torch.zeros_like(v),
+        )
+    else:
+        h = w.view(1, 1, HV, 1, 1).expand(B, T // BT, HV, D, D).contiguous()
+        g = torch.zeros(B, T, HV, device=device)
+        dq, dk, _, _ = chunk_bwd_dqkwg(q=k, k=k, v=v, do=v, h=h, dh=h, g=g, scale=1.0)
+        actual = dq if output == 'dq' else dk
+        expected *= D
+    torch.testing.assert_close(actual, expected.to(dtype).view(1, 1, H, 1).expand_as(actual), rtol=0, atol=0)
