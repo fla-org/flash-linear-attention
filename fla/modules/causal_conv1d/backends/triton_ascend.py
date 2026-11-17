@@ -8,11 +8,13 @@
 """Causal 1D convolution kernels adapted for triton-ascend on Huawei NPU."""
 
 from collections.abc import Iterator
+from typing import NamedTuple
 
 import torch
 import triton
 import triton.language as tl
 from einops import rearrange
+from triton.backends.ascend.utils import is_compile_on_910_95
 
 from fla.backends import TritonAscendBackend, register
 from fla.modules.causal_conv1d.ops import (
@@ -24,6 +26,7 @@ from fla.modules.causal_conv1d.ops import (
 )
 from fla.ops.utils import prepare_chunk_indices
 from fla.utils import get_multiprocessor_count, input_guard
+from fla.utils.hardware import get_npu_target_arch
 
 # triton-ascend exposes extract_slice/insert_slice via cann.extension on some versions.
 try:
@@ -35,6 +38,21 @@ try:
         tl.insert_slice = insert_slice
 except ImportError:
     pass
+
+
+class _Conv1dTileConfig(NamedTuple):
+    fp32_fwd_bd: int = 256
+    dx_tile_budget: int | None = None
+
+
+_DEFAULT_TILE_CONFIG = _Conv1dTileConfig()
+_ASCEND_950_TILE_CONFIG = _Conv1dTileConfig(fp32_fwd_bd=128, dx_tile_budget=8192)
+
+
+def _get_conv1d_tile_config(device_index: int) -> _Conv1dTileConfig:
+    if is_compile_on_910_95(get_npu_target_arch(device_index)):
+        return _ASCEND_950_TILE_CONFIG
+    return _DEFAULT_TILE_CONFIG
 
 
 def _select_coregrid_bd(D: int, preferred: int) -> int | None:
@@ -923,6 +941,7 @@ def causal_conv1d_bwd_dx_kernel(
 
 
 def _launch_bwd_dx_core(dy, weight, dht, cu_seqlens, cu_seqlens_cpu, B, T, D, W, BT, BD=None) -> torch.Tensor:
+    tile_budget = _get_conv1d_tile_config(dy.device.index).dx_tile_budget
     # dht needs smaller tiles because its extra branch overflows Ascend UB at the forward tile size.
     if BD is None:
         if dht is not None:
@@ -932,6 +951,17 @@ def _launch_bwd_dx_core(dy, weight, dht, cu_seqlens, cu_seqlens_cpu, B, T, D, W,
             BD = min(16, max(8, triton.next_power_of_2(D)))
         else:
             BD, BT = _npu_tile_config(T=T, BT=BT, D=D, dtype=dy.dtype, initial_state=None)
+            if tile_budget is not None:
+                # Avoid reserving UB for channels outside a small input.
+                BD = min(BD, max(8, triton.next_power_of_2(D)))
+    bd_limit = None
+    if tile_budget is not None:
+        BT = min(BT, tile_budget // 8)
+        bd_limit = tile_budget // BT
+        if B * triton.cdiv(D, bd_limit) > _NPU_MAX_TRITON_GRID:
+            # Even one time chunk exceeds the grid at this BD. Shorten BT to fit a wider BD.
+            bd_limit = _clamp_bd_for_grid(B=B, NT=1, D=D, BD=bd_limit)
+            BT = tile_budget // bd_limit
     if cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT, cu_seqlens_cpu=cu_seqlens_cpu)
         NT = len(chunk_indices)
@@ -939,6 +969,9 @@ def _launch_bwd_dx_core(dy, weight, dht, cu_seqlens, cu_seqlens_cpu, B, T, D, W,
         chunk_indices = None
         NT = triton.cdiv(T, BT)
     BD = _clamp_bd_for_grid(B=B, NT=NT, D=D, BD=BD)
+    if bd_limit is not None:
+        # Split excess time chunks across launches without growing BD past the UB budget.
+        BD = min(BD, bd_limit)
     BW = triton.next_power_of_2(W)
 
     stride_dy_n, stride_dy_t, stride_dy_d = dy.stride()
@@ -1586,7 +1619,11 @@ def _launch_fwd_coregrid(
     W = weight.shape[1]
     weight_wd = weight.transpose(0, 1).contiguous()
     NUM_CORES = get_multiprocessor_count(x.device.index)
-    BD = _select_coregrid_bd(D=D, preferred=256)
+    tile_config = _get_conv1d_tile_config(x.device.index)
+    preferred_bd = 256
+    if x.dtype == torch.float32:
+        preferred_bd = tile_config.fp32_fwd_bd
+    BD = _select_coregrid_bd(D=D, preferred=preferred_bd)
     if BD is None:
         raise RuntimeError(f'coregrid fwd: no aligned BD for D={D}')
     BT = min(32, triton.next_power_of_2(triton.cdiv(max(16, B * T), NUM_CORES)))

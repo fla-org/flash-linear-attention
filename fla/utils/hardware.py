@@ -73,6 +73,22 @@ def get_device_arch() -> str:
         return ''
 
 
+@cache
+def _get_npu_target_arch(device_index: int) -> str:
+    with torch.npu.device(device_index):
+        target = triton.runtime.driver.active.get_current_target()
+    return str(target.arch) if target.backend == 'npu' else ''
+
+
+def get_npu_target_arch(device_index: int = 0) -> str:
+    """Return the device's raw Triton NPU target architecture, or empty when unavailable."""
+    try:
+        return _get_npu_target_arch(device_index)
+    except Exception:
+        logger.debug('Failed to get NPU target architecture.', exc_info=True)
+        return ''
+
+
 def map_triton_backend_to_torch_device() -> str:
     backend = get_available_device()        # 'cuda' | 'hip' | 'xpu' | 'cpu' | ...
     return {'cuda': 'cuda', 'hip': 'cuda', 'xpu': 'xpu'}.get(backend, backend)

@@ -198,6 +198,7 @@ jobs:
             tests/benchmarks/test_graph_benchmark.py \
             tests/modules/residuals/test_attnres.py \
             tests/modules/residuals/test_standard.py \
+            tests/modules/test_conv.py \
             tests/modules/test_cross_entropy.py \
             tests/modules/test_grouplinear.py \
             tests/modules/test_grpo.py \
