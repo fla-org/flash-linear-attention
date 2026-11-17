@@ -249,6 +249,7 @@ def chunk_o_fwd_kernel(
     TIME_TAIL: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     MASK_DMA: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
 ):
     core_id = tl.program_id(0)
     h_t_step = HV * total_chunks
@@ -259,98 +260,112 @@ def chunk_o_fwd_kernel(
         global_t = remainder % total_chunks
         T_cur = T
 
-        if IS_VARLEN:
-            i_n, i_t = tl.load(chunk_indices + global_t * 2).to(tl.int32), tl.load(
-                chunk_indices + global_t * 2 + 1,
-            ).to(tl.int32)
-            bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
-            T_cur = (eos - bos).to(tl.int32)
-            i_tg = tl.load(chunk_offsets + i_n).to(tl.int64) + tl.cast(i_t, tl.int64)
-        else:
-            NT = tl.cdiv(T, BT)
-            i_n = global_t // NT
-            i_t = global_t % NT
-            bos = tl.cast(i_n, tl.int64) * T
-            i_tg = global_t
-
-        # local pointers avoid accumulating offsets across tasks.
-        q_ptr = q + (bos * H + i_h // (HV // H)) * K
-        k_ptr = k + (bos * H + i_h // (HV // H)) * K
-        v_ptr = v + (bos * HV + i_h) * V
-        o_ptr = o + (bos * HV + i_h) * V
-        h_base = h + (tl.cast(i_tg, tl.int64) * HV + i_h) * K * V
-
-        b_o = tl.zeros([BT, BV], dtype=tl.float32)
-        b_A = tl.zeros([BT, BT], dtype=tl.float32)
-        row_base, rows, m_rows = chunk_token_rows(i_t, T_cur, BT)
-        stride_qk = H * K
-        stride_v = HV * V
-
-        for i_k in range(tl.cdiv(K, BK)):
-            o_k = i_k * BK + tl.arange(0, BK)
-            m_k = (o_k >= 0) & (o_k < K)
-            m_p_q = m_rows[:, None] & m_k[None, :]
-            p_q = q_ptr + row_base * stride_qk + rows[:, None] * stride_qk + o_k[None, :]
-            m_p_k = m_k[:, None] & m_rows[None, :]
-            p_k = k_ptr + row_base * stride_qk + o_k[:, None] + rows[None, :] * stride_qk
-            if STATE_V_FIRST:
-                o_v = i_v * BV + tl.arange(0, BV)
-                m_v = (o_v >= 0) & (o_v < V)
-                m_p_h = m_v[:, None] & m_k[None, :]
-                p_h = h_base + o_v[:, None] * K + o_k[None, :]
-            else:
-                o_v = i_v * BV + tl.arange(0, BV)
-                m_v = (o_v >= 0) & (o_v < V)
-                m_p_h = m_k[:, None] & m_v[None, :]
-                p_h = h_base + o_k[:, None] * V + o_v[None, :]
-            # [BT, BK]
-            b_q = mload(p_q, m_p_q, MASK_DMA)
-            # [BK, BT]
-            b_k = mload(p_k, m_p_k, MASK_DMA)
-            # [BK, BV]
-            b_h = mload(p_h, m_p_h, MASK_DMA)
-
-            # ascend tl.dot clobbers lhs; copy before the first dot on b_q.
-            b_q_c = b_q + 0.0
-            # [BT, BK] @ [BK, BV] -> [BT, BV]
-            if STATE_V_FIRST:
-                b_o = tl.dot(b_q, tl.trans(b_h), b_o)
-            else:
-                b_o = tl.dot(b_q, b_h, b_o)
-            # [BT, BK] @ [BK, BT] -> [BT, BT]
-            b_A = tl.dot(b_q_c, b_k, b_A)
-
-        if USE_G:
-            # g is transposed to [B, HV, T] for contiguous token loads.
+        is_valid = True
+        if USE_GRAPH:
+            i_n_check = tl.load(chunk_indices + tl.cast(global_t, tl.int64) * 2).to(tl.int32)
+            is_valid = i_n_check >= 0
+        if is_valid:
             if IS_VARLEN:
-                g_ptr = g + bos + i_h * T
+                i_n, i_t = tl.load(chunk_indices + global_t * 2).to(tl.int32), tl.load(
+                    chunk_indices + global_t * 2 + 1,
+                ).to(tl.int32)
+                bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+                T_cur = (eos - bos).to(tl.int32)
+                # graph states retain the original slots, including sentinel holes.
+                if USE_GRAPH:
+                    i_tg = global_t
+                else:
+                    i_tg = tl.load(chunk_offsets + i_n).to(tl.int64) + tl.cast(i_t, tl.int64)
             else:
-                g_ptr = g + tl.cast(i_n, tl.int64) * HV * T + i_h * T
-            p_g = g_ptr + row_base + rows
-            b_g = mload(p_g, m_rows, MASK_DMA)
+                NT = tl.cdiv(T, BT)
+                i_n = global_t // NT
+                i_t = global_t % NT
+                bos = tl.cast(i_n, tl.int64) * T
+                i_tg = global_t
 
-            b_o = b_o * exp2(b_g)[:, None]
-            b_A = b_A * exp2(b_g[:, None] - b_g[None, :])
-        if USE_G_GAMMA:
-            b_gamma = tl.load(g_gamma + i_h)
-            b_g = b_gamma * (tl.arange(0, BT) + 1)
-            b_o = b_o * exp2(b_g)[:, None]
-            b_A = b_A * exp2(b_g[:, None] - b_g[None, :])
+            # local pointers avoid accumulating offsets across tasks.
+            q_ptr = q + (bos * H + i_h // (HV // H)) * K
+            k_ptr = k + (bos * H + i_h // (HV // H)) * K
+            v_ptr = v + (bos * HV + i_h) * V
+            o_ptr = o + (bos * HV + i_h) * V
+            h_base = h + (tl.cast(i_tg, tl.int64) * HV + i_h) * K * V
 
-        m_A = (rows[:, None] >= rows[None, :]) & (m_rows[:, None] & m_rows)
-        b_A = tl.where(m_A, b_A, 0)
+            b_o = tl.zeros([BT, BV], dtype=tl.float32)
+            b_A = tl.zeros([BT, BT], dtype=tl.float32)
+            row_base, rows, m_rows = chunk_token_rows(i_t, T_cur, BT)
+            stride_qk = H * K
+            stride_v = HV * V
 
-        o_v = i_v * BV + tl.arange(0, BV)
-        m_v = (o_v >= 0) & (o_v < V)
-        m_p_v = m_rows[:, None] & m_v[None, :]
-        p_v = v_ptr + row_base * stride_v + rows[:, None] * stride_v + o_v[None, :]
-        p_o = o_ptr + row_base * stride_v + rows[:, None] * stride_v + o_v[None, :]
+            for i_k in range(tl.cdiv(K, BK)):
+                o_k = i_k * BK + tl.arange(0, BK)
+                m_k = (o_k >= 0) & (o_k < K)
+                m_p_q = m_rows[:, None] & m_k[None, :]
+                p_q = q_ptr + row_base * stride_qk + rows[:, None] * stride_qk + o_k[None, :]
+                m_p_k = m_k[:, None] & m_rows[None, :]
+                p_k = k_ptr + row_base * stride_qk + o_k[:, None] + rows[None, :] * stride_qk
+                if STATE_V_FIRST:
+                    o_v = i_v * BV + tl.arange(0, BV)
+                    m_v = (o_v >= 0) & (o_v < V)
+                    m_p_h = m_v[:, None] & m_k[None, :]
+                    p_h = h_base + o_v[:, None] * K + o_k[None, :]
+                else:
+                    o_v = i_v * BV + tl.arange(0, BV)
+                    m_v = (o_v >= 0) & (o_v < V)
+                    m_p_h = m_k[:, None] & m_v[None, :]
+                    p_h = h_base + o_k[:, None] * V + o_v[None, :]
+                # [BT, BK]
+                b_q = mload(p_q, m_p_q, MASK_DMA)
+                # [BK, BT]
+                b_k = mload(p_k, m_p_k, MASK_DMA)
+                # [BK, BV]
+                b_h = mload(p_h, m_p_h, MASK_DMA)
 
-        b_v = mload(p_v, m_p_v, MASK_DMA)
-        # to fix mma -> mma layout conversion
-        # already solved by triton v3.2 or higher
-        b_o = b_o * scale + tl.dot(b_A.to(b_v.dtype), b_v) * scale
-        mstore(p_o, b_o.to(p_o.dtype.element_ty), m_p_v, MASK_DMA)
+                # ascend tl.dot clobbers lhs; copy before the first dot on b_q.
+                b_q_c = b_q + 0.0
+                # [BT, BK] @ [BK, BV] -> [BT, BV]
+                if STATE_V_FIRST:
+                    b_o = tl.dot(b_q, tl.trans(b_h), b_o)
+                else:
+                    b_o = tl.dot(b_q, b_h, b_o)
+                # [BT, BK] @ [BK, BT] -> [BT, BT]
+                b_A = tl.dot(b_q_c, b_k, b_A)
+
+            if USE_G:
+                # g is transposed to [B, HV, T] for contiguous token loads.
+                if IS_VARLEN:
+                    g_ptr = g + bos + i_h * T
+                else:
+                    g_ptr = g + tl.cast(i_n, tl.int64) * HV * T + i_h * T
+                p_g = g_ptr + row_base + rows
+                b_g = mload(p_g, m_rows, MASK_DMA)
+
+                b_o = b_o * exp2(b_g)[:, None]
+                if USE_GRAPH:
+                    valid = (rows[:, None] >= rows[None, :]) & (m_rows[:, None] & m_rows)
+                    diff = tl.where(valid, b_g[:, None] - b_g[None, :], 0)
+                    b_A = b_A * exp2(diff)
+                else:
+                    b_A = b_A * exp2(b_g[:, None] - b_g[None, :])
+            if USE_G_GAMMA:
+                b_gamma = tl.load(g_gamma + i_h)
+                b_g = b_gamma * (tl.arange(0, BT) + 1)
+                b_o = b_o * exp2(b_g)[:, None]
+                b_A = b_A * exp2(b_g[:, None] - b_g[None, :])
+
+            m_A = (rows[:, None] >= rows[None, :]) & (m_rows[:, None] & m_rows)
+            b_A = tl.where(m_A, b_A, 0)
+
+            o_v = i_v * BV + tl.arange(0, BV)
+            m_v = (o_v >= 0) & (o_v < V)
+            m_p_v = m_rows[:, None] & m_v[None, :]
+            p_v = v_ptr + row_base * stride_v + rows[:, None] * stride_v + o_v[None, :]
+            p_o = o_ptr + row_base * stride_v + rows[:, None] * stride_v + o_v[None, :]
+
+            b_v = mload(p_v, m_p_v, MASK_DMA)
+            # to fix mma -> mma layout conversion
+            # already solved by triton v3.2 or higher
+            b_o = b_o * scale + tl.dot(b_A.to(b_v.dtype), b_v) * scale
+            mstore(p_o, b_o.to(p_o.dtype.element_ty), m_p_v, MASK_DMA)
 
 
 @register(chunk_fwd_o, backend=TritonAscendBackend)
@@ -367,6 +382,8 @@ def chunk_fwd_o_npu(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
+    chunk_offsets: torch.LongTensor | None = None,
+    use_graph: bool = False,
 ) -> torch.Tensor:
     B, T, H, K, V, HV = *q.shape, v.shape[-1], v.shape[2]
     BT = chunk_size
@@ -408,8 +425,13 @@ def chunk_fwd_o_npu(
                 h = torch.nn.functional.pad(h, (0, v_pad - h.shape[-1], 0, k_pad - h.shape[-2]))
             K, V = k_pad, v_pad
 
-    o = torch.empty_like(v)
-    if cu_seqlens is None:
+    o = (torch.zeros_like if use_graph else torch.empty_like)(v)
+    if use_graph:
+        if cu_seqlens is None or chunk_indices is None or chunk_offsets is None:
+            raise ValueError("graph output requires fixed-capacity indices and device offsets")
+        N, total_chunks = len(cu_seqlens) - 1, len(chunk_indices)
+        passes = [(chunk_indices, True)]
+    elif cu_seqlens is None:
         N, chunk_offsets = B, None
         NT = triton.cdiv(T, BT)
         total_chunks = N * NT
@@ -464,6 +486,7 @@ def chunk_fwd_o_npu(
             BV=BV,
             STATE_V_FIRST=state_v_first,
             TIME_TAIL=time_tail,
+            USE_GRAPH=use_graph,
             enable_ubuf_saving=True,
             unit_flag=True,
             **ascend_compile_kwargs(),
@@ -479,7 +502,9 @@ def _launch_bwd_2d_kernel(kernel, *, nt: int, bh_total: int, kernel_kwargs: dict
         nt_len = min(max_nt, nt - nt_off)
         chunk_indices = kernel_kwargs.get('chunk_indices')
         cu_seqlens = kernel_kwargs.get('cu_seqlens')
-        if cu_seqlens is not None and chunk_indices is not None:
+        if kernel_kwargs.get('USE_GRAPH', False):
+            kernel_kwargs['NT_OFFSET'] = nt_off
+        elif cu_seqlens is not None and chunk_indices is not None:
             kernel_kwargs['chunk_indices'] = chunk_indices[nt_off:nt_off + nt_len]
             kernel_kwargs['NT_OFFSET'] = 0
         else:
@@ -499,7 +524,9 @@ def _launch_bwd_3d_kernel(kernel, *, nk: int, nt: int, bh_total: int, kernel_kwa
             nt_len = min(max_nt, nt - nt_off)
             chunk_indices = kernel_kwargs.get('chunk_indices')
             cu_seqlens = kernel_kwargs.get('cu_seqlens')
-            if cu_seqlens is not None and chunk_indices is not None:
+            if kernel_kwargs.get('USE_GRAPH', False):
+                kernel_kwargs['NT_OFFSET'] = nt_off
+            elif cu_seqlens is not None and chunk_indices is not None:
                 kernel_kwargs['chunk_indices'] = chunk_indices[nt_off:nt_off + nt_len]
                 kernel_kwargs['NT_OFFSET'] = 0
             else:
@@ -538,6 +565,7 @@ def chunk_dv_local_bwd_kernel_full(
     G_T_CONTIG: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     MASK_DMA: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
 ):
     """Compute full-chunk value gradients on a persistent Cube grid.
 
@@ -553,67 +581,72 @@ def chunk_dv_local_bwd_kernel_full(
         T_seq = T
         T_cur = T
 
-        if IS_VARLEN:
-            i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-            bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
-            T_cur = (eos - bos).to(tl.int32)
-        else:
-            bos = tl.cast(i_b, tl.int64) * T_seq
-
-        q_ptr = q + (bos * H + i_h // (HV // H)) * K
-        k_ptr = k + (bos * H + i_h // (HV // H)) * K
-        do_ptr = do + (bos * HV + i_h) * V
-        dv_ptr = dv + (bos * HV + i_h) * V
-
-        # Masked tiles keep one int64 offset. The int32 64x64 mask does not
-        # fit in UB next to the DMA predicates. Aligned tiles stay int32.
-        if not MASK_DMA:
-            row_base, rows, m_rows = chunk_token_rows(i_t, T_cur, BT)
-        else:
-            row_base, rows_local, m_rows = chunk_token_rows(i_t, T_cur, BT)
-            rows = clamp_token_rows(row_base + rows_local, T_cur)
-            row_base = tl.cast(0, tl.int64)
-        stride_qk = H * K
-        stride_v = HV * V
-        if USE_G:
-            if G_T_CONTIG:
-                g_base = _g_contig_base(g=g, bos=bos, i_b=i_b, i_h=i_h, T_seq=T_seq, HV=HV, IS_VARLEN=IS_VARLEN)
+        is_valid = True
+        if USE_GRAPH:
+            i_n_check = tl.load(chunk_indices + tl.cast(i_t, tl.int64) * 2).to(tl.int32)
+            is_valid = i_n_check >= 0
+        if is_valid:
+            if IS_VARLEN:
+                i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+                bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+                T_cur = (eos - bos).to(tl.int32)
             else:
-                g_base = g + bos * HV + i_h
-            p_g = _g_row_ptr(g_base, T_cur, i_t * BT, BT, G_T_CONTIG, HV)
-            b_g = mload(p_g, m_rows, MASK_DMA)
-        if USE_G_GAMMA:
-            b_gamma = tl.load(g_gamma + i_h)
-            b_g = b_gamma * (tl.arange(0, BT) + 1)
+                bos = tl.cast(i_b, tl.int64) * T_seq
 
-        b_A = tl.zeros([BT, BT], dtype=tl.float32)
-        for i_k in range(tl.cdiv(K, BK)):
-            o_k = i_k * BK + tl.arange(0, BK)
-            m_k = (o_k >= 0) & (o_k < K)
-            m_p_k = m_rows[:, None] & m_k[None, :]
-            p_k = k_ptr + row_base * stride_qk + rows[:, None] * stride_qk + o_k[None, :]
-            m_p_q = m_k[:, None] & m_rows[None, :]
-            p_q = q_ptr + row_base * stride_qk + o_k[:, None] + rows[None, :] * stride_qk
-            b_k = mload(p_k, m_p_k, MASK_DMA)
-            b_q = mload(p_q, m_p_q, MASK_DMA)
-            b_A += tl.dot(b_k, b_q, allow_tf32=False) * scale
-        if USE_G or USE_G_GAMMA:
-            b_A *= exp2(b_g[None, :] - b_g[:, None])
+            q_ptr = q + (bos * H + i_h // (HV // H)) * K
+            k_ptr = k + (bos * H + i_h // (HV // H)) * K
+            do_ptr = do + (bos * HV + i_h) * V
+            dv_ptr = dv + (bos * HV + i_h) * V
 
-        m_A = (rows[:, None] <= rows[None, :]) & (m_rows[:, None] & m_rows)
-        b_A = tl.where(m_A, b_A, 0)
-        b_A_pristine = b_A + 0.0
+            # Masked tiles keep one int64 offset. The int32 64x64 mask does not
+            # fit in UB next to the DMA predicates. Aligned tiles stay int32.
+            if not MASK_DMA:
+                row_base, rows, m_rows = chunk_token_rows(i_t, T_cur, BT)
+            else:
+                row_base, rows_local, m_rows = chunk_token_rows(i_t, T_cur, BT)
+                rows = clamp_token_rows(row_base + rows_local, T_cur)
+                row_base = tl.cast(0, tl.int64)
+            stride_qk = H * K
+            stride_v = HV * V
+            if USE_G:
+                if G_T_CONTIG:
+                    g_base = _g_contig_base(g=g, bos=bos, i_b=i_b, i_h=i_h, T_seq=T_seq, HV=HV, IS_VARLEN=IS_VARLEN)
+                else:
+                    g_base = g + bos * HV + i_h
+                p_g = _g_row_ptr(g_base, T_cur, i_t * BT, BT, G_T_CONTIG, HV)
+                b_g = mload(p_g, m_rows, MASK_DMA)
+            if USE_G_GAMMA:
+                b_gamma = tl.load(g_gamma + i_h)
+                b_g = b_gamma * (tl.arange(0, BT) + 1)
 
-        for i_v in range(tl.cdiv(V, BV)):
-            o_v = i_v * BV + tl.arange(0, BV)
-            m_v = (o_v >= 0) & (o_v < V)
-            m_p_do = m_rows[:, None] & m_v[None, :]
-            p_do = do_ptr + row_base * stride_v + rows[:, None] * stride_v + o_v[None, :]
-            p_dv = dv_ptr + row_base * stride_v + rows[:, None] * stride_v + o_v[None, :]
-            b_do = mload(p_do, m_p_do, MASK_DMA)
-            b_A_i = b_A_pristine + 0.0
-            b_dv = tl.dot(b_A_i.to(b_do.dtype), b_do, allow_tf32=False)
-            mstore(p_dv, b_dv.to(p_dv.dtype.element_ty), m_p_do, MASK_DMA)
+            b_A = tl.zeros([BT, BT], dtype=tl.float32)
+            for i_k in range(tl.cdiv(K, BK)):
+                o_k = i_k * BK + tl.arange(0, BK)
+                m_k = (o_k >= 0) & (o_k < K)
+                m_p_k = m_rows[:, None] & m_k[None, :]
+                p_k = k_ptr + row_base * stride_qk + rows[:, None] * stride_qk + o_k[None, :]
+                m_p_q = m_k[:, None] & m_rows[None, :]
+                p_q = q_ptr + row_base * stride_qk + o_k[:, None] + rows[None, :] * stride_qk
+                b_k = mload(p_k, m_p_k, MASK_DMA)
+                b_q = mload(p_q, m_p_q, MASK_DMA)
+                b_A += tl.dot(b_k, b_q, allow_tf32=False) * scale
+            if USE_G or USE_G_GAMMA:
+                b_A *= exp2(b_g[None, :] - b_g[:, None])
+
+            m_A = (rows[:, None] <= rows[None, :]) & (m_rows[:, None] & m_rows)
+            b_A = tl.where(m_A, b_A, 0)
+            b_A_pristine = b_A + 0.0
+
+            for i_v in range(tl.cdiv(V, BV)):
+                o_v = i_v * BV + tl.arange(0, BV)
+                m_v = (o_v >= 0) & (o_v < V)
+                m_p_do = m_rows[:, None] & m_v[None, :]
+                p_do = do_ptr + row_base * stride_v + rows[:, None] * stride_v + o_v[None, :]
+                p_dv = dv_ptr + row_base * stride_v + rows[:, None] * stride_v + o_v[None, :]
+                b_do = mload(p_do, m_p_do, MASK_DMA)
+                b_A_i = b_A_pristine + 0.0
+                b_dv = tl.dot(b_A_i.to(b_do.dtype), b_do, allow_tf32=False)
+                mstore(p_dv, b_dv.to(p_dv.dtype.element_ty), m_p_do, MASK_DMA)
 
 
 @triton.jit(do_not_specialize=['T'])
@@ -642,6 +675,7 @@ def chunk_dv_local_bwd_kernel(
     IS_VARLEN: tl.constexpr,
     NT_OFFSET: tl.constexpr,
     BH_OFFSET: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
 ):
     i_t = tl.program_id(0) + NT_OFFSET
     i_bh = tl.program_id(1) + BH_OFFSET
@@ -650,6 +684,8 @@ def chunk_dv_local_bwd_kernel(
 
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        if USE_GRAPH and i_n < 0:
+            return
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = (eos - bos).to(tl.int32)
     else:
@@ -855,6 +891,7 @@ def chunk_dqkwg_bwd_kernel(
     K_OFFSET: tl.constexpr,
     NT_OFFSET: tl.constexpr,
     BH_OFFSET: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
 ):
     """BC-tiled dq/dk/dw with fused ds: each (r,c) block computes do@v.T once for both grads."""
     i_k = tl.program_id(0) + K_OFFSET
@@ -866,6 +903,8 @@ def chunk_dqkwg_bwd_kernel(
     if IS_VARLEN:
         i_tg = i_t
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        if USE_GRAPH and i_n < 0:
+            return
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = (eos - bos).to(tl.int32)
     else:
@@ -1138,6 +1177,7 @@ def chunk_dqkwg_bwd_kernel_full(
     STATE_V_FIRST: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     MASK_DMA: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
 ):
     """CUDA-style full-BT dq/dk/dw[/dg row-sums], 1D Cube core-grid.
 
@@ -1155,147 +1195,155 @@ def chunk_dqkwg_bwd_kernel_full(
         T_seq = T
         T_cur = T
 
-        if IS_VARLEN:
-            i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-            i_tg = tl.load(chunk_offsets + i_n).to(tl.int64) + tl.cast(i_t, tl.int64)
-            bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
-            T_cur = (eos - bos).to(tl.int32)
-        else:
-            NT = tl.cdiv(T_seq, BT)
-            i_tg = tl.cast(i_b, tl.int64) * NT + i_t
-            bos = tl.cast(i_b, tl.int64) * T_seq
-
-        v_ptr = v + (bos * HV + i_h) * V
-        do_ptr = do + (bos * HV + i_h) * V
-        h_ptr = h + (tl.cast(i_tg, tl.int64) * HV + i_h) * K * V
-        dh_ptr = dh + (tl.cast(i_tg, tl.int64) * HV + i_h) * K * V
-        q_ptr = q + (bos * H + i_h // (HV // H)) * K
-        k_ptr = k + (bos * H + i_h // (HV // H)) * K
-        dq_ptr = dq + (bos * HV + i_h) * K
-        dk_ptr = dk + (bos * HV + i_h) * K
-        if USE_DW:
-            dw_ptr = dw + (bos * HV + i_h) * K
-            dv_ptr = dv + (bos * HV + i_h) * V
-
-        row_base, rows, m_rows = chunk_token_rows(i_t, T_cur, BT)
-        stride_qk = H * K
-        stride_v = HV * V
-        stride_hk = HV * K
-        if USE_G:
-            dg_head = dg + bos * HV + i_h
-            last_idx = min(row_base + BT, T_cur) - 1
-            if G_T_CONTIG:
-                g_base = _g_contig_base(g=g, bos=bos, i_b=i_b, i_h=i_h, T_seq=T_seq, HV=HV, IS_VARLEN=IS_VARLEN)
-                b_g_last = tl.load(g_base + last_idx).to(tl.float32)
+        is_valid = True
+        if USE_GRAPH:
+            i_n_check = tl.load(chunk_indices + tl.cast(i_t, tl.int64) * 2).to(tl.int32)
+            is_valid = i_n_check >= 0
+        if is_valid:
+            i_tg = i_t
+            if IS_VARLEN:
+                i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+                # eager full/tail passes renumber chunks; graph slots retain state addresses.
+                if not USE_GRAPH:
+                    i_tg = tl.load(chunk_offsets + i_n).to(tl.int64) + tl.cast(i_t, tl.int64)
+                bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+                T_cur = (eos - bos).to(tl.int32)
             else:
-                g_base = g + bos * HV + i_h
-                b_g_last = tl.load(g_base + last_idx * HV).to(tl.float32)
-            p_g = _g_row_ptr(g_base, T_cur, i_t * BT, BT, G_T_CONTIG, HV)
-            b_g = mload(p_g, m_rows, MASK_DMA).to(tl.float32)
-        if USE_G_GAMMA:
-            b_gamma = tl.load(g_gamma + i_h)
-            b_g = b_gamma * (tl.arange(0, BT) + 1).to(tl.float32)
-            b_g_last = b_gamma * min(BT, T_cur - i_t * BT)
+                NT = tl.cdiv(T_seq, BT)
+                i_tg = tl.cast(i_b, tl.int64) * NT + i_t
+                bos = tl.cast(i_b, tl.int64) * T_seq
 
-        m_A = (rows[:, None] >= rows[None, :]) & (m_rows[:, None] & m_rows)
-
-        b_ds = tl.zeros([BT, BT], dtype=tl.float32)
-        for i_v in range(tl.cdiv(V, BV)):
-            o_v = i_v * BV + tl.arange(0, BV)
-            m_v = (o_v >= 0) & (o_v < V)
-            m_p_v = m_rows[:, None] & m_v[None, :]
-            p_v = v_ptr + row_base * stride_v + rows[:, None] * stride_v + o_v[None, :]
-            p_do = do_ptr + row_base * stride_v + rows[:, None] * stride_v + o_v[None, :]
-            b_v = mload(p_v, m_p_v, MASK_DMA)
-            b_do = mload(p_do, m_p_v, MASK_DMA)
-            b_ds = tl.dot(b_do, tl.trans(b_v), b_ds, allow_tf32=False)
-
-        if USE_G or USE_G_GAMMA:
-            b_ds = tl.where(m_A, b_ds * exp2(b_g[:, None] - b_g[None, :]), 0) * scale
-        else:
-            b_ds = b_ds * m_A.to(tl.float32) * scale
-        b_ds_keep = b_ds.to(q.dtype.element_ty)
-
-        for i_k in range(tl.cdiv(K, BK)):
-            b_dq = tl.zeros([BT, BK], dtype=tl.float32)
-            b_dk = tl.zeros([BT, BK], dtype=tl.float32)
+            v_ptr = v + (bos * HV + i_h) * V
+            do_ptr = do + (bos * HV + i_h) * V
+            h_ptr = h + (tl.cast(i_tg, tl.int64) * HV + i_h) * K * V
+            dh_ptr = dh + (tl.cast(i_tg, tl.int64) * HV + i_h) * K * V
+            q_ptr = q + (bos * H + i_h // (HV // H)) * K
+            k_ptr = k + (bos * H + i_h // (HV // H)) * K
+            dq_ptr = dq + (bos * HV + i_h) * K
+            dk_ptr = dk + (bos * HV + i_h) * K
             if USE_DW:
-                b_dw = tl.zeros([BT, BK], dtype=tl.float32)
+                dw_ptr = dw + (bos * HV + i_h) * K
+                dv_ptr = dv + (bos * HV + i_h) * V
 
+            row_base, rows, m_rows = chunk_token_rows(i_t, T_cur, BT)
+            stride_qk = H * K
+            stride_v = HV * V
+            stride_hk = HV * K
+            if USE_G:
+                dg_head = dg + bos * HV + i_h
+                last_idx = min(row_base + BT, T_cur) - 1
+                if G_T_CONTIG:
+                    g_base = _g_contig_base(g=g, bos=bos, i_b=i_b, i_h=i_h, T_seq=T_seq, HV=HV, IS_VARLEN=IS_VARLEN)
+                    b_g_last = tl.load(g_base + last_idx).to(tl.float32)
+                else:
+                    g_base = g + bos * HV + i_h
+                    b_g_last = tl.load(g_base + last_idx * HV).to(tl.float32)
+                p_g = _g_row_ptr(g_base, T_cur, i_t * BT, BT, G_T_CONTIG, HV)
+                b_g = mload(p_g, m_rows, MASK_DMA).to(tl.float32)
+            if USE_G_GAMMA:
+                b_gamma = tl.load(g_gamma + i_h)
+                b_g = b_gamma * (tl.arange(0, BT) + 1).to(tl.float32)
+                b_g_last = b_gamma * min(BT, T_cur - i_t * BT)
+
+            m_A = (rows[:, None] >= rows[None, :]) & (m_rows[:, None] & m_rows)
+
+            b_ds = tl.zeros([BT, BT], dtype=tl.float32)
             for i_v in range(tl.cdiv(V, BV)):
                 o_v = i_v * BV + tl.arange(0, BV)
                 m_v = (o_v >= 0) & (o_v < V)
                 m_p_v = m_rows[:, None] & m_v[None, :]
                 p_v = v_ptr + row_base * stride_v + rows[:, None] * stride_v + o_v[None, :]
                 p_do = do_ptr + row_base * stride_v + rows[:, None] * stride_v + o_v[None, :]
-                if STATE_V_FIRST:
-                    o_k = i_k * BK + tl.arange(0, BK)
-                    m_k = (o_k >= 0) & (o_k < K)
-                    m_p_h = m_v[:, None] & m_k[None, :]
-                    p_h = h_ptr + o_v[:, None] * K + o_k[None, :]
-                    p_dh = dh_ptr + o_v[:, None] * K + o_k[None, :]
-                else:
-                    o_k = i_k * BK + tl.arange(0, BK)
-                    m_k = (o_k >= 0) & (o_k < K)
-                    m_p_h = m_v[:, None] & m_k[None, :]
-                    p_h = h_ptr + o_v[:, None] + o_k[None, :] * V
-                    p_dh = dh_ptr + o_v[:, None] + o_k[None, :] * V
                 b_v = mload(p_v, m_p_v, MASK_DMA)
                 b_do = mload(p_do, m_p_v, MASK_DMA)
-                b_h = mload(p_h, m_p_h, MASK_DMA)
-                b_dh = mload(p_dh, m_p_h, MASK_DMA)
-                b_dq = tl.dot(b_do, b_h.to(b_do.dtype), b_dq, allow_tf32=False)
-                b_dk = tl.dot(b_v, b_dh.to(b_v.dtype), b_dk, allow_tf32=False)
-                if USE_DW:
-                    p_dv = dv_ptr + row_base * stride_v + rows[:, None] * stride_v + o_v[None, :]
-                    b_dv = mload(p_dv, m_p_v, MASK_DMA)
-                    b_dw = tl.dot(b_dv.to(b_h.dtype), b_h.to(b_h.dtype), b_dw, allow_tf32=False)
+                b_ds = tl.dot(b_do, tl.trans(b_v), b_ds, allow_tf32=False)
 
-            if USE_DW:
+            if USE_G or USE_G_GAMMA:
+                b_ds = tl.where(m_A, b_ds * exp2(b_g[:, None] - b_g[None, :]), 0) * scale
+            else:
+                b_ds = b_ds * m_A.to(tl.float32) * scale
+            b_ds_keep = b_ds.to(q.dtype.element_ty)
+
+            for i_k in range(tl.cdiv(K, BK)):
+                b_dq = tl.zeros([BT, BK], dtype=tl.float32)
+                b_dk = tl.zeros([BT, BK], dtype=tl.float32)
+                if USE_DW:
+                    b_dw = tl.zeros([BT, BK], dtype=tl.float32)
+
+                for i_v in range(tl.cdiv(V, BV)):
+                    o_v = i_v * BV + tl.arange(0, BV)
+                    m_v = (o_v >= 0) & (o_v < V)
+                    m_p_v = m_rows[:, None] & m_v[None, :]
+                    p_v = v_ptr + row_base * stride_v + rows[:, None] * stride_v + o_v[None, :]
+                    p_do = do_ptr + row_base * stride_v + rows[:, None] * stride_v + o_v[None, :]
+                    if STATE_V_FIRST:
+                        o_k = i_k * BK + tl.arange(0, BK)
+                        m_k = (o_k >= 0) & (o_k < K)
+                        m_p_h = m_v[:, None] & m_k[None, :]
+                        p_h = h_ptr + o_v[:, None] * K + o_k[None, :]
+                        p_dh = dh_ptr + o_v[:, None] * K + o_k[None, :]
+                    else:
+                        o_k = i_k * BK + tl.arange(0, BK)
+                        m_k = (o_k >= 0) & (o_k < K)
+                        m_p_h = m_v[:, None] & m_k[None, :]
+                        p_h = h_ptr + o_v[:, None] + o_k[None, :] * V
+                        p_dh = dh_ptr + o_v[:, None] + o_k[None, :] * V
+                    b_v = mload(p_v, m_p_v, MASK_DMA)
+                    b_do = mload(p_do, m_p_v, MASK_DMA)
+                    b_h = mload(p_h, m_p_h, MASK_DMA)
+                    b_dh = mload(p_dh, m_p_h, MASK_DMA)
+                    b_dq = tl.dot(b_do, b_h.to(b_do.dtype), b_dq, allow_tf32=False)
+                    b_dk = tl.dot(b_v, b_dh.to(b_v.dtype), b_dk, allow_tf32=False)
+                    if USE_DW:
+                        p_dv = dv_ptr + row_base * stride_v + rows[:, None] * stride_v + o_v[None, :]
+                        b_dv = mload(p_dv, m_p_v, MASK_DMA)
+                        b_dw = tl.dot(b_dv.to(b_h.dtype), b_h.to(b_h.dtype), b_dw, allow_tf32=False)
+
+                if USE_DW:
+                    o_k = i_k * BK + tl.arange(0, BK)
+                    m_k = (o_k >= 0) & (o_k < K)
+                    m_p_dw = m_rows[:, None] & m_k[None, :]
+                    p_dw = dw_ptr + row_base * stride_hk + rows[:, None] * stride_hk + o_k[None, :]
+                    mstore(p_dw, -b_dw.to(p_dw.dtype.element_ty), m_p_dw, MASK_DMA)
+
                 o_k = i_k * BK + tl.arange(0, BK)
                 m_k = (o_k >= 0) & (o_k < K)
-                m_p_dw = m_rows[:, None] & m_k[None, :]
-                p_dw = dw_ptr + row_base * stride_hk + rows[:, None] * stride_hk + o_k[None, :]
-                mstore(p_dw, -b_dw.to(p_dw.dtype.element_ty), m_p_dw, MASK_DMA)
+                m_p_q = m_rows[:, None] & m_k[None, :]
+                p_q = q_ptr + row_base * stride_qk + rows[:, None] * stride_qk + o_k[None, :]
+                p_k = k_ptr + row_base * stride_qk + rows[:, None] * stride_qk + o_k[None, :]
+                b_q = mload(p_q, m_p_q, MASK_DMA)
+                b_k = mload(p_k, m_p_q, MASK_DMA)
 
-            o_k = i_k * BK + tl.arange(0, BK)
-            m_k = (o_k >= 0) & (o_k < K)
-            m_p_q = m_rows[:, None] & m_k[None, :]
-            p_q = q_ptr + row_base * stride_qk + rows[:, None] * stride_qk + o_k[None, :]
-            p_k = k_ptr + row_base * stride_qk + rows[:, None] * stride_qk + o_k[None, :]
-            b_q = mload(p_q, m_p_q, MASK_DMA)
-            b_k = mload(p_k, m_p_q, MASK_DMA)
+                b_ds_lhs = b_ds_keep + 0.0
+                b_ds_rhs = b_ds_keep + 0.0
+                if USE_G or USE_G_GAMMA:
+                    b_dq = b_dq * exp2(b_g)[:, None] * scale
+                    b_dk = b_dk * tl.where(m_rows, exp2(-b_g + b_g_last), 0)[:, None]
+                    if USE_G:
+                        # Padding lanes of the [BT, BK] tile are outside K and can be NaN.
+                        # They are masked out of dk, but a raw sum would still poison dg.
+                        b_dk_m = tl.where(m_p_q, b_dk, 0)
+                        b_k_m = tl.where(m_p_q, b_k.to(tl.float32), 0)
+                        b_dg_last = tl.sum(b_dk_m * b_k_m)
+                    b_dq = tl.dot(b_ds_lhs, b_k, b_dq, allow_tf32=False)
+                    b_dk = tl.dot(tl.trans(b_ds_rhs), b_q, b_dk, allow_tf32=False)
+                else:
+                    b_dq = b_dq * scale + tl.dot(b_ds_lhs, b_k, allow_tf32=False)
+                    b_dk = tl.dot(tl.trans(b_ds_rhs), b_q, b_dk, allow_tf32=False)
 
-            b_ds_lhs = b_ds_keep + 0.0
-            b_ds_rhs = b_ds_keep + 0.0
-            if USE_G or USE_G_GAMMA:
-                b_dq = b_dq * exp2(b_g)[:, None] * scale
-                b_dk = b_dk * tl.where(m_rows, exp2(-b_g + b_g_last), 0)[:, None]
+                p_dq = dq_ptr + row_base * stride_hk + rows[:, None] * stride_hk + o_k[None, :]
+                p_dk = dk_ptr + row_base * stride_hk + rows[:, None] * stride_hk + o_k[None, :]
+                mstore(p_dq, b_dq.to(p_dq.dtype.element_ty), m_p_q, MASK_DMA)
+                mstore(p_dk, b_dk.to(p_dk.dtype.element_ty), m_p_q, MASK_DMA)
                 if USE_G:
-                    # Padding lanes of the [BT, BK] tile are outside K and can be NaN.
-                    # They are masked out of dk, but a raw sum would still poison dg.
-                    b_dk_m = tl.where(m_p_q, b_dk, 0)
-                    b_k_m = tl.where(m_p_q, b_k.to(tl.float32), 0)
-                    b_dg_last = tl.sum(b_dk_m * b_k_m)
-                b_dq = tl.dot(b_ds_lhs, b_k, b_dq, allow_tf32=False)
-                b_dk = tl.dot(tl.trans(b_ds_rhs), b_q, b_dk, allow_tf32=False)
-            else:
-                b_dq = b_dq * scale + tl.dot(b_ds_lhs, b_k, allow_tf32=False)
-                b_dk = tl.dot(tl.trans(b_ds_rhs), b_q, b_dk, allow_tf32=False)
-
-            p_dq = dq_ptr + row_base * stride_hk + rows[:, None] * stride_hk + o_k[None, :]
-            p_dk = dk_ptr + row_base * stride_hk + rows[:, None] * stride_hk + o_k[None, :]
-            mstore(p_dq, b_dq.to(p_dq.dtype.element_ty), m_p_q, MASK_DMA)
-            mstore(p_dk, b_dk.to(p_dk.dtype.element_ty), m_p_q, MASK_DMA)
-            if USE_G:
-                b_q_f = tl.where(m_p_q, b_q.to(tl.float32), 0)
-                b_k_f = tl.where(m_p_q, b_k.to(tl.float32), 0)
-                b_dg = tl.sum(tl.where(m_p_q, b_dq, 0) * b_q_f, axis=1) - tl.sum(tl.where(m_p_q, b_dk, 0) * b_k_f, axis=1)
-                m_before_last = rows < (min(BT, T_cur - i_t * BT) - 1)
-                b_dg = tl.where(m_before_last, b_dg, b_dg + b_dg_last)
-                dg_k = dg_head + tl.cast(i_k, tl.int64) * tl.cast(B, tl.int64) * tl.cast(T_seq, tl.int64) * HV
-                p_dg = (dg_k + row_base * HV) + rows * HV
-                mstore(p_dg, b_dg.to(p_dg.dtype.element_ty), m_rows, MASK_DMA)
+                    b_q_f = tl.where(m_p_q, b_q.to(tl.float32), 0)
+                    b_k_f = tl.where(m_p_q, b_k.to(tl.float32), 0)
+                    b_dg = tl.sum(tl.where(m_p_q, b_dq, 0) * b_q_f, axis=1) - tl.sum(tl.where(m_p_q, b_dk, 0) * b_k_f, axis=1)
+                    m_before_last = rows < (min(BT, T_cur - i_t * BT) - 1)
+                    b_dg = tl.where(m_before_last, b_dg, b_dg + b_dg_last)
+                    dg_k = dg_head + tl.cast(i_k, tl.int64) * tl.cast(B, tl.int64) * tl.cast(T_seq, tl.int64) * HV
+                    p_dg = (dg_k + row_base * HV) + rows * HV
+                    mstore(p_dg, b_dg.to(p_dg.dtype.element_ty), m_rows, MASK_DMA)
 
 
 @triton.jit(do_not_specialize=['T', 'task_num', 'num_core'])
@@ -1320,6 +1368,7 @@ def chunk_dg_bwd_kernel_hdh(
     STATE_V_FIRST: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     MASK_DMA: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
 ):
     """Compute the final-token gate contribution from h and dh on vector cores.
 
@@ -1334,56 +1383,61 @@ def chunk_dg_bwd_kernel_hdh(
         T_seq = T
         T_cur = T
 
-        if IS_VARLEN:
-            i_tg = i_t
-            i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-            bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
-            T_cur = (eos - bos).to(tl.int32)
-        else:
-            NT = tl.cdiv(T_seq, BT)
-            i_tg = tl.cast(i_b, tl.int64) * NT + i_t
-            bos = tl.cast(i_b, tl.int64) * T_seq
+        is_valid = True
+        if USE_GRAPH:
+            i_n_check = tl.load(chunk_indices + tl.cast(i_t, tl.int64) * 2).to(tl.int32)
+            is_valid = i_n_check >= 0
+        if is_valid:
+            if IS_VARLEN:
+                i_tg = i_t
+                i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+                bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+                T_cur = (eos - bos).to(tl.int32)
+            else:
+                NT = tl.cdiv(T_seq, BT)
+                i_tg = tl.cast(i_b, tl.int64) * NT + i_t
+                bos = tl.cast(i_b, tl.int64) * T_seq
 
-        h_ptr = h + (tl.cast(i_tg, tl.int64) * HV + i_h) * K * V
-        dh_ptr = dh + (tl.cast(i_tg, tl.int64) * HV + i_h) * K * V
-        last_idx = min(tl.cast(i_t, tl.int64) * BT + BT, T_cur) - 1
-        if G_T_CONTIG:
-            g_base = _g_contig_base(g=g, bos=bos, i_b=i_b, i_h=i_h, T_seq=T_seq, HV=HV, IS_VARLEN=IS_VARLEN)
-            b_g_last = tl.load(g_base + last_idx).to(tl.float32)
-        else:
-            g_base = g + bos * HV + i_h
-            b_g_last = tl.load(g_base + tl.cast(last_idx, tl.int64) * HV).to(tl.float32)
+            h_ptr = h + (tl.cast(i_tg, tl.int64) * HV + i_h) * K * V
+            dh_ptr = dh + (tl.cast(i_tg, tl.int64) * HV + i_h) * K * V
+            last_idx = min(tl.cast(i_t, tl.int64) * BT + BT, T_cur) - 1
+            if G_T_CONTIG:
+                g_base = _g_contig_base(g=g, bos=bos, i_b=i_b, i_h=i_h, T_seq=T_seq, HV=HV, IS_VARLEN=IS_VARLEN)
+                b_g_last = tl.load(g_base + last_idx).to(tl.float32)
+            else:
+                g_base = g + bos * HV + i_h
+                b_g_last = tl.load(g_base + tl.cast(last_idx, tl.int64) * HV).to(tl.float32)
 
-        acc = 0.0
-        for i_k in range(tl.cdiv(K, BK)):
-            for i_v in range(tl.cdiv(V, BV)):
-                if STATE_V_FIRST:
-                    o_v = i_v * BV + tl.arange(0, BV)
-                    m_v = (o_v >= 0) & (o_v < V)
-                    o_k = i_k * BK + tl.arange(0, BK)
-                    m_k = (o_k >= 0) & (o_k < K)
-                    m_p_h = m_v[:, None] & m_k[None, :]
-                    p_h = h_ptr + o_v[:, None] * K + o_k[None, :]
-                    p_dh = dh_ptr + o_v[:, None] * K + o_k[None, :]
-                else:
-                    o_v = i_v * BV + tl.arange(0, BV)
-                    m_v = (o_v >= 0) & (o_v < V)
-                    o_k = i_k * BK + tl.arange(0, BK)
-                    m_k = (o_k >= 0) & (o_k < K)
-                    # Sum is layout-invariant; load the V-contiguous [BK, BV] tile.
-                    m_p_h = m_k[:, None] & m_v[None, :]
-                    p_h = h_ptr + o_k[:, None] * V + o_v[None, :]
-                    p_dh = dh_ptr + o_k[:, None] * V + o_v[None, :]
-                b_h = mload(p_h, m_p_h, MASK_DMA).to(tl.float32)
-                b_dh = mload(p_dh, m_p_h, MASK_DMA).to(tl.float32)
-                if MASK_DMA:
-                    b_h = tl.where(m_p_h, b_h, 0)
-                    b_dh = tl.where(m_p_h, b_dh, 0)
-                acc += tl.sum(b_h * b_dh)
+            acc = 0.0
+            for i_k in range(tl.cdiv(K, BK)):
+                for i_v in range(tl.cdiv(V, BV)):
+                    if STATE_V_FIRST:
+                        o_v = i_v * BV + tl.arange(0, BV)
+                        m_v = (o_v >= 0) & (o_v < V)
+                        o_k = i_k * BK + tl.arange(0, BK)
+                        m_k = (o_k >= 0) & (o_k < K)
+                        m_p_h = m_v[:, None] & m_k[None, :]
+                        p_h = h_ptr + o_v[:, None] * K + o_k[None, :]
+                        p_dh = dh_ptr + o_v[:, None] * K + o_k[None, :]
+                    else:
+                        o_v = i_v * BV + tl.arange(0, BV)
+                        m_v = (o_v >= 0) & (o_v < V)
+                        o_k = i_k * BK + tl.arange(0, BK)
+                        m_k = (o_k >= 0) & (o_k < K)
+                        # Sum is layout-invariant; load the V-contiguous [BK, BV] tile.
+                        m_p_h = m_k[:, None] & m_v[None, :]
+                        p_h = h_ptr + o_k[:, None] * V + o_v[None, :]
+                        p_dh = dh_ptr + o_k[:, None] * V + o_v[None, :]
+                    b_h = mload(p_h, m_p_h, MASK_DMA).to(tl.float32)
+                    b_dh = mload(p_dh, m_p_h, MASK_DMA).to(tl.float32)
+                    if MASK_DMA:
+                        b_h = tl.where(m_p_h, b_h, 0)
+                        b_dh = tl.where(m_p_h, b_dh, 0)
+                    acc += tl.sum(b_h * b_dh)
 
-        dg_ptr = dg + bos * HV + i_h
-        p_last = dg_ptr + tl.cast(last_idx, tl.int64) * HV
-        tl.store(p_last, tl.load(p_last) + acc * exp2(b_g_last))
+            dg_ptr = dg + bos * HV + i_h
+            p_last = dg_ptr + tl.cast(last_idx, tl.int64) * HV
+            tl.store(p_last, tl.load(p_last) + acc * exp2(b_g_last))
 
 
 @triton.jit(do_not_specialize=['T'])
@@ -1415,6 +1469,7 @@ def chunk_dg_bwd_kernel(
     K_OFFSET: tl.constexpr,
     NT_OFFSET: tl.constexpr,
     BH_OFFSET: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
 ):
     """dg kernel: b_dg_last + sum(dq*q) - sum(dk*k) from fp32 scratch."""
     i_k = tl.program_id(0) + K_OFFSET
@@ -1427,6 +1482,8 @@ def chunk_dg_bwd_kernel(
     if IS_VARLEN:
         i_tg = i_t
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        if USE_GRAPH and i_n < 0:
+            return
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = (eos - bos).to(tl.int32)
     else:
@@ -1565,9 +1622,12 @@ def chunk_bwd_dv_local_npu(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
+    use_graph: bool = False,
 ) -> torch.Tensor:
     B, T, H, K, V, HV = *k.shape, do.shape[-1], do.shape[2]
     BT = chunk_size
+    if use_graph and (cu_seqlens is None or chunk_indices is None):
+        raise ValueError("GDN graph backward requires fixed chunk indices and cu_seqlens.")
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens=cu_seqlens, chunk_size=BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
@@ -1605,7 +1665,7 @@ def chunk_bwd_dv_local_npu(
 
     use_g = g is not None
     use_g_gamma = g_gamma is not None
-    masked_launch = time_axis_needs_mask(T, BT, cu_seqlens)
+    masked_launch = use_graph or time_axis_needs_mask(T, BT, cu_seqlens)
     full_tiles = _get_dv_full_tiles(BT=BT, K=K, V=V)
     if masked_launch and max(K, V) > 64 and full_tiles is not None:
         full_tiles = min(full_tiles[0], 32), min(full_tiles[1], 32)
@@ -1628,7 +1688,7 @@ def chunk_bwd_dv_local_npu(
         g_arg = q
         g_t_contig = False
 
-    dv = torch.empty_like(do)
+    dv = (torch.zeros_like if use_graph else torch.empty_like)(do)
     kernel_kwargs = {
         'q': q,
         'k': k,
@@ -1651,10 +1711,11 @@ def chunk_bwd_dv_local_npu(
         'USE_G_GAMMA': use_g_gamma,
         'G_T_CONTIG': g_t_contig,
         'IS_VARLEN': cu_seqlens is not None,
+        'USE_GRAPH': use_graph,
     }
     if use_full:
         num_core = get_npu_properties()["num_aicore"]
-        if cu_seqlens is not None and not torch.npu.is_current_stream_capturing():
+        if cu_seqlens is not None and not use_graph and not torch.npu.is_current_stream_capturing():
             passes = _varlen_chunk_passes(cu_seqlens, chunk_indices, BT)
         else:
             passes = [(chunk_indices, cu_seqlens is not None or T % BT != 0)]
@@ -1701,9 +1762,12 @@ def chunk_bwd_dqkwg_npu(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
+    use_graph: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
     B, T, H, K, V, HV = *k.shape, v.shape[-1], v.shape[2]
     BT = chunk_size
+    if use_graph and (cu_seqlens is None or chunk_indices is None):
+        raise ValueError("GDN graph backward requires fixed chunk indices and cu_seqlens.")
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens=cu_seqlens, chunk_size=BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
@@ -1737,7 +1801,7 @@ def chunk_bwd_dqkwg_npu(
 
     use_dw = w is not None
     # ungated full-BT fails on a Cube-to-Cube tl.trans copy; gated paths flush ds through vector exp2.
-    masked_launch = time_axis_needs_mask(T, BT, cu_seqlens)
+    masked_launch = use_graph or time_axis_needs_mask(T, BT, cu_seqlens)
     full_tiles = _get_dqkwg_full_tiles(BT=BT, K=K, V=V, use_dw=use_dw)
     if masked_launch and max(K, V) > 64 and full_tiles is not None:
         full_tiles = min(full_tiles[0], 32), min(full_tiles[1], 32)
@@ -1747,7 +1811,7 @@ def chunk_bwd_dqkwg_npu(
         # gamma and masked loads keep extra buffers beyond the unmasked scalar-gate estimate.
         if g_gamma is not None:
             BK, BV = min(BK, 32), min(BV, 32)
-        elif need_dma_mask(T, BT, K, BK, V, BV, cu_seqlens is not None, cu_seqlens):
+        elif use_graph or need_dma_mask(T, BT, K, BK, V, BV, cu_seqlens is not None, cu_seqlens):
             BV = min(BV, 32)
         dqkwg_kernel = chunk_dqkwg_bwd_kernel_full
     else:
@@ -1755,18 +1819,23 @@ def chunk_bwd_dqkwg_npu(
         BK = _get_bk(K=K, BC=BC)
         BV = _get_bv(V=V, BC=BC)
         dqkwg_kernel = chunk_dqkwg_bwd_kernel
-        dq_f32 = torch.empty(B, T, HV, K, dtype=torch.float32, device=q.device)
-        dk_f32 = torch.empty(B, T, HV, K, dtype=torch.float32, device=q.device)
+        dq_f32 = (torch.zeros if use_graph else torch.empty)(B, T, HV, K, dtype=torch.float32, device=q.device)
+        dk_f32 = (torch.zeros if use_graph else torch.empty)(B, T, HV, K, dtype=torch.float32, device=q.device)
     NK = triton.cdiv(K, BK)
     if g is not None:
         g_arg, g_t_contig = _g_npu_arg(g=g, HV=HV)
     else:
         g_arg = q
         g_t_contig = False
-    dq = q.new_empty(B, T, HV, K)
-    dk = k.new_empty(B, T, HV, K)
-    dg = torch.empty(NK, *g.shape, dtype=torch.float32, device=g.device) if g is not None else None
-    dw = torch.empty_like(w) if use_dw else None
+    dq = (q.new_zeros if use_graph else q.new_empty)(B, T, HV, K)
+    dk = (k.new_zeros if use_graph else k.new_empty)(B, T, HV, K)
+    dg = (torch.zeros if use_graph else torch.empty)(
+        NK,
+        *g.shape,
+        dtype=torch.float32,
+        device=g.device,
+    ) if g is not None else None
+    dw = (torch.zeros_like if use_graph else torch.empty_like)(w) if use_dw else None
 
     dqkwg_kwargs = {
         'q': q,
@@ -1798,14 +1867,15 @@ def chunk_bwd_dqkwg_npu(
         'G_T_CONTIG': g_t_contig,
         'STATE_V_FIRST': state_v_first,
         'IS_VARLEN': cu_seqlens is not None,
+        'USE_GRAPH': use_graph,
     }
     if use_full:
         dqkwg_kwargs['dg'] = dg if dg is not None else dq
         dqkwg_kwargs['B'] = B
         num_core = get_npu_properties()["num_aicore"]
         if cu_seqlens is not None:
-            dqkwg_kwargs['chunk_offsets'] = prepare_chunk_offsets(cu_seqlens, BT)
-            if not torch.npu.is_current_stream_capturing():
+            dqkwg_kwargs['chunk_offsets'] = None if use_graph else prepare_chunk_offsets(cu_seqlens, BT)
+            if not use_graph and not torch.npu.is_current_stream_capturing():
                 passes = _varlen_chunk_passes(cu_seqlens, chunk_indices, BT)
             else:
                 passes = [(chunk_indices, True)]
@@ -1866,6 +1936,7 @@ def chunk_bwd_dqkwg_npu(
                 'G_T_CONTIG': g_t_contig,
                 'STATE_V_FIRST': state_v_first,
                 'IS_VARLEN': cu_seqlens is not None,
+                'USE_GRAPH': use_graph,
                 'K_OFFSET': 0,
                 'NT_OFFSET': 0,
                 'BH_OFFSET': 0,
@@ -1900,7 +1971,8 @@ def chunk_bwd_dqkwg_npu(
                 G_T_CONTIG=g_t_contig,
                 STATE_V_FIRST=state_v_first,
                 IS_VARLEN=cu_seqlens is not None,
-                MASK_DMA=need_dma_mask(T, BT, K, hdh_bk, V, hdh_bv, cu_seqlens is not None, cu_seqlens),
+                USE_GRAPH=use_graph,
+                MASK_DMA=use_graph or need_dma_mask(T, BT, K, hdh_bk, V, hdh_bv, cu_seqlens is not None, cu_seqlens),
             )
     if K_orig != K:
         dq = dq[..., :K_orig].contiguous()

@@ -71,6 +71,12 @@ class FlashQLABackend(BaseBackend):
         return_intermediate_states: bool = False,
         **kwargs,
     ) -> tuple[bool, str | None]:
+        if kwargs.get('use_graph', False):
+            return False, (
+                "use_graph=True selects FLA's NPU-specific graph execution path; skipping FlashQLA. "
+                "For GPU execution, omit use_graph or set it to False. "
+                "CUDA Graph capture is controlled separately by the caller."
+            )
         if not (IS_NVIDIA_HOPPER or IS_NVIDIA_SM100 or IS_NVIDIA_SM120):
             return False, "FlashQLA requires NVIDIA SM90, SM100/SM103 or SM120"
         if IS_NVIDIA_SM120 and _needs_backward(q, k, v, g, beta, initial_state):

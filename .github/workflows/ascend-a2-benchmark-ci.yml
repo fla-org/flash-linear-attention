@@ -96,6 +96,7 @@ jobs:
     env:
       FLA_CI_ENV: 1
       ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3"
+      GDN_TRITON_CACHE_DIR: ${{ github.workspace }}/.triton-gdn-cache
       KDA_TRITON_CACHE_DIR: ${{ github.workspace }}/.triton-kda-cache
       PRECOND_KDA_SHAPES: >-
         {"B1_T8192_H96_D128": {"B": 1, "T": 8192, "H": 96, "D": 128},
@@ -121,14 +122,22 @@ jobs:
           restore-keys: |
             triton-kda-${{ runner.os }}-${{ matrix.os }}-python-${{ matrix.python }}-cann-9.1.0-torch-2.10.0-torch-npu-2.10.0.post7-triton-ascend-3.6.0-
 
+      - name: Restore GDN Triton-Ascend kernel cache
+        id: gdn-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.GDN_TRITON_CACHE_DIR }}
+          key: >-
+            triton-gdn-${{ runner.os }}-${{ matrix.os }}-python-${{ matrix.python }}-cann-9.1.0-torch-2.10.0-torch-npu-2.10.0.post7-triton-ascend-3.6.0-${{ github.sha }}
+          restore-keys: |
+            triton-gdn-${{ runner.os }}-${{ matrix.os }}-python-${{ matrix.python }}-cann-9.1.0-torch-2.10.0-torch-npu-2.10.0.post7-triton-ascend-3.6.0-
+
       - name: Check NPU and CANN info
-        if: github.event_name != 'schedule' || steps.triton-cache.outputs.cache-hit != 'true'
         run: |
           cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -m)"-linux/ascend_toolkit_install.info
           npu-smi info
 
       - name: Install dependencies
-        if: github.event_name != 'schedule' || steps.triton-cache.outputs.cache-hit != 'true'
         run: |
           python -m pip install -U pip setuptools wheel
           # triton-ascend runtime/build deps; install before resolving [npu] extra
@@ -141,7 +150,7 @@ jobs:
             --extra-index-url=https://triton-ascend.osinfra.cn/pypi/simple
 
       - name: Verify environment
-        if: github.event_name != 'schedule' || steps.triton-cache.outputs.cache-hit != 'true'
+        id: gdn-environment
         shell: bash
         run: |
           source /usr/local/Ascend/ascend-toolkit/set_env.sh
@@ -231,8 +240,12 @@ jobs:
 
           (
             status=0
-            run_benchmark chunk_gdn 0 python -m benchmarks.ops.run \
-              --op chunk_gdn --base '' --json benchmark_chunk_gdn.json || status=1
+            if run_benchmark chunk_gdn 0 env TRITON_CACHE_DIR="$GDN_TRITON_CACHE_DIR" python -m benchmarks.ops.run \
+              --op chunk_gdn --base '' --json benchmark_chunk_gdn.json; then
+              echo "gdn_benchmark_succeeded=true" >> "$GITHUB_OUTPUT"
+            else
+              status=1
+            fi
             run_benchmark fused_recurrent_gdn2 0 python -m benchmarks.ops.run \
               --op fused_recurrent_gdn2 --base '' --json benchmark_fused_recurrent_gdn2.json || status=1
             run_benchmark fused_recurrent_oja 0 python -m benchmarks.ops.run \
@@ -327,6 +340,14 @@ jobs:
             status=1
           fi
 
+          if run_benchmark chunk_gdn_graph 0 env TRITON_CACHE_DIR="$GDN_TRITON_CACHE_DIR" python -m benchmarks.ops.run --graph \
+            --op chunk_gdn --no-base --modes fwd fwdbwd \
+            --warmup 3 --iterations 10 --json benchmark_gdn_graph.json; then
+            echo "gdn_graph_benchmark_succeeded=true" >> "$GITHUB_OUTPUT"
+          else
+            status=1
+          fi
+
           echo "========== chunk_gdn =========="
           cat chunk_gdn.log
           echo "========== fused_recurrent_gdn2 =========="
@@ -341,6 +362,7 @@ jobs:
           cat fused_attnres.log
           echo "========== chunk_kda graph =========="
           cat chunk_kda_graph.log
+          cat chunk_gdn_graph.log
           echo "========== conv1d =========="
           cat conv1d.log
           echo "========== chunk_momentum_delta =========="
@@ -492,6 +514,7 @@ jobs:
             benchmark_parallel_wall_attn.json
             benchmark_chunk_ttt.json
             benchmark_chunk_momentum_delta.json
+            benchmark_gdn_graph.json
             conv_benchmark/
           if-no-files-found: ignore
           retention-days: 10
@@ -578,3 +601,27 @@ jobs:
         with:
           path: ${{ env.KDA_TRITON_CACHE_DIR }}
           key: ${{ steps.triton-cache.outputs.cache-primary-key }}
+
+      - name: Save GDN Triton-Ascend kernel cache
+        if: |
+          always() && !cancelled() && steps.gdn-environment.outcome == 'success' &&
+          steps.benchmark.outputs.gdn_benchmark_succeeded == 'true' &&
+          steps.benchmark.outputs.gdn_graph_benchmark_succeeded == 'true' &&
+          steps.gdn-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.GDN_TRITON_CACHE_DIR }}
+          key: ${{ steps.gdn-cache.outputs.cache-primary-key }}
+
+      - name: Upload GDN benchmark reports and logs
+        if: always() && (github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request')
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: ascend-a2-gdn-benchmark
+          path: |
+            benchmark_chunk_gdn.json
+            benchmark_gdn_graph.json
+            chunk_gdn.log
+            chunk_gdn_graph.log
+          if-no-files-found: ignore
+          retention-days: 10
