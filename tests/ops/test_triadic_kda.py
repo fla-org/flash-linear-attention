@@ -207,8 +207,9 @@ def test_naive_varlen_rejects_multiple_batches(op):
         pytest.param(
             *test,
             id="B{}-T{}-H{}-K{}-V{}-E{}-scale{}-gate_scale{}-use_state{}-disable_recompute{}-{}".format(*test),
+            marks=pytest.mark.smoke if i == 0 else (),
         )
-        for test in [
+        for i, test in enumerate([
             (1, 63, 1, 64, 64, 1, 1.0, 0.2, True, False, torch.bfloat16),
             (1, 200, 2, 64, 64, 4, 1.0, 0.2, True, False, torch.float32),
             (2, 129, 3, 60, 64, 2, 1.0, 0.2, True, True, torch.bfloat16),
@@ -219,10 +220,11 @@ def test_naive_varlen_rejects_multiple_batches(op):
             (2, 100, 2, 8, 12, 3, 1.0, 0.2, True, False, torch.bfloat16),
             (1, 193, 2, 256, 128, 4, 1.0, 0.2, True, False, torch.bfloat16),
             (1, 129, 2, 128, 128, 6, 1.0, 0.2, True, True, torch.bfloat16),
+            (1, 131, 2, 64, 64, 20, 1.0, 0.2, False, False, torch.bfloat16),
             (1, 131, 2, 64, 64, 20, 1.0, 0.2, True, False, torch.bfloat16),
             (1, 131, 2, 64, 48, 20, 1.0, 0.2, True, True, torch.float16),
             (1, 129, 2, 32, 32, 72, None, 0.2, True, False, torch.bfloat16),
-        ]
+        ])
     ],
 )
 def test_chunk(
@@ -554,6 +556,8 @@ def test_chunk_varlen_and_in_kernel_gates(
 
 def test_chunk_validation():
     q, k, v, k2, q2, gk, g2, beta = _make_inputs(1, 16, 2, 32, 32, 4, 0.2, torch.bfloat16)
+    with pytest.raises(ValueError, match=r'\[B, T, H, D\]'):
+        chunk_triadic_kda(q[0], k[0], v[0], k2[0], q2[0], gk[0], g2[0], beta[0])
     with pytest.raises(ValueError, match='E >= 1'):
         chunk_triadic_kda(q, k, v, k2[..., :0], q2[..., :0], gk, g2[..., :0], beta)
     with pytest.raises(ValueError, match=r'\[1, 256\]'):

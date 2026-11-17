@@ -200,7 +200,7 @@ def _validate_inputs(
     allow_neg_eigval,
     lower_bound,
 ):
-    if k.ndim != 4:
+    if any(x.ndim != 4 for x in (q, k, v, k2, q2, gk, g2)):
         raise ValueError('chunk_triadic_kda expects [B, T, H, D] inputs.')
     B, T, H, K = k.shape
     E, V = k2.shape[-1], v.shape[-1]
@@ -214,7 +214,7 @@ def _validate_inputs(
         raise ValueError(f'v must have shape [B, T, H, V]={[B, T, H, V]}, got {list(v.shape)}.')
     if any(x.shape != (B, T, H, E) for x in (k2, q2, g2)):
         raise ValueError(f'k2, q2 and g2 must share shape [B, T, H, E]={[B, T, H, E]}.')
-    if beta.shape != (B, T, H):
+    if beta is not None and beta.shape != (B, T, H):
         raise ValueError(f'beta must have shape [B, T, H]={[B, T, H]}, got {list(beta.shape)}.')
 
     N = B
@@ -309,11 +309,13 @@ def chunk_triadic_kda(
             Whether to fuse `-exp(A_log) * softplus(gk + dt_bias)` and `-exp(A2_log) * softplus(g2 + dt2_bias)`
             (or `lower_bound * sigmoid(...)` when `lower_bound` is set) with intra-chunk cumsum. Default: `False`.
         A_log (torch.Tensor, Optional):
-            First-axis log decay scale of shape `[H]`. Default: `None`.
+            First-axis log decay scale of shape `[H]`; required when `use_gate_in_kernel=True` and `lower_bound` is `None`.
+            Default: `None`.
         dt_bias (torch.Tensor, Optional):
             First-axis decay bias of shape `[H * K]`. Default: `None`.
         A2_log (torch.Tensor, Optional):
-            Second-axis log decay scale of shape `[H]`. Default: `None`.
+            Second-axis log decay scale of shape `[H]`; required when `use_gate_in_kernel=True` and `lower_bound` is `None`.
+            Default: `None`.
         dt2_bias (torch.Tensor, Optional):
             Second-axis decay bias of shape `[H * E]`. Default: `None`.
         use_beta_sigmoid_in_kernel (bool, Optional):
@@ -334,10 +336,6 @@ def chunk_triadic_kda(
         final_state (torch.Tensor):
             FP32 final state of shape `[N, H, E, K, V]` if `output_final_state=True`, else `None`.
     """
-    B, T, H, K = k.shape
-    scale = K ** -0.5 if scale is None else scale
-    if beta is None:
-        beta = torch.ones(B, T, H, device=q.device, dtype=torch.float32)
     if not use_gate_in_kernel:
         A_log = dt_bias = A2_log = dt2_bias = lower_bound = None
     _validate_inputs(
@@ -361,6 +359,10 @@ def chunk_triadic_kda(
         allow_neg_eigval=allow_neg_eigval,
         lower_bound=lower_bound,
     )
+    B, T, H, K = k.shape
+    scale = K ** -0.5 if scale is None else scale
+    if beta is None:
+        beta = torch.ones(B, T, H, device=q.device, dtype=torch.float32)
     return ChunkTriadicKDAFunction.apply(
         q,
         k,
