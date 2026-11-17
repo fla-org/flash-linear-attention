@@ -948,19 +948,19 @@ def chunk_gated_delta_rule_fwd_h_pre_process_npu(
         fns = context.front_num_seqs
         if use_graph:
             from fla.ops.cp.chunk_delta_h import _graph_metadata
-            first, _, _, cu_parts = _graph_metadata(cu_seqlens, context)
+            first, _, _, last_windows = _graph_metadata(cu_seqlens, context)
         else:
-            cu_parts = (cu_seqlens[fns - 1: fns + 1], cu_seqlens[-2:])
+            last_windows = (cu_seqlens[fns - 1: fns + 1], cu_seqlens[-2:])
         hm = k.new_zeros(2, HV, K, V + K, dtype=torch.float32)
         if state_v_first:
             initial_state = k.new_zeros(N, HV, V, K, dtype=torch.float32)
         else:
             initial_state = k.new_zeros(N, HV, K, V, dtype=torch.float32)
         # each part exports the affine chain of its last segment, skipped when chain-last
-        for part, (cu_win, is_last) in enumerate(zip(
-                cu_parts, (False, False) if use_graph else context.is_last_by_part)):
+        for part, (last_window, is_last) in enumerate(zip(
+                last_windows, (False, False) if use_graph else context.is_last_by_part)):
             if not is_last:
-                launch_fwd(hm[part], cu_win)
+                launch_fwd(hm[part], last_window)
         ag_hm, _ = all_gather_into_tensor(hm, group=context.group)
         # chain order: front parts of ranks 0..W-1, then back parts of ranks W-1..0
         slots = torch.cat([ag_hm[:, 0], ag_hm[:, 1].flip(0)])
@@ -1108,19 +1108,19 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process_npu(
         fns = context.front_num_seqs
         if use_graph:
             from fla.ops.cp.chunk_delta_h import _graph_metadata
-            _, last, cu_parts, _ = _graph_metadata(cu_seqlens, context)
+            _, last, first_windows, _ = _graph_metadata(cu_seqlens, context)
         else:
-            cu_parts = (cu_seqlens[:2], cu_seqlens[fns: fns + 2])
+            first_windows = (cu_seqlens[:2], cu_seqlens[fns: fns + 2])
         dhm = q.new_zeros(2, HV, K, V + K, dtype=torch.float32)
         if state_v_first:
             dht = q.new_zeros(N, HV, V, K, dtype=torch.float32)
         else:
             dht = q.new_zeros(N, HV, K, V, dtype=torch.float32)
         # each part exports the backward affine chain of its first segment, skipped when chain-first
-        for part, (cu_win, is_first) in enumerate(zip(
-                cu_parts, (False, False) if use_graph else context.is_first_by_part)):
+        for part, (first_window, is_first) in enumerate(zip(
+                first_windows, (False, False) if use_graph else context.is_first_by_part)):
             if not is_first:
-                launch_bwd(dhm[part], cu_win)
+                launch_bwd(dhm[part], first_window)
         ag_dhm, _ = all_gather_into_tensor(dhm, group=context.group)
         # chain order: front parts of ranks 0..W-1, then back parts of ranks W-1..0
         slots = torch.cat([ag_dhm[:, 0], ag_dhm[:, 1].flip(0)])

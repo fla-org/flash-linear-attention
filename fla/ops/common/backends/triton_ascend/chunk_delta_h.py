@@ -1287,7 +1287,7 @@ def chunk_gated_delta_rule_fwd_h_npu(
     # Partial K/V tiles take the masked DMA path. That path keeps a second image
     # of the state plus the w/v operands: BK=128/BV=128 asks for 230528 B against
     # 192 KiB. Zero-pad features onto the selected tile so only sequence tails
-    # require masked DMA.
+    # require masked DMA (Direct Memory Access).
     K_orig, V_orig = K, V
     k_pad = triton.cdiv(K, BK) * BK
     v_pad = triton.cdiv(V, BV) * BV

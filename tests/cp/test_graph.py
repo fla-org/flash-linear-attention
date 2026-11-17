@@ -13,7 +13,7 @@ replays it with several cu_seqlens layouts (different splits and zero-length tai
 and compares against the eager CP path on the same shard.
 The recorded region includes cross-rank state all-gathers, so ranks must capture and replay in lockstep.
 NPU eager-parity and global-reference checks use separate tests; the latter
-also exposes existing backend precision discrepancies against the recurrent oracle.
+also exposes existing backend precision discrepancies against the CPU recurrent reference.
 """
 
 import inspect
@@ -181,21 +181,10 @@ def _run_graph(rank, world_size):
     dist.barrier()
 
 
+@pytest.mark.skipif(IS_NPU, reason='Ascend graph coverage is provided by test_chunk_kda_npu_graph_reference')
 def test_chunk_kda(run_distributed):
     # a communicator recorded by a graph must outlive the graph; worker exit reaps it
-    if IS_NPU:
-        run_distributed(
-            worker=_run_npu_graph,
-            world_size=2,
-            destroy_process_group=False,
-            capture='direct',
-            training=True,
-            dtype=torch.bfloat16,
-            options={'use_gate_in_kernel': True, 'chunk_size': 64},
-            reference='eager',
-        )
-    else:
-        run_distributed(worker=_run_graph, world_size=2, destroy_process_group=False)
+    run_distributed(worker=_run_graph, world_size=2, destroy_process_group=False)
 
 
 def _make_npu_inputs(
@@ -254,6 +243,109 @@ def _npu_global_reference(inputs, offsets, training, options):
     return result
 
 
+def _npu_replay_cases(total_tokens, world_size, layout):
+    """Exercise boundary changes and restoration within one captured graph."""
+    part = total_tokens // world_size
+    varlen_cases = [(tag, [offset * total_tokens // T for offset in offsets]) for tag, offsets in VARLEN_CASES]
+    cases = varlen_cases + [
+        ('quarter-aligned', [0, total_tokens // 4, total_tokens // 2, 3 * total_tokens // 4, total_tokens]),
+        ('one-token-boundary', [0, part - 1, part + 1, total_tokens, total_tokens]),
+    ]
+    if layout == 'zigzag':
+        cases += [
+            ('four-front-sequences', [0, 1, 2, 3, total_tokens]),
+            ('part-one-token-boundary', [0, part // 2 - 1, part // 2 + 1, total_tokens, total_tokens]),
+            ('split-empty-sequence', [0, total_tokens]),
+        ]
+    return cases + [
+        ('leading-empty-sequence', [0, total_tokens]),
+        ('internal-empty-sequence', [0, part // 4, part + part // 2, total_tokens]),
+        ('half-capacity', [0, 1, part // 2 + 1, total_tokens // 2, total_tokens // 2]),
+        varlen_cases[0],
+    ]
+
+
+def _npu_graph_results(o, leaves, active_names, *, training, actual_part, part):
+    """Snapshot replay outputs and gradients, checking unused token capacity before trimming it."""
+    result = {'o': o.detach().clone()}
+    if training:
+        result.update({name: leaves[name].grad.clone() for name in active_names})
+    if actual_part < part:
+        for name, tensor in result.items():
+            if name == 'o' or name in TOKEN_NAMES:
+                padding = tensor[:, actual_part:]
+                torch.testing.assert_close(padding, torch.zeros_like(padding), rtol=0, atol=0)
+                result[name] = tensor[:, :actual_part]
+    return result
+
+
+def _capture_npu_graph(forward, step, leaves, metadata, *, capture, rank):
+    """Warm up and capture in rank lockstep, returning the stream to keep its lifetime with the graph."""
+    logger.info('rank=%d: warmup (%s)', rank, capture)
+    stream = torch.npu.Stream()
+    stream.wait_stream(torch.npu.current_stream())
+    with torch.npu.stream(stream):
+        for _ in range(3):
+            step()
+    torch.npu.current_stream().wait_stream(stream)
+    torch.npu.synchronize()
+    dist.barrier()
+    logger.info('rank=%d: capture', rank)
+    output = None
+    if capture == 'direct':
+        captured = torch.npu.NPUGraph()
+        with torch.npu.graph(captured, stream=stream):
+            output = step()
+    else:
+        # release warmup autograd nodes before capturing forward and backward on a different stream.
+        for tensor in leaves.values():
+            tensor.grad = None
+        captured = torch.npu.make_graphed_callables(
+            forward,
+            tuple(leaves[name] for name in INPUT_NAMES) + metadata,
+            num_warmup_iters=0,
+            allow_unused_input=True,
+        )
+    torch.npu.synchronize()
+    logger.info('rank=%d: capture complete', rank)
+    return captured, output, stream
+
+
+def _npu_eager_reference(inputs, cu, call, *, active_names, actual_tokens, rank, world_size, layout, training):
+    """Run eager CP on the same shard with fresh leaves and current sequence boundaries."""
+    leaves = {
+        name: (shard_tensor(inputs[name][:, :actual_tokens], rank, world_size, layout)
+               if name in TOKEN_NAMES else inputs[name])
+        .detach().clone().requires_grad_(training)
+        for name in INPUT_NAMES
+    }
+    context = build_cp_context(cu, group=dist.group.WORLD, layout=layout)
+    o = call(leaves, context, use_graph=False)
+    result = {'o': o.detach()}
+    if training:
+        (o * shard_tensor(inputs['do'][:, :actual_tokens], rank, world_size, layout)).sum().backward()
+        result.update({name: leaves[name].grad for name in active_names})
+    return result
+
+
+def _check_npu_global_reference(tag, got, reference, *, rank, world_size, layout):
+    """Compare against CPU recurrence, deferring tolerance failures until all replay layouts finish."""
+    errors = []
+    actual_tokens = reference['o'].shape[1]
+    for name, actual in got.items():
+        expected = reference[name]
+        if name == 'o' or name in TOKEN_NAMES:
+            expected = shard_tensor(expected[:, :actual_tokens], rank, world_size, layout)
+        else:
+            dist.all_reduce(actual)
+        assert torch.isfinite(expected).all(), f'{tag}::{name} global reference is not finite'
+        try:
+            assert_close(f'{tag}::global::{name}', expected.to(actual.device).float(), actual.float(), ratio=8e-3)
+        except AssertionError as error:
+            errors.append(str(error))
+    return errors
+
+
 def _run_npu_graph(
     rank, world_size, capture, training, dtype, options, layout='contiguous', cu_dtype=torch.long,
     shape=(T, H, H, D, D), reference='global',
@@ -264,7 +356,7 @@ def _run_npu_graph(
     gate = options.get('use_gate_in_kernel', False)
     total_tokens = shape[0]
     part = total_tokens // world_size
-    varlen_cases = [(tag, [offset * total_tokens // T for offset in offsets]) for tag, offsets in VARLEN_CASES]
+    replay_cases = _npu_replay_cases(total_tokens, world_size, layout)
     group = dist.group.WORLD
 
     max_num_seqs = MAX_NUM_SEQS + 1
@@ -286,7 +378,7 @@ def _run_npu_graph(
             pre_dev.fill_(base.pre_num_ranks)
             post_dev.fill_(base.post_num_ranks)
 
-    base0 = build_cp_context(torch.tensor(varlen_cases[0][1], dtype=torch.long, device=device), group=group, layout=layout)
+    base0 = build_cp_context(torch.tensor(replay_cases[0][1], dtype=torch.long, device=device), group=group, layout=layout)
     refresh(base0)
     active_names = INPUT_NAMES if gate else TOKEN_NAMES
 
@@ -344,53 +436,19 @@ def _run_npu_graph(
             (o * do).sum().backward()
         return o
 
-    logger.info('rank=%d: warmup (%s)', rank, capture)
-    stream = torch.npu.Stream()
-    stream.wait_stream(torch.npu.current_stream())
-    with torch.npu.stream(stream):
-        for _ in range(3):
-            step()
-    torch.npu.current_stream().wait_stream(stream)
-    torch.npu.synchronize()
-    dist.barrier()
-    logger.info('rank=%d: capture', rank)
-    if capture == 'direct':
-        graph = torch.npu.NPUGraph()
-        with torch.npu.graph(graph, stream=stream):
-            o_captured = step()
-    else:
-        # release warmup autograd nodes before capturing forward and backward on a different stream.
-        for tensor in leaves.values():
-            tensor.grad = None
-        graphed = torch.npu.make_graphed_callables(
-            forward,
-            tuple(leaves[name] for name in INPUT_NAMES) + (cu_static, pre_dev, post_dev),
-            num_warmup_iters=0,
-            allow_unused_input=True,
-        )
-    torch.npu.synchronize()
-    logger.info('rank=%d: capture complete', rank)
+    captured, o_captured, _capture_stream = _capture_npu_graph(
+        forward=forward,
+        step=step,
+        leaves=leaves,
+        metadata=(cu_static, pre_dev, post_dev),
+        capture=capture,
+        rank=rank,
+    )
     captured_forward_calls = forward_calls
     capture_addresses = tuple(tensor.data_ptr() for tensor in (*leaves.values(), do))
     captured_output_address = o_captured.data_ptr() if capture == 'direct' else None
     captured_gradient_addresses = tuple(leaves[name].grad.data_ptr() for name in active_names) if capture == 'direct' else ()
     metadata_addresses = tuple(tensor.data_ptr() for tensor in (cu_static, pre_dev, post_dev))
-    replay_cases = varlen_cases + [
-        ('quarter-aligned', [0, total_tokens // 4, total_tokens // 2, 3 * total_tokens // 4, total_tokens]),
-        ('one-token-boundary', [0, part - 1, part + 1, total_tokens, total_tokens]),
-    ]
-    if layout == 'zigzag':
-        replay_cases += [
-            ('four-front-sequences', [0, 1, 2, 3, total_tokens]),
-            ('part-one-token-boundary', [0, part // 2 - 1, part // 2 + 1, total_tokens, total_tokens]),
-            ('split-empty-sequence', [0, total_tokens]),
-        ]
-    replay_cases += [
-        ('leading-empty-sequence', [0, total_tokens]),
-        ('internal-empty-sequence', [0, part // 4, part + part // 2, total_tokens]),
-        ('half-capacity', [0, 1, part // 2 + 1, total_tokens // 2, total_tokens // 2]),
-        varlen_cases[0],
-    ]
     global_reference_errors = []
     for seed, (tag, sequence_offsets) in enumerate(replay_cases, start=1):
         inputs = make_inputs(seed * 17)
@@ -414,10 +472,10 @@ def _run_npu_graph(
         dist.barrier()
         logger.info('rank=%d: replay %s', rank, tag)
         if capture == 'direct':
-            graph.replay()
+            captured.replay()
             o = o_captured
         else:
-            o = graphed(*(leaves[name] for name in INPUT_NAMES), cu_static, pre_dev, post_dev)
+            o = captured(*(leaves[name] for name in INPUT_NAMES), cu_static, pre_dev, post_dev)
             if training:
                 (o * do).sum().backward()
         torch.npu.synchronize()
@@ -426,30 +484,21 @@ def _run_npu_graph(
             assert tuple(tensor.data_ptr() for tensor in (*leaves.values(), do)) == capture_addresses
             assert o.data_ptr() == captured_output_address
             assert tuple(leaves[name].grad.data_ptr() for name in active_names) == captured_gradient_addresses
-        got = {'o': o.detach().clone()}
-        if training:
-            got.update({name: leaves[name].grad.clone() for name in active_names})
-        if actual_part < part:
-            for name, tensor in got.items():
-                if name == 'o' or name in TOKEN_NAMES:
-                    padding = tensor[:, actual_part:]
-                    torch.testing.assert_close(padding, torch.zeros_like(padding), rtol=0, atol=0)
-                    got[name] = tensor[:, :actual_part]
+        got = _npu_graph_results(o, leaves, active_names, training=training, actual_part=actual_part, part=part)
         assert tuple(tensor.data_ptr() for tensor in (cu_static, pre_dev, post_dev)) == metadata_addresses
         dist.barrier()
 
-        # eager CP reference on the same shard
-        ref_leaves = {
-            name: (shard_tensor(inputs[name][:, :actual_tokens], rank, world_size, layout)
-                   if name in TOKEN_NAMES else inputs[name])
-            .detach().clone().requires_grad_(training)
-            for name in INPUT_NAMES
-        }
-        o = call(ref_leaves, build_cp_context(cu, group=group, layout=layout), use_graph=False)
-        ref = {'o': o.detach()}
-        if training:
-            (o * shard_tensor(inputs['do'][:, :actual_tokens], rank, world_size, layout)).sum().backward()
-            ref.update({name: ref_leaves[name].grad for name in active_names})
+        ref = _npu_eager_reference(
+            inputs,
+            cu,
+            call,
+            active_names=active_names,
+            actual_tokens=actual_tokens,
+            rank=rank,
+            world_size=world_size,
+            layout=layout,
+            training=training,
+        )
         dist.barrier()
 
         for name in got:
@@ -460,18 +509,9 @@ def _run_npu_graph(
         if reference == 'eager':
             continue
         global_reference = _npu_global_reference(inputs, sequence_offsets, training, options)
-        for name, actual in got.items():
-            expected = global_reference[name]
-            if name == 'o' or name in TOKEN_NAMES:
-                expected = shard_tensor(expected[:, :actual_tokens], rank, world_size, layout)
-            else:
-                dist.all_reduce(actual)
-            assert torch.isfinite(expected).all(), f'{tag}::{name} global reference is not finite'
-            # finish every replay layout before reporting global reference discrepancies.
-            try:
-                assert_close(f'{tag}::global::{name}', expected.to(device).float(), actual.float(), ratio=8e-3)
-            except AssertionError as error:
-                global_reference_errors.append(str(error))
+        global_reference_errors.extend(
+            _check_npu_global_reference(tag, got, global_reference, rank=rank, world_size=world_size, layout=layout),
+        )
 
     # captured communicators must outlive their graphs; process exit reaps them.
     dist.barrier()

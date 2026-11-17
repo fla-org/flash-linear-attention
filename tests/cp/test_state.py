@@ -256,13 +256,13 @@ def _native_summary(monkeypatch, forward=False):
 
 @pytest.mark.skipif(not IS_NPU, reason="requires Ascend summary kernels")
 @pytest.mark.parametrize(('K', 'dtype', 'gate'), SUMMARY_CASES)
-def test_chunk_bwd_partial_key_summary(K, dtype, gate):
+def test_chunk_bwd_summary(K, dtype, gate):
     _check_chunk_summary(K, dtype, gate, chunk_cp_bwd_dh)
 
 
 @pytest.mark.skipif(not IS_NPU, reason="requires Ascend summary kernels")
 @pytest.mark.parametrize(('K', 'dtype', 'gate'), SUMMARY_CASES)
-def test_chunk_bwd_npu_summary(monkeypatch, K, dtype, gate):
+def test_chunk_bwd_summary_npu(monkeypatch, K, dtype, gate):
     _check_chunk_summary(K, dtype, gate, _native_summary(monkeypatch), chunk_size=64)
 
 
@@ -274,5 +274,5 @@ def test_chunk_fwd_summary(K, dtype, gate):
 
 @pytest.mark.skipif(not IS_NPU, reason="requires Ascend summary kernels")
 @pytest.mark.parametrize(('K', 'dtype', 'gate'), SUMMARY_CASES)
-def test_chunk_fwd_npu_summary(monkeypatch, K, dtype, gate):
+def test_chunk_fwd_summary_npu(monkeypatch, K, dtype, gate):
     _check_chunk_summary(K, dtype, gate, _native_summary(monkeypatch, forward=True), forward=True, chunk_size=64)

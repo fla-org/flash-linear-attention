@@ -24,6 +24,33 @@ def cp_graph_metadata_kernel(
     NUM_PARTS: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
+    """Build first/last sequence metadata for context-parallel (CP) graph replay on Ascend.
+
+    Read the current device boundaries on every replay so metadata follows in-place sequence-length updates.
+    Empty sequence slots keep their row IDs but are excluded when selecting each part's first and last rows.
+    A part with no nonempty rows uses first=0 and last=-1; its invalid last-row window is filled with zeros.
+    Outputs are written into caller-owned buffers; the kernel is launched with one program.
+
+    Args:
+        cu_seqlens (pointer):
+            Nondecreasing cumulative token offsets for this rank's local buffer, with N + 1 entries starting at zero.
+            Equal adjacent offsets represent an empty sequence slot. The final entry is the local token count.
+        indices (pointer):
+            Contiguous int64 output of length 2 * NUM_PARTS: all first-row IDs followed by all last-row IDs.
+            IDs refer to the original sequence slots, including empty slots, rather than a compacted list.
+        windows (pointer):
+            Contiguous output with the same integer dtype as cu_seqlens, viewed as [2 * NUM_PARTS, 2].
+            Each row holds a selected sequence's [start, end) token offsets; row order matches indices.
+        N (tl.constexpr):
+            Number of sequence slots in cu_seqlens, including empty and reserved slots.
+        CU_STRIDE (tl.constexpr):
+            Distance in elements between adjacent cu_seqlens entries.
+        NUM_PARTS (tl.constexpr):
+            1 for a contiguous local buffer; 2 for a zigzag buffer stored in front/back order.
+            Zigzag parts have equal token counts, with a sequence boundary at half the local token count.
+        BLOCK (tl.constexpr):
+            Power-of-two number of sequence slots scanned per loop iteration, bounding the reduction tile size.
+    """
     total = tl.load(cu_seqlens + tl.cast(N, tl.int64) * CU_STRIDE).to(tl.int64)
     first_front = tl.full((), N, tl.int64)
     first_back = tl.full((), N, tl.int64)
@@ -39,6 +66,7 @@ def cp_graph_metadata_kernel(
         front = active & (starts < total // 2) if NUM_PARTS == 2 else active
         back = active & (starts >= total // 2)
         # empty sequences retain their row IDs, so counts cannot locate part boundaries.
+        # reduce tile-local int32 lanes, then add the int64 base to preserve large row offsets.
         local_first_front = tl.min(tl.where(front, lanes, BLOCK), 0)
         local_first_back = tl.min(tl.where(back, lanes, BLOCK), 0)
         local_last_front = tl.max(tl.where(front, lanes, -1), 0)
@@ -62,6 +90,7 @@ def cp_graph_metadata_kernel(
         seq = tl.where(row == 0, first_front, tl.where(row == 1, first_back, tl.where(row == 2, last_front, last_back)))
     else:
         seq = tl.where(row == 0, first_front, last_front)
+    # each selected row contributes its two adjacent cumulative offsets: [start, end).
     # empty metadata has no final segment; do not read before the sequence buffer.
     bounds = tl.load(cu_seqlens + (seq + lanes % 2) * CU_STRIDE, (seq >= 0) & (seq < N), other=0)
     tl.store(windows + lanes, bounds)

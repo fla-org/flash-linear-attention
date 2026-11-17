@@ -78,9 +78,9 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
     if context.layout == 'zigzag':
         if use_graph:
             assert context.pre_num_ranks_dev is not None, "use_graph with CP requires context.pre_num_ranks_dev"
-            first, _, _, cu_parts = _graph_metadata(cu_seqlens, context)
+            first, _, _, last_windows = _graph_metadata(cu_seqlens, context)
         else:
-            cu_parts = (cu_seqlens[context.front_num_seqs - 1: context.front_num_seqs + 1], cu_seqlens[-2:])
+            last_windows = (cu_seqlens[context.front_num_seqs - 1: context.front_num_seqs + 1], cu_seqlens[-2:])
         front_num_seqs = context.front_num_seqs
         hm = k.new_zeros(2, HV, K, V + K, dtype=torch.float32)
         if state_v_first:
@@ -88,8 +88,8 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
         else:
             initial_state = k.new_zeros(N, HV, K, V, dtype=torch.float32)
         # each part exports the affine chain of its last segment, skipped when chain-last
-        for i_part, (cu_seqlens_part, is_last) in enumerate(zip(
-            cu_parts,
+        for i_part, (last_window, is_last) in enumerate(zip(
+            last_windows,
             (False, False) if use_graph else context.is_last_by_part,
         )):
             if not is_last:
@@ -102,7 +102,7 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
                     gk=gk,
                     bg=bg,
                     v=v,
-                    cu_seqlens=cu_seqlens_part,
+                    cu_seqlens=last_window,
                     chunk_size=chunk_size,
                 )
         ag_hm, _ = all_gather_into_tensor(hm, group=context.group)
@@ -199,9 +199,9 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
     if context.layout == 'zigzag':
         if use_graph:
             assert context.post_num_ranks_dev is not None, "use_graph with CP requires context.post_num_ranks_dev"
-            _, last, cu_parts, _ = _graph_metadata(cu_seqlens, context)
+            _, last, first_windows, _ = _graph_metadata(cu_seqlens, context)
         else:
-            cu_parts = (cu_seqlens[:2], cu_seqlens[context.front_num_seqs: context.front_num_seqs + 2])
+            first_windows = (cu_seqlens[:2], cu_seqlens[context.front_num_seqs: context.front_num_seqs + 2])
         front_num_seqs = context.front_num_seqs
         dhm = q.new_zeros(2, HV, K, V + K, dtype=torch.float32)
         if state_v_first:
@@ -209,8 +209,8 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
         else:
             dht = q.new_zeros(N, HV, K, V, dtype=torch.float32)
         # each part exports the backward affine chain of its first segment, skipped when chain-first
-        for i_part, (cu_seqlens_part, is_first) in enumerate(zip(
-            cu_parts,
+        for i_part, (first_window, is_first) in enumerate(zip(
+            first_windows,
             (False, False) if use_graph else context.is_first_by_part,
         )):
             if not is_first:
@@ -225,7 +225,7 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
                     gk=gk,
                     bg=bg,
                     scale=scale,
-                    cu_seqlens=cu_seqlens_part,
+                    cu_seqlens=first_window,
                     chunk_size=chunk_size,
                 )
         ag_dhm, _ = all_gather_into_tensor(dhm, group=context.group)

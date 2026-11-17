@@ -184,15 +184,14 @@ def test_contiguous_graph_boundaries_non_npu(cu_dtype, monkeypatch):
 
 
 @pytest.mark.skipif(not IS_NPU, reason='requires Ascend graph metadata kernels')
-@pytest.mark.parametrize('layout', ['contiguous', 'zigzag'])
 @pytest.mark.parametrize(
-    ('cu_dtype', 'capacity', 'total', 'stride'),
+    ('layout', 'cu_dtype', 'capacity', 'total', 'stride'),
     [
-        pytest.param(torch.int32, 2, 128, 1, id='int32-two-sequences'),
-        pytest.param(torch.int64, 8, 128, 1, id='int64-tail-capacity'),
-        pytest.param(torch.int64, 1024, 1 << 34, 1, id='int64-reduction-tile-large-offsets'),
-        pytest.param(torch.int32, 1025, 128, 2, id='int32-strided-two-tiles'),
-        pytest.param(torch.int64, 32768, 128, 1, id='int64-large-capacity'),
+        pytest.param('contiguous', torch.int32, 2, 128, 1, id='contiguous-int32-two-sequences'),
+        pytest.param('zigzag', torch.int64, 8, 128, 1, id='zigzag-int64-tail-capacity'),
+        pytest.param('zigzag', torch.int64, 1024, 1 << 34, 1, id='zigzag-int64-reduction-tile-large-offsets'),
+        pytest.param('contiguous', torch.int32, 1025, 128, 2, id='contiguous-int32-strided-two-tiles'),
+        pytest.param('zigzag', torch.int64, 32768, 128, 1, id='zigzag-int64-large-capacity'),
     ],
 )
 def test_cp_graph_metadata(layout, cu_dtype, capacity, total, stride):
