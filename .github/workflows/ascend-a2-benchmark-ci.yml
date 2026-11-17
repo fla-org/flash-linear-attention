@@ -307,19 +307,16 @@ jobs:
               --op chunk_ttt --base '' --json benchmark_chunk_ttt.json \
               --custom-shapes '{"B8_T1024_H8_D64": {"B": 8, "T": 1024, "H": 8, "D": 64}, "B4_T4096_H32_D64": {"B": 4, "T": 4096, "H": 32, "D": 64}, "B8_T2048_H16_D64": {"B": 8, "T": 2048, "H": 16, "D": 64}, "B1_T16384_H16_D64": {"B": 1, "T": 16384, "H": 16, "D": 64}}' \
               > chunk_ttt.log 2>&1
+            ASCEND_RT_VISIBLE_DEVICES=3 python -m benchmarks.ops.run \
+              --op parallel_parallax --base '' --json benchmark_parallel_parallax.json \
+              > parallel_parallax.log 2>&1
           ) &
           pid_precond_gdn=$!
-
-          ASCEND_RT_VISIBLE_DEVICES=3 python -m benchmarks.ops.run \
-            --op parallel_parallax --base '' --json benchmark_parallel_parallax.json \
-            > parallel_parallax.log 2>&1 &
-          pid_parallel_parallax=$!
 
           wait "$pid_gdn" || status=1
           wait "$pid_kda" || status=1
           wait "$pid_attnres" || status=1
           wait "$pid_precond_gdn" || status=1
-          wait "$pid_parallel_parallax" || status=1
 
           # The runner exposes devices 0-3. Reuse device 0 only after the
           # parallel benchmarks finish so graph latency is not affected by
