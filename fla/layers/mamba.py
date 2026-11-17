@@ -186,7 +186,8 @@ class Mamba(nn.Module):
         # 1. Gated MLP's linear projection
         projected_states = self.in_proj(hidden_states).transpose(1, 2)
 
-        if self.training and not use_cache:
+        # the fused kernel has no hook for the padding mask, so hand masked batches to the unfused path
+        if self.training and not use_cache and attention_mask is None:
             contextualized_states = mamba_inner_fn(
                 projected_states,
                 self.conv1d.weight,
