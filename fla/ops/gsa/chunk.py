@@ -30,6 +30,7 @@ class ChunkGSAFunction(torch.autograd.Function):
         hk0: torch.Tensor | None,
         hv0: torch.Tensor | None,
         output_final_state: bool,
+        state_v_first: bool,
         checkpoint_level: int,
         cu_seqlens: torch.LongTensor | None,
         cu_seqlens_cpu: torch.LongTensor | None,
@@ -62,9 +63,10 @@ class ChunkGSAFunction(torch.autograd.Function):
             v=v,
             s=s,
             g=g,
+            scale=scale,
             initial_state=(hk0, hv0),
             output_final_state=output_final_state,
-            scale=scale,
+            state_v_first=state_v_first,
             cu_seqlens=cu_seqlens,
             chunk_size=chunk_size,
             chunk_indices=chunk_indices,
@@ -94,6 +96,7 @@ class ChunkGSAFunction(torch.autograd.Function):
         ctx.scale = scale
         ctx.cu_seqlens = cu_seqlens
         ctx.chunk_size = chunk_size
+        ctx.state_v_first = state_v_first
         return ov, hkt, hvt
 
     @staticmethod
@@ -140,11 +143,12 @@ class ChunkGSAFunction(torch.autograd.Function):
             scale=scale,
             do=dov,
             dht=(dhkt, dhvt),
+            state_v_first=ctx.state_v_first,
             cu_seqlens=cu_seqlens,
             chunk_size=chunk_size,
             chunk_indices=chunk_indices,
         )
-        return dq, dk, dv, ds, dg, None, dhk0, dhv0, None, None, None, None, None
+        return dq, dk, dv, ds, dg, None, dhk0, dhv0, None, None, None, None, None, None
 
 
 @torch.compiler.disable
@@ -157,6 +161,7 @@ def chunk_gsa(
     scale: float | None = None,
     initial_state: tuple[torch.Tensor, torch.Tensor] | None = None,
     output_final_state: bool = False,
+    state_v_first: bool = False,
     checkpoint_level: int = 2,
     cu_seqlens: torch.LongTensor | None = None,
     cu_seqlens_cpu: torch.LongTensor | None = None,
@@ -180,12 +185,16 @@ def chunk_gsa(
             Scale factor for attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         initial_state (Optional[Tuple[torch.Tensor]]):
-            Initial state tuple having tensors of shape `[N, H, K, M]` and `[N, H, M, V]` for `N` input sequences.
+            Initial states of shape `[N, H, K, M]` and `[N, H, M, V]` for `N` input sequences,
+            or `[N, H, M, K]` and `[N, H, V, M]` if `state_v_first=True`.
             For equal-length input sequences, `N` equals the batch size `B`.
             Default: `None`.
         output_final_state (Optional[bool]):
-            Whether to output the final state tuple, having tensors of shape `[N, H, K, M]` and `[N, H, M, V]`.
+            Whether to output the final states in the layout selected by `state_v_first`.
             Default: `False`.
+        state_v_first (bool, Optional):
+            Store the recurrent states in V-first `[M, K]` and `[V, M]` layouts.
+            Initial/final states and their gradients follow the selected layout. Default: `False`.
         checkpoint_level (Optional[int]):
             Checkpointing level; higher values will save more memory and do more recomputations during backward.
             Default: `2`.
@@ -202,8 +211,9 @@ def chunk_gsa(
         o (torch.Tensor):
             Outputs of shape `[B, T, HQ, V]`.
         final_state (Tuple[torch.Tensor]):
-            Final state tuple having tensors of shape `[N, H, K, M]` and `[N, H, M, V]` if `output_final_state=True`.
-            Both entries are `None` otherwise.
+            Final states of shape `[N, H, K, M]` and `[N, H, M, V]`,
+            or `[N, H, M, K]` and `[N, H, V, M]` if `state_v_first=True`.
+            Both entries are `None` if `output_final_state=False`.
 
     Examples::
         >>> import torch
@@ -286,6 +296,7 @@ def chunk_gsa(
         hk0,
         hv0,
         output_final_state,
+        state_v_first,
         checkpoint_level,
         cu_seqlens,
         cu_seqlens_cpu,

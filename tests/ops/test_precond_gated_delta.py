@@ -7,18 +7,54 @@
 
 # Tests for preconditioned gated delta rule kernel
 
+import math
 import os
 
 import pytest
 import torch
 import torch.nn.functional as F
 
+from fla.ops.atk import chunk_atk_fwd
 from fla.ops.precond_gated_delta_rule import (
     chunk_precond_gated_delta_rule,
     fused_recurrent_precond_gated_delta_rule,
 )
 from fla.ops.precond_gated_delta_rule.naive import naive_recurrent_precond_gated_delta_rule
-from fla.utils import assert_close, device
+from fla.utils import IS_NPU, assert_close, device
+
+
+@pytest.mark.skipif(not IS_NPU, reason='Triton-Ascend ATK path requires NPU')
+def test_chunk_atk_fwd_small_feature_dim():
+    torch.manual_seed(42)
+    B, T, H, D = 1, 35, 1, 8
+    x = 1.5
+    eps = 1e-6
+    k = torch.randn(B, T, H, D, dtype=torch.float32, device=device)
+    beta = torch.rand(B, T, H, dtype=torch.float32, device=device)
+    log_g = -torch.rand(B, T, H, dtype=torch.float32, device=device) * 0.1
+    log_atk_scale = torch.zeros(H, dtype=torch.float32, device=device)
+
+    actual_kp, actual_state = chunk_atk_fwd(
+        k=k,
+        beta=beta,
+        log_g=log_g,
+        output_final_state=True,
+        x=x,
+        eps=eps,
+        log_atk_scale=log_atk_scale,
+    )
+
+    state = torch.zeros(B, H, D, dtype=torch.float32, device=device)
+    expected_kp = []
+    for t in range(T):
+        state = log_g[:, t, :, None].exp() * state + beta[:, t, :, None] * k[:, t].square()
+        r = torch.log(state + eps) - log_atk_scale[None, :, None]
+        s = r / (1 + r.abs())
+        expected_kp.append(k[:, t] * torch.exp(-math.log(x) * s))
+    expected_kp = torch.stack(expected_kp, dim=1)
+
+    assert_close('k_precond', expected_kp, actual_kp, 1e-5)
+    assert_close('final_state', state, actual_state, 1e-5)
 
 
 @pytest.mark.parametrize(
@@ -121,6 +157,9 @@ def test_fused_recurrent(
             (4, 1024, 4, 128, 0.1, 1, 0, True, torch.float16),
             (2, 1500, 4, 128, 0.1, 10, 0, False, torch.float16),
             (4, 2048, 8, 64, 0.1, 1, 0, False, torch.float16),
+            (1, 75, 1, 129, 0.1, 1, 0, False, torch.float16),
+            (1, 33, 1, 256, 0.1, 1, 0, False, torch.float16),
+            (1, 129, 1, 256, 0.1, 1, 0, False, torch.float16),
         ]
     ],
 )
@@ -234,6 +273,8 @@ def test_chunk(
             (4, 64, 0, [0, 256, 500, 1000]),
             (4, 64, 0.5, [0, 256, 500, 1000]),
             (4, 100, 0, [0, 15, 100, 300, 1200, 2000]),
+            (1, 129, 0, [0, 75, 110]),
+            (1, 256, 0, [0, 75, 110]),
         ]
     ],
 )
