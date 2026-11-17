@@ -10,6 +10,7 @@ import triton
 import triton.language as tl
 from einops import reduce
 
+from fla.backends import dispatch
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp2
 from fla.utils import IS_NVIDIA_BLACKWELL, autocast_custom_bwd, autocast_custom_fwd, check_shared_mem, contiguous
@@ -756,6 +757,7 @@ class ParallaxFunction(torch.autograd.Function):
         return gq.to(q), gr.to(r), gk.to(k), gv.to(v), None, None, None
 
 
+@dispatch('parallax')
 def parallel_parallax(
     q: torch.Tensor,
     r: torch.Tensor,
