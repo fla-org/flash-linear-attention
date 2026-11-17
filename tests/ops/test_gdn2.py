@@ -912,6 +912,55 @@ def test_chunk_bwd_intra_npu_saved_state(monkeypatch):
     spy.assert_called_once()
 
 
+@pytest.mark.skipif(not IS_NPU, reason='Ascend packed WY layout selection')
+@pytest.mark.parametrize(
+    ('K', 'V', 'dtype', 'state_v_first', 'disable_recompute'),
+    [
+        (48, 32, torch.float16, False, False), (32, 48, torch.bfloat16, True, True),
+        (256, 256, torch.float16, False, True), (256, 256, torch.bfloat16, False, False),
+        (256, 256, torch.float32, False, False),
+    ],
+)
+def test_chunk_bwd_wy_npu_packed_layout(K, V, dtype, state_v_first, disable_recompute, monkeypatch):
+    """Small packed WY batches select their input layout and retain reference gradients."""
+    from fla.ops.gdn2.backends.triton_ascend import chunk_bwd
+
+    kernel = chunk_bwd.chunk_gdn2_bwd_kernel_wy_v_part_npu
+    spy = Mock(wraps=kernel.run)
+    layout_spy = Mock(wraps=chunk_bwd.prepare_time_contiguous_input)
+    monkeypatch.setattr(kernel, 'run', spy)
+    monkeypatch.setattr(chunk_bwd, 'prepare_time_contiguous_input', layout_spy)
+    test_chunk_varlen(
+        cu_seqlens=[0, 15, 80, 145], H=2, K=K, V=V, use_gate_in_kernel=False,
+        dtype=dtype, state_v_first=state_v_first, disable_recompute=disable_recompute,
+    )
+    assert layout_spy.call_count == 7
+    modes = {call.kwargs['transpose'] for call in layout_spy.call_args_list}
+    assert len(modes) == 1
+    spy.assert_called_once()
+    assert spy.call_args.kwargs['T_CONTIG'] is modes.pop()
+
+
+@pytest.mark.skipif(not IS_NPU, reason='Ascend packed WY layout boundary')
+@pytest.mark.parametrize('V', [32, 512])
+@pytest.mark.parametrize('above_wave', [False, True])
+def test_chunk_bwd_wy_npu_packed_wave_boundary(above_wave, V, monkeypatch):
+    """Both sides of one vector-core wave preserve reference gradients."""
+    from fla.ops.gdn2.backends.triton_ascend import chunk_bwd
+
+    tiles = triton.cdiv(V, chunk_bwd.get_bwd_tile(V, 32))
+    H = max(1, chunk_bwd.get_npu_properties()['num_vectorcore'] // (5 * tiles)) + int(above_wave)
+    kernel = chunk_bwd.chunk_gdn2_bwd_kernel_wy_v_part_npu
+    spy = Mock(wraps=kernel.run)
+    monkeypatch.setattr(kernel, 'run', spy)
+    test_chunk_varlen(
+        cu_seqlens=[0, 15, 80, 145], H=H, K=32, V=V, use_gate_in_kernel=False,
+        dtype=torch.bfloat16, state_v_first=False, disable_recompute=False,
+    )
+    spy.assert_called_once()
+    assert spy.call_args.kwargs['T_CONTIG'] is above_wave
+
+
 @pytest.mark.parametrize(
     ('K', 'dtype', 'chunk_size', 'on_npu', 'ub_kib', 'expected'),
     [
