@@ -30,7 +30,7 @@ jobs:
             const pr = context.eventName === 'pull_request_target'
               ? context.payload.pull_request
               : null;
-            const prefixes = ['triton-kda-', 'triton-a2-tests-'];
+            const prefixes = ['triton-kda-', 'triton-gdn-', 'triton-a2-tests-'];
             const params = { owner, repo, per_page: 100 };
             if (pr) {
               params.ref = `refs/pull/${pr.number}/merge`;
