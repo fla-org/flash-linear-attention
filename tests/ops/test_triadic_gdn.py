@@ -256,6 +256,8 @@ def test_chunk_varlen(H: int, K: int, V: int, E: int, cu_seqlens: list[int], dty
             id="B{}-T{}-H{}-K{}-V{}-E{}-scale{}-gate_logit_normalizer{}-use_initial_state{}-output_final_state{}-{}".format(
                 *test,
             ),
+            # the one-step decode case runs in the smoke tier
+            marks=[pytest.mark.smoke] if test[1] == 1 else [],
         )
         for test in [
             (1, 63, 1, 64, 64, 1, 1, 1, True, True, torch.float),

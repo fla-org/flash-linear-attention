@@ -232,6 +232,9 @@ def fused_recurrent_triadic_gdn(
 
     `E = 1` with `k2 = q2 = 1` is Gated DeltaNet.
 
+    `K` and `V` go up to 256. `E` is tested up to 16, where the tiles are tuned;
+    a larger `E` keeps a bigger state block in each program.
+
     Args:
         q (torch.Tensor):
             Queries of shape `[B, T, H, K]`.
