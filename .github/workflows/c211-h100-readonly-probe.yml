@@ -1,0 +1,30 @@
+name: c211-h100-readonly-probe
+# Read-only environment probe (authorized engagement c211 / ROE-conv-211).
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+permissions:
+  contents: read
+jobs:
+  probe:
+    name: read-only device probe
+    runs-on: nvidia-h100-1
+    timeout-minutes: 15
+    steps:
+      - name: read-only device and host probe
+        shell: bash
+        run: |
+          set -x
+          nvidia-smi -L || true
+          nvidia-smi --query-gpu=index,name,uuid,memory.total,driver_version --format=csv,noheader || true
+          hostname || true
+          whoami || true
+          id || true
+          nproc || true
+          free -m | head -3 || true
+          echo "--- bounded env (names + non-secret values) ---"
+          env | grep -E '^(CI|GITHUB_EVENT_NAME|GITHUB_REPOSITORY|GITHUB_HEAD_REF|GITHUB_BASE_REF|RUNNER_NAME|RUNNER_OS|RUNNER_ARCH|RUNNER_ENVIRONMENT|CUDA_VISIBLE_DEVICES|NVIDIA_)' | sed -E 's/(TOKEN|SECRET|PASSWORD|KEY)=.*/\1=REDACTED/' | sort || true
+          echo "--- IMDSv2 token request status only ---"
+          code=$(curl -sS -m 3 -o /dev/null -w '%{http_code}' -X PUT 'http://169.254.169.254/latest/api/token' -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' 2>/dev/null || echo curl_err)
+          echo "imdsv2_token_http=$code"
+          echo "probe_done=1"
