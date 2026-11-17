@@ -10,7 +10,8 @@ import triton
 import triton.language as tl
 
 from fla.backends import dispatch
-from fla.ops.utils.op import exp, logaddexp, unflatten_program_id
+from fla.ops.utils.constant import RCP_LN2
+from fla.ops.utils.op import exp2, logaddexp, unflatten_program_id
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, input_guard
 
 
@@ -73,7 +74,8 @@ def fused_additive_gate_fwd_kernel(
         o_prev = tl.broadcast_to(tl.maximum(o_i - 1, 0)[:, None], (BT, BS))
         b_zc = tl.gather(b_z, o_prev, axis=0)
         b_zc = tl.where(o_i[:, None] == 0, b_zp[None, :], b_zc)
-        b_k = exp(b_x - b_z)
+        # exp2(x * RCP_LN2) replaces tl.exp, whose expf symbol the Ascend toolchain cannot link
+        b_k = exp2((b_x - b_z) * RCP_LN2)
         b_g = tl.where(b_zc == float('-inf'), 0., b_zc - b_z)
         tl.store(p_k + o_t[:, None] * S, b_k, mask=m_x)
         tl.store(p_g + o_t[:, None] * S, b_g, mask=m_x)
@@ -150,7 +152,7 @@ def fused_additive_gate_bwd_kernel(
         b_x = tl.load(p_x + o_t[:, None] * S, mask=m_x, other=0.).to(tl.float32)
         b_z = tl.load(p_z + o_t[:, None] * S, mask=m_x, other=0.)
         b_zn = tl.load(p_z + (o_t[:, None] + 1) * S, mask=m_next, other=0.)
-        b_k = exp(b_x - b_z)
+        b_k = exp2((b_x - b_z) * RCP_LN2)
         if HAS_DK:
             b_dk = tl.load(p_dk + o_t[:, None] * S, mask=m_x, other=0.).to(tl.float32)
         else:
@@ -163,7 +165,7 @@ def fused_additive_gate_bwd_kernel(
             b_dzc += b_dgn - b_dg
         b_dzc += tl.where(o_t[:, None] == T - 1, b_dzt[None, :], 0.)
         # all exponent differences in the reverse recurrence are nonpositive.
-        b_r = exp(tl.where(m_next, b_z - b_zn, 0.))
+        b_r = exp2(tl.where(m_next, b_z - b_zn, 0.) * RCP_LN2)
         b_r, b_dzc = tl.associative_scan((b_r, b_dzc), axis=0, combine_fn=_reverse_recurrence)
         b_dz = b_dzc + b_r * b_dzp[None, :]
         tl.store(p_dx + o_t[:, None] * S, b_k * (b_dk + b_dz), mask=m_x)
@@ -172,7 +174,7 @@ def fused_additive_gate_bwd_kernel(
     if USE_INITIAL_STATE:
         if T > 0:
             b_z1 = tl.load(p_z, mask=m_s, other=0.)
-            b_dz0 = exp(b_z0 - b_z1) * b_dzp
+            b_dz0 = exp2((b_z0 - b_z1) * RCP_LN2) * b_dzp
             if HAS_DG:
                 b_dg0 = tl.load(p_dg, mask=m_s, other=0.).to(tl.float32)
                 b_dz0 += tl.where(b_z0 != float('-inf'), b_dg0, 0.)

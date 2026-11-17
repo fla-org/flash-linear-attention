@@ -11,6 +11,7 @@ import triton
 import triton.language as tl
 import triton.language.extra.libdevice as tldevice
 
+from fla.ops.utils.constant import RCP_LN2
 from fla.utils import IS_GATHER_SUPPORTED, IS_NVIDIA_BLACKWELL
 
 
@@ -57,7 +58,8 @@ else:
 def logaddexp(a, b):
     maximum = tl.maximum(a, b)
     difference = tl.where(maximum == float('-inf'), 0., -tl.abs(a - b))
-    return maximum + tldevice.log1p(exp(difference))
+    # exp2(x * RCP_LN2) replaces tl.exp, whose expf symbol the Ascend toolchain cannot link
+    return maximum + tldevice.log1p(exp2(difference * RCP_LN2))
 
 
 if IS_NVIDIA_BLACKWELL:
