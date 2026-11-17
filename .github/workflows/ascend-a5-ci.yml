@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       agent_mode:
-        description: Run the reusable agent-selected A5 workflow instead of tests/utils
+        description: Run the reusable agent-selected A5 workflow instead of utils and convolution tests
         required: false
         type: boolean
         default: false
@@ -62,7 +62,7 @@ jobs:
             const files = await github.paginate(github.rest.pulls.listFiles, {
               owner, repo, pull_number: pr.number, per_page: 100,
             });
-            // Pytest currently runs tests/utils. This detector still matches
+            // Pytest runs utils and convolution tests. This detector still matches
             // the wider NPU file set used by A2, so later suite growth can reuse it.
             //   pyproject.toml    - pins the [npu] extra (torch_npu / triton-ascend)
             //   fla/backends.py   - shared dispatch machinery
@@ -186,7 +186,7 @@ jobs:
           assert IS_NPU, "Expected NPU backend (IS_NPU=True)"
           PY
 
-      - name: Run utils tests
+      - name: Run utils and convolution tests
         id: pytest
         if: github.event_name != 'schedule' || steps.triton-cache.outputs.cache-hit != 'true'
         shell: bash
@@ -194,9 +194,9 @@ jobs:
           FLA_NPU_XDIST: "1"
         run: |
           source /usr/local/Ascend/ascend-toolkit/set_env.sh
-          # Scope is tests/utils until the remaining A5 suites have been verified.
           pytest -s -v --exitfirst -n 8 --dist load \
-            tests/utils
+            tests/utils \
+            tests/modules/test_conv.py
 
       - name: Save A5 pytest Triton-Ascend kernel cache
         if: |

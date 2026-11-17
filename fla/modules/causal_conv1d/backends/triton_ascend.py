@@ -8,6 +8,7 @@
 """Causal 1D convolution kernels adapted for triton-ascend on Huawei NPU."""
 
 from collections.abc import Iterator
+from typing import NamedTuple
 
 import torch
 import triton
@@ -24,6 +25,7 @@ from fla.modules.causal_conv1d.ops import (
 )
 from fla.ops.utils import prepare_chunk_indices
 from fla.utils import get_multiprocessor_count, input_guard
+from fla.utils.hardware import get_npu_arch
 
 # triton-ascend exposes extract_slice/insert_slice via cann.extension on some versions.
 try:
@@ -35,6 +37,15 @@ try:
         tl.insert_slice = insert_slice
 except ImportError:
     pass
+
+
+class _Conv1dTileConfig(NamedTuple):
+    fp32_residual_bd: int = 256
+    limit_bf16_channels: bool = False
+
+
+_DEFAULT_TILE_CONFIG = _Conv1dTileConfig()
+_TILE_CONFIGS = {'950': _Conv1dTileConfig(fp32_residual_bd=128, limit_bf16_channels=True)}
 
 
 def _select_coregrid_bd(D: int, preferred: int) -> int | None:
@@ -932,6 +943,10 @@ def _launch_bwd_dx_core(dy, weight, dht, cu_seqlens, cu_seqlens_cpu, B, T, D, W,
             BD = min(16, max(8, triton.next_power_of_2(D)))
         else:
             BD, BT = _npu_tile_config(T=T, BT=BT, D=D, dtype=dy.dtype, initial_state=None)
+            tile_config = _TILE_CONFIGS.get(get_npu_arch(dy.device.index), _DEFAULT_TILE_CONFIG)
+            if dy.dtype == torch.bfloat16 and tile_config.limit_bf16_channels:
+                # avoid reserving UB for channels outside a small input.
+                BD = min(BD, max(8, triton.next_power_of_2(D)))
     if cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT, cu_seqlens_cpu=cu_seqlens_cpu)
         NT = len(chunk_indices)
@@ -1586,7 +1601,11 @@ def _launch_fwd_coregrid(
     W = weight.shape[1]
     weight_wd = weight.transpose(0, 1).contiguous()
     NUM_CORES = get_multiprocessor_count(x.device.index)
-    BD = _select_coregrid_bd(D=D, preferred=256)
+    tile_config = _TILE_CONFIGS.get(get_npu_arch(x.device.index), _DEFAULT_TILE_CONFIG)
+    preferred_bd = 256
+    if x.dtype == torch.float32 and residual is not None:
+        preferred_bd = tile_config.fp32_residual_bd
+    BD = _select_coregrid_bd(D=D, preferred=preferred_bd)
     if BD is None:
         raise RuntimeError(f'coregrid fwd: no aligned BD for D={D}')
     BT = min(32, triton.next_power_of_2(triton.cdiv(max(16, B * T), NUM_CORES)))

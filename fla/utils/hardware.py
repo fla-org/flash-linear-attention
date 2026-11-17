@@ -73,6 +73,27 @@ def get_device_arch() -> str:
         return ''
 
 
+_NPU_ARCH_PATTERNS = {
+    '950': ('950', '910_95'),
+    'a2/a3': ('910',),
+}
+
+
+@cache
+def get_npu_arch(device_index: int = 0) -> str:
+    """Return the Ascend architecture family for a device, or empty when unknown."""
+    try:
+        with torch.npu.device(device_index):
+            target = triton.runtime.driver.active.get_current_target()
+        if target.backend != 'npu':
+            return ''
+        arch = str(target.arch)
+        return next((family for family, patterns in _NPU_ARCH_PATTERNS.items() if any(p in arch for p in patterns)), '')
+    except Exception:
+        logger.debug('Failed to get NPU architecture family.', exc_info=True)
+        return ''
+
+
 def map_triton_backend_to_torch_device() -> str:
     backend = get_available_device()        # 'cuda' | 'hip' | 'xpu' | 'cpu' | ...
     return {'cuda': 'cuda', 'hip': 'cuda', 'xpu': 'xpu'}.get(backend, backend)
