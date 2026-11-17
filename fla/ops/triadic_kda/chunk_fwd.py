@@ -10,6 +10,8 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets, solve_tril
+from fla.ops.utils.op import unflatten_program_id
+from fla.utils import IS_TF32_SUPPORTED
 
 CHUNK_SIZE = 64
 # state recurrence keeps up to MAX_REG_E slice tiles in registers; larger E streams slices through an FP32 workspace
@@ -17,6 +19,7 @@ MAX_REG_E = 16
 # a midpoint anchor keeps every exponent within half the cumulative decay span of its block,
 # wider spans take the pairwise gate differences so that no exponent can overflow
 MAX_ANCHOR_SPAN = tl.constexpr(64.0)
+DOT_PRECISION = tl.constexpr('tf32' if IS_TF32_SUPPORTED else 'ieee')
 
 
 @triton.jit
@@ -60,8 +63,8 @@ def diag_score_tile(ri, qi, ki, gi, mi, md, erase_d, query_d, BC: tl.constexpr):
         gq = tl.where(mi, tl.exp(gi - anchor[None, :]), 0.0)
         gk_inv = tl.where(mi, tl.exp(anchor[None, :] - gi), 0.0)
         kgt = tl.trans(ki * gk_inv)
-        erase_d = tl.dot(ri * gq, kgt, erase_d, input_precision='ieee')
-        query_d = tl.dot(qi * gq, kgt, query_d, input_precision='ieee')
+        erase_d = tl.dot(ri * gq, kgt, erase_d, input_precision=DOT_PRECISION)
+        query_d = tl.dot(qi * gq, kgt, query_d, input_precision=DOT_PRECISION)
     else:
         for col in range(BC):
             m_col = oi == col
@@ -126,8 +129,8 @@ def chunk_triadic_kda_fwd_kernel_scores_k(
             kj = tl.load(k + pj, mj, other=0.0).to(tl.float32)
             gj = tl.load(g + pj, mj, other=0.0)
             kgt = tl.trans(kj * tl.where(mj, tl.exp(tl.minimum(gn[None, :] - gj, 0.0)), 0.0))
-            erase_off = tl.dot(ki * fgq, kgt, erase_off, input_precision='ieee')
-            query_off = tl.dot(qi * fgq, kgt, query_off, input_precision='ieee')
+            erase_off = tl.dot(ki * fgq, kgt, erase_off, input_precision=DOT_PRECISION)
+            query_off = tl.dot(qi * fgq, kgt, query_off, input_precision=DOT_PRECISION)
         pa = (ti[:, None] * H + h) * BT + oj[None, :]
         ma = (ti < end)[:, None] & (tj < end)[None, :]
         tl.store(L_axis + pa, erase_off, ma)
@@ -333,7 +336,7 @@ def chunk_triadic_kda_fwd_kernel_h(
     OUTPUT: tl.constexpr,
     REG_STATE: tl.constexpr,
 ):
-    iv, nh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
+    iv, nh = unflatten_program_id(tl.cdiv(V, BV))
     n, h = nh // H, nh % H
     e_dim = E_CONST if REG_STATE else E.to(tl.int64)
     start, end, nc, first = sequence_bounds(n, T, cu, offsets, BT, VARLEN)
@@ -440,7 +443,7 @@ def fwd_h(v, beta, q2, k2, gk, g2, Ai, Aqk, keys, h0, cu, indices, scale, save=T
     ws = None if use_reg else (ht if final else v.new_empty(N, H, E, K, V, dtype=torch.float32))
     BV = get_state_block_size(N, H, V, E)
 
-    chunk_triadic_kda_fwd_kernel_h[(triton.cdiv(V, BV), N * H)](
+    chunk_triadic_kda_fwd_kernel_h[(triton.cdiv(V, BV) * N * H,)](
         v=v,
         beta=beta,
         q2=q2,
@@ -519,5 +522,6 @@ def chunk_triadic_kda_fwd(q, k, v, k2, q2, gk, g2, beta, h0, cu, scale, save, fi
     )
     if not save:
         keys = [None] * 3
+        Lk = Mk = None
     saved = (v, beta, q, k, q2, k2, gk, g2, Ai, Aqk, states, u, Lk, Mk, *keys, h0, cu, indices)
     return o, ht, saved

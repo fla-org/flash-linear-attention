@@ -14,7 +14,7 @@ import torch.nn.functional as F
 
 from fla.ops.kda.naive import naive_recurrent_kda
 from fla.ops.triadic_gdn import naive_recurrent_triadic_gdn
-from fla.ops.triadic_kda import chunk_bwd, chunk_triadic_kda, naive_chunk_triadic_kda, naive_recurrent_triadic_kda
+from fla.ops.triadic_kda import chunk_bwd, chunk_fwd, chunk_triadic_kda, naive_chunk_triadic_kda, naive_recurrent_triadic_kda
 from fla.ops.triadic_kda.chunk_fwd import CHUNK_SIZE
 from fla.ops.utils import prepare_chunk_indices
 from fla.utils import assert_close, device_name
@@ -566,25 +566,45 @@ def test_chunk_validation():
         cu = torch.tensor([0, 16, 32], dtype=torch.int32, device=device_name)
         chunk_triadic_kda(q2b, k2b, vb, k2_2b, q2_2b, gk2b, g2_2b, beta2b, cu_seqlens=cu)
 
+    # fp16 inputs with large final-state upstream gradients must keep matrix-gradient dot operands in bf16/fp32 range
+    q16 = torch.ones(1, 2, 1, 1, dtype=torch.float16, device=device_name, requires_grad=True)
+    k16 = torch.ones(1, 2, 1, 1, dtype=torch.float16, device=device_name, requires_grad=True)
+    v16 = torch.ones(1, 2, 1, 1, dtype=torch.float16, device=device_name, requires_grad=True)
+    k2_16 = torch.ones(1, 2, 1, 1, dtype=torch.float32, device=device_name, requires_grad=True)
+    q2_16 = torch.ones(1, 2, 1, 1, dtype=torch.float32, device=device_name, requires_grad=True)
+    gk16 = torch.zeros(1, 2, 1, 1, dtype=torch.float32, device=device_name, requires_grad=True)
+    g2_16 = torch.zeros(1, 2, 1, 1, dtype=torch.float32, device=device_name, requires_grad=True)
+    beta16 = torch.full((1, 2, 1), 0.1, dtype=torch.float32, device=device_name, requires_grad=True)
+    _, ht16 = chunk_triadic_kda(q16, k16, v16, k2_16, q2_16, gk16, g2_16, beta16, output_final_state=True)
+    grads16 = torch.autograd.grad(65536.0 * ht16.sum(), (q16, k16, v16, k2_16, q2_16, gk16, g2_16, beta16))
+    assert all(torch.isfinite(g).all() for g in grads16)
+
 
 @pytest.mark.parametrize('varlen', [False, True], ids=['dense', 'varlen'])
 @pytest.mark.parametrize('nc', [65_535, 65_536])
 def test_chunk_bwd_inter_launch_grid(nc: int, varlen: bool, monkeypatch):
     if varlen:
-        # each 65-token sequence contributes two chunks; an odd tail contributes one.
+        # each 65-token sequence contributes two chunks; with H=2 this also reaches N * H == 65_536 at nc == 65_536
         lengths = [CHUNK_SIZE + 1] * (nc // 2) + [1] * (nc % 2)
         cu = torch.tensor(list(accumulate(lengths, initial=0)), dtype=torch.int32, device='cpu')
         indices = prepare_chunk_indices(cu, CHUNK_SIZE)
-        B, T = 1, sum(lengths)
+        B, T, N = 1, sum(lengths), len(lengths)
     else:
         cu = indices = None
-        B, T = 2, (nc - 1) * CHUNK_SIZE + 1
-    H, K, V, E = 1 if varlen else 2, 80, 32, 4
+        B, T, N = 2, (nc - 1) * CHUNK_SIZE + 1, 2
+    H, K, V, E = 2, 80, 32, 4
 
-    # capture the real host launch without allocating large tensors or requiring an accelerator.
+    # capture the real host launches without allocating large tensors or requiring an accelerator.
+    fwd_h_kernel = MagicMock()
+    bwd_h_kernel = MagicMock()
     inter_kernel = MagicMock()
+    monkeypatch.setattr(chunk_fwd, 'chunk_triadic_kda_fwd_kernel_h', fwd_h_kernel)
+    for stage in ('scores_k', 'scores_e'):
+        monkeypatch.setattr(chunk_fwd, f'chunk_triadic_kda_fwd_kernel_{stage}', MagicMock())
+    monkeypatch.setattr(chunk_fwd, 'solve_tril', lambda A, **kwargs: torch.empty_like(A, dtype=torch.bfloat16))
+    monkeypatch.setattr(chunk_bwd, 'chunk_triadic_kda_bwd_kernel_h', bwd_h_kernel)
     monkeypatch.setattr(chunk_bwd, 'chunk_triadic_kda_bwd_kernel_inter', inter_kernel)
-    for stage in ('h', 'matrices', 'scores_e', 'scores_k'):
+    for stage in ('matrices', 'scores_e', 'scores_k'):
         monkeypatch.setattr(chunk_bwd, f'chunk_triadic_kda_bwd_kernel_{stage}', MagicMock())
     monkeypatch.setattr(chunk_bwd, 'chunk_local_cumsum', lambda x, **kwargs: x)
 
@@ -594,6 +614,27 @@ def test_chunk_bwd_inter_launch_grid(nc: int, varlen: bool, monkeypatch):
     beta = torch.empty(B, T, H, device='meta')
     matrix = torch.empty(B, T, H, CHUNK_SIZE, device='meta')
     states = torch.empty(B * nc, H, E, K, V, device='meta')
+
+    _, _, saved = chunk_fwd.chunk_triadic_kda_fwd(
+        q=q,
+        k=q,
+        v=v,
+        k2=k2,
+        q2=k2,
+        gk=q,
+        g2=k2,
+        beta=beta,
+        h0=None,
+        cu=cu,
+        scale=1.0,
+        save=False,
+        final=False,
+        indices=indices,
+    )
+    assert saved[12] is None and saved[13] is None
+    expected_h_grid = ((V // chunk_fwd.get_state_block_size(N, H, V, E)) * N * H,)
+    fwd_h_kernel.__getitem__.assert_called_once_with(expected_h_grid)
+
     chunk_bwd.chunk_triadic_kda_bwd(
         v=v,
         beta=beta,
@@ -618,4 +659,5 @@ def test_chunk_bwd_inter_launch_grid(nc: int, varlen: bool, monkeypatch):
         keys=(q, q, q),
     )
 
+    bwd_h_kernel.__getitem__.assert_called_once_with(expected_h_grid)
     inter_kernel.__getitem__.assert_called_once_with((3 * nc, B * H))

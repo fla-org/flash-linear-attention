@@ -11,10 +11,10 @@ import triton.language as tl
 
 from fla.ops.triadic_kda.chunk_fwd import (
     CHUNK_SIZE,
+    DOT_PRECISION,
     MAX_ANCHOR_SPAN,
     MAX_REG_E,
     chunk_position,
-    diag_score_tile,
     fwd_h,
     fwd_intra,
     get_state_block_size,
@@ -87,7 +87,7 @@ def chunk_triadic_kda_bwd_kernel_h(
     FINAL: tl.constexpr,
     REG_STATE: tl.constexpr,
 ):
-    iv, nh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
+    iv, nh = unflatten_program_id(tl.cdiv(V, BV))
     n, h = nh // H, nh % H
     e_dim = E_CONST if REG_STATE else E.to(tl.int64)
     start, end, nc, first = sequence_bounds(n, T, cu, offsets, BT, VARLEN)
@@ -338,10 +338,15 @@ def chunk_triadic_kda_bwd_kernel_matrices(
         vv = iv * BV + tl.arange(0, BV).to(tl.int64)
         p = (tt[:, None] * H + h) * V + vv[None, :]
         mask = mt[:, None] & (vv < V)[None, :]
-        uu_t = tl.trans(tl.load(u + p, mask, other=0.0)).to(tl.float32)
+        uu_t = tl.trans(tl.load(u + p, mask, other=0.0))
         dz = tl.load(dx + p, mask, other=0.0)
-        da -= tl.dot(dz.to(tl.float32), uu_t, input_precision='ieee')
-        dm += tl.dot(tl.load(do + p, mask, other=0.0).to(tl.float32), uu_t, input_precision='ieee') * scale
+        b_do = tl.load(do + p, mask, other=0.0)
+        if b_do.dtype == tl.float32:
+            da -= tl.dot(dz, uu_t, input_precision=DOT_PRECISION)
+            dm += tl.dot(b_do, uu_t, input_precision=DOT_PRECISION) * scale
+        else:
+            da -= state_dot(dz, uu_t)
+            dm += state_dot(b_do, uu_t) * scale
         tl.store(dv + p, dz * b_beta[:, None], mask)
         dbeta_acc += tl.sum(dz * tl.load(v + p, mask, other=0.0).to(tl.float32), 1)
 
@@ -431,49 +436,31 @@ def chunk_triadic_kda_bwd_kernel_scores_e(
         tl.store(outg + p, tl.cumsum(vg, reverse=True), mask)
 
     tl.store(dbeta_v + tt * H + h, dbeta_acc, mask)
+    tl.debug_barrier()
 
-
-@triton.jit
-def _offdiag_scores_e(
-    q2,
-    k2,
-    g2,
-    b_beta_row,
-    t_row,
-    t_col,
-    t_anchor,
-    end,
-    h,
-    H: tl.constexpr,
-    E: tl.constexpr,
-    BE: tl.constexpr,
-    BC: tl.constexpr,
-    TRANS: tl.constexpr,
-):
-    l2_sub = tl.zeros((BC, BC), tl.float32)
-    m2_sub = tl.zeros((BC, BC), tl.float32)
-    for ie in range(tl.cdiv(E, BE)):
-        e_idx = ie * BE + tl.arange(0, BE).to(tl.int64)
-        me_r = (t_row < end)[:, None] & (e_idx < E)[None, :]
-        me_c = (t_col < end)[:, None] & (e_idx < E)[None, :]
-        pe_r = (t_row[:, None] * H + h) * E + e_idx[None, :]
-        pe_c = (t_col[:, None] * H + h) * E + e_idx[None, :]
-        g2_n = tl.load(g2 + (t_anchor * H + h) * E + e_idx, e_idx < E, other=0.0)
-
-        q2_r = tl.load(q2 + pe_r, me_r, other=0.0)
-        r2_r = tl.load(k2 + pe_r, me_r, other=0.0) * b_beta_row[:, None]
-        fg_r = tl.where(me_r, tl.exp(tl.minimum(tl.load(g2 + pe_r, me_r, other=0.0) - g2_n[None, :], 0.0)), 0.0)
-        k2_c = tl.load(k2 + pe_c, me_c, other=0.0)
-        fg_c = tl.where(me_c, tl.exp(tl.minimum(g2_n[None, :] - tl.load(g2 + pe_c, me_c, other=0.0), 0.0)), 0.0)
-        k2_scaled = k2_c * fg_c
-        if TRANS:
-            l2_sub = tl.dot(k2_scaled, tl.trans(r2_r * fg_r), l2_sub, input_precision='ieee')
-            m2_sub = tl.dot(k2_scaled, tl.trans(q2_r * fg_r), m2_sub, input_precision='ieee')
+    # fold L2 and M2 into dA and dM after base_l/base_m die so scores_k skips E-axis recomputation
+    l2_acc = tl.zeros((BT, BT), tl.float32)
+    m2_acc = tl.zeros((BT, BT), tl.float32)
+    for e in tl.range(E):
+        p = (tt * H + h) * E + e
+        qi = tl.load(q2 + p, mask, other=0.0)
+        ki = tl.load(k2 + p, mask, other=0.0)
+        gi = tl.load(g2 + p, mask, other=0.0)
+        ri = ki * b_beta
+        first_g = tl.max(tl.where(t == 0, gi, float('-inf')), 0)
+        last_g = tl.min(tl.where(mask, gi, float('inf')), 0)
+        if first_g - last_g <= MAX_ANCHOR_SPAN:
+            anchor = 0.5 * (first_g + last_g)
+            decay = tl.exp(tl.where(mask, gi - anchor, 0.0))[:, None] * tl.exp(tl.where(mask, anchor - gi, 0.0))[None, :]
         else:
-            k2_gt = tl.trans(k2_scaled)
-            l2_sub = tl.dot(r2_r * fg_r, k2_gt, l2_sub, input_precision='ieee')
-            m2_sub = tl.dot(q2_r * fg_r, k2_gt, m2_sub, input_precision='ieee')
-    return l2_sub, m2_sub
+            decay = tl.exp(tl.minimum(gi[:, None] - gi[None, :], 0.0))
+        decay = tl.where(mask[:, None] & (t[:, None] >= t[None, :]), decay, 0.0)
+        l2_acc += decay * (ri[:, None] * ki[None, :])
+        m2_acc += decay * (qi[:, None] * ki[None, :])
+
+    pa_out = (tt[:, None] * H + h) * BT + t[None, :]
+    tl.store(dA + pa_out, tl.load(dA + pa_out, mask[:, None], other=0.0) * l2_acc, mask[:, None])
+    tl.store(dM + pa_out, tl.load(dM + pa_out, mask[:, None], other=0.0) * m2_acc, mask[:, None])
 
 
 @triton.heuristics({
@@ -484,10 +471,6 @@ def chunk_triadic_kda_bwd_kernel_scores_k(
     q,
     k,
     g,
-    q2,
-    k2,
-    beta,
-    g2,
     dA,
     dM,
     dq,
@@ -502,9 +485,7 @@ def chunk_triadic_kda_bwd_kernel_scores_k(
     T,
     H: tl.constexpr,
     K: tl.constexpr,
-    E: tl.constexpr,
     BD: tl.constexpr,
-    BE: tl.constexpr,
     BT: tl.constexpr,
     BC: tl.constexpr,
     VARLEN: tl.constexpr,
@@ -529,7 +510,6 @@ def chunk_triadic_kda_bwd_kernel_scores_k(
     ri = ki.to(tl.float32)
     gi = tl.load(g + pi, mi, other=0.0)
     vq, vr, vk = tl.zeros((BC, BD), tl.float32), tl.zeros((BC, BD), tl.float32), tl.zeros((BC, BD), tl.float32)
-    b_beta_i = tl.load(beta + ti * H + h, ti < end, other=0.0).to(tl.float32)
 
     # off-diagonal sub-blocks before this block: dq and dr
     if block > 0:
@@ -542,11 +522,10 @@ def chunk_triadic_kda_bwd_kernel_scores_k(
             mjb = (tjb < end)[:, None] & md[None, :]
             pjb = (tjb[:, None] * H + h) * K + d[None, :]
             kjb = tl.load(k + pjb, mjb, other=0.0) * tl.exp(tl.minimum(gn[None, :] - tl.load(g + pjb, mjb, other=0.0), 0.0))
-            l2_sub, m2_sub = _offdiag_scores_e(q2, k2, g2, b_beta_i, ti, tjb, t_anchor, end, h, H, E, BE, BC, False)
             pa = (ti[:, None] * H + h) * BT + oj[None, :]
             ma = (ti < end)[:, None] & (tjb < end)[None, :]
-            vr += state_dot(tl.load(dA + pa, ma, other=0.0) * l2_sub, kjb) * factor_q
-            vq += state_dot(tl.load(dM + pa, ma, other=0.0) * m2_sub, kjb) * factor_q
+            vr += state_dot(tl.load(dA + pa, ma, other=0.0), kjb) * factor_q
+            vq += state_dot(tl.load(dM + pa, ma, other=0.0), kjb) * factor_q
 
     # off-diagonal sub-blocks after this block: dk only
     if start + (block + 1) * BC < end and block < BT // BC - 1:
@@ -561,31 +540,21 @@ def chunk_triadic_kda_bwd_kernel_scores_k(
             qjb = tl.load(q + pjb, mjb, other=0.0)
             rjb = tl.load(k + pjb, mjb, other=0.0).to(tl.float32)
             fg = tl.where((tjb < end)[:, None], tl.exp(tl.minimum(tl.load(g + pjb, mjb, other=0.0) - gn[None, :], 0.0)), 0.0)
-            b_beta_j = tl.load(beta + tjb * H + h, tjb < end, other=0.0).to(tl.float32)
-            l2_sub_t, m2_sub_t = _offdiag_scores_e(q2, k2, g2, b_beta_j, tjb, ti, t_anchor, end, h, H, E, BE, BC, True)
             pa = (tjb[None, :] * H + h) * BT + i[:, None]
             ma = (tjb < end)[None, :] & (ti < end)[:, None]
-            dl = tl.load(dA + pa, ma, other=0.0) * l2_sub_t
-            dm = tl.load(dM + pa, ma, other=0.0) * m2_sub_t
+            dl = tl.load(dA + pa, ma, other=0.0)
+            dm = tl.load(dM + pa, ma, other=0.0)
             vk += (state_dot(dl, rjb * fg) + state_dot(dm, qjb * fg)) * factor_k
 
     # diagonal [BC, BC] sub-block
-    l2_d = tl.zeros((BC, BC), tl.float32)
-    m2_d = tl.zeros((BC, BC), tl.float32)
-    for ie in range(tl.cdiv(E, BE)):
-        e_idx = ie * BE + tl.arange(0, BE).to(tl.int64)
-        me_d = e_idx < E
-        me_i = (ti < end)[:, None] & me_d[None, :]
-        pe_i = (ti[:, None] * H + h) * E + e_idx[None, :]
-        q2_i = tl.load(q2 + pe_i, me_i, other=0.0)
-        k2_i = tl.load(k2 + pe_i, me_i, other=0.0)
-        g2_i = tl.load(g2 + pe_i, me_i, other=0.0)
-        l2_d, m2_d = diag_score_tile(k2_i * b_beta_i[:, None], q2_i, k2_i, g2_i, me_i, me_d, l2_d, m2_d, BC)
-
     pa = (ti[:, None] * H + h) * BT + i[None, :]
-    ma = (ti < end)[:, None] & (ti < end)[None, :] & (oi[:, None] >= oi[None, :])
-    dl_d = tl.load(dA + pa, ma, other=0.0) * tl.where(ma, l2_d, 0.0)
-    dm_d = tl.load(dM + pa, ma, other=0.0) * tl.where(ma, m2_d, 0.0)
+    m_ti = ti < end
+    m_strict = m_ti[:, None] & m_ti[None, :] & (oi[:, None] > oi[None, :])
+    m_diag = m_ti[:, None] & (oi[:, None] == oi[None, :])
+    dl_d = tl.load(dA + pa, m_strict, other=0.0)
+    dm_full = tl.load(dM + pa, m_strict | m_diag, other=0.0)
+    dm_diag = tl.sum(tl.where(m_diag, dm_full, 0.0), 1)
+    dm_d = tl.where(m_strict, dm_full, 0.0)
 
     first_g = tl.where(md, tl.max(tl.where(oi[:, None] == 0, gi, float('-inf')), 0), 0.0)
     last_g = tl.where(md, tl.min(tl.where(mi, gi, float('inf')), 0), 0.0)
@@ -594,11 +563,11 @@ def chunk_triadic_kda_bwd_kernel_scores_k(
         gq = tl.where(mi, tl.exp(gi - anchor[None, :]), 0.0)
         gk_inv = tl.where(mi, tl.exp(anchor[None, :] - gi), 0.0)
         k_scaled = ri * gk_inv
-        vq += tl.dot(dm_d, k_scaled, input_precision='ieee') * gq
-        vr += tl.dot(dl_d, k_scaled, input_precision='ieee') * gq
+        vq += tl.dot(dm_d, k_scaled, input_precision=DOT_PRECISION) * gq
+        vr += tl.dot(dl_d, k_scaled, input_precision=DOT_PRECISION) * gq
         vk += (
-            tl.dot(tl.trans(dl_d), ri * gq, input_precision='ieee')
-            + tl.dot(tl.trans(dm_d), qi.to(tl.float32) * gq, input_precision='ieee')
+            tl.dot(tl.trans(dl_d), ri * gq, input_precision=DOT_PRECISION)
+            + tl.dot(tl.trans(dm_d), qi.to(tl.float32) * gq, input_precision=DOT_PRECISION)
         ) * gk_inv
     else:
         for col in range(BC):
@@ -614,7 +583,10 @@ def chunk_triadic_kda_bwd_kernel_scores_k(
             vk_col = tl.sum((dl_col[:, None] * ri + dm_col[:, None] * qi.to(tl.float32)) * decay, 0)
             vk += tl.where(m_col[:, None], vk_col[None, :], 0.0)
 
+    # diagonal M[i, i] has zero derivative w.r.t. gk; add its dq/dk contribution after vg
     vg = qi * vq + ri * vr - ki * vk
+    vq += dm_diag[:, None] * ri
+    vk += dm_diag[:, None] * qi.to(tl.float32)
     erase = tl.load(dr + pi, mi, other=0.0) + vr
     tl.store(outq + pi, tl.load(dq + pi, mi, other=0.0) + vq, mi)
     tl.store(outk + pi, tl.load(dk + pi, mi, other=0.0) + vk + erase, mi)
@@ -673,7 +645,7 @@ def chunk_triadic_kda_bwd(v, beta, q, k, q2, k2, gk, g2, Ai, Aqk, states, u, Lk,
     ws = None if use_reg else (dh0 if dh0 is not None else u.new_empty(N, H, E, K, V, dtype=torch.float32))
     BV = get_state_block_size(N, H, V, E)
 
-    chunk_triadic_kda_bwd_kernel_h[(triton.cdiv(V, BV), N * H)](
+    chunk_triadic_kda_bwd_kernel_h[(triton.cdiv(V, BV) * N * H,)](
         q2=q2,
         k2=k2,
         beta=beta,
@@ -803,10 +775,6 @@ def chunk_triadic_kda_bwd(v, beta, q, k, q2, k2, gk, g2, Ai, Aqk, states, u, Lk,
         q=q,
         k=k,
         g=gk,
-        q2=q2,
-        k2=k2,
-        beta=beta,
-        g2=g2,
         dA=dA,
         dM=dM,
         dq=inter_k[0],
@@ -821,9 +789,7 @@ def chunk_triadic_kda_bwd(v, beta, q, k, q2, k2, gk, g2, Ai, Aqk, states, u, Lk,
         T=T,
         H=H,
         K=K,
-        E=E,
         BD=32,
-        BE=min(64, max(16, triton.next_power_of_2(E))),
         BT=CHUNK_SIZE,
         BC=16,
         num_warps=4,
