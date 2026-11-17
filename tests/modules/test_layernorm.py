@@ -90,74 +90,44 @@ def test_groupnorm(B: int, T: int, D: int, G: int, is_rms_norm: bool):
     assert_close('db', ref_db, tri_db, 1e-3)
 
 
-@pytest.mark.parametrize("B", [2])
-@pytest.mark.parametrize("H", [2])
-@pytest.mark.parametrize("T", [512])
-@pytest.mark.parametrize("D", [50, 64, 128, 256])
-def test_rmsnorm(B: int, H: int, T: int, D: int):
-    x = torch.randn(B, H, T, D).to(device).requires_grad_(True)
-    ref = LlamaRMSNorm(D, eps=0).to(device)
-    tri = RMSNorm(D, eps=0).to(device)
-    nn.init.normal_(ref.weight)
-    tri.weight.data.copy_(ref.weight.data)
-
-    ref_y = ref(x)
-    tri_y = tri(x)
-    ref_dx = torch.autograd.grad(ref(x).sum(), x)[0]
-    tri_dx = torch.autograd.grad(tri(x).sum(), x)[0]
-
-    ref_dw = torch.autograd.grad(ref(x).sum(), ref.weight)[0]
-    tri_dw = torch.autograd.grad(tri(x).sum(), tri.weight)[0]
-
-    assert_close(' y', ref_y, tri_y, 1e-3)
-    assert_close('dx', ref_dx, tri_dx, 1e-3)
-    assert_close('dw', ref_dw, tri_dw, 1e-3)
-
-
-def test_rmsnorm_positional_args():
-    norm = RMSNorm(64, True, False, 1e-5, device, torch.bfloat16)
-    assert norm.weight.device.type == device
-    assert norm.weight.dtype == torch.bfloat16
-    assert not norm.zero_centered_weight
-    torch.testing.assert_close(norm.weight, torch.ones_like(norm.weight))
-
-
 @pytest.mark.parametrize(
-    ('T', 'D', 'prenorm', 'dtype'),
+    ('T', 'D', 'zero_centered_weight', 'prenorm', 'dtype'),
     [
-        pytest.param(*test, id="T{}-D{}-prenorm{}-{}".format(*test))
+        pytest.param(*test, id="T{}-D{}-zero_centered{}-prenorm{}-{}".format(*test))
         for test in [
-            (512, 64, False, torch.float),
-            (300, 50, True, torch.float),
-            (512, 128, False, torch.bfloat16),
-            (512, 128, True, torch.bfloat16),
-            (7, 1024, True, torch.bfloat16),
+            (512, 50, False, False, torch.float),
+            (512, 64, False, False, torch.float),
+            (512, 128, False, False, torch.float),
+            (512, 256, False, False, torch.float),
+            (300, 50, True, True, torch.float),
+            (512, 128, True, False, torch.bfloat16),
+            (7, 1024, True, True, torch.bfloat16),
         ]
     ],
 )
-def test_rmsnorm_zero_centered(T: int, D: int, prenorm: bool, dtype: torch.dtype):
+def test_rmsnorm(T: int, D: int, zero_centered_weight: bool, prenorm: bool, dtype: torch.dtype):
     torch.manual_seed(42)
-    tri = RMSNorm(hidden_size=D, eps=1e-6, device=device, dtype=dtype, zero_centered_weight=True)
-    torch.testing.assert_close(tri.weight, torch.zeros_like(tri.weight))
-    nn.init.normal_(tri.weight, std=0.1)
+    eps = 1e-6 if zero_centered_weight else 0.
+    tri = RMSNorm(D, True, False, eps, device, dtype, zero_centered_weight=zero_centered_weight)
+    torch.testing.assert_close(tri.weight, torch.full_like(tri.weight, 0. if zero_centered_weight else 1.))
+    nn.init.normal_(tri.weight, std=0.1 if zero_centered_weight else 1.)
     weight = tri.weight.detach().clone().requires_grad_(True)
-    x = torch.randn(2, T, D, device=device, dtype=dtype).requires_grad_(True)
-    residual = torch.randn(2, T, D, device=device, dtype=dtype).requires_grad_(True) if prenorm else None
+    x = torch.randn(2, 2, T, D, device=device, dtype=dtype).requires_grad_(True)
+    residual = torch.randn_like(x).requires_grad_(True) if prenorm else None
     dy = torch.randn_like(x)
     dh = torch.randn_like(x) if prenorm else None
 
     ref_y, ref_h = rms_norm_ref(
         x=x,
-        weight=1. + weight.float(),
+        weight=1. + weight.float() if zero_centered_weight else weight,
         bias=None,
         residual=residual,
-        eps=1e-6,
+        eps=eps,
         prenorm=True,
         upcast=True,
     )
-    ref_h = ref_h.to(dtype)
     if prenorm:
-        torch.autograd.backward((ref_y, ref_h), (dy, dh))
+        torch.autograd.backward((ref_y, ref_h.to(dtype)), (dy, dh))
     else:
         ref_y.backward(dy)
     ref_dx, ref_dw = x.grad, weight.grad
@@ -176,7 +146,7 @@ def test_rmsnorm_zero_centered(T: int, D: int, prenorm: bool, dtype: torch.dtype
     assert_close('dx', ref_dx, x.grad, tol)
     assert_close('dw', ref_dw, tri.weight.grad, tol)
     if prenorm:
-        assert_close(' h', ref_h, tri_h, tol)
+        assert_close(' h', ref_h.to(dtype), tri_h, tol)
         assert_close('dr', ref_dr, residual.grad, tol)
     assert tri.weight.grad.dtype == dtype
 
