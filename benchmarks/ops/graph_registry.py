@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 _INTEGER_FIELDS = ('B', 'T', 'H', 'D', 'N', 'actual_T', 'HV', 'DV', 'chunk_size')
-_RESULT_FIELDS = {'op', 'shape', 'mode', 'eager', 'graph', 'graph_safe', 'memory', 'capture_ms', 'validation'}
+_RESULT_FIELDS = {'op', 'shape', 'mode', 'eager', 'graph', 'capture_ms', 'validation'}
 
 
 _BOOLEAN_FIELDS = ('fused_options', 'safe_gate', 'allow_neg_eigval', 'disable_recompute')

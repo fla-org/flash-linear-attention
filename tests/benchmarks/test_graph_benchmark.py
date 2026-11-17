@@ -341,57 +341,10 @@ def test_benchmark_case_rejects_reusing_capture_tensor_as_live_input():
         )
 
 
-@pytest.mark.parametrize('requires_grad', [False, True], ids=['inference', 'training'])
-def test_graph_safe_measurement_uses_independent_leaf_storage(requires_grad):
-    torch = pytest.importorskip("torch")
-
-    live = torch.ones(2, requires_grad=requires_grad)
-    seen = []
-
-    def graph_step(value):
-        seen.append(value)
-        return value
-
-    def run_once(step, args, collect):
-        value = step(*args)
-        return {'o': value.detach().clone()} if collect else {}
-
-    case = GraphBenchmarkCase(
-        eager_step=lambda value: value,
-        graph_step=graph_step,
-        capture_args=(torch.zeros_like(live),),
-        eager_args=(live.detach().clone(),),
-        graph_args=(live,),
-        run_once=run_once,
-        assert_close=lambda actual, expected: torch.testing.assert_close(actual['o'], expected['o']),
-        metadata={'B': 1, 'T': 128, 'H': 2, 'D': 64},
-    )
-    benchmark_case(
-        case=case,
-        mode='fwdbwd',
-        engines=('graph',),
-        warmup=0,
-        iterations=2,
-        graph_factory=lambda *_: lambda value: value,
-        synchronize=lambda: None,
-        measure_graph_safe=True,
-    )
-    assert len(seen) == 3
-    assert all(value.data_ptr() != live.data_ptr() for value in seen)
-    assert all(value.is_leaf and value.requires_grad == requires_grad for value in seen)
-    assert all(value is seen[0] for value in seen)
-
-
 @pytest.mark.parametrize(
-    'replayed,uncaptured',
-    [(5.1, 5.0), (5.0, 5.1), (5.01, 5.01)],
-    ids=[
-        'replayed-5.1-uncaptured-5.0',
-        'replayed-5.0-uncaptured-5.1',
-        'replayed-5.01-uncaptured-5.01',
-    ],
+    'replayed', [5.1, 5.01], ids=['outside-budget', 'within-budget'],
 )
-def test_gdn_runner_checks_both_graph_paths_before_reporting(replayed, uncaptured):
+def test_gdn_runner_checks_replay_before_reporting(replayed):
     timings = []
 
     def run_once(step, args, collect):
@@ -406,7 +359,7 @@ def test_gdn_runner_checks_both_graph_paths_before_reporting(replayed, uncapture
 
     case = GraphBenchmarkCase(
         eager_step=lambda: 5.0,
-        graph_step=lambda: uncaptured,
+        graph_step=lambda: replayed,
         capture_args=(),
         graph_args=(),
         eager_args=(),
@@ -422,22 +375,19 @@ def test_gdn_runner_checks_both_graph_paths_before_reporting(replayed, uncapture
         iterations=2,
         graph_factory=lambda *_: lambda: replayed,
         synchronize=lambda: None,
-        measure_graph_safe=True,
     )
-    if 5.1 in (replayed, uncaptured):
+    if replayed == 5.1:
         with pytest.raises(AssertionError, match='GDN dg'):
             benchmark_case(**kwargs)
         assert timings == []
     else:
         result = benchmark_case(**kwargs)
         assert result['validation'] == 'passed'
-        assert result['graph_safe']['p50_ms'] >= 0
         assert result['graph']['p50_ms'] >= 0
-        assert len(timings) == 4
+        assert len(timings) == 2
 
 
-@pytest.mark.parametrize('report_memory', [False, True], ids=['memory-off', 'memory-on'])
-def test_gdn_memory_measurement_covers_selected_engines(monkeypatch, report_memory):
+def test_gdn_runner_preserves_case_metadata(monkeypatch):
     calls = []
 
     def record(name, result=None):
@@ -449,10 +399,6 @@ def test_gdn_memory_measurement_covers_selected_engines(monkeypatch, report_memo
     npu = SimpleNamespace(
         is_available=lambda: True,
         set_device=lambda _: None,
-        reset_peak_memory_stats=record('reset'),
-        memory_allocated=record('baseline', 100),
-        max_memory_allocated=record('peak_allocated', 250),
-        max_memory_reserved=record('peak_reserved', 400),
         synchronize=lambda: None,
         empty_cache=record('empty_cache'),
     )
@@ -474,50 +420,11 @@ def test_gdn_memory_measurement_covers_selected_engines(monkeypatch, report_memo
         0,
         1,
         progress=False,
-        report_memory=report_memory,
     )
-    if report_memory:
-        assert calls == ['build', 'reset', 'baseline', 'benchmark', 'peak_allocated', 'peak_reserved', 'empty_cache']
-        assert result[0]['memory'] == {'baseline_allocated_bytes': 100,
-                                       'peak_allocated_bytes': 250, 'peak_reserved_bytes': 400}
-    else:
-        assert calls == ['build', 'benchmark', 'empty_cache']
-        assert 'memory' not in result[0]
+    assert calls == ['build', 'benchmark', 'empty_cache']
     assert result[0]['mode'] == 'fwdbwd'
     assert result[0]['T'] == 64
     assert result[0]['workload_label'] == 'custom'
-
-
-def test_graph_safe_measurement_is_opt_in():
-    calls = []
-
-    def run_once(step, args, collect):
-        calls.append(collect)
-        return step()
-
-    case = GraphBenchmarkCase(
-        eager_step=lambda: 1,
-        graph_step=lambda: 1,
-        capture_args=(),
-        graph_args=(),
-        eager_args=(),
-        run_once=run_once,
-        assert_close=lambda actual, expected: None,
-        metadata=normalize_gdn_shape({'B': 1, 'T': 64, 'H': 1, 'D': 64}),
-    )
-    result = benchmark_case(case, 'fwdbwd', ('graph',), 0, 2, graph_factory=lambda step, _: step, synchronize=lambda: None)
-    assert 'graph_safe' not in result
-    assert calls == [True, True, False, False]
-
-
-@pytest.mark.parametrize('enabled', [False, True], ids=['diagnostics-off', 'diagnostics-on'])
-def test_runner_forwards_diagnostics_to_the_worker(enabled):
-    flags = ['--measure-graph-safe', '--report-memory'] if enabled else []
-    _, args = graph_benchmark._parse_args(['--op', 'chunk_gdn', *flags])
-    for engines in (('eager',), ('eager', 'graph')):
-        command = graph_benchmark._worker_command('run.py', ['chunk_gdn'], {}, ('fwd',), engines, args, 'result.json')
-        assert ('--measure-graph-safe' in command) == (enabled and 'graph' in engines)
-        assert ('--report-memory' in command) == enabled
 
 
 def test_result_table_reports_base_and_graph_speedups(capsys):
