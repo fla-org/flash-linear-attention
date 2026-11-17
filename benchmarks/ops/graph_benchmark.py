@@ -244,7 +244,6 @@ def benchmark_graph_op(
                 "op": op_name,
                 "shape": shape_name,
                 "mode": mode,
-                **shape,
                 **case.metadata,
                 **measured,
             })
