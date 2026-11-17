@@ -14,7 +14,7 @@ from transformers.models.llama.modeling_llama import LlamaRMSNorm
 
 from fla.modules import GroupNorm, GroupNormLinear, LayerNorm, LayerNormLinear, RMSNorm, RMSNormLinear
 from fla.modules.fused_bitlinear import activation_quant, layer_norm_linear_quant, weight_quant
-from fla.modules.layernorm import GroupNormRef
+from fla.modules.layernorm import GroupNormRef, rms_norm_ref
 from fla.utils import assert_close, device
 
 
@@ -114,13 +114,12 @@ def test_rmsnorm(B: int, H: int, T: int, D: int):
     assert_close('dw', ref_dw, tri_dw, 1e-3)
 
 
-
-def zero_centered_rms_norm_ref(x, weight, eps):
-    """The zero-centered RMSNorm of Gemma3 and Qwen3.5 in transformers."""
-    output = x.float()
-    output = output * torch.rsqrt(output.pow(2).mean(-1, keepdim=True) + eps)
-    output = output * (1.0 + weight.float())
-    return output.type_as(x)
+def test_rmsnorm_positional_args():
+    norm = RMSNorm(64, True, False, 1e-5, device, torch.bfloat16)
+    assert norm.weight.device.type == device
+    assert norm.weight.dtype == torch.bfloat16
+    assert not norm.zero_centered_weight
+    torch.testing.assert_close(norm.weight, torch.ones_like(norm.weight))
 
 
 @pytest.mark.parametrize(
@@ -132,40 +131,55 @@ def zero_centered_rms_norm_ref(x, weight, eps):
             (300, 50, True, torch.float),
             (512, 128, False, torch.bfloat16),
             (512, 128, True, torch.bfloat16),
+            (7, 1024, True, torch.bfloat16),
         ]
     ],
 )
 def test_rmsnorm_zero_centered(T: int, D: int, prenorm: bool, dtype: torch.dtype):
     torch.manual_seed(42)
-    tri = RMSNorm(D, eps=1e-6, zero_centered_weight=True).to(device=device, dtype=dtype)
-    assert (tri.weight == 0).all()
+    tri = RMSNorm(hidden_size=D, eps=1e-6, device=device, dtype=dtype, zero_centered_weight=True)
+    torch.testing.assert_close(tri.weight, torch.zeros_like(tri.weight))
     nn.init.normal_(tri.weight, std=0.1)
     weight = tri.weight.detach().clone().requires_grad_(True)
     x = torch.randn(2, T, D, device=device, dtype=dtype).requires_grad_(True)
     residual = torch.randn(2, T, D, device=device, dtype=dtype).requires_grad_(True) if prenorm else None
-    do = torch.randn(2, T, D, device=device, dtype=dtype)
+    dy = torch.randn_like(x)
+    dh = torch.randn_like(x) if prenorm else None
 
-    h = x + residual if prenorm else x
-    ref = zero_centered_rms_norm_ref(h, weight, 1e-6)
-    (ref * do).sum().backward()
+    ref_y, ref_h = rms_norm_ref(
+        x=x,
+        weight=1. + weight.float(),
+        bias=None,
+        residual=residual,
+        eps=1e-6,
+        prenorm=True,
+        upcast=True,
+    )
+    ref_h = ref_h.to(dtype)
+    if prenorm:
+        torch.autograd.backward((ref_y, ref_h), (dy, dh))
+    else:
+        ref_y.backward(dy)
     ref_dx, ref_dw = x.grad, weight.grad
     ref_dr = residual.grad if prenorm else None
     x.grad = None
-    tol = 1e-3 if dtype == torch.float else 5e-3
     if prenorm:
         residual.grad = None
-        tri_y, tri_h = tri(x, residual, prenorm=True)
-        assert_close(' h', h, tri_h, tol)
+        tri_y, tri_h = tri(x=x, residual=residual, prenorm=True)
+        torch.autograd.backward((tri_y, tri_h), (dy, dh))
     else:
         tri_y = tri(x)
-    (tri_y * do).sum().backward()
+        tri_y.backward(dy)
 
-    assert_close(' y', ref, tri_y, tol)
+    tol = 1e-3 if dtype == torch.float else 5e-3
+    assert_close(' y', ref_y, tri_y, tol)
     assert_close('dx', ref_dx, x.grad, tol)
     assert_close('dw', ref_dw, tri.weight.grad, tol)
     if prenorm:
+        assert_close(' h', ref_h, tri_h, tol)
         assert_close('dr', ref_dr, residual.grad, tol)
     assert tri.weight.grad.dtype == dtype
+
 
 @pytest.mark.parametrize("N", [1, 16, 128])
 @pytest.mark.parametrize("D", [50, 64, 128])

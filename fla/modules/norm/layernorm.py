@@ -1086,15 +1086,16 @@ class RMSNorm(nn.Module):
         elementwise_affine: bool = True,
         bias: bool = False,
         eps: float = 1e-5,
-        zero_centered_weight: bool = False,
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
+        *,
+        zero_centered_weight: bool = False,
     ) -> None:
         r"""
         Args:
-            zero_centered_weight (bool):
-                Whether to scale by `1 + weight` instead of `weight`, with the weight initialized to zeros, as in the
-                norms of Gemma and Qwen3.5. The scale is formed in fp32. Default: `False`.
+            zero_centered_weight (bool, Optional):
+                Whether to initialize the weight to zero and scale by `1 + weight` in fp32.
+                Ignored when `elementwise_affine=False`. Default: `False`.
         """
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
@@ -1115,10 +1116,7 @@ class RMSNorm(nn.Module):
 
     def reset_parameters(self):
         if self.elementwise_affine:
-            if self.zero_centered_weight:
-                nn.init.zeros_(self.weight)
-            else:
-                nn.init.ones_(self.weight)
+            nn.init.constant_(self.weight, 0. if self.zero_centered_weight else 1.)
             if self.bias is not None:
                 nn.init.zeros_(self.bias)
 
