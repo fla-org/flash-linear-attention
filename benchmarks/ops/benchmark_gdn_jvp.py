@@ -52,7 +52,8 @@ def torch_chunk_gdn(q, k, v, g, beta, scale, C=64):
         nu = u[:, :, n] - w[:, :, n] @ h
         os.append(scale * (G[:, :, n].exp()[..., None] * (qc[:, :, n] @ h) + P[:, :, n] @ nu))
         GL = G[:, :, n, -1]
-        h = GL.exp()[..., None, None] * h + (kc[:, :, n] * (GL[..., None] - G[:, :, n]).exp()[..., None]).transpose(-1, -2) @ nu
+        decayed_k = kc[:, :, n] * (GL[..., None] - G[:, :, n]).exp()[..., None]
+        h = GL.exp()[..., None, None] * h + decayed_k.transpose(-1, -2) @ nu
     return _unchunk(torch.stack(os, 2), T, 0)
 
 
