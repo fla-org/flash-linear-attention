@@ -273,3 +273,21 @@ def test_custom_ops_opcheck():
     torch.library.opcheck(torch.ops.fla.chunk_gated_delta_rule_vjp.default, (*xs, do, scale, 64))
     torch.library.opcheck(torch.ops.fla.chunk_gated_delta_rule_vjp.default,
                           (*xs, torch.randn(D, *v.shape, device=device), scale, 64))
+
+
+def test_custom_op_jvp_backward_compiled():
+    """A loss on the layer's JVP, differentiated with respect to the parameters, under torch.compile(fullgraph=True)
+    equals eager (the backward traces fla::chunk_gated_delta_rule_vjp and the second-order reference operator)."""
+    torch._dynamo.reset()
+    torch.manual_seed(0)
+    B, T, C, D = 1, 100, 96, 2
+    m = _TinyGDN(C).to(device)
+    x = torch.randn(B, T, C, device=device)
+    x_dot = torch.randn(D, B, T, C, device=device)
+
+    def loss(x, x_dot):
+        y, y_dot = m.jvp(x, x_dot)
+        return y.square().mean() + y_dot.square().mean()
+    ge = torch.autograd.grad(loss(x, x_dot), list(m.parameters()))
+    gc = torch.autograd.grad(torch.compile(loss, fullgraph=True, dynamic=False)(x, x_dot), list(m.parameters()))
+    assert max(rel(a, b) for a, b in zip(gc, ge)) < 1e-3

@@ -86,8 +86,7 @@ def _gdn_bwd(
 
 @_gdn_bwd.register_fake
 def _(q, k, v, g_cum, beta, A, do, scale, chunk_size):
-    return (torch.empty_like(q), torch.empty_like(k), torch.empty_like(v),
-            torch.empty_like(g_cum), torch.empty_like(beta))
+    return tuple(x.new_empty(x.shape) for x in (q, k, v, g_cum, beta))
 
 
 def _gdn_setup_context(ctx, inputs, output):
@@ -216,12 +215,13 @@ def _gdn_jvp_primal_vjp_ref(
         tans = [t.detach().float() for t in (q_dot, k_dot, v_dot, g_dot, beta_dot)]
         _, o_dot = chunk_gated_delta_rule_jvp_ref(*xs, *tans, scale=scale, chunk_size=chunk_size)
         grads = torch.autograd.grad(o_dot, xs, do_dot.float())
-    return tuple(gr.to(x.dtype) for gr, x in zip(grads, (q, k, v, g, beta)))
+    return tuple(gr.to(x.dtype).contiguous() for gr, x in zip(grads, (q, k, v, g, beta)))
 
 
 @_gdn_jvp_primal_vjp_ref.register_fake
 def _(q, k, v, g, beta, q_dot, k_dot, v_dot, g_dot, beta_dot, do_dot, scale, chunk_size):
-    return tuple(torch.empty_like(x) for x in (q, k, v, g, beta))
+    # contiguous, like the real outputs (empty_like would copy the strides of possibly strided inputs)
+    return tuple(x.new_empty(x.shape) for x in (q, k, v, g, beta))
 
 
 def _jvp_setup_context(ctx, inputs, output):

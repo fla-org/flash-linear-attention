@@ -7,11 +7,12 @@
 
 from fla.backends import TritonAscendBackend
 from fla.ops.gated_delta_rule.chunk import chunk_gated_delta_rule, chunk_gdn
+from fla.ops.gated_delta_rule.chunk_jvp import chunk_gated_delta_rule_jvp
 from fla.ops.gated_delta_rule.fused_recurrent import fused_recurrent_gated_delta_rule, fused_recurrent_gdn
 from fla.ops.gated_delta_rule.naive import naive_chunk_gated_delta_rule, naive_recurrent_gated_delta_rule
 
 __all__ = [
-    "chunk_gated_delta_rule", "chunk_gdn",
+    "chunk_gated_delta_rule", "chunk_gated_delta_rule_jvp", "chunk_gdn",
     "fused_recurrent_gated_delta_rule", "fused_recurrent_gdn",
     "naive_chunk_gated_delta_rule",
     "naive_recurrent_gated_delta_rule",
