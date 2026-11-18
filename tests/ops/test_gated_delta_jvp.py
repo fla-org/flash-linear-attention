@@ -58,8 +58,9 @@ def test_chunk_jvp_reference_matches_naive_fp64(T):
 # Tolerances (relative Frobenius difference to the fp64 reference, measured on an RTX 5090):
 #   * default precision: the library's forward kernels use TF32 in their fp32 dots, and so do the three JVP kernels;
 #     the primal o itself is off by ~1.5e-3, and o_dot by the same amount. Bound: 5e-3.
-#   * IEEE everywhere we can control it (TRITON_F32_DEFAULT=ieee in a fresh process; the library's solve_tril
-#     block merge keeps explicit TF32): see test_chunk_jvp_fast_ieee for its bound.
+#   * input_precision='ieee' in the three JVP kernels (library forward still TF32): o_dot ~3e-5.
+#   * TRITON_F32_DEFAULT=ieee for the whole process (the library's solve_tril block merge keeps explicit TF32):
+#     o ~5e-6, o_dot ~5e-6 (not a test here: compiling every library kernel with IEEE dots takes many minutes).
 JVP_TF32_TOL = 5e-3
 
 
@@ -81,6 +82,19 @@ def test_chunk_jvp_fast_matches_reference(B, H, K, T, D):
     assert rel(o, o64) < JVP_TF32_TOL
     # the primal output is the library's own forward, bit for bit
     assert torch.equal(o, chunk_gated_delta_rule(*f32[:5])[0])
+
+
+@pytest.mark.parametrize('fuse_output', [True, False])
+@pytest.mark.parametrize('intra_impl', ['triton', 'torch'])
+def test_chunk_jvp_fast_variants(intra_impl, fuse_output):
+    """Both implementations of the intra-chunk tangents, with and without the output fused into the recurrence."""
+    from fla.ops.gated_delta_rule.chunk_jvp import chunk_gated_delta_rule_jvp_fwd
+    B, T, H, K, D = 2, 200, 4, 128, 3
+    ins = make_inputs(B, T, H, K, K, D, torch.float64)
+    _, o_dot64 = chunk_gated_delta_rule_jvp_ref(*ins)
+    f32 = [x.float() for x in ins]
+    _, o_dot = chunk_gated_delta_rule_jvp_fwd(*f32, scale=K ** -0.5, intra_impl=intra_impl, fuse_output=fuse_output)
+    assert rel(o_dot, o_dot64) < JVP_TF32_TOL
 
 
 def test_chunk_jvp_fast_strided_tangents():
