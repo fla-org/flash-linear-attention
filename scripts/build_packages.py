@@ -91,6 +91,9 @@ Repository = "https://github.com/fla-org/flash-linear-attention"
 [tool.setuptools.packages.find]
 include = ["fla*"]
 namespaces = true
+
+[tool.setuptools.package-data]
+"fla.ops.gated_delta_rule.backends.qla_ptx" = ["*.json", "ptx/*.ptx", "ptx/*.cpp", "*.md"]
 """
 
     with open(package_dir / 'pyproject.toml', 'w') as f:

@@ -1,0 +1,4743 @@
+{
+  "arch": "sm_103a",
+  "gpu": "NVIDIA B300 SXM6 AC",
+  "bindings": {
+    "[\"chunk_async\", \"fused_module\", {\"hk\": 2, \"hv\": 4, \"initial\": false, \"packed\": false, \"t\": 17}]:0": {
+      "ptx": "ptx/05bf0ea4348e9046d441ce58.ptx",
+      "ptx_sha256": "91aff88253e5756c6087fc045d30896029e2d5b53b7563db55a90acef444af61",
+      "shim": "ptx/05bf0ea4348e9046d441ce58.cpp",
+      "entry": "run",
+      "module_ident": "fused_short_f780f79ca5",
+      "kernel_name": "kernel_fused_short",
+      "arg_plan": [
+        [
+          "buffer",
+          "q"
+        ],
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "v"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "T": 17,
+        "HK": 2,
+        "HV": 4,
+        "PACKED": false,
+        "HAS_INITIAL": false,
+        "VSTEP": 8
+      }
+    },
+    "[\"chunk_async\", \"modules\", {\"hk\": 2, \"hv\": 4, \"initial\": true, \"packed\": false, \"t\": 17, \"vstep\": 8}]:0": {
+      "ptx": "ptx/4f88f95f7919007f0dadd646.ptx",
+      "ptx_sha256": "62308de698fd865f4d3d41fe687911cfd77c2bef48022fa998a6e1038fefb764",
+      "shim": "ptx/4f88f95f7919007f0dadd646.cpp",
+      "entry": "run",
+      "module_ident": "prepare_bf16_5c7617fea8",
+      "kernel_name": "kernel_prepare_bf16",
+      "arg_plan": [
+        [
+          "buffer",
+          "q"
+        ],
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "v"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "zero"
+        ],
+        [
+          "buffer",
+          "prepared"
+        ],
+        [
+          "buffer",
+          "updates"
+        ],
+        [
+          "buffer",
+          "mixing"
+        ],
+        [
+          "buffer",
+          "decays"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "T": 17,
+        "NC": 2,
+        "HK": 2,
+        "HV": 4,
+        "PACKED": false
+      }
+    },
+    "[\"chunk_async\", \"modules\", {\"hk\": 2, \"hv\": 4, \"initial\": true, \"packed\": false, \"t\": 17, \"vstep\": 8}]:1": {
+      "ptx": "ptx/436691eb7fd3be3087172a4e.ptx",
+      "ptx_sha256": "b71709e448d274c5dcc87a3a76b48b2fc981d148820517106158fe7e93d15ae0",
+      "shim": "ptx/436691eb7fd3be3087172a4e.cpp",
+      "entry": "run",
+      "module_ident": "apply_async_23b2e106e9",
+      "kernel_name": "kernel_apply_async",
+      "arg_plan": [
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "prepared"
+        ],
+        [
+          "buffer",
+          "updates"
+        ],
+        [
+          "buffer",
+          "mixing"
+        ],
+        [
+          "buffer",
+          "decays"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "T": 17,
+        "NC": 2,
+        "HV": 4,
+        "PACKED": false,
+        "HAS_INITIAL": true,
+        "SKIP_FIRST": 0,
+        "VSTEP": 8
+      }
+    },
+    "[\"context_sensitivity_zero\", \"modules_context\", {\"groups\": 2, \"hk\": 4, \"hv\": 4, \"initial\": false, \"length\": 512, \"packed\": false, \"t\": 4096, \"warps\": 4, \"workers\": 128}]:0": {
+      "ptx": "ptx/1fa8031980809ef50cda3dfa.ptx",
+      "ptx_sha256": "615e6af6a3acc6243ca1a4796189e8586d22de3e6d459292f79c11577fa47a5e",
+      "shim": "ptx/1fa8031980809ef50cda3dfa.cpp",
+      "entry": "run",
+      "module_ident": "prepare_bf16_29d92b1a95",
+      "kernel_name": "kernel_prepare_bf16",
+      "arg_plan": [
+        [
+          "buffer",
+          "q"
+        ],
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "v"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "zero"
+        ],
+        [
+          "buffer",
+          "prepared"
+        ],
+        [
+          "buffer",
+          "updates"
+        ],
+        [
+          "buffer",
+          "mixing"
+        ],
+        [
+          "buffer",
+          "decays"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "T": 4096,
+        "NC": 256,
+        "HK": 4,
+        "HV": 4,
+        "PACKED": false,
+        "FILL_ZERO": 0
+      }
+    },
+    "[\"context_sensitivity_zero\", \"modules_context\", {\"groups\": 2, \"hk\": 4, \"hv\": 4, \"initial\": false, \"length\": 512, \"packed\": false, \"t\": 4096, \"warps\": 4, \"workers\": 128}]:1": {
+      "ptx": "ptx/9dc11021a9be429c1cbd4671.ptx",
+      "ptx_sha256": "d68039a33baa44e41914efeddb2834497af3e50ceeea93d4925e2cc253f3df27",
+      "shim": "ptx/9dc11021a9be429c1cbd4671.cpp",
+      "entry": "run",
+      "module_ident": "map_sensitivity_b2c5dd24fb",
+      "kernel_name": "kernel_map_sensitivity",
+      "arg_plan": [
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "prepared"
+        ],
+        [
+          "buffer",
+          "updates"
+        ],
+        [
+          "buffer",
+          "mixing"
+        ],
+        [
+          "buffer",
+          "decays"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "buffer",
+          "map_a"
+        ],
+        [
+          "buffer",
+          "sensitivity"
+        ],
+        [
+          "buffer",
+          "zero_after"
+        ],
+        [
+          "buffer",
+          "tasks"
+        ],
+        [
+          "buffer",
+          "task_count"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "T": 4096,
+        "NC": 256,
+        "HV": 4,
+        "PACKED": false,
+        "HAS_INITIAL": false,
+        "VSTEP": 16,
+        "NX": 8,
+        "LENGTH": 512,
+        "PERSISTENT": false
+      }
+    },
+    "[\"context_sensitivity_zero\", \"modules_context\", {\"groups\": 2, \"hk\": 4, \"hv\": 4, \"initial\": false, \"length\": 512, \"packed\": false, \"t\": 4096, \"warps\": 4, \"workers\": 128}]:2": {
+      "ptx": "ptx/12c6bb9e650e739f6ecbb72e.ptx",
+      "ptx_sha256": "db5759deec72b5d98e987c6a6d7bfb8e338ead11f619494bd1b2ca8802252e7d",
+      "shim": "ptx/12c6bb9e650e739f6ecbb72e.cpp",
+      "entry": "run",
+      "module_ident": "prefix_final_70f8262fc3",
+      "kernel_name": "kernel_prefix_final",
+      "arg_plan": [
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "maps"
+        ],
+        [
+          "buffer",
+          "map_a"
+        ],
+        [
+          "buffer",
+          "entries"
+        ],
+        [
+          "buffer",
+          "zero_after"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "PG": 1,
+        "T": 4096,
+        "HV": 4,
+        "NX": 8,
+        "LENGTH": 512,
+        "PACKED": false,
+        "HAS_INITIAL": false
+      }
+    },
+    "[\"context_sensitivity_zero\", \"modules_context\", {\"groups\": 2, \"hk\": 4, \"hv\": 4, \"initial\": false, \"length\": 512, \"packed\": false, \"t\": 4096, \"warps\": 4, \"workers\": 128}]:3": {
+      "ptx": "ptx/cd32d74e07c2dc3337f673c5.ptx",
+      "ptx_sha256": "8dde717b9c6504a906a54da89462e7c9247d01d094f23cc81e203000dbab7ab4",
+      "shim": "ptx/cd32d74e07c2dc3337f673c5.cpp",
+      "entry": "run",
+      "module_ident": "correct_outputs_6adf90bfa0",
+      "kernel_name": "kernel_correct_outputs",
+      "arg_plan": [
+        [
+          "buffer",
+          "sensitivity"
+        ],
+        [
+          "buffer",
+          "entries"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "buffer",
+          "zero_after"
+        ],
+        [
+          "buffer",
+          "tasks"
+        ],
+        [
+          "buffer",
+          "task_count"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "PERSISTENT": false,
+        "WORKERS": 128,
+        "T": 4096,
+        "HV": 4,
+        "NX": 8,
+        "LENGTH": 512,
+        "HAS_INITIAL": false
+      }
+    },
+    "[\"context_sensitivity_zero\", \"modules_context\", {\"groups\": 2, \"hk\": 4, \"hv\": 4, \"initial\": true, \"length\": 512, \"packed\": false, \"t\": 4096, \"warps\": 4, \"workers\": 128}]:0": {
+      "ptx": "ptx/1fa8031980809ef50cda3dfa.ptx",
+      "ptx_sha256": "615e6af6a3acc6243ca1a4796189e8586d22de3e6d459292f79c11577fa47a5e",
+      "shim": "ptx/1fa8031980809ef50cda3dfa.cpp",
+      "entry": "run",
+      "module_ident": "prepare_bf16_29d92b1a95",
+      "kernel_name": "kernel_prepare_bf16",
+      "arg_plan": [
+        [
+          "buffer",
+          "q"
+        ],
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "v"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "zero"
+        ],
+        [
+          "buffer",
+          "prepared"
+        ],
+        [
+          "buffer",
+          "updates"
+        ],
+        [
+          "buffer",
+          "mixing"
+        ],
+        [
+          "buffer",
+          "decays"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "T": 4096,
+        "NC": 256,
+        "HK": 4,
+        "HV": 4,
+        "PACKED": false,
+        "FILL_ZERO": 0
+      }
+    },
+    "[\"context_sensitivity_zero\", \"modules_context\", {\"groups\": 2, \"hk\": 4, \"hv\": 4, \"initial\": true, \"length\": 512, \"packed\": false, \"t\": 4096, \"warps\": 4, \"workers\": 128}]:1": {
+      "ptx": "ptx/eef50c962b77748ff2bf9f36.ptx",
+      "ptx_sha256": "bb8062af9169a07bb6cc5f65ed76e74b41ed43bebab0b298e5d05fc70f595bd5",
+      "shim": "ptx/eef50c962b77748ff2bf9f36.cpp",
+      "entry": "run",
+      "module_ident": "map_sensitivity_477027cceb",
+      "kernel_name": "kernel_map_sensitivity",
+      "arg_plan": [
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "prepared"
+        ],
+        [
+          "buffer",
+          "updates"
+        ],
+        [
+          "buffer",
+          "mixing"
+        ],
+        [
+          "buffer",
+          "decays"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "buffer",
+          "map_a"
+        ],
+        [
+          "buffer",
+          "sensitivity"
+        ],
+        [
+          "buffer",
+          "zero_after"
+        ],
+        [
+          "buffer",
+          "tasks"
+        ],
+        [
+          "buffer",
+          "task_count"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "T": 4096,
+        "NC": 256,
+        "HV": 4,
+        "PACKED": false,
+        "HAS_INITIAL": true,
+        "VSTEP": 16,
+        "NX": 8,
+        "LENGTH": 512,
+        "PERSISTENT": false
+      }
+    },
+    "[\"context_sensitivity_zero\", \"modules_context\", {\"groups\": 2, \"hk\": 4, \"hv\": 4, \"initial\": true, \"length\": 512, \"packed\": false, \"t\": 4096, \"warps\": 4, \"workers\": 128}]:2": {
+      "ptx": "ptx/731e29c43a75a8879ca54a14.ptx",
+      "ptx_sha256": "3d545ced0cc1ca511b53745caadb95533becd9cc4e1e6eee21b1c1aca698de3f",
+      "shim": "ptx/731e29c43a75a8879ca54a14.cpp",
+      "entry": "run",
+      "module_ident": "prefix_final_3c297cacfd",
+      "kernel_name": "kernel_prefix_final",
+      "arg_plan": [
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "maps"
+        ],
+        [
+          "buffer",
+          "map_a"
+        ],
+        [
+          "buffer",
+          "entries"
+        ],
+        [
+          "buffer",
+          "zero_after"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "PG": 1,
+        "T": 4096,
+        "HV": 4,
+        "NX": 8,
+        "LENGTH": 512,
+        "PACKED": false,
+        "HAS_INITIAL": true
+      }
+    },
+    "[\"context_sensitivity_zero\", \"modules_context\", {\"groups\": 2, \"hk\": 4, \"hv\": 4, \"initial\": true, \"length\": 512, \"packed\": false, \"t\": 4096, \"warps\": 4, \"workers\": 128}]:3": {
+      "ptx": "ptx/2bef03d5e43331cbbc56f9bb.ptx",
+      "ptx_sha256": "99de1dd5234c3beed564d3d35f5124add7ec31c7face20eeac5a6400e89dafe2",
+      "shim": "ptx/2bef03d5e43331cbbc56f9bb.cpp",
+      "entry": "run",
+      "module_ident": "correct_outputs_9c113ba63b",
+      "kernel_name": "kernel_correct_outputs",
+      "arg_plan": [
+        [
+          "buffer",
+          "sensitivity"
+        ],
+        [
+          "buffer",
+          "entries"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "buffer",
+          "zero_after"
+        ],
+        [
+          "buffer",
+          "tasks"
+        ],
+        [
+          "buffer",
+          "task_count"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "PERSISTENT": false,
+        "WORKERS": 128,
+        "T": 4096,
+        "HV": 4,
+        "NX": 8,
+        "LENGTH": 512,
+        "HAS_INITIAL": true
+      }
+    },
+    "[\"context_sensitivity_zero\", \"modules_context\", {\"groups\": 2, \"hk\": 2, \"hv\": 8, \"initial\": false, \"length\": 512, \"packed\": false, \"t\": 4096, \"warps\": 8, \"workers\": 256}]:0": {
+      "ptx": "ptx/2b909c9d61a3934b3c2ea454.ptx",
+      "ptx_sha256": "88c6bd8e5f53ccef21022b207c569be8148d983f6429079466889cf1d1805ad0",
+      "shim": "ptx/2b909c9d61a3934b3c2ea454.cpp",
+      "entry": "run",
+      "module_ident": "prepare_bf16_80b8e6ac59",
+      "kernel_name": "kernel_prepare_bf16",
+      "arg_plan": [
+        [
+          "buffer",
+          "q"
+        ],
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "v"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "zero"
+        ],
+        [
+          "buffer",
+          "prepared"
+        ],
+        [
+          "buffer",
+          "updates"
+        ],
+        [
+          "buffer",
+          "mixing"
+        ],
+        [
+          "buffer",
+          "decays"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "T": 4096,
+        "NC": 256,
+        "HK": 2,
+        "HV": 8,
+        "PACKED": false,
+        "FILL_ZERO": 0
+      }
+    },
+    "[\"context_sensitivity_zero\", \"modules_context\", {\"groups\": 2, \"hk\": 2, \"hv\": 8, \"initial\": false, \"length\": 512, \"packed\": false, \"t\": 4096, \"warps\": 8, \"workers\": 256}]:1": {
+      "ptx": "ptx/a8897fa402b87c988f6fa651.ptx",
+      "ptx_sha256": "7cf8f23d40527c4a3a85b24d5c7be66bd74292c7279f11ca076e6780e523c6da",
+      "shim": "ptx/a8897fa402b87c988f6fa651.cpp",
+      "entry": "run",
+      "module_ident": "map_sensitivity_3cb033bb99",
+      "kernel_name": "kernel_map_sensitivity",
+      "arg_plan": [
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "prepared"
+        ],
+        [
+          "buffer",
+          "updates"
+        ],
+        [
+          "buffer",
+          "mixing"
+        ],
+        [
+          "buffer",
+          "decays"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "buffer",
+          "map_a"
+        ],
+        [
+          "buffer",
+          "sensitivity"
+        ],
+        [
+          "buffer",
+          "zero_after"
+        ],
+        [
+          "buffer",
+          "tasks"
+        ],
+        [
+          "buffer",
+          "task_count"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "T": 4096,
+        "NC": 256,
+        "HV": 8,
+        "PACKED": false,
+        "HAS_INITIAL": false,
+        "VSTEP": 16,
+        "NX": 8,
+        "LENGTH": 512,
+        "PERSISTENT": false
+      }
+    },
+    "[\"context_sensitivity_zero\", \"modules_context\", {\"groups\": 2, \"hk\": 2, \"hv\": 8, \"initial\": false, \"length\": 512, \"packed\": false, \"t\": 4096, \"warps\": 8, \"workers\": 256}]:2": {
+      "ptx": "ptx/1f264a44f63006c96edb268f.ptx",
+      "ptx_sha256": "6f031a74612683bb7c67c1783f2c8359b12516ea090d9d0d5882ad3029e4dd3e",
+      "shim": "ptx/1f264a44f63006c96edb268f.cpp",
+      "entry": "run",
+      "module_ident": "prefix_final_c1809328e9",
+      "kernel_name": "kernel_prefix_final",
+      "arg_plan": [
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "maps"
+        ],
+        [
+          "buffer",
+          "map_a"
+        ],
+        [
+          "buffer",
+          "entries"
+        ],
+        [
+          "buffer",
+          "zero_after"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "PG": 1,
+        "T": 4096,
+        "HV": 8,
+        "NX": 8,
+        "LENGTH": 512,
+        "PACKED": false,
+        "HAS_INITIAL": false
+      }
+    },
+    "[\"context_sensitivity_zero\", \"modules_context\", {\"groups\": 2, \"hk\": 2, \"hv\": 8, \"initial\": false, \"length\": 512, \"packed\": false, \"t\": 4096, \"warps\": 8, \"workers\": 256}]:3": {
+      "ptx": "ptx/2af2f88baf33bbffaac0bc51.ptx",
+      "ptx_sha256": "ab2254f9a9d809bd39b088af685cd024a6c51d1a962b8ffb0d1dce66ba0ea793",
+      "shim": "ptx/2af2f88baf33bbffaac0bc51.cpp",
+      "entry": "run",
+      "module_ident": "correct_outputs_83201e7eb8",
+      "kernel_name": "kernel_correct_outputs",
+      "arg_plan": [
+        [
+          "buffer",
+          "sensitivity"
+        ],
+        [
+          "buffer",
+          "entries"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "buffer",
+          "zero_after"
+        ],
+        [
+          "buffer",
+          "tasks"
+        ],
+        [
+          "buffer",
+          "task_count"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "PERSISTENT": false,
+        "WORKERS": 256,
+        "T": 4096,
+        "HV": 8,
+        "NX": 8,
+        "LENGTH": 512,
+        "HAS_INITIAL": false
+      }
+    },
+    "[\"context_sensitivity_zero\", \"modules_context\", {\"groups\": 2, \"hk\": 2, \"hv\": 8, \"initial\": true, \"length\": 512, \"packed\": false, \"t\": 4096, \"warps\": 8, \"workers\": 256}]:0": {
+      "ptx": "ptx/2b909c9d61a3934b3c2ea454.ptx",
+      "ptx_sha256": "88c6bd8e5f53ccef21022b207c569be8148d983f6429079466889cf1d1805ad0",
+      "shim": "ptx/2b909c9d61a3934b3c2ea454.cpp",
+      "entry": "run",
+      "module_ident": "prepare_bf16_80b8e6ac59",
+      "kernel_name": "kernel_prepare_bf16",
+      "arg_plan": [
+        [
+          "buffer",
+          "q"
+        ],
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "v"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "zero"
+        ],
+        [
+          "buffer",
+          "prepared"
+        ],
+        [
+          "buffer",
+          "updates"
+        ],
+        [
+          "buffer",
+          "mixing"
+        ],
+        [
+          "buffer",
+          "decays"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "T": 4096,
+        "NC": 256,
+        "HK": 2,
+        "HV": 8,
+        "PACKED": false,
+        "FILL_ZERO": 0
+      }
+    },
+    "[\"context_sensitivity_zero\", \"modules_context\", {\"groups\": 2, \"hk\": 2, \"hv\": 8, \"initial\": true, \"length\": 512, \"packed\": false, \"t\": 4096, \"warps\": 8, \"workers\": 256}]:1": {
+      "ptx": "ptx/8b7d615b312ab0bb60c9575e.ptx",
+      "ptx_sha256": "7e2e306956223d96f033c7e285eb8353b5a810c378e789b1dfb01efbd7786f0d",
+      "shim": "ptx/8b7d615b312ab0bb60c9575e.cpp",
+      "entry": "run",
+      "module_ident": "map_sensitivity_a48e0193b3",
+      "kernel_name": "kernel_map_sensitivity",
+      "arg_plan": [
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "prepared"
+        ],
+        [
+          "buffer",
+          "updates"
+        ],
+        [
+          "buffer",
+          "mixing"
+        ],
+        [
+          "buffer",
+          "decays"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "buffer",
+          "map_a"
+        ],
+        [
+          "buffer",
+          "sensitivity"
+        ],
+        [
+          "buffer",
+          "zero_after"
+        ],
+        [
+          "buffer",
+          "tasks"
+        ],
+        [
+          "buffer",
+          "task_count"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "T": 4096,
+        "NC": 256,
+        "HV": 8,
+        "PACKED": false,
+        "HAS_INITIAL": true,
+        "VSTEP": 16,
+        "NX": 8,
+        "LENGTH": 512,
+        "PERSISTENT": false
+      }
+    },
+    "[\"context_sensitivity_zero\", \"modules_context\", {\"groups\": 2, \"hk\": 2, \"hv\": 8, \"initial\": true, \"length\": 512, \"packed\": false, \"t\": 4096, \"warps\": 8, \"workers\": 256}]:2": {
+      "ptx": "ptx/0a875328319477215b69b4ba.ptx",
+      "ptx_sha256": "a0ab5fda8d21c8de8d1bba4404cfc259859c9a2c6800c5ccb525892eaa70ba43",
+      "shim": "ptx/0a875328319477215b69b4ba.cpp",
+      "entry": "run",
+      "module_ident": "prefix_final_f41bf9f05c",
+      "kernel_name": "kernel_prefix_final",
+      "arg_plan": [
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "maps"
+        ],
+        [
+          "buffer",
+          "map_a"
+        ],
+        [
+          "buffer",
+          "entries"
+        ],
+        [
+          "buffer",
+          "zero_after"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "PG": 1,
+        "T": 4096,
+        "HV": 8,
+        "NX": 8,
+        "LENGTH": 512,
+        "PACKED": false,
+        "HAS_INITIAL": true
+      }
+    },
+    "[\"context_sensitivity_zero\", \"modules_context\", {\"groups\": 2, \"hk\": 2, \"hv\": 8, \"initial\": true, \"length\": 512, \"packed\": false, \"t\": 4096, \"warps\": 8, \"workers\": 256}]:3": {
+      "ptx": "ptx/778dfb9eac5a54a925ae8a88.ptx",
+      "ptx_sha256": "8da3f4a9a0a1c051f692a174d322d8acc714a5ad3dfbf6ff5dfb62fbad59b8ab",
+      "shim": "ptx/778dfb9eac5a54a925ae8a88.cpp",
+      "entry": "run",
+      "module_ident": "correct_outputs_4c453737a0",
+      "kernel_name": "kernel_correct_outputs",
+      "arg_plan": [
+        [
+          "buffer",
+          "sensitivity"
+        ],
+        [
+          "buffer",
+          "entries"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "buffer",
+          "zero_after"
+        ],
+        [
+          "buffer",
+          "tasks"
+        ],
+        [
+          "buffer",
+          "task_count"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "PERSISTENT": false,
+        "WORKERS": 256,
+        "T": 4096,
+        "HV": 8,
+        "NX": 8,
+        "LENGTH": 512,
+        "HAS_INITIAL": true
+      }
+    },
+    "[\"context_sensitivity_zero\", \"modules_context\", {\"groups\": 4, \"hk\": 4, \"hv\": 16, \"initial\": false, \"length\": 512, \"packed\": false, \"t\": 4096, \"warps\": 4, \"workers\": 256}]:0": {
+      "ptx": "ptx/7a78fd8778eb903249862de3.ptx",
+      "ptx_sha256": "34003f7146ee44350efc32b0dd42424bcfb5fb580ebd461f5be784b011e4ecdc",
+      "shim": "ptx/7a78fd8778eb903249862de3.cpp",
+      "entry": "run",
+      "module_ident": "prepare_bf16_97f78fe0ff",
+      "kernel_name": "kernel_prepare_bf16",
+      "arg_plan": [
+        [
+          "buffer",
+          "q"
+        ],
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "v"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "zero"
+        ],
+        [
+          "buffer",
+          "prepared"
+        ],
+        [
+          "buffer",
+          "updates"
+        ],
+        [
+          "buffer",
+          "mixing"
+        ],
+        [
+          "buffer",
+          "decays"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "T": 4096,
+        "NC": 256,
+        "HK": 4,
+        "HV": 16,
+        "PACKED": false,
+        "FILL_ZERO": 0
+      }
+    },
+    "[\"context_sensitivity_zero\", \"modules_context\", {\"groups\": 4, \"hk\": 4, \"hv\": 16, \"initial\": false, \"length\": 512, \"packed\": false, \"t\": 4096, \"warps\": 4, \"workers\": 256}]:1": {
+      "ptx": "ptx/31c1bae527eb2efd88488052.ptx",
+      "ptx_sha256": "f1c413b89d8f714a490ca4c9061319b56deee47d1af959777ec83ba06a7d7261",
+      "shim": "ptx/31c1bae527eb2efd88488052.cpp",
+      "entry": "run",
+      "module_ident": "map_sensitivity_03b604b3c3",
+      "kernel_name": "kernel_map_sensitivity",
+      "arg_plan": [
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "prepared"
+        ],
+        [
+          "buffer",
+          "updates"
+        ],
+        [
+          "buffer",
+          "mixing"
+        ],
+        [
+          "buffer",
+          "decays"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "buffer",
+          "map_a"
+        ],
+        [
+          "buffer",
+          "sensitivity"
+        ],
+        [
+          "buffer",
+          "zero_after"
+        ],
+        [
+          "buffer",
+          "tasks"
+        ],
+        [
+          "buffer",
+          "task_count"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "T": 4096,
+        "NC": 256,
+        "HV": 16,
+        "PACKED": false,
+        "HAS_INITIAL": false,
+        "VSTEP": 32,
+        "NX": 8,
+        "LENGTH": 512,
+        "PERSISTENT": false
+      }
+    },
+    "[\"context_sensitivity_zero\", \"modules_context\", {\"groups\": 4, \"hk\": 4, \"hv\": 16, \"initial\": false, \"length\": 512, \"packed\": false, \"t\": 4096, \"warps\": 4, \"workers\": 256}]:2": {
+      "ptx": "ptx/11277123a40a4ac6bd8c7ad1.ptx",
+      "ptx_sha256": "3b1419562fa47cfa21efbb1b85b7527e2bbc09deaeec3c0d4bdc3dedcf9d9d3c",
+      "shim": "ptx/11277123a40a4ac6bd8c7ad1.cpp",
+      "entry": "run",
+      "module_ident": "prefix_final_acc5eb7342",
+      "kernel_name": "kernel_prefix_final",
+      "arg_plan": [
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "maps"
+        ],
+        [
+          "buffer",
+          "map_a"
+        ],
+        [
+          "buffer",
+          "entries"
+        ],
+        [
+          "buffer",
+          "zero_after"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "PG": 1,
+        "T": 4096,
+        "HV": 16,
+        "NX": 8,
+        "LENGTH": 512,
+        "PACKED": false,
+        "HAS_INITIAL": false
+      }
+    },
+    "[\"context_sensitivity_zero\", \"modules_context\", {\"groups\": 4, \"hk\": 4, \"hv\": 16, \"initial\": false, \"length\": 512, \"packed\": false, \"t\": 4096, \"warps\": 4, \"workers\": 256}]:3": {
+      "ptx": "ptx/2be3eca28d42c59452e0d664.ptx",
+      "ptx_sha256": "37a60111c9d9da0b16f7a135275a47c76f0a43a96e3cf39b5fb49f7efff10f92",
+      "shim": "ptx/2be3eca28d42c59452e0d664.cpp",
+      "entry": "run",
+      "module_ident": "correct_outputs_4558902f81",
+      "kernel_name": "kernel_correct_outputs",
+      "arg_plan": [
+        [
+          "buffer",
+          "sensitivity"
+        ],
+        [
+          "buffer",
+          "entries"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "buffer",
+          "zero_after"
+        ],
+        [
+          "buffer",
+          "tasks"
+        ],
+        [
+          "buffer",
+          "task_count"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "PERSISTENT": false,
+        "WORKERS": 256,
+        "T": 4096,
+        "HV": 16,
+        "NX": 8,
+        "LENGTH": 512,
+        "HAS_INITIAL": false
+      }
+    },
+    "[\"context_sensitivity_zero\", \"modules_context\", {\"groups\": 2, \"hk\": 4, \"hv\": 16, \"initial\": true, \"length\": 512, \"packed\": false, \"t\": 4096, \"warps\": 8, \"workers\": 256}]:0": {
+      "ptx": "ptx/7a78fd8778eb903249862de3.ptx",
+      "ptx_sha256": "34003f7146ee44350efc32b0dd42424bcfb5fb580ebd461f5be784b011e4ecdc",
+      "shim": "ptx/7a78fd8778eb903249862de3.cpp",
+      "entry": "run",
+      "module_ident": "prepare_bf16_97f78fe0ff",
+      "kernel_name": "kernel_prepare_bf16",
+      "arg_plan": [
+        [
+          "buffer",
+          "q"
+        ],
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "v"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "zero"
+        ],
+        [
+          "buffer",
+          "prepared"
+        ],
+        [
+          "buffer",
+          "updates"
+        ],
+        [
+          "buffer",
+          "mixing"
+        ],
+        [
+          "buffer",
+          "decays"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "T": 4096,
+        "NC": 256,
+        "HK": 4,
+        "HV": 16,
+        "PACKED": false,
+        "FILL_ZERO": 0
+      }
+    },
+    "[\"context_sensitivity_zero\", \"modules_context\", {\"groups\": 2, \"hk\": 4, \"hv\": 16, \"initial\": true, \"length\": 512, \"packed\": false, \"t\": 4096, \"warps\": 8, \"workers\": 256}]:1": {
+      "ptx": "ptx/29377ad8be3ab838d592e5fe.ptx",
+      "ptx_sha256": "326f259b64ca26deba28ebce5e6b1c64b33dd0235fc9fcb7f84399afb4cb5c59",
+      "shim": "ptx/29377ad8be3ab838d592e5fe.cpp",
+      "entry": "run",
+      "module_ident": "map_sensitivity_f53f961dc8",
+      "kernel_name": "kernel_map_sensitivity",
+      "arg_plan": [
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "prepared"
+        ],
+        [
+          "buffer",
+          "updates"
+        ],
+        [
+          "buffer",
+          "mixing"
+        ],
+        [
+          "buffer",
+          "decays"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "buffer",
+          "map_a"
+        ],
+        [
+          "buffer",
+          "sensitivity"
+        ],
+        [
+          "buffer",
+          "zero_after"
+        ],
+        [
+          "buffer",
+          "tasks"
+        ],
+        [
+          "buffer",
+          "task_count"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "T": 4096,
+        "NC": 256,
+        "HV": 16,
+        "PACKED": false,
+        "HAS_INITIAL": true,
+        "VSTEP": 16,
+        "NX": 8,
+        "LENGTH": 512,
+        "PERSISTENT": false
+      }
+    },
+    "[\"context_sensitivity_zero\", \"modules_context\", {\"groups\": 2, \"hk\": 4, \"hv\": 16, \"initial\": true, \"length\": 512, \"packed\": false, \"t\": 4096, \"warps\": 8, \"workers\": 256}]:2": {
+      "ptx": "ptx/4cc3b7ae122272ef03e6cfee.ptx",
+      "ptx_sha256": "c505a7276871ca349979c56e19fa2d07b4b2ac589f4e081f318074acc6ad7284",
+      "shim": "ptx/4cc3b7ae122272ef03e6cfee.cpp",
+      "entry": "run",
+      "module_ident": "prefix_final_83ad397d85",
+      "kernel_name": "kernel_prefix_final",
+      "arg_plan": [
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "maps"
+        ],
+        [
+          "buffer",
+          "map_a"
+        ],
+        [
+          "buffer",
+          "entries"
+        ],
+        [
+          "buffer",
+          "zero_after"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "PG": 1,
+        "T": 4096,
+        "HV": 16,
+        "NX": 8,
+        "LENGTH": 512,
+        "PACKED": false,
+        "HAS_INITIAL": true
+      }
+    },
+    "[\"context_sensitivity_zero\", \"modules_context\", {\"groups\": 2, \"hk\": 4, \"hv\": 16, \"initial\": true, \"length\": 512, \"packed\": false, \"t\": 4096, \"warps\": 8, \"workers\": 256}]:3": {
+      "ptx": "ptx/75c0fcda49c7e6d6cdd928cc.ptx",
+      "ptx_sha256": "1800df44ec32c1b4fd280e6ffee05e08a0ad2d5f4e52f132ff87ea31e1a30176",
+      "shim": "ptx/75c0fcda49c7e6d6cdd928cc.cpp",
+      "entry": "run",
+      "module_ident": "correct_outputs_d130844614",
+      "kernel_name": "kernel_correct_outputs",
+      "arg_plan": [
+        [
+          "buffer",
+          "sensitivity"
+        ],
+        [
+          "buffer",
+          "entries"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "buffer",
+          "zero_after"
+        ],
+        [
+          "buffer",
+          "tasks"
+        ],
+        [
+          "buffer",
+          "task_count"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "PERSISTENT": false,
+        "WORKERS": 256,
+        "T": 4096,
+        "HV": 16,
+        "NX": 8,
+        "LENGTH": 512,
+        "HAS_INITIAL": true
+      }
+    },
+    "[\"chunk_async\", \"modules\", {\"hk\": 4, \"hv\": 4, \"initial\": false, \"packed\": true, \"t\": 128, \"vstep\": 8}]:0": {
+      "ptx": "ptx/a49863316089c91579f5e1c4.ptx",
+      "ptx_sha256": "87809975eb7d1cfb8ac0c46bb134a17b13deca2dced6bb2c5485981619636f18",
+      "shim": "ptx/a49863316089c91579f5e1c4.cpp",
+      "entry": "run",
+      "module_ident": "prepare_bf16_a3c877f54a",
+      "kernel_name": "kernel_prepare_bf16",
+      "arg_plan": [
+        [
+          "buffer",
+          "q"
+        ],
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "v"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "zero"
+        ],
+        [
+          "buffer",
+          "prepared"
+        ],
+        [
+          "buffer",
+          "updates"
+        ],
+        [
+          "buffer",
+          "mixing"
+        ],
+        [
+          "buffer",
+          "decays"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "T": 128,
+        "NC": 8,
+        "HK": 4,
+        "HV": 4,
+        "PACKED": true
+      }
+    },
+    "[\"chunk_async\", \"modules\", {\"hk\": 4, \"hv\": 4, \"initial\": false, \"packed\": true, \"t\": 128, \"vstep\": 8}]:1": {
+      "ptx": "ptx/143c1af1d84eda796bae36c3.ptx",
+      "ptx_sha256": "fd2f9c16ba950aa044ead659ff60bc84a5d2b63a2ec39eb4237df4a02ac1b1b8",
+      "shim": "ptx/143c1af1d84eda796bae36c3.cpp",
+      "entry": "run",
+      "module_ident": "apply_async_28b8673075",
+      "kernel_name": "kernel_apply_async",
+      "arg_plan": [
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "prepared"
+        ],
+        [
+          "buffer",
+          "updates"
+        ],
+        [
+          "buffer",
+          "mixing"
+        ],
+        [
+          "buffer",
+          "decays"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "T": 128,
+        "NC": 8,
+        "HV": 4,
+        "PACKED": true,
+        "HAS_INITIAL": false,
+        "SKIP_FIRST": 1,
+        "VSTEP": 8
+      }
+    },
+    "[\"chunk_async\", \"modules\", {\"hk\": 4, \"hv\": 4, \"initial\": true, \"packed\": true, \"t\": 128, \"vstep\": 8}]:0": {
+      "ptx": "ptx/a49863316089c91579f5e1c4.ptx",
+      "ptx_sha256": "87809975eb7d1cfb8ac0c46bb134a17b13deca2dced6bb2c5485981619636f18",
+      "shim": "ptx/a49863316089c91579f5e1c4.cpp",
+      "entry": "run",
+      "module_ident": "prepare_bf16_a3c877f54a",
+      "kernel_name": "kernel_prepare_bf16",
+      "arg_plan": [
+        [
+          "buffer",
+          "q"
+        ],
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "v"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "zero"
+        ],
+        [
+          "buffer",
+          "prepared"
+        ],
+        [
+          "buffer",
+          "updates"
+        ],
+        [
+          "buffer",
+          "mixing"
+        ],
+        [
+          "buffer",
+          "decays"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "T": 128,
+        "NC": 8,
+        "HK": 4,
+        "HV": 4,
+        "PACKED": true
+      }
+    },
+    "[\"chunk_async\", \"modules\", {\"hk\": 4, \"hv\": 4, \"initial\": true, \"packed\": true, \"t\": 128, \"vstep\": 8}]:1": {
+      "ptx": "ptx/0be1409e3985c9cc91bb0176.ptx",
+      "ptx_sha256": "43383f16be5a4699329754ecb0c7cf7374c3d031be435643dbb7a6e5b35da56d",
+      "shim": "ptx/0be1409e3985c9cc91bb0176.cpp",
+      "entry": "run",
+      "module_ident": "apply_async_3c57d4cfc6",
+      "kernel_name": "kernel_apply_async",
+      "arg_plan": [
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "prepared"
+        ],
+        [
+          "buffer",
+          "updates"
+        ],
+        [
+          "buffer",
+          "mixing"
+        ],
+        [
+          "buffer",
+          "decays"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "T": 128,
+        "NC": 8,
+        "HV": 4,
+        "PACKED": true,
+        "HAS_INITIAL": true,
+        "SKIP_FIRST": 0,
+        "VSTEP": 8
+      }
+    },
+    "[\"context\", \"modules_context\", {\"groups\": 2, \"hk\": 4, \"hv\": 4, \"initial\": false, \"length\": 512, \"n\": 5, \"packed\": true, \"t\": 4096, \"warps\": 2}]:0": {
+      "ptx": "ptx/b121bb30381b2dc73805f3fd.ptx",
+      "ptx_sha256": "a9e49a5cb5ef01412693dfa625e510413edcbb6a4d7c040bef6f8dd9b38af3d6",
+      "shim": "ptx/b121bb30381b2dc73805f3fd.cpp",
+      "entry": "run",
+      "module_ident": "prepare_bf16_7aeeefdd51",
+      "kernel_name": "kernel_prepare_bf16",
+      "arg_plan": [
+        [
+          "buffer",
+          "q"
+        ],
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "v"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "zero"
+        ],
+        [
+          "buffer",
+          "prepared"
+        ],
+        [
+          "buffer",
+          "updates"
+        ],
+        [
+          "buffer",
+          "mixing"
+        ],
+        [
+          "buffer",
+          "decays"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "T": 4096,
+        "NC": 256,
+        "HK": 4,
+        "HV": 4,
+        "PACKED": true,
+        "FILL_ZERO": 0,
+        "NSEQ": 5
+      }
+    },
+    "[\"context\", \"modules_context\", {\"groups\": 2, \"hk\": 4, \"hv\": 4, \"initial\": false, \"length\": 512, \"n\": 5, \"packed\": true, \"t\": 4096, \"warps\": 2}]:1": {
+      "ptx": "ptx/a5f69f1912c9e427d65f4703.ptx",
+      "ptx_sha256": "3b7973a4b2c8b2cd0bb3336f1ac7e4150df90855989c31c108810b36d13f0eec",
+      "shim": "ptx/a5f69f1912c9e427d65f4703.cpp",
+      "entry": "run",
+      "module_ident": "map_context_5a29c30559",
+      "kernel_name": "kernel_map_context",
+      "arg_plan": [
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "prepared"
+        ],
+        [
+          "buffer",
+          "updates"
+        ],
+        [
+          "buffer",
+          "mixing"
+        ],
+        [
+          "buffer",
+          "decays"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "buffer",
+          "map_a"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "EARLY_EXIT": false,
+        "T": 4096,
+        "NC": 256,
+        "HV": 4,
+        "PACKED": true,
+        "HAS_INITIAL": false,
+        "VSTEP": 16,
+        "NX": 8,
+        "LENGTH": 512,
+        "NSEQ": 5
+      }
+    },
+    "[\"context\", \"modules_context\", {\"groups\": 2, \"hk\": 4, \"hv\": 4, \"initial\": false, \"length\": 512, \"n\": 5, \"packed\": true, \"t\": 4096, \"warps\": 2}]:2": {
+      "ptx": "ptx/815bf8718c4a234a6f1fa203.ptx",
+      "ptx_sha256": "81f7679dfc3aab38b0050878c07159cf5a01388ef1e89052dcba55a1cffe0176",
+      "shim": "ptx/815bf8718c4a234a6f1fa203.cpp",
+      "entry": "run",
+      "module_ident": "apply_context_13e9a5efc8",
+      "kernel_name": "kernel_apply_context",
+      "arg_plan": [
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "prepared"
+        ],
+        [
+          "buffer",
+          "updates"
+        ],
+        [
+          "buffer",
+          "mixing"
+        ],
+        [
+          "buffer",
+          "decays"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "T": 4096,
+        "NC": 256,
+        "HV": 4,
+        "PACKED": true,
+        "HAS_INITIAL": true,
+        "VSTEP": 16,
+        "NX": 8,
+        "LENGTH": 512,
+        "NSEQ": 5
+      }
+    },
+    "[\"context\", \"modules_context\", {\"groups\": 2, \"hk\": 4, \"hv\": 4, \"initial\": false, \"length\": 512, \"n\": 5, \"packed\": true, \"t\": 4096, \"warps\": 2}]:3": {
+      "ptx": "ptx/ae4fbea8356a8b1b349dd478.ptx",
+      "ptx_sha256": "8122416c59b260689373a240049b92f1adc151f7aac02f3fffcfd10a2a659f5d",
+      "shim": "ptx/ae4fbea8356a8b1b349dd478.cpp",
+      "entry": "run",
+      "module_ident": "prefix_context_59ca1b1789",
+      "kernel_name": "kernel_prefix_context",
+      "arg_plan": [
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "maps"
+        ],
+        [
+          "buffer",
+          "map_a"
+        ],
+        [
+          "buffer",
+          "entries"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "T": 4096,
+        "HV": 4,
+        "NX": 8,
+        "LENGTH": 512,
+        "PACKED": true,
+        "HAS_INITIAL": false
+      }
+    },
+    "[\"context\", \"modules_context\", {\"groups\": 2, \"hk\": 4, \"hv\": 4, \"initial\": true, \"length\": 512, \"n\": 5, \"packed\": true, \"t\": 4096, \"warps\": 2}]:0": {
+      "ptx": "ptx/b121bb30381b2dc73805f3fd.ptx",
+      "ptx_sha256": "a9e49a5cb5ef01412693dfa625e510413edcbb6a4d7c040bef6f8dd9b38af3d6",
+      "shim": "ptx/b121bb30381b2dc73805f3fd.cpp",
+      "entry": "run",
+      "module_ident": "prepare_bf16_7aeeefdd51",
+      "kernel_name": "kernel_prepare_bf16",
+      "arg_plan": [
+        [
+          "buffer",
+          "q"
+        ],
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "v"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "zero"
+        ],
+        [
+          "buffer",
+          "prepared"
+        ],
+        [
+          "buffer",
+          "updates"
+        ],
+        [
+          "buffer",
+          "mixing"
+        ],
+        [
+          "buffer",
+          "decays"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "T": 4096,
+        "NC": 256,
+        "HK": 4,
+        "HV": 4,
+        "PACKED": true,
+        "FILL_ZERO": 0,
+        "NSEQ": 5
+      }
+    },
+    "[\"context\", \"modules_context\", {\"groups\": 2, \"hk\": 4, \"hv\": 4, \"initial\": true, \"length\": 512, \"n\": 5, \"packed\": true, \"t\": 4096, \"warps\": 2}]:1": {
+      "ptx": "ptx/4bbfd3b5d677cba435b39af9.ptx",
+      "ptx_sha256": "8137bc0a38009488bae8410b4a14ee4acdad40f346e84930b07eeece1007da2b",
+      "shim": "ptx/4bbfd3b5d677cba435b39af9.cpp",
+      "entry": "run",
+      "module_ident": "map_context_805a2f31d6",
+      "kernel_name": "kernel_map_context",
+      "arg_plan": [
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "prepared"
+        ],
+        [
+          "buffer",
+          "updates"
+        ],
+        [
+          "buffer",
+          "mixing"
+        ],
+        [
+          "buffer",
+          "decays"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "buffer",
+          "map_a"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "EARLY_EXIT": false,
+        "T": 4096,
+        "NC": 256,
+        "HV": 4,
+        "PACKED": true,
+        "HAS_INITIAL": true,
+        "VSTEP": 16,
+        "NX": 8,
+        "LENGTH": 512,
+        "NSEQ": 5
+      }
+    },
+    "[\"context\", \"modules_context\", {\"groups\": 2, \"hk\": 4, \"hv\": 4, \"initial\": true, \"length\": 512, \"n\": 5, \"packed\": true, \"t\": 4096, \"warps\": 2}]:2": {
+      "ptx": "ptx/815bf8718c4a234a6f1fa203.ptx",
+      "ptx_sha256": "81f7679dfc3aab38b0050878c07159cf5a01388ef1e89052dcba55a1cffe0176",
+      "shim": "ptx/815bf8718c4a234a6f1fa203.cpp",
+      "entry": "run",
+      "module_ident": "apply_context_13e9a5efc8",
+      "kernel_name": "kernel_apply_context",
+      "arg_plan": [
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "prepared"
+        ],
+        [
+          "buffer",
+          "updates"
+        ],
+        [
+          "buffer",
+          "mixing"
+        ],
+        [
+          "buffer",
+          "decays"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "T": 4096,
+        "NC": 256,
+        "HV": 4,
+        "PACKED": true,
+        "HAS_INITIAL": true,
+        "VSTEP": 16,
+        "NX": 8,
+        "LENGTH": 512,
+        "NSEQ": 5
+      }
+    },
+    "[\"context\", \"modules_context\", {\"groups\": 2, \"hk\": 4, \"hv\": 4, \"initial\": true, \"length\": 512, \"n\": 5, \"packed\": true, \"t\": 4096, \"warps\": 2}]:3": {
+      "ptx": "ptx/cd5a35222ff168f55e8c1cc0.ptx",
+      "ptx_sha256": "c8df9d739bd95e7d1fc82c023cf19d4ea481d86f9969cc3ed4e19d1705d12ae8",
+      "shim": "ptx/cd5a35222ff168f55e8c1cc0.cpp",
+      "entry": "run",
+      "module_ident": "prefix_context_0eab012360",
+      "kernel_name": "kernel_prefix_context",
+      "arg_plan": [
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "maps"
+        ],
+        [
+          "buffer",
+          "map_a"
+        ],
+        [
+          "buffer",
+          "entries"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "T": 4096,
+        "HV": 4,
+        "NX": 8,
+        "LENGTH": 512,
+        "PACKED": true,
+        "HAS_INITIAL": true
+      }
+    },
+    "[\"context_packed\", \"modules_context\", {\"hk\": 16, \"hv\": 32, \"initial\": false, \"length\": 512, \"n\": 6, \"t\": 4096, \"workers\": 256}]:0": {
+      "ptx": "ptx/5bc603c37711bd99473446d4.ptx",
+      "ptx_sha256": "2e6a7f468e9854aae59176b261a57f0757a539f6762554bbfcf5302195b3b549",
+      "shim": "ptx/5bc603c37711bd99473446d4.cpp",
+      "entry": "run",
+      "module_ident": "prepare_bf16_243e737dc3",
+      "kernel_name": "kernel_prepare_bf16",
+      "arg_plan": [
+        [
+          "buffer",
+          "q"
+        ],
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "v"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "zero"
+        ],
+        [
+          "buffer",
+          "prepared"
+        ],
+        [
+          "buffer",
+          "updates"
+        ],
+        [
+          "buffer",
+          "mixing"
+        ],
+        [
+          "buffer",
+          "decays"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "T": 4096,
+        "NC": 256,
+        "HK": 16,
+        "HV": 32,
+        "PACKED": true,
+        "FILL_ZERO": 0,
+        "NSEQ": 6
+      }
+    },
+    "[\"context_packed\", \"modules_context\", {\"hk\": 16, \"hv\": 32, \"initial\": false, \"length\": 512, \"n\": 6, \"t\": 4096, \"workers\": 256}]:1": {
+      "ptx": "ptx/5206d8a2f44ecfea64fbd2ad.ptx",
+      "ptx_sha256": "438f19038641a03a2868ead275dcf6ff1a89620704969972b95a60f35ac46139",
+      "shim": "ptx/5206d8a2f44ecfea64fbd2ad.cpp",
+      "entry": "run",
+      "module_ident": "map_sensitivity_b7defe45df",
+      "kernel_name": "kernel_map_sensitivity",
+      "arg_plan": [
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "prepared"
+        ],
+        [
+          "buffer",
+          "updates"
+        ],
+        [
+          "buffer",
+          "mixing"
+        ],
+        [
+          "buffer",
+          "decays"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "buffer",
+          "terminal"
+        ],
+        [
+          "buffer",
+          "map_a"
+        ],
+        [
+          "buffer",
+          "sensitivity"
+        ],
+        [
+          "buffer",
+          "zero_after"
+        ],
+        [
+          "buffer",
+          "tasks"
+        ],
+        [
+          "buffer",
+          "task_count"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "T": 4096,
+        "NC": 256,
+        "HV": 32,
+        "PACKED": true,
+        "HAS_INITIAL": false,
+        "NSEQ": 6,
+        "VSTEP": 32,
+        "NX": 8,
+        "LENGTH": 512,
+        "PERSISTENT": true
+      }
+    },
+    "[\"context_packed\", \"modules_context\", {\"hk\": 16, \"hv\": 32, \"initial\": false, \"length\": 512, \"n\": 6, \"t\": 4096, \"workers\": 256}]:2": {
+      "ptx": "ptx/aca1289a493a5d2070a6016b.ptx",
+      "ptx_sha256": "4665ab171414684801a49428a55099a6e203fd556d200809f675be3f791fa45d",
+      "shim": "ptx/aca1289a493a5d2070a6016b.cpp",
+      "entry": "run",
+      "module_ident": "prefix_matrix_87e5e4500c",
+      "kernel_name": "kernel_prefix_matrix",
+      "arg_plan": [
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "maps"
+        ],
+        [
+          "buffer",
+          "map_a"
+        ],
+        [
+          "buffer",
+          "entries"
+        ],
+        [
+          "buffer",
+          "zero_after"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "PG": 1,
+        "T": 4096,
+        "HV": 32,
+        "NX": 8,
+        "LENGTH": 512,
+        "PACKED": true,
+        "HAS_INITIAL": false
+      }
+    },
+    "[\"context_packed\", \"modules_context\", {\"hk\": 16, \"hv\": 32, \"initial\": false, \"length\": 512, \"n\": 6, \"t\": 4096, \"workers\": 256}]:3": {
+      "ptx": "ptx/b136b89daeaaeffa341c10b4.ptx",
+      "ptx_sha256": "65bb3ae6be7d2ba5485b861d006bc7f83de2d87850262c224c12e5cdf8efdf88",
+      "shim": "ptx/b136b89daeaaeffa341c10b4.cpp",
+      "entry": "run",
+      "module_ident": "correct_outputs_ce8774d9bb",
+      "kernel_name": "kernel_correct_outputs",
+      "arg_plan": [
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "sensitivity"
+        ],
+        [
+          "buffer",
+          "entries"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "buffer",
+          "zero_after"
+        ],
+        [
+          "buffer",
+          "tasks"
+        ],
+        [
+          "buffer",
+          "task_count"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "NSEQ": 6,
+        "PACKED": true,
+        "WORKERS": 256,
+        "PERSISTENT": true,
+        "T": 4096,
+        "HV": 32,
+        "NX": 8,
+        "LENGTH": 512,
+        "HAS_INITIAL": false
+      }
+    },
+    "[\"context_packed\", \"modules_context\", {\"hk\": 16, \"hv\": 32, \"initial\": true, \"length\": 512, \"n\": 6, \"t\": 4096, \"workers\": 256}]:0": {
+      "ptx": "ptx/5bc603c37711bd99473446d4.ptx",
+      "ptx_sha256": "2e6a7f468e9854aae59176b261a57f0757a539f6762554bbfcf5302195b3b549",
+      "shim": "ptx/5bc603c37711bd99473446d4.cpp",
+      "entry": "run",
+      "module_ident": "prepare_bf16_243e737dc3",
+      "kernel_name": "kernel_prepare_bf16",
+      "arg_plan": [
+        [
+          "buffer",
+          "q"
+        ],
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "v"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "zero"
+        ],
+        [
+          "buffer",
+          "prepared"
+        ],
+        [
+          "buffer",
+          "updates"
+        ],
+        [
+          "buffer",
+          "mixing"
+        ],
+        [
+          "buffer",
+          "decays"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "T": 4096,
+        "NC": 256,
+        "HK": 16,
+        "HV": 32,
+        "PACKED": true,
+        "FILL_ZERO": 0,
+        "NSEQ": 6
+      }
+    },
+    "[\"context_packed\", \"modules_context\", {\"hk\": 16, \"hv\": 32, \"initial\": true, \"length\": 512, \"n\": 6, \"t\": 4096, \"workers\": 256}]:1": {
+      "ptx": "ptx/c4a2a2f7c84ef5592f331f4c.ptx",
+      "ptx_sha256": "e2f722532bc72b93cc50be297849e547336744639b483bf9da444c1ee9a51313",
+      "shim": "ptx/c4a2a2f7c84ef5592f331f4c.cpp",
+      "entry": "run",
+      "module_ident": "map_sensitivity_ee14fc541a",
+      "kernel_name": "kernel_map_sensitivity",
+      "arg_plan": [
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "prepared"
+        ],
+        [
+          "buffer",
+          "updates"
+        ],
+        [
+          "buffer",
+          "mixing"
+        ],
+        [
+          "buffer",
+          "decays"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "buffer",
+          "terminal"
+        ],
+        [
+          "buffer",
+          "map_a"
+        ],
+        [
+          "buffer",
+          "sensitivity"
+        ],
+        [
+          "buffer",
+          "zero_after"
+        ],
+        [
+          "buffer",
+          "tasks"
+        ],
+        [
+          "buffer",
+          "task_count"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "T": 4096,
+        "NC": 256,
+        "HV": 32,
+        "PACKED": true,
+        "HAS_INITIAL": true,
+        "NSEQ": 6,
+        "VSTEP": 32,
+        "NX": 8,
+        "LENGTH": 512,
+        "PERSISTENT": true
+      }
+    },
+    "[\"context_packed\", \"modules_context\", {\"hk\": 16, \"hv\": 32, \"initial\": true, \"length\": 512, \"n\": 6, \"t\": 4096, \"workers\": 256}]:2": {
+      "ptx": "ptx/a6bcd9aac7fd727e7d0ead6a.ptx",
+      "ptx_sha256": "4665ab171414684801a49428a55099a6e203fd556d200809f675be3f791fa45d",
+      "shim": "ptx/a6bcd9aac7fd727e7d0ead6a.cpp",
+      "entry": "run",
+      "module_ident": "prefix_matrix_acb248e298",
+      "kernel_name": "kernel_prefix_matrix",
+      "arg_plan": [
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "maps"
+        ],
+        [
+          "buffer",
+          "map_a"
+        ],
+        [
+          "buffer",
+          "entries"
+        ],
+        [
+          "buffer",
+          "zero_after"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "PG": 1,
+        "T": 4096,
+        "HV": 32,
+        "NX": 8,
+        "LENGTH": 512,
+        "PACKED": true,
+        "HAS_INITIAL": true
+      }
+    },
+    "[\"context_packed\", \"modules_context\", {\"hk\": 16, \"hv\": 32, \"initial\": true, \"length\": 512, \"n\": 6, \"t\": 4096, \"workers\": 256}]:3": {
+      "ptx": "ptx/82027a081f32ee0ecccfb584.ptx",
+      "ptx_sha256": "19a889c68f7f5db7ac0b2da1dbb0c93eab7a8e4757f34045e92dd5da13a1f83e",
+      "shim": "ptx/82027a081f32ee0ecccfb584.cpp",
+      "entry": "run",
+      "module_ident": "correct_outputs_7d60015fce",
+      "kernel_name": "kernel_correct_outputs",
+      "arg_plan": [
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "sensitivity"
+        ],
+        [
+          "buffer",
+          "entries"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "buffer",
+          "zero_after"
+        ],
+        [
+          "buffer",
+          "tasks"
+        ],
+        [
+          "buffer",
+          "task_count"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "NSEQ": 6,
+        "PACKED": true,
+        "WORKERS": 256,
+        "PERSISTENT": true,
+        "T": 4096,
+        "HV": 32,
+        "NX": 8,
+        "LENGTH": 512,
+        "HAS_INITIAL": true
+      }
+    },
+    "[\"chunk_async\", \"modules\", {\"hk\": 4, \"hv\": 4, \"initial\": false, \"packed\": true, \"t\": 209, \"vstep\": 8}]:0": {
+      "ptx": "ptx/cad83ffae3092d2dcfd7838d.ptx",
+      "ptx_sha256": "b1dc67745705e5f4e3e80dc98f31884917f58fdc200153699f379daa6a43c1a7",
+      "shim": "ptx/cad83ffae3092d2dcfd7838d.cpp",
+      "entry": "run",
+      "module_ident": "prepare_bf16_150b93f5e3",
+      "kernel_name": "kernel_prepare_bf16",
+      "arg_plan": [
+        [
+          "buffer",
+          "q"
+        ],
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "v"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "zero"
+        ],
+        [
+          "buffer",
+          "prepared"
+        ],
+        [
+          "buffer",
+          "updates"
+        ],
+        [
+          "buffer",
+          "mixing"
+        ],
+        [
+          "buffer",
+          "decays"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "T": 209,
+        "NC": 14,
+        "HK": 4,
+        "HV": 4,
+        "PACKED": true
+      }
+    },
+    "[\"chunk_async\", \"modules\", {\"hk\": 4, \"hv\": 4, \"initial\": false, \"packed\": true, \"t\": 209, \"vstep\": 8}]:1": {
+      "ptx": "ptx/dd53af59c13872e7b5b2305f.ptx",
+      "ptx_sha256": "9f56bc62642e8393db04fd1b3b524c22d0d0727bbf5d04955fae6838b25d70c1",
+      "shim": "ptx/dd53af59c13872e7b5b2305f.cpp",
+      "entry": "run",
+      "module_ident": "apply_async_59bd7c4466",
+      "kernel_name": "kernel_apply_async",
+      "arg_plan": [
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "prepared"
+        ],
+        [
+          "buffer",
+          "updates"
+        ],
+        [
+          "buffer",
+          "mixing"
+        ],
+        [
+          "buffer",
+          "decays"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "T": 209,
+        "NC": 14,
+        "HV": 4,
+        "PACKED": true,
+        "HAS_INITIAL": false,
+        "SKIP_FIRST": 1,
+        "VSTEP": 8
+      }
+    },
+    "[\"chunk_async\", \"modules\", {\"hk\": 4, \"hv\": 4, \"initial\": true, \"packed\": true, \"t\": 209, \"vstep\": 8}]:0": {
+      "ptx": "ptx/cad83ffae3092d2dcfd7838d.ptx",
+      "ptx_sha256": "b1dc67745705e5f4e3e80dc98f31884917f58fdc200153699f379daa6a43c1a7",
+      "shim": "ptx/cad83ffae3092d2dcfd7838d.cpp",
+      "entry": "run",
+      "module_ident": "prepare_bf16_150b93f5e3",
+      "kernel_name": "kernel_prepare_bf16",
+      "arg_plan": [
+        [
+          "buffer",
+          "q"
+        ],
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "v"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "zero"
+        ],
+        [
+          "buffer",
+          "prepared"
+        ],
+        [
+          "buffer",
+          "updates"
+        ],
+        [
+          "buffer",
+          "mixing"
+        ],
+        [
+          "buffer",
+          "decays"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "T": 209,
+        "NC": 14,
+        "HK": 4,
+        "HV": 4,
+        "PACKED": true
+      }
+    },
+    "[\"chunk_async\", \"modules\", {\"hk\": 4, \"hv\": 4, \"initial\": true, \"packed\": true, \"t\": 209, \"vstep\": 8}]:1": {
+      "ptx": "ptx/cff660d2d6319bdecd2296df.ptx",
+      "ptx_sha256": "b11aeb1b3d2041a5b6ec84162a1075c7f1f8c22a3e8276aa51ee9bb3cc16a4e9",
+      "shim": "ptx/cff660d2d6319bdecd2296df.cpp",
+      "entry": "run",
+      "module_ident": "apply_async_07007c190a",
+      "kernel_name": "kernel_apply_async",
+      "arg_plan": [
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "prepared"
+        ],
+        [
+          "buffer",
+          "updates"
+        ],
+        [
+          "buffer",
+          "mixing"
+        ],
+        [
+          "buffer",
+          "decays"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "T": 209,
+        "NC": 14,
+        "HV": 4,
+        "PACKED": true,
+        "HAS_INITIAL": true,
+        "SKIP_FIRST": 0,
+        "VSTEP": 8
+      }
+    },
+    "[\"context_packed\", \"modules_context\", {\"hk\": 4, \"hv\": 4, \"initial\": false, \"length\": 512, \"n\": 6, \"t\": 16384, \"workers\": 128}]:0": {
+      "ptx": "ptx/1684d2178e2f7dd32519299c.ptx",
+      "ptx_sha256": "ac946170d7543db304f604918315b33399742a71b2950f4297741be6bcff9b6c",
+      "shim": "ptx/1684d2178e2f7dd32519299c.cpp",
+      "entry": "run",
+      "module_ident": "prepare_bf16_c0c6c5b0f1",
+      "kernel_name": "kernel_prepare_bf16",
+      "arg_plan": [
+        [
+          "buffer",
+          "q"
+        ],
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "v"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "zero"
+        ],
+        [
+          "buffer",
+          "prepared"
+        ],
+        [
+          "buffer",
+          "updates"
+        ],
+        [
+          "buffer",
+          "mixing"
+        ],
+        [
+          "buffer",
+          "decays"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "T": 16384,
+        "NC": 1024,
+        "HK": 4,
+        "HV": 4,
+        "PACKED": true,
+        "FILL_ZERO": 0,
+        "NSEQ": 6
+      }
+    },
+    "[\"context_packed\", \"modules_context\", {\"hk\": 4, \"hv\": 4, \"initial\": false, \"length\": 512, \"n\": 6, \"t\": 16384, \"workers\": 128}]:1": {
+      "ptx": "ptx/58e046c1afb9d6c530b29124.ptx",
+      "ptx_sha256": "1110f36887037c03ab13eced348fb9e755d3af7610bfb2e34665aa9cbc30eef8",
+      "shim": "ptx/58e046c1afb9d6c530b29124.cpp",
+      "entry": "run",
+      "module_ident": "map_sensitivity_76fae48861",
+      "kernel_name": "kernel_map_sensitivity",
+      "arg_plan": [
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "prepared"
+        ],
+        [
+          "buffer",
+          "updates"
+        ],
+        [
+          "buffer",
+          "mixing"
+        ],
+        [
+          "buffer",
+          "decays"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "buffer",
+          "terminal"
+        ],
+        [
+          "buffer",
+          "map_a"
+        ],
+        [
+          "buffer",
+          "sensitivity"
+        ],
+        [
+          "buffer",
+          "zero_after"
+        ],
+        [
+          "buffer",
+          "tasks"
+        ],
+        [
+          "buffer",
+          "task_count"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "T": 16384,
+        "NC": 1024,
+        "HV": 4,
+        "PACKED": true,
+        "HAS_INITIAL": false,
+        "NSEQ": 6,
+        "VSTEP": 32,
+        "NX": 32,
+        "LENGTH": 512,
+        "PERSISTENT": true
+      }
+    },
+    "[\"context_packed\", \"modules_context\", {\"hk\": 4, \"hv\": 4, \"initial\": false, \"length\": 512, \"n\": 6, \"t\": 16384, \"workers\": 128}]:2": {
+      "ptx": "ptx/65c97f911c83da0542bdac14.ptx",
+      "ptx_sha256": "430e5569139c0bf77139f191608595eca73b61b2263be83f26c16e8119c327a0",
+      "shim": "ptx/65c97f911c83da0542bdac14.cpp",
+      "entry": "run",
+      "module_ident": "prefix_final_534f5b7ae5",
+      "kernel_name": "kernel_prefix_final",
+      "arg_plan": [
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "maps"
+        ],
+        [
+          "buffer",
+          "map_a"
+        ],
+        [
+          "buffer",
+          "zero_after"
+        ],
+        [
+          "buffer",
+          "entries"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "PG": 1,
+        "T": 16384,
+        "HV": 4,
+        "NX": 32,
+        "LENGTH": 512,
+        "PACKED": true,
+        "HAS_INITIAL": false
+      }
+    },
+    "[\"context_packed\", \"modules_context\", {\"hk\": 4, \"hv\": 4, \"initial\": false, \"length\": 512, \"n\": 6, \"t\": 16384, \"workers\": 128}]:3": {
+      "ptx": "ptx/547e44116f9c8e378aaa5fa7.ptx",
+      "ptx_sha256": "44a40a962c0bc1a050aa18a906305fb96d0da98d1b9074bc4d17ccfb3a007089",
+      "shim": "ptx/547e44116f9c8e378aaa5fa7.cpp",
+      "entry": "run",
+      "module_ident": "correct_outputs_89e560cb1c",
+      "kernel_name": "kernel_correct_outputs",
+      "arg_plan": [
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "sensitivity"
+        ],
+        [
+          "buffer",
+          "entries"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "buffer",
+          "zero_after"
+        ],
+        [
+          "buffer",
+          "tasks"
+        ],
+        [
+          "buffer",
+          "task_count"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "NSEQ": 6,
+        "PACKED": true,
+        "WORKERS": 128,
+        "PERSISTENT": true,
+        "T": 16384,
+        "HV": 4,
+        "NX": 32,
+        "LENGTH": 512,
+        "HAS_INITIAL": false
+      }
+    },
+    "[\"context_packed\", \"modules_context\", {\"hk\": 4, \"hv\": 4, \"initial\": true, \"length\": 384, \"n\": 6, \"t\": 16384, \"workers\": 128}]:0": {
+      "ptx": "ptx/1684d2178e2f7dd32519299c.ptx",
+      "ptx_sha256": "ac946170d7543db304f604918315b33399742a71b2950f4297741be6bcff9b6c",
+      "shim": "ptx/1684d2178e2f7dd32519299c.cpp",
+      "entry": "run",
+      "module_ident": "prepare_bf16_c0c6c5b0f1",
+      "kernel_name": "kernel_prepare_bf16",
+      "arg_plan": [
+        [
+          "buffer",
+          "q"
+        ],
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "v"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "zero"
+        ],
+        [
+          "buffer",
+          "prepared"
+        ],
+        [
+          "buffer",
+          "updates"
+        ],
+        [
+          "buffer",
+          "mixing"
+        ],
+        [
+          "buffer",
+          "decays"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "T": 16384,
+        "NC": 1024,
+        "HK": 4,
+        "HV": 4,
+        "PACKED": true,
+        "FILL_ZERO": 0,
+        "NSEQ": 6
+      }
+    },
+    "[\"context_packed\", \"modules_context\", {\"hk\": 4, \"hv\": 4, \"initial\": true, \"length\": 384, \"n\": 6, \"t\": 16384, \"workers\": 128}]:1": {
+      "ptx": "ptx/2509555311a62315da0878a0.ptx",
+      "ptx_sha256": "6b416173c526b3bda34fed9b5f9138718550a836c9844053082607e1e17ce103",
+      "shim": "ptx/2509555311a62315da0878a0.cpp",
+      "entry": "run",
+      "module_ident": "map_sensitivity_d6d1512252",
+      "kernel_name": "kernel_map_sensitivity",
+      "arg_plan": [
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "prepared"
+        ],
+        [
+          "buffer",
+          "updates"
+        ],
+        [
+          "buffer",
+          "mixing"
+        ],
+        [
+          "buffer",
+          "decays"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "buffer",
+          "terminal"
+        ],
+        [
+          "buffer",
+          "map_a"
+        ],
+        [
+          "buffer",
+          "sensitivity"
+        ],
+        [
+          "buffer",
+          "zero_after"
+        ],
+        [
+          "buffer",
+          "tasks"
+        ],
+        [
+          "buffer",
+          "task_count"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "T": 16384,
+        "NC": 1024,
+        "HV": 4,
+        "PACKED": true,
+        "HAS_INITIAL": true,
+        "NSEQ": 6,
+        "VSTEP": 32,
+        "NX": 43,
+        "LENGTH": 384,
+        "PERSISTENT": true
+      }
+    },
+    "[\"context_packed\", \"modules_context\", {\"hk\": 4, \"hv\": 4, \"initial\": true, \"length\": 384, \"n\": 6, \"t\": 16384, \"workers\": 128}]:2": {
+      "ptx": "ptx/2beb97ca4ea293f096f4d8bd.ptx",
+      "ptx_sha256": "d0af9bf7a84b9cd225a112c61b8c9a54f48228eb2725dc9d403066e0e64fcb5e",
+      "shim": "ptx/2beb97ca4ea293f096f4d8bd.cpp",
+      "entry": "run",
+      "module_ident": "prefix_final_4486b9a0e6",
+      "kernel_name": "kernel_prefix_final",
+      "arg_plan": [
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "maps"
+        ],
+        [
+          "buffer",
+          "map_a"
+        ],
+        [
+          "buffer",
+          "zero_after"
+        ],
+        [
+          "buffer",
+          "entries"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "PG": 1,
+        "T": 16384,
+        "HV": 4,
+        "NX": 43,
+        "LENGTH": 384,
+        "PACKED": true,
+        "HAS_INITIAL": true
+      }
+    },
+    "[\"context_packed\", \"modules_context\", {\"hk\": 4, \"hv\": 4, \"initial\": true, \"length\": 384, \"n\": 6, \"t\": 16384, \"workers\": 128}]:3": {
+      "ptx": "ptx/495cfb3874b9f27eb752d18c.ptx",
+      "ptx_sha256": "3daa40a503dc1d3ef212f17fdb20e57fe89f4cadc0294b19365ef2d0e3de4e05",
+      "shim": "ptx/495cfb3874b9f27eb752d18c.cpp",
+      "entry": "run",
+      "module_ident": "correct_outputs_17d6d1511a",
+      "kernel_name": "kernel_correct_outputs",
+      "arg_plan": [
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "sensitivity"
+        ],
+        [
+          "buffer",
+          "entries"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "buffer",
+          "zero_after"
+        ],
+        [
+          "buffer",
+          "tasks"
+        ],
+        [
+          "buffer",
+          "task_count"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "NSEQ": 6,
+        "PACKED": true,
+        "WORKERS": 128,
+        "PERSISTENT": true,
+        "T": 16384,
+        "HV": 4,
+        "NX": 43,
+        "LENGTH": 384,
+        "HAS_INITIAL": true
+      }
+    },
+    "[\"context_sensitivity_zero\", \"modules_context\", {\"groups\": 4, \"hk\": 16, \"hv\": 16, \"initial\": false, \"length\": 2048, \"packed\": false, \"t\": 32768, \"warps\": 4, \"workers\": 128}]:0": {
+      "ptx": "ptx/3e26e04485b5e17bd39b28cc.ptx",
+      "ptx_sha256": "e175e839b345e36b24c54a9f5a57cd4d2a7b63d6b34a033d9694c51fcb799b7c",
+      "shim": "ptx/3e26e04485b5e17bd39b28cc.cpp",
+      "entry": "run",
+      "module_ident": "prepare_bf16_c493545e09",
+      "kernel_name": "kernel_prepare_bf16",
+      "arg_plan": [
+        [
+          "buffer",
+          "q"
+        ],
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "v"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "zero"
+        ],
+        [
+          "buffer",
+          "prepared"
+        ],
+        [
+          "buffer",
+          "updates"
+        ],
+        [
+          "buffer",
+          "mixing"
+        ],
+        [
+          "buffer",
+          "decays"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "T": 32768,
+        "NC": 2048,
+        "HK": 16,
+        "HV": 16,
+        "PACKED": false,
+        "FILL_ZERO": 0
+      }
+    },
+    "[\"context_sensitivity_zero\", \"modules_context\", {\"groups\": 4, \"hk\": 16, \"hv\": 16, \"initial\": false, \"length\": 2048, \"packed\": false, \"t\": 32768, \"warps\": 4, \"workers\": 128}]:1": {
+      "ptx": "ptx/61dd8c3f8ce772fe8028c365.ptx",
+      "ptx_sha256": "9f6fa1d62ae2990b6c144956e9635a14271fc213334ede38801788dbdba802c5",
+      "shim": "ptx/61dd8c3f8ce772fe8028c365.cpp",
+      "entry": "run",
+      "module_ident": "map_sensitivity_a6a7ff795b",
+      "kernel_name": "kernel_map_sensitivity",
+      "arg_plan": [
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "prepared"
+        ],
+        [
+          "buffer",
+          "updates"
+        ],
+        [
+          "buffer",
+          "mixing"
+        ],
+        [
+          "buffer",
+          "decays"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "buffer",
+          "map_a"
+        ],
+        [
+          "buffer",
+          "sensitivity"
+        ],
+        [
+          "buffer",
+          "zero_after"
+        ],
+        [
+          "buffer",
+          "tasks"
+        ],
+        [
+          "buffer",
+          "task_count"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "T": 32768,
+        "NC": 2048,
+        "HV": 16,
+        "PACKED": false,
+        "HAS_INITIAL": false,
+        "VSTEP": 32,
+        "NX": 16,
+        "LENGTH": 2048,
+        "PERSISTENT": true
+      }
+    },
+    "[\"context_sensitivity_zero\", \"modules_context\", {\"groups\": 4, \"hk\": 16, \"hv\": 16, \"initial\": false, \"length\": 2048, \"packed\": false, \"t\": 32768, \"warps\": 4, \"workers\": 128}]:2": {
+      "ptx": "ptx/d93f000f89d0e10edd9d65c9.ptx",
+      "ptx_sha256": "542169e9f45b83d76044854dd74ea185dd64bd7b56b0ee9cbe61710dbfebc098",
+      "shim": "ptx/d93f000f89d0e10edd9d65c9.cpp",
+      "entry": "run",
+      "module_ident": "prefix_matrix_cbea70b545",
+      "kernel_name": "kernel_prefix_matrix",
+      "arg_plan": [
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "maps"
+        ],
+        [
+          "buffer",
+          "map_a"
+        ],
+        [
+          "buffer",
+          "entries"
+        ],
+        [
+          "buffer",
+          "zero_after"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "PG": 1,
+        "T": 32768,
+        "HV": 16,
+        "NX": 16,
+        "LENGTH": 2048,
+        "PACKED": false,
+        "HAS_INITIAL": false
+      }
+    },
+    "[\"context_sensitivity_zero\", \"modules_context\", {\"groups\": 4, \"hk\": 16, \"hv\": 16, \"initial\": false, \"length\": 2048, \"packed\": false, \"t\": 32768, \"warps\": 4, \"workers\": 128}]:3": {
+      "ptx": "ptx/6bb68f84d47134fde9674b8b.ptx",
+      "ptx_sha256": "8a75c1e029204934d09f715959877c5fcad6d68b9e8d5301dd2e51a0f7f53e32",
+      "shim": "ptx/6bb68f84d47134fde9674b8b.cpp",
+      "entry": "run",
+      "module_ident": "correct_outputs_2bc24e6cb9",
+      "kernel_name": "kernel_correct_outputs",
+      "arg_plan": [
+        [
+          "buffer",
+          "sensitivity"
+        ],
+        [
+          "buffer",
+          "entries"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "buffer",
+          "zero_after"
+        ],
+        [
+          "buffer",
+          "tasks"
+        ],
+        [
+          "buffer",
+          "task_count"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "PERSISTENT": true,
+        "WORKERS": 128,
+        "T": 32768,
+        "HV": 16,
+        "NX": 16,
+        "LENGTH": 2048,
+        "HAS_INITIAL": false
+      }
+    },
+    "[\"context_sensitivity_zero\", \"modules_context\", {\"groups\": 4, \"hk\": 16, \"hv\": 16, \"initial\": true, \"length\": 2048, \"packed\": false, \"t\": 32768, \"warps\": 4, \"workers\": 128}]:0": {
+      "ptx": "ptx/f273b4962435d7323888692f.ptx",
+      "ptx_sha256": "4f28d6335015b28e633a22057716baf2d446229ced4eb1f6f00d86121555378c",
+      "shim": "ptx/f273b4962435d7323888692f.cpp",
+      "entry": "run",
+      "module_ident": "prepare_bf16_23cbf4489f",
+      "kernel_name": "kernel_prepare_bf16",
+      "arg_plan": [
+        [
+          "buffer",
+          "q"
+        ],
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "v"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "zero"
+        ],
+        [
+          "buffer",
+          "prepared"
+        ],
+        [
+          "buffer",
+          "updates"
+        ],
+        [
+          "buffer",
+          "mixing"
+        ],
+        [
+          "buffer",
+          "decays"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "T": 32768,
+        "NC": 2048,
+        "HK": 16,
+        "HV": 16,
+        "PACKED": false,
+        "FILL_ZERO": 0
+      }
+    },
+    "[\"context_sensitivity_zero\", \"modules_context\", {\"groups\": 4, \"hk\": 16, \"hv\": 16, \"initial\": true, \"length\": 2048, \"packed\": false, \"t\": 32768, \"warps\": 4, \"workers\": 128}]:1": {
+      "ptx": "ptx/1e2a176be9e6ccc83b1e6e7e.ptx",
+      "ptx_sha256": "1d83ed67bb02bdf2e1f8a150e5d3fb88e3f5ce4006dcd2bcf8e265b64d809e91",
+      "shim": "ptx/1e2a176be9e6ccc83b1e6e7e.cpp",
+      "entry": "run",
+      "module_ident": "map_sensitivity_2b66966029",
+      "kernel_name": "kernel_map_sensitivity",
+      "arg_plan": [
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "prepared"
+        ],
+        [
+          "buffer",
+          "updates"
+        ],
+        [
+          "buffer",
+          "mixing"
+        ],
+        [
+          "buffer",
+          "decays"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "buffer",
+          "map_a"
+        ],
+        [
+          "buffer",
+          "sensitivity"
+        ],
+        [
+          "buffer",
+          "zero_after"
+        ],
+        [
+          "buffer",
+          "tasks"
+        ],
+        [
+          "buffer",
+          "task_count"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "T": 32768,
+        "NC": 2048,
+        "HV": 16,
+        "PACKED": false,
+        "HAS_INITIAL": true,
+        "VSTEP": 32,
+        "NX": 16,
+        "LENGTH": 2048,
+        "PERSISTENT": true
+      }
+    },
+    "[\"context_sensitivity_zero\", \"modules_context\", {\"groups\": 4, \"hk\": 16, \"hv\": 16, \"initial\": true, \"length\": 2048, \"packed\": false, \"t\": 32768, \"warps\": 4, \"workers\": 128}]:2": {
+      "ptx": "ptx/f8bb21bbc355b75b55d504df.ptx",
+      "ptx_sha256": "32ca5c200c3292809071df83d0879d1048ce500bcac62474527fe2730b131958",
+      "shim": "ptx/f8bb21bbc355b75b55d504df.cpp",
+      "entry": "run",
+      "module_ident": "prefix_final_cb251f49b3",
+      "kernel_name": "kernel_prefix_final",
+      "arg_plan": [
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "maps"
+        ],
+        [
+          "buffer",
+          "map_a"
+        ],
+        [
+          "buffer",
+          "entries"
+        ],
+        [
+          "buffer",
+          "zero_after"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "PG": 1,
+        "T": 32768,
+        "HV": 16,
+        "NX": 16,
+        "LENGTH": 2048,
+        "PACKED": false,
+        "HAS_INITIAL": true
+      }
+    },
+    "[\"context_sensitivity_zero\", \"modules_context\", {\"groups\": 4, \"hk\": 16, \"hv\": 16, \"initial\": true, \"length\": 2048, \"packed\": false, \"t\": 32768, \"warps\": 4, \"workers\": 128}]:3": {
+      "ptx": "ptx/ddd2ed57a4cf3e5f19c55376.ptx",
+      "ptx_sha256": "72ebb322fec6dfcd3851f303c910b72746685c0d8cd760022800e7f3353ec3fb",
+      "shim": "ptx/ddd2ed57a4cf3e5f19c55376.cpp",
+      "entry": "run",
+      "module_ident": "correct_outputs_957b5ee937",
+      "kernel_name": "kernel_correct_outputs",
+      "arg_plan": [
+        [
+          "buffer",
+          "sensitivity"
+        ],
+        [
+          "buffer",
+          "entries"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "buffer",
+          "zero_after"
+        ],
+        [
+          "buffer",
+          "tasks"
+        ],
+        [
+          "buffer",
+          "task_count"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "PERSISTENT": true,
+        "WORKERS": 128,
+        "T": 32768,
+        "HV": 16,
+        "NX": 16,
+        "LENGTH": 2048,
+        "HAS_INITIAL": true
+      }
+    }
+  }
+}

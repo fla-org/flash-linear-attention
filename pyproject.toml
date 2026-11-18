@@ -46,6 +46,9 @@ requires = ["setuptools>=64", "wheel"]
 [tool.setuptools.dynamic]
 version = {attr = "fla.__version__"}
 
+[tool.setuptools.package-data]
+"fla.ops.gated_delta_rule.backends.qla_ptx" = ["*.json", "ptx/*.ptx", "ptx/*.cpp", "*.md"]
+
 [tool.pytest.ini_options]
 log_cli = true
 log_cli_level = "INFO"
