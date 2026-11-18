@@ -67,7 +67,10 @@ def swila_router_statistics(
     *,
     compute_statistics: bool = True,
 ):
-    """Evaluate the existing sequence-aware entropy/MI formulas once."""
+    """Evaluate sequence-aware entropy/MI, using FP32 for FP16/BF16 inputs."""
+    # keep epsilon representable and avoid low-precision sequence-sum overflow.
+    r = r.float() if r.dtype in (torch.float16, torch.bfloat16) else r
+    rho = rho.float() if rho.dtype in (torch.float16, torch.bfloat16) else rho
     eps = 1e-8
     p_bar_r = mean_over_sequences(r, cu_seqlens)
     p_bar_rho = mean_over_sequences(rho, cu_seqlens)

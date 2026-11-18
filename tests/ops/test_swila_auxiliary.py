@@ -128,6 +128,117 @@ def test_swila_mi_gradient_formula_fp64():
         torch.testing.assert_close(gradient, dense_mi_gradient(prob, .37, -1.73), rtol=1e-12, atol=1e-12)
 
 
+def low_precision_mi_inputs(shape, target, dtypes, *, saturated=False, strided=False, uniform=False):
+    torch.manual_seed(42)
+    logits = []
+    for dtype in dtypes:
+        value = torch.zeros(shape, device=target) if uniform else torch.randn(shape, device=target)
+        if saturated:
+            value[0, 0, :, :, 0] = -40
+        logits.append(value.to(dtype).requires_grad_())
+    probs = tuple(value.softmax(-1) for value in logits)
+    if strided:
+        probs = tuple(value.transpose(2, 3) for value in probs)
+        assert all(not value.is_contiguous() for value in probs)
+    if saturated:
+        assert all(torch.count_nonzero(value == 0) > 0 for value in probs)
+    return tuple(logits), probs
+
+
+def check_low_precision_mi(logits, probs, *, boundaries=None, low_level=False, long_uniform=False):
+    r, rho = probs
+    weight = .73
+    expected = mi_reference(r.float(), rho.float(), weight, boundaries)
+    if low_level:
+        assert boundaries is None and not can_use_fused_swila_mi_loss_from_probs(r, rho)
+        actual = fused_swila_mi_loss_from_probs(r, rho, mi_loss_weight=weight)
+    else:
+        cu_seqlens = None if boundaries is None else torch.tensor(boundaries, device=r.device, dtype=torch.int32)
+        if boundaries is None:
+            assert not can_use_fused_swila_mi_loss_from_probs(r, rho)
+        actual = compute_swila_mi_loss(r, rho, r.shape[-1], weight, True, cu_seqlens, return_stats=True)
+    assert torch.isfinite(actual[0])
+    for value in actual[1].values():
+        assert torch.isfinite(value).all()
+    # long packed index_add can accumulate FP32 error; retain the existing FP16 MI budget.
+    rtol, atol = (5e-3, 5e-4) if long_uniform else (2e-5, 1e-5)
+    check_mi_result(actual, expected, rtol=rtol, atol=atol)
+    assert actual[0].dtype == torch.float32
+    assert all(value.dtype == torch.float32 for value in actual[1].values())
+    upstream = 1.0 if long_uniform else 1.37 * math.prod(r.shape[:-1])
+    inputs = (*probs, *logits)
+    gradients = torch.autograd.grad(actual[0] * upstream, inputs, retain_graph=True)
+    reference_gradients = torch.autograd.grad(expected[0] * upstream, inputs)
+    for name, leaf, reference, gradient in zip(
+        ("dr", "drho", "dlogits_r", "dlogits_rho"), inputs, reference_gradients, gradients, strict=True,
+    ):
+        assert gradient.dtype == leaf.dtype and gradient.device == leaf.device
+        assert torch.isfinite(gradient).all()
+        assert_swila_grad(name, reference, gradient, connected=True, require_relative=True, slice_dims=(0, 1, 2, 3))
+        if r.shape[-1] == 1:
+            assert torch.count_nonzero(gradient) == 0
+    if r.shape[-1] == 1:
+        assert actual[0].item() == 0
+        for name in ("MI_r", "MI_rho", "MI_r_normalized", "MI_rho_normalized"):
+            assert actual[1][name].item() == 0
+
+
+@pytest.mark.parametrize(("target", "dtypes", "boundaries", "saturated"), [
+    pytest.param("cpu", (torch.float16, torch.float16), (0, 0, 1, 3, 7, 7), True, id="cpu-fp16-zero-probability"),
+    pytest.param("cpu", (torch.float32, torch.bfloat16), (0, 1, 1, 3, 7), False, id="cpu-mixed-unequal-sequences"),
+    pytest.param(
+        device, (torch.float16, torch.float16), (0, 2, 3, 3, 7), True,
+        marks=requires_cuda,
+        id="cuda-fp16-zero-probability",
+    ),
+    pytest.param(
+        device, (torch.float32, torch.bfloat16), (0, 0, 1, 4, 9), False,
+        marks=requires_cuda,
+        id="cuda-mixed-unequal-sequences",
+    ),
+])
+def test_swila_mi_packed_low_precision(target, dtypes, boundaries, saturated):
+    logits, probs = low_precision_mi_inputs((1, boundaries[-1], 2, 3, 4), target, dtypes, saturated=saturated)
+    check_low_precision_mi(logits, probs, boundaries=boundaries)
+
+
+@pytest.mark.parametrize(("target", "dtypes", "experts", "low_level", "saturated", "strided"), [
+    pytest.param("cpu", (torch.float16, torch.float16), 4, False, True, False, id="cpu-router-fp16"),
+    pytest.param("cpu", (torch.bfloat16, torch.bfloat16), 4, True, False, False, id="cpu-direct-bf16"),
+    pytest.param(
+        device, (torch.float16, torch.float16), 3, False, True, False,
+        marks=requires_cuda,
+        id="cuda-non-e4-fp16",
+    ),
+    pytest.param(
+        device, (torch.float32, torch.bfloat16), 4, True, False, True,
+        marks=requires_cuda,
+        id="cuda-strided-mixed",
+    ),
+])
+def test_swila_mi_dense_low_precision_fallback(target, dtypes, experts, low_level, saturated, strided):
+    logits, probs = low_precision_mi_inputs((2, 11, 2, 3, experts), target, dtypes, saturated=saturated, strided=strided)
+    check_low_precision_mi(logits, probs, low_level=low_level)
+
+
+@pytest.mark.parametrize(("target", "experts", "boundaries", "low_level"), [
+    pytest.param("cpu", 4, (0, 49152), False, id="cpu-packed-entropy-overflow"),
+    pytest.param("cpu", 1, (0, 65536), False, id="cpu-packed-connected-zero"),
+    pytest.param(device, 4, (0, 49152), False, marks=requires_cuda, id="cuda-packed-entropy-overflow"),
+    pytest.param(device, 1, None, True, marks=requires_cuda, id="cuda-direct-connected-zero"),
+])
+def test_swila_mi_fp16_long_reduction(target, experts, boundaries, low_level):
+    length = 65536 if boundaries is None else boundaries[-1]
+    logits, probs = low_precision_mi_inputs((1, length, 1, 1, experts), target, (torch.float16, torch.float16), uniform=True)
+    if experts > 1:
+        token = probs[0][0, 0].float()
+        token_entropy = -(token * (token + 1e-8).log()).sum()
+        assert length * token_entropy > torch.finfo(torch.float16).max
+    else:
+        assert length > torch.finfo(torch.float16).max
+    check_low_precision_mi(logits, probs, boundaries=boundaries, low_level=low_level, long_uniform=True)
+
+
 @requires_cuda
 @pytest.mark.parametrize(("shape", "r_dtype", "rho_dtype", "seeds", "atol", "rtol"), [
     pytest.param((2, 17, 3, 5, 4), torch.float32, torch.float32, (505, 606), 1e-5, 2e-5, marks=pytest.mark.smoke),

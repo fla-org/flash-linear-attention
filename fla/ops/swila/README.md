@@ -50,6 +50,8 @@ Backward supports output, memory, responsibility and temporal-carry objectives, 
 
 `fused_swila_log_decay_gate` computes FP32 `-exp(a_log) * softplus(raw + dt_bias)` with a stable negative-tail softplus. `compute_swila_mi_loss` supplies the graph-connected mutual-information objective, with optional detached statistics. Packed MI averages tokens within each sequence, then averages sequences equally. E=1 yields a connected zero. These helpers remain independent of model logging and training frameworks.
 
+Eager MI entropy and reductions promote FP16/BF16 probabilities to FP32, keeping `1e-8` representable and avoiding low-precision sequence-sum overflow. Losses and statistics are FP32; gradients return in each input's dtype. FP32/FP64 inputs retain their precision. The casts require additional FP32 storage in eager paths; dense fused MI already computes in FP32 and is unchanged.
+
 General and split backward paths are distinct execution routes, not different recurrence equations. Fused recurrence currently requires NVIDIA CUDA; other backends fail before kernel execution. Gate and MI helpers retain eager fallbacks on other devices. Eager-capable custom autograd helpers preserve the actual input device’s autocast state, including CPU, while fused recurrence uses FLA’s accelerator AMP decorators without implicit input casts.
 
 See the [SwiLA model guide](../../models/swila/README.md) for layer, language-model and MI usage, and the [paper](https://arxiv.org/abs/2609.39034) for the recurrence derivation. The original implementation's MIT attribution is retained in [LICENSE](LICENSE).

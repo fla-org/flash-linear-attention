@@ -100,7 +100,7 @@ def test_swila_mi_partial_mixed_precision(target, noncontiguous, forward_amp):
     if noncontiguous:
         r, rho = (value[:, :, :, ::2].detach().requires_grad_() for value in (r, rho))
     fused = r.is_cuda and not noncontiguous
-    expected = mi_reference(r.float(), rho.float(), .73) if fused else mi_reference(r, rho, .73)
+    expected = mi_reference(r.float(), rho.float(), .73)
     with torch.autocast(device_type=r.device.type, dtype=torch.bfloat16, enabled=forward_amp):
         actual = mi_loss.fused_swila_mi_loss_from_probs(r, rho, mi_loss_weight=.73)
     assert actual[0].dtype == torch.float32

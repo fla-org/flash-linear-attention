@@ -91,7 +91,10 @@ def _eager_dense_mi_loss_from_probs(
     *,
     mi_loss_weight: float,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-    """Reference dense recurrence diagnostic formula used by ``swila.py``."""
+    """Evaluate dense entropy/MI, using FP32 for FP16/BF16 inputs."""
+    # keep epsilon representable and avoid low-precision sequence-sum overflow.
+    r = r.float() if r.dtype in (torch.float16, torch.bfloat16) else r
+    rho = rho.float() if rho.dtype in (torch.float16, torch.bfloat16) else rho
     p_bar_r = r.mean(dim=1)
     p_bar_rho = rho.mean(dim=1)
     h_marginal_r = -(p_bar_r * torch.log(p_bar_r + _EPS)).sum(dim=-1)
