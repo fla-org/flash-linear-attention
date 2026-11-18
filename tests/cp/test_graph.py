@@ -25,6 +25,7 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 
+import fla.backends as backends
 from fla.ops.cp import FLACPContext, build_cp_context
 from fla.ops.kda import chunk_kda
 from fla.ops.kda.gate import naive_kda_gate, naive_kda_lowerbound_gate
@@ -723,6 +724,7 @@ def test_chunk_kda_single_rank(single_rank_group, monkeypatch):
 
 
 @pytest.mark.skipif(not IS_NPU, reason='requires Ascend NPU graphs')
+@pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
 @pytest.mark.parametrize(
     ('chunk_size', 'state_v_first', 'training'),
     [
