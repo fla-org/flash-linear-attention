@@ -8,37 +8,11 @@
 r"""
 Forward-mode derivative (JVP) of the chunked gated delta rule.
 
-Notation (one sequence, one head; chunk n of C positions r, s; key features kappa; value features mu;
-a dot marks a tangent). All gates here are in natural-log units; the Triton kernels store the within-chunk
-cumulative gate in log2 units (``chunk_local_cumsum(..., scale=RCP_LN2)``) so that ``exp2(g_cum) = exp(G)``.
-
-Forward (as the library computes it):
-    G_{n,r}          = sum_{s <= r, s in chunk n} g_s                       (within-chunk cumulative gate)
-    M_{n,rs}         = beta_r (k_r . k_s) exp(G_r - G_s)       for r > s, else 0
-    A_n              = (I + M_n)^{-1}                                       (unit lower triangular)
-    u_{n,r mu}       = sum_s A_{rs} beta_s v_{s mu}
-    w_{n,r kappa}    = sum_s A_{rs} beta_s exp(G_s) k_{s kappa}
-    nu_{n,r mu}      = u_{n,r mu} - sum_kappa w_{n,r kappa} h_{n,kappa mu}  (the library's ``v_new``)
-    h_{n+1,kappa mu} = exp(G_L) h_{n,kappa mu} + sum_r k_{r kappa} exp(G_L - G_r) nu_{r mu}   (L = last row of chunk n)
-    o_{r mu}         = scale [exp(G_r) sum_kappa q_{r kappa} h_{n,kappa mu}
-                              + sum_{s <= r} (q_r . k_s) exp(G_r - G_s) nu_{s mu}]       =: O(q, k, nu, h)_{r mu}
-
-Tangent:
-    M_dot_{rs} = [beta_dot_r (k_r.k_s) + beta_r (k_dot_r.k_s + k_r.k_dot_s)
-                  + beta_r (k_r.k_s)(G_dot_r - G_dot_s)] exp(G_r - G_s)                 (r > s)
-    A_dot      = -A M_dot A, hence
-    u_dot      = A [beta_dot v + beta v_dot - M_dot u]
-    w_dot      = A [exp(G) (beta_dot k + beta G_dot k + beta k_dot) - M_dot w]
-    nu_dot     = u_dot - w_dot h_n - w h_dot_n
-    h_dot_{n+1} = exp(G_L) (h_dot_n + G_dot_L h_n)
-                  + sum_r k_r exp(G_L - G_r) [nu_dot_r + (G_dot_L - G_dot_r) nu_r]
-                  + sum_r k_dot_r exp(G_L - G_r) nu_r
-    o_dot      = O(q_dot, k, nu, h) + O(q, k_dot, nu, 0) + O(q, k, nu_dot - G_dot nu, h_dot) + G_dot o
-(the last line: O is linear in q, k, (nu, h) separately, and d/dG of the decays gives G_dot_r o_r - [terms with
-G_dot_s nu_s], which is the -G_dot nu inside the third call.)
+The primal runs through the library's forward kernels; three Triton kernels then compute the intra-chunk tangents,
+the sequential tangent recurrence and the output tangent, with the tangent directions as a grid dimension.
+See README.md in this directory for the derivation and the notation used here.
 """
 
-import math
 import os
 
 import torch
@@ -47,12 +21,12 @@ import triton
 import triton.language as tl
 
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_fwd_h
-from fla.ops.common.chunk_o import chunk_fwd_o
+from fla.ops.common.chunk_o import BLACKWELL_8_WARP_RACE, chunk_fwd_o
 from fla.ops.gated_delta_rule.chunk_fwd import chunk_gated_delta_rule_fwd_intra
 from fla.ops.utils import chunk_local_cumsum
 from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.op import exp2
-from fla.utils import IS_NVIDIA_BLACKWELL, IS_TF32_SUPPORTED, TRITON_ABOVE_3_8_0, input_guard
+from fla.utils import IS_NVIDIA_BLACKWELL, IS_TF32_SUPPORTED, TRITON_ABOVE_3_8_0, autotune_cache_kwargs, input_guard
 
 __all__ = ['chunk_gated_delta_rule_jvp', 'chunk_gated_delta_rule_jvp_fwd', 'chunk_gated_delta_rule_jvp_ref']
 
@@ -62,12 +36,11 @@ def _chunk(x: torch.Tensor, C: int, lead: int) -> torch.Tensor:
     T = x.shape[lead + 1]
     pad = (-T) % C
     if pad:
-        # F.pad pads from the last dim backwards: we need to pad dim (lead + 1)
-        nf = x.dim() - (lead + 2)  # number of dims after T (H and features)
-        x = F.pad(x, (0, 0) * nf + (0, pad))
+        # F.pad pads from the last dim backwards; skip H and the feature dims to reach T
+        x = F.pad(x, (0, 0) * (x.dim() - lead - 2) + (0, pad))
     shape = x.shape
+    # [*lead, B, N, C, H, *f]
     x = x.view(*shape[:lead + 1], (T + pad) // C, C, *shape[lead + 2:])
-    # [*lead, B, N, C, H, *f] -> [*lead, B, H, N, C, *f]
     return x.movedim(lead + 3, lead + 1)
 
 
@@ -80,26 +53,30 @@ def _unchunk(x: torch.Tensor, T: int, lead: int) -> torch.Tensor:
 
 
 def _intra_chunk_tangents(
-    k: torch.Tensor, v: torch.Tensor, beta: torch.Tensor, G: torch.Tensor,
-    A: torch.Tensor, u: torch.Tensor, w: torch.Tensor,
-    k_dot: torch.Tensor, v_dot: torch.Tensor, beta_dot: torch.Tensor, G_dot: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    beta: torch.Tensor,
+    G: torch.Tensor,
+    A: torch.Tensor,
+    u: torch.Tensor,
+    w: torch.Tensor,
+    k_dot: torch.Tensor,
+    v_dot: torch.Tensor,
+    beta_dot: torch.Tensor,
+    G_dot: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
-    Tangents of the WY representation, batched over chunks (no loop).
-
-    Primal (chunked layout, ``...`` = [B, H, N]): k [..., C, K], v [..., C, V], beta [..., C], G [..., C] (natural log),
-    A [..., C, C] = (I + M)^{-1}, u [..., C, V], w [..., C, K].
-    Tangents carry one extra leading direction dim D: k_dot [D, ..., C, K], etc.
-    Returns u_dot [D, ..., C, V], w_dot [D, ..., C, K].
+    Tangents (u_dot, w_dot) of the WY representation, batched over chunks.
+    Primal inputs are chunked as [..., C, *] with `...` = [B, H, N] and G in natural log units;
+    tangents carry an extra leading direction dim.
     """
     C = k.shape[-2]
     strict = torch.ones(C, C, dtype=torch.bool, device=k.device).tril(-1)
-    # decay_{rs} = exp(G_r - G_s) on r > s, 0 elsewhere (masked before exp: the upper triangle can overflow)
-    dG = G[..., :, None] - G[..., None, :]
-    decay = torch.where(strict, dG, float('-inf')).exp()
-    kk = k @ k.transpose(-1, -2)                                   # (k_r . k_s)
-    kdk = k_dot @ k.transpose(-1, -2)                              # (k_dot_r . k_s); its transpose is (k_r . k_dot_s)
-    # M_dot_{rs} = [beta_dot_r kk + beta_r (kdk + kdk^T) + beta_r kk (G_dot_r - G_dot_s)] decay_{rs}
+    # exp(G_r - G_s) on r > s and 0 elsewhere, masked before exp since the upper triangle can overflow
+    decay = torch.where(strict, G[..., :, None] - G[..., None, :], float('-inf')).exp()
+    kk = k @ k.transpose(-1, -2)
+    # (k_dot_r . k_s); its transpose is (k_r . k_dot_s)
+    kdk = k_dot @ k.transpose(-1, -2)
     M_dot = (beta_dot[..., :, None] * kk
              + beta[..., :, None] * (kdk + kdk.transpose(-1, -2)
                                      + kk * (G_dot[..., :, None] - G_dot[..., None, :]))) * decay
@@ -110,11 +87,15 @@ def _intra_chunk_tangents(
     return u_dot, w_dot
 
 
-def _chunk_o(q, k, nu, h, G, scale):
-    r"""
-    O(q, k, nu, h)_{r mu} = scale [exp(G_r) q_r . h_{:, mu} + sum_{s <= r} (q_r . k_s) exp(G_r - G_s) nu_{s mu}].
-    Chunked layout; h [..., N, K, V] or None (zero state); broadcasting over a leading direction dim is allowed.
-    """
+def _chunk_o(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    nu: torch.Tensor,
+    h: torch.Tensor | None,
+    G: torch.Tensor,
+    scale: float,
+) -> torch.Tensor:
+    r"""O(q, k, nu, h) of README.md in the chunked layout; `h=None` is a zero state."""
     C = q.shape[-2]
     causal = torch.ones(C, C, dtype=torch.bool, device=q.device).tril()
     decay = torch.where(causal, G[..., :, None] - G[..., None, :], float('-inf')).exp()
@@ -139,31 +120,54 @@ def chunk_gated_delta_rule_jvp_ref(
     chunk_size: int = 64,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
-    Pure-PyTorch chunked reference of the gated delta rule and its forward-mode derivative.
-
-    Computes in the input dtype (use float64 for a reference). Vectorized over chunks except for the
-    sequential state recurrence (a loop over chunks, never over tokens).
+    Pure-PyTorch chunked reference of :func:`chunk_gated_delta_rule_jvp`, computed in the input dtype.
+    It loops over chunks for the state recurrence and is batched otherwise.
 
     Args:
-        q, k: [B, T, H, K]; v: [B, T, H, V]; g: [B, T, H] per-step log decay (not cumulative); beta: [B, T, H].
-        q_dot, k_dot, v_dot, g_dot, beta_dot: the same shapes with a leading direction dim D.
+        q (torch.Tensor):
+            Queries of shape `[B, T, H, K]`.
+        k (torch.Tensor):
+            Keys of shape `[B, T, H, K]`.
+        v (torch.Tensor):
+            Values of shape `[B, T, H, V]`.
+        g (torch.Tensor):
+            Per-step log decay of shape `[B, T, H]`.
+        beta (torch.Tensor):
+            Betas of shape `[B, T, H]`.
+        q_dot (torch.Tensor):
+            Tangent of `q` of shape `[D, B, T, H, K]`.
+        k_dot (torch.Tensor):
+            Tangent of `k` of shape `[D, B, T, H, K]`.
+        v_dot (torch.Tensor):
+            Tangent of `v` of shape `[D, B, T, H, V]`.
+        g_dot (torch.Tensor):
+            Tangent of `g` of shape `[D, B, T, H]`.
+        beta_dot (torch.Tensor):
+            Tangent of `beta` of shape `[D, B, T, H]`.
+        scale (float, Optional):
+            Scale of the attention scores. Default: `K ** -0.5`.
+        chunk_size (int, Optional):
+            Chunk size. Default: 64.
+
     Returns:
-        o [B, T, H, V], o_dot [D, B, T, H, V]
+        o (torch.Tensor):
+            Output of shape `[B, T, H, V]`.
+        o_dot (torch.Tensor):
+            Derivative of `o` along each direction, of shape `[D, B, T, H, V]`.
     """
     B, T, H, K = q.shape
     C = chunk_size
     if scale is None:
         scale = K ** -0.5
-    qc, kc, vc = (_chunk(x, C, 0) for x in (q, k, v))                      # [B, H, N, C, F]
-    bc, gc = (_chunk(x, C, 0) for x in (beta, g))                          # [B, H, N, C]
-    qdc, kdc, vdc = (_chunk(x, C, 1) for x in (q_dot, k_dot, v_dot))      # [D, B, H, N, C, F]
-    bdc, gdc = (_chunk(x, C, 1) for x in (beta_dot, g_dot))                # [D, B, H, N, C]
+    # [B, H, N, C, *]
+    qc, kc, vc, bc, gc = (_chunk(x, C, lead=0) for x in (q, k, v, beta, g))
+    # [D, B, H, N, C, *]
+    qdc, kdc, vdc, bdc, gdc = (_chunk(x, C, lead=1) for x in (q_dot, k_dot, v_dot, beta_dot, g_dot))
     N = qc.shape[2]
 
-    # within-chunk cumulative gate (padded positions have g = 0, so G stays at its last valid value)
+    # padded positions have g = 0, so G stays at its last valid value there
     G, G_dot = gc.cumsum(-1), gdc.cumsum(-1)
 
-    # primal WY representation
     strict = torch.ones(C, C, dtype=torch.bool, device=q.device).tril(-1)
     decay = torch.where(strict, G[..., :, None] - G[..., None, :], float('-inf')).exp()
     M = bc[..., :, None] * (kc @ kc.transpose(-1, -2)) * decay
@@ -171,9 +175,21 @@ def chunk_gated_delta_rule_jvp_ref(
     A = torch.linalg.solve_triangular(eye + M, eye.expand_as(M), upper=False, unitriangular=True)
     u = A @ (bc[..., None] * vc)
     w = A @ ((bc * G.exp())[..., None] * kc)
-    u_dot, w_dot = _intra_chunk_tangents(kc, vc, bc, G, A, u, w, kdc, vdc, bdc, G_dot)
+    u_dot, w_dot = _intra_chunk_tangents(
+        k=kc,
+        v=vc,
+        beta=bc,
+        G=G,
+        A=A,
+        u=u,
+        w=w,
+        k_dot=kdc,
+        v_dot=vdc,
+        beta_dot=bdc,
+        G_dot=G_dot,
+    )
 
-    # sequential state recurrence over chunks (h_n is the state entering chunk n)
+    # h is the state entering chunk n
     D = q_dot.shape[0]
     V = v.shape[-1]
     h = q.new_zeros(B, H, K, V)
@@ -186,42 +202,38 @@ def chunk_gated_delta_rule_jvp_ref(
         nu_dot = u_dot[:, :, :, n] - w_dot[:, :, :, n] @ h - w[:, :, n] @ h_dot
         nus.append(nu)
         nuds.append(nu_dot)
-        GL, GdL = G[:, :, n, -1], G_dot[:, :, :, n, -1]                     # [B, H], [D, B, H]
-        dec = (GL[..., None] - G[:, :, n]).exp()                             # exp(G_L - G_r): [B, H, C]
-        kdec = kc[:, :, n] * dec[..., None]                                  # [B, H, C, K]
+        # [B, H], [D, B, H]
+        GL, GdL = G[:, :, n, -1], G_dot[:, :, :, n, -1]
+        # [B, H, C]
+        dec = (GL[..., None] - G[:, :, n]).exp()
+        # [B, H, C, K]
+        kdec = kc[:, :, n] * dec[..., None]
         h_new = GL.exp()[..., None, None] * h + kdec.transpose(-1, -2) @ nu
         h_dot = (GL.exp()[..., None, None] * (h_dot + GdL[..., None, None] * h)
                  + kdec.transpose(-1, -2) @ (nu_dot + (GdL[..., None] - G_dot[:, :, :, n])[..., None] * nu)
                  + (kdc[:, :, :, n] * dec[..., None]).transpose(-1, -2) @ nu)
         h = h_new
-    hs, hds = torch.stack(hs, 2), torch.stack(hds, 3)                        # [B, H, N, K, V], [D, B, H, N, K, V]
-    nus, nuds = torch.stack(nus, 2), torch.stack(nuds, 3)                    # [B, H, N, C, V], [D, B, H, N, C, V]
+    # [B, H, N, K, V], [D, B, H, N, K, V]
+    hs, hds = torch.stack(hs, 2), torch.stack(hds, 3)
+    # [B, H, N, C, V], [D, B, H, N, C, V]
+    nus, nuds = torch.stack(nus, 2), torch.stack(nuds, 3)
 
-    o = _chunk_o(qc, kc, nus, hs, G, scale)
-    o_dot = (_chunk_o(qdc, kc, nus, hs, G, scale)
-             + _chunk_o(qc, kdc, nus, None, G, scale)
-             + _chunk_o(qc, kc, nuds - G_dot[..., None] * nus, hds, G, scale)
+    o = _chunk_o(q=qc, k=kc, nu=nus, h=hs, G=G, scale=scale)
+    o_dot = (_chunk_o(q=qdc, k=kc, nu=nus, h=hs, G=G, scale=scale)
+             + _chunk_o(q=qc, k=kdc, nu=nus, h=None, G=G, scale=scale)
+             + _chunk_o(q=qc, k=kc, nu=nuds - G_dot[..., None] * nus, h=hds, G=G, scale=scale)
              + G_dot[..., None] * o)
-    return _unchunk(o, T, 0), _unchunk(o_dot, T, 1)
+    return _unchunk(o, T, lead=0), _unchunk(o_dot, T, lead=1)
 
 
-##################################################################################################################
-# Fast path: the library's forward kernels for the primal, then three Triton kernels (intra-chunk tangents u_dot,
-# w_dot; the sequential tangent recurrence; the output tangent), with the D directions as a grid dimension so
-# that the primal tensors (q, k, v, w, u, nu, h, A, g) are never copied per direction.
-##################################################################################################################
-
-LN2 = math.log(2.0)
-
-# The library's forward state kernel stays at num_warps=2 on Blackwell because of a tl.dot recurrence race in Triton
-# before 3.8 (chunk_o.py lifts its own Blackwell restriction from Triton 3.8 on). The tangent recurrence has the same
-# structure: 2 warps only on Blackwell with Triton < 3.8. With Triton 3.8.0 on an RTX 5090, 4 warps gave bit-identical
-# results over 60 repeated runs (B=1, H=16, K=V=128, T=2048, D=8), and the fused recurrence runs 2.2x faster.
+# 2 warps on Blackwell before Triton 3.8: the recurrence has the tl.dot race that chunk_delta_h avoids the same way
 JVP_H_NUM_WARPS = [2] if (IS_NVIDIA_BLACKWELL and not TRITON_ABOVE_3_8_0) else [2, 4]
+# the intra-chunk and output kernels have chunk_fwd_o's structure, so they drop 8 warps where chunk_o.py does
+JVP_NUM_WARPS = [4] if BLACKWELL_8_WARP_RACE else [4, 8]
 
 
 def _resolve_precision(input_precision: str | None) -> str:
-    r"""fp32 tl.dot precision of the JVP kernels: explicit argument, else TRITON_F32_DEFAULT, else tf32 (Triton default)."""
+    r"""fp32 tl.dot precision of the JVP kernels: the argument, else TRITON_F32_DEFAULT, else tf32 where supported."""
     if input_precision is None:
         input_precision = os.environ.get('TRITON_F32_DEFAULT') or ('tf32' if IS_TF32_SUPPORTED else 'ieee')
     if input_precision not in ('tf32', 'tf32x3', 'ieee'):
@@ -250,16 +262,28 @@ def _prune_ieee(configs, named_args, **kwargs):
     ],
     key=['H', 'K', 'V', 'BT', 'BK', 'FUSE_O', 'DOT_PRECISION'],
     prune_configs_by={'early_config_prune': _prune_ieee},
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T', 'B'])
 def chunk_gated_delta_rule_jvp_fwd_kernel_h(
-    q, k, w, nu, h, g, P,
-    kd, wd, ud, gd,
-    hd, nud, od,
-    s_kd_d, s_kd_b, s_kd_t, s_kd_h,
-    s_wd_d, s_wd_b, s_wd_t, s_wd_h,
-    s_ud_d, s_ud_b, s_ud_t, s_ud_h,
-    s_gd_d, s_gd_b, s_gd_t, s_gd_h,
+    q,
+    k,
+    w,
+    nu,
+    h,
+    g,
+    P,
+    kd,
+    wd,
+    ud,
+    gd,
+    hd,
+    nud,
+    od,
+    s_kd_d,
+    s_kd_b,
+    s_kd_t,
+    s_kd_h,
     scale,
     T,
     B,
@@ -273,26 +297,20 @@ def chunk_gated_delta_rule_jvp_fwd_kernel_h(
     DOT_PRECISION: tl.constexpr,
 ):
     r"""
-    Sequential tangent recurrence over chunks, one program per (value block, batch*head, direction).
+    Sequential tangent recurrence over chunks, one program per (value block, head, direction).
 
-    Primal inputs (stored by the forward): k, w [B, T, H, K]; nu = v_new [B, T, H, V] (before gating);
-    h [B, NT, H, K, V] (state entering each chunk); g [B, T, H] within-chunk cumulative gate in log2 units.
-    Tangent inputs (strided, feature stride 1): kd, wd [D, B, T, H, K]; ud [D, B, T, H, V];
-    gd [D, B, T, H] within-chunk cumulative gate tangent in NATURAL units (d/de exp2(g) = exp2(g) * gd).
-    Per chunk (L = last valid row):
-        nu_dot = u_dot - w_dot h - w h_dot
-        h_dot <- exp2(g_L) (h_dot + gd_L h)
-                 + k^T [exp2(g_L - g) (nu_dot + (gd_L - gd) nu)] + k_dot^T [exp2(g_L - g) nu]
-    If FUSE_O: writes the part of the output tangent that needs h_dot and nu_dot,
-        od = scale [exp2(g) (q h_dot) + P nu_dot]     (P [B, T, H, BT]: P_rs = (q_r . k_s) exp2(g_r - g_s), s <= r)
-    so that h_dot and nu_dot are never stored; chunk_gated_delta_rule_jvp_fwd_kernel_o then adds the rest.
-    Else: stores hd [D, B, NT, H, K, V] (h_dot entering each chunk) and nud [D, B, T, H, V] (nu_dot).
+    Primal: k, w [B, T, H, K]; nu (v_new) [B, T, H, V]; h [B, NT, H, K, V] (state entering each chunk);
+    g [B, T, H] within-chunk cumulative gate in log2 units. Tangents: kd [D, B, T, H, K] with strides s_kd_*;
+    wd [D, B, T, H, K], ud [D, B, T, H, V] and gd [D, B, T, H] (natural units), contiguous.
+    If FUSE_O, writes into od the output terms with h_dot and nu_dot, scale [exp2(g) (q h_dot) + P nu_dot],
+    from P [B, T, H, BT]; else stores hd [D, B, NT, H, K, V] (h_dot entering each chunk) and nud [D, B, T, H, V].
     """
     pid = tl.program_id(0).to(tl.int64)
     NV = tl.cdiv(V, BV)
     i_v, i_bhd = pid % NV, pid // NV
     i_bh, i_d = i_bhd % (B * H), i_bhd // (B * H)
     i_b, i_h = i_bh // H, i_bh % H
+    i_db = i_d * B + i_b
     NT = tl.cdiv(T, BT)
     bos = i_b * T
 
@@ -302,16 +320,16 @@ def chunk_gated_delta_rule_jvp_fwd_kernel_h(
     g += bos * H + i_h
     h += (i_b * NT * H + i_h) * K * V
     kd += i_d * s_kd_d + i_b * s_kd_b + i_h * s_kd_h
-    wd += i_d * s_wd_d + i_b * s_wd_b + i_h * s_wd_h
-    ud += i_d * s_ud_d + i_b * s_ud_b + i_h * s_ud_h
-    gd += i_d * s_gd_d + i_b * s_gd_b + i_h * s_gd_h
+    wd += (i_db * T * H + i_h) * K
+    ud += (i_db * T * H + i_h) * V
+    gd += i_db * T * H + i_h
     if FUSE_O:
         q += (bos * H + i_h) * K
         P += (bos * H + i_h) * BT
-        od += ((i_d * B + i_b) * T * H + i_h) * V
+        od += (i_db * T * H + i_h) * V
     else:
-        hd += ((i_d * B + i_b) * NT * H + i_h) * K * V
-        nud += ((i_d * B + i_b) * T * H + i_h) * V
+        hd += (i_db * NT * H + i_h) * K * V
+        nud += (i_db * T * H + i_h) * V
 
     o_k = tl.arange(0, BK)
     m_k = o_k < K
@@ -319,7 +337,7 @@ def chunk_gated_delta_rule_jvp_fwd_kernel_h(
     m_v = o_v < V
     m_kv = m_k[:, None] & m_v[None, :]
 
-    # h_dot entering chunk 0 is zero (no initial state)
+    # [BK, BV] h_dot entering chunk 0 is zero without an initial state
     b_hd = tl.zeros([BK, BV], dtype=tl.float32)
     for i_t0 in range(NT):
         i_t = i_t0.to(tl.int64)
@@ -330,13 +348,13 @@ def chunk_gated_delta_rule_jvp_fwd_kernel_h(
 
         if not FUSE_O:
             tl.store(hd + i_t * H * K * V + o_k[:, None] * V + o_v[None, :], b_hd.to(hd.dtype.element_ty), mask=m_kv)
-        # [BK, BV] primal state entering this chunk
+        # [BK, BV]
         b_h = tl.load(h + i_t * H * K * V + o_k[:, None] * V + o_v[None, :], mask=m_kv, other=0.).to(tl.float32)
         # [BT, BK]
         b_w = tl.load(w + o_t[:, None] * (H * K) + o_k[None, :], mask=m_tk, other=0.)
-        b_wd = tl.load(wd + o_t[:, None] * s_wd_t + o_k[None, :], mask=m_tk, other=0.).to(b_w.dtype)
-        # nu_dot = u_dot - w_dot h - w h_dot: [BT, BV]
-        b_nud = tl.load(ud + o_t[:, None] * s_ud_t + o_v[None, :], mask=m_tv, other=0.).to(tl.float32)
+        b_wd = tl.load(wd + o_t[:, None] * (H * K) + o_k[None, :], mask=m_tk, other=0.).to(b_w.dtype)
+        # [BT, BV] nu_dot = u_dot - w_dot h - w h_dot
+        b_nud = tl.load(ud + o_t[:, None] * (H * V) + o_v[None, :], mask=m_tv, other=0.).to(tl.float32)
         b_nud -= tl.dot(b_wd, b_h.to(b_w.dtype), input_precision=DOT_PRECISION)
         b_nud -= tl.dot(b_w, b_hd.to(b_w.dtype), input_precision=DOT_PRECISION)
 
@@ -344,7 +362,6 @@ def chunk_gated_delta_rule_jvp_fwd_kernel_h(
         b_g_last = tl.load(g + last_idx * H).to(tl.float32)
         b_g = tl.load(g + o_t * H, mask=m_t, other=0.).to(tl.float32)
         if FUSE_O:
-            # output part with h_dot (entering this chunk) and nu_dot: scale [exp2(g) (q h_dot) + P nu_dot]
             b_q = tl.load(q + o_t[:, None] * (H * K) + o_k[None, :], mask=m_tk, other=0.)
             b_P = tl.load(P + o_t[:, None] * (H * BT) + tl.arange(0, BT)[None, :], mask=m_t[:, None], other=0.)
             b_od = tl.dot(b_q, b_hd.to(b_q.dtype), input_precision=DOT_PRECISION) * exp2(b_g)[:, None]
@@ -352,9 +369,9 @@ def chunk_gated_delta_rule_jvp_fwd_kernel_h(
             tl.store(od + o_t[:, None] * (H * V) + o_v[None, :], (b_od * scale).to(od.dtype.element_ty), mask=m_tv)
         else:
             tl.store(nud + o_t[:, None] * (H * V) + o_v[None, :], b_nud.to(nud.dtype.element_ty), mask=m_tv)
-        b_gd_last = tl.load(gd + last_idx * s_gd_t).to(tl.float32)
-        b_gd = tl.load(gd + o_t * s_gd_t, mask=m_t, other=0.).to(tl.float32)
-        # exp(G_L - G_r), zero on padded rows (also avoids 0 * inf there)
+        b_gd_last = tl.load(gd + last_idx * H).to(tl.float32)
+        b_gd = tl.load(gd + o_t * H, mask=m_t, other=0.).to(tl.float32)
+        # exp(G_L - G_r), zeroed on padded rows so that 0 * inf cannot occur there
         b_dec = tl.where(m_t, exp2(b_g_last - b_g), 0.)
         b_nu = tl.load(nu + o_t[:, None] * (H * V) + o_v[None, :], mask=m_tv, other=0.).to(tl.float32)
         b_x = (b_nud + (b_gd_last - b_gd)[:, None] * b_nu) * b_dec[:, None]
@@ -373,21 +390,35 @@ def chunk_gated_delta_rule_jvp_fwd_kernel_h(
         triton.Config({'BK': BK, 'BV': BV}, num_warps=num_warps, num_stages=num_stages)
         for BK in [32, 64]
         for BV in [32, 64]
-        for num_warps in [4, 8]
+        for num_warps in JVP_NUM_WARPS
         for num_stages in [2, 3]
     ],
     key=['H', 'K', 'V', 'BT', 'FUSE_O', 'DOT_PRECISION'],
     prune_configs_by={'early_config_prune': _prune_ieee},
     restore_value=['od'],
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T', 'B'])
 def chunk_gated_delta_rule_jvp_fwd_kernel_o(
-    q, k, nu, h, g,
-    qd, kd, nud, hd, gd,
+    q,
+    k,
+    nu,
+    h,
+    g,
+    qd,
+    kd,
+    nud,
+    hd,
+    gd,
     od,
-    s_qd_d, s_qd_b, s_qd_t, s_qd_h,
-    s_kd_d, s_kd_b, s_kd_t, s_kd_h,
-    s_gd_d, s_gd_b, s_gd_t, s_gd_h,
+    s_qd_d,
+    s_qd_b,
+    s_qd_t,
+    s_qd_h,
+    s_kd_d,
+    s_kd_b,
+    s_kd_t,
+    s_kd_h,
     scale,
     T,
     B,
@@ -401,19 +432,17 @@ def chunk_gated_delta_rule_jvp_fwd_kernel_o(
     DOT_PRECISION: tl.constexpr,
 ):
     r"""
-    Output tangent, one program per (value block * chunk, batch*head*direction). With P_{rs} = (q_r . k_s)
-    exp(G_r - G_s) [s <= r] and P_dot from (q_dot_r . k_s + q_r . k_dot_s):
-        o_dot_r = scale [exp(G_r) (q_dot_r h + q_r h_dot + G_dot_r q_r h)
-                         + sum_s (P_dot_{rs} + P_{rs} (G_dot_r - G_dot_s)) nu_s + sum_s P_{rs} nu_dot_s]
-    which equals O(q_dot, k, nu, h) + O(q, k_dot, nu, 0) + O(q, k, nu_dot - G_dot nu, h_dot) + G_dot o
-    in one pass, without materializing the primal o or per-direction copies of q, k, nu, h.
-    If FUSE_O, the terms with h_dot and nu_dot were written into od by the recurrence kernel: add the rest to them.
+    Output tangent o_dot [D, B, T, H, V], one program per (value block, chunk, head, direction), without
+    materializing the primal output or per-direction copies of q, k, nu, h.
+    Tangents: qd, kd with strides s_qd_*, s_kd_*; gd [D, B, T, H] contiguous; nud and hd as written by the
+    recurrence kernel. If FUSE_O, od already holds the terms with h_dot and nu_dot and the rest is added to it.
     """
-    i_v, i_t = tl.program_id(0).to(tl.int64) % tl.cdiv(V, BV), tl.program_id(0).to(tl.int64) // tl.cdiv(V, BV)
-    i_bhd = tl.program_id(1).to(tl.int64)
+    pid = tl.program_id(0).to(tl.int64)
+    NV, NT = tl.cdiv(V, BV), tl.cdiv(T, BT)
+    i_v, i_t, i_bhd = pid % NV, (pid // NV) % NT, pid // (NV * NT)
     i_bh, i_d = i_bhd % (B * H), i_bhd // (B * H)
     i_b, i_h = i_bh // H, i_bh % H
-    NT = tl.cdiv(T, BT)
+    i_db = i_d * B + i_b
     bos = i_b * T
 
     q += (bos * H + i_h) * K
@@ -423,21 +452,22 @@ def chunk_gated_delta_rule_jvp_fwd_kernel_o(
     h += ((i_b * NT + i_t) * H + i_h) * K * V
     qd += i_d * s_qd_d + i_b * s_qd_b + i_h * s_qd_h
     kd += i_d * s_kd_d + i_b * s_kd_b + i_h * s_kd_h
-    gd += i_d * s_gd_d + i_b * s_gd_b + i_h * s_gd_h
+    gd += i_db * T * H + i_h
     if not FUSE_O:
-        nud += ((i_d * B + i_b) * T * H + i_h) * V
-        hd += (((i_d * B + i_b) * NT + i_t) * H + i_h) * K * V
-    od += ((i_d * B + i_b) * T * H + i_h) * V
+        nud += (i_db * T * H + i_h) * V
+        hd += ((i_db * NT + i_t) * H + i_h) * K * V
+    od += (i_db * T * H + i_h) * V
 
     o_t = i_t * BT + tl.arange(0, BT)
     m_t = o_t < T
     o_v = i_v * BV + tl.arange(0, BV)
     m_v = o_v < V
 
-    b_o0 = tl.zeros([BT, BV], dtype=tl.float32)   # q h
-    b_o1 = tl.zeros([BT, BV], dtype=tl.float32)   # q_dot h (+ q h_dot)
-    b_A = tl.zeros([BT, BT], dtype=tl.float32)    # q k^T
-    b_Ad = tl.zeros([BT, BT], dtype=tl.float32)   # q_dot k^T + q k_dot^T
+    # accumulators of q h, q_dot h (+ q h_dot), q k^T and q_dot k^T + q k_dot^T
+    b_o0 = tl.zeros([BT, BV], dtype=tl.float32)
+    b_o1 = tl.zeros([BT, BV], dtype=tl.float32)
+    b_A = tl.zeros([BT, BT], dtype=tl.float32)
+    b_Ad = tl.zeros([BT, BT], dtype=tl.float32)
     for i_k in range(tl.cdiv(K, BK)):
         o_k = i_k * BK + tl.arange(0, BK)
         m_k = o_k < K
@@ -459,7 +489,7 @@ def chunk_gated_delta_rule_jvp_fwd_kernel_o(
         b_Ad = tl.dot(b_q, b_kdt, b_Ad, input_precision=DOT_PRECISION)
 
     b_g = tl.load(g + o_t * H, mask=m_t, other=0.).to(tl.float32)
-    b_gd = tl.load(gd + o_t * s_gd_t, mask=m_t, other=0.).to(tl.float32)
+    b_gd = tl.load(gd + o_t * H, mask=m_t, other=0.).to(tl.float32)
     b_o = exp2(b_g)[:, None] * (b_o1 + b_gd[:, None] * b_o0)
     m_A = (o_t[:, None] >= o_t[None, :]) & (m_t[:, None] & m_t[None, :])
     b_dec = tl.where(m_A, exp2(b_g[:, None] - b_g[None, :]), 0.)
@@ -482,21 +512,36 @@ def chunk_gated_delta_rule_jvp_fwd_kernel_o(
         triton.Config({'BK': BK, 'BV': BV}, num_warps=num_warps, num_stages=num_stages)
         for BK in [32, 64]
         for BV in [32, 64]
-        for num_warps in [4, 8]
+        for num_warps in JVP_NUM_WARPS
         for num_stages in [2, 3]
     ],
     key=['H', 'K', 'V', 'BT', 'DOT_PRECISION'],
     prune_configs_by={'early_config_prune': _prune_ieee},
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T', 'B'])
 def chunk_gated_delta_rule_jvp_fwd_kernel_intra(
-    k, v, beta, g, A, u, w,
-    kd, vd, bd, gd,
-    ud, wd,
-    s_kd_d, s_kd_b, s_kd_t, s_kd_h,
-    s_vd_d, s_vd_b, s_vd_t, s_vd_h,
-    s_bd_d, s_bd_b, s_bd_t, s_bd_h,
-    s_gd_d, s_gd_b, s_gd_t, s_gd_h,
+    k,
+    v,
+    beta,
+    g,
+    A,
+    u,
+    w,
+    kd,
+    vd,
+    bd,
+    gd,
+    ud,
+    wd,
+    s_kd_d,
+    s_kd_b,
+    s_kd_t,
+    s_kd_h,
+    s_vd_d,
+    s_vd_b,
+    s_vd_t,
+    s_vd_h,
     T,
     B,
     H: tl.constexpr,
@@ -508,18 +553,16 @@ def chunk_gated_delta_rule_jvp_fwd_kernel_intra(
     DOT_PRECISION: tl.constexpr,
 ):
     r"""
-    Intra-chunk tangents of the WY representation, one program per (chunk, batch*head*direction):
-        M_dot = [beta_dot_r (k_r.k_s) + beta_r (k_dot_r.k_s + k_r.k_dot_s) + beta_r (k_r.k_s)(G_dot_r - G_dot_s)]
-                * exp2(g_r - g_s)  (r > s)
-        u_dot = A [beta_dot v + beta v_dot - M_dot u]
-        w_dot = A [exp2(g) ((beta_dot + beta G_dot) k + beta k_dot) - M_dot w]
-    Primal: k [B, T, H, K], v, u [B, T, H, V], w [B, T, H, K], beta [B, T, H], g [B, T, H] (log2 cumulative),
-    A [B, T, H, BT] = (I + M)^{-1}. Tangents strided (kd, vd [D, B, T, H, *], bd, gd [D, B, T, H]; gd natural units).
-    Outputs ud [D, B, T, H, V], wd [D, B, T, H, K] (contiguous).
+    Intra-chunk tangents ud [D, B, T, H, V] and wd [D, B, T, H, K] of the WY representation, one program per
+    (chunk, head, direction). Primal: k, w [B, T, H, K]; v, u [B, T, H, V]; beta and g (log2 cumulative)
+    [B, T, H]; A [B, T, H, BT]. Tangents: kd, vd with strides s_kd_*, s_vd_*; bd and gd [D, B, T, H] contiguous.
     """
-    i_t, i_bhd = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
+    pid = tl.program_id(0).to(tl.int64)
+    NT = tl.cdiv(T, BT)
+    i_t, i_bhd = pid % NT, pid // NT
     i_bh, i_d = i_bhd % (B * H), i_bhd // (B * H)
     i_b, i_h = i_bh // H, i_bh % H
+    i_db = i_d * B + i_b
     bos = i_b * T
 
     k += (bos * H + i_h) * K
@@ -531,22 +574,22 @@ def chunk_gated_delta_rule_jvp_fwd_kernel_intra(
     A += (bos * H + i_h) * BT
     kd += i_d * s_kd_d + i_b * s_kd_b + i_h * s_kd_h
     vd += i_d * s_vd_d + i_b * s_vd_b + i_h * s_vd_h
-    bd += i_d * s_bd_d + i_b * s_bd_b + i_h * s_bd_h
-    gd += i_d * s_gd_d + i_b * s_gd_b + i_h * s_gd_h
-    ud += ((i_d * B + i_b) * T * H + i_h) * V
-    wd += ((i_d * B + i_b) * T * H + i_h) * K
+    bd += i_db * T * H + i_h
+    gd += i_db * T * H + i_h
+    ud += (i_db * T * H + i_h) * V
+    wd += (i_db * T * H + i_h) * K
 
     o_t = i_t * BT + tl.arange(0, BT)
     m_t = o_t < T
     o_c = tl.arange(0, BT)
 
     b_b = tl.load(beta + o_t * H, mask=m_t, other=0.).to(tl.float32)
-    b_bd = tl.load(bd + o_t * s_bd_t, mask=m_t, other=0.).to(tl.float32)
+    b_bd = tl.load(bd + o_t * H, mask=m_t, other=0.).to(tl.float32)
     b_g = tl.load(g + o_t * H, mask=m_t, other=0.).to(tl.float32)
-    b_gd = tl.load(gd + o_t * s_gd_t, mask=m_t, other=0.).to(tl.float32)
+    b_gd = tl.load(gd + o_t * H, mask=m_t, other=0.).to(tl.float32)
     b_A = tl.load(A + o_t[:, None] * (H * BT) + o_c[None, :], mask=m_t[:, None], other=0.).to(tl.float32)
 
-    # (k_r . k_s) and (k_dot_r . k_s), accumulated over key blocks
+    # [BT, BT] (k_r . k_s) and (k_dot_r . k_s), accumulated over key blocks
     b_kk = tl.zeros([BT, BT], dtype=tl.float32)
     b_kdk = tl.zeros([BT, BT], dtype=tl.float32)
     for i_k in range(tl.cdiv(K, BK)):
@@ -595,10 +638,14 @@ def chunk_gated_delta_rule_jvp_fwd_kernel_intra(
     ],
     key=['H', 'K', 'BT', 'DOT_PRECISION'],
     prune_configs_by={'early_config_prune': _prune_ieee},
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_gated_delta_rule_jvp_fwd_kernel_qk(
-    q, k, g, P,
+    q,
+    k,
+    g,
+    P,
     T,
     H: tl.constexpr,
     K: tl.constexpr,
@@ -606,7 +653,7 @@ def chunk_gated_delta_rule_jvp_fwd_kernel_qk(
     BK: tl.constexpr,
     DOT_PRECISION: tl.constexpr,
 ):
-    r"""P [B, T, H, BT]: P_rs = (q_r . k_s) exp2(g_r - g_s) for s <= r within a chunk, else 0 (direction-independent)."""
+    r"""P [B, T, H, BT]: P_rs = (q_r . k_s) exp2(g_r - g_s) for s <= r within a chunk, else 0."""
     i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     bos = i_b * T
@@ -629,15 +676,6 @@ def chunk_gated_delta_rule_jvp_fwd_kernel_qk(
     tl.store(P + o_t[:, None] * (H * BT) + tl.arange(0, BT)[None, :], b_A.to(P.dtype.element_ty), mask=m_t[:, None])
 
 
-def _strides4(x: torch.Tensor, chunked: bool) -> tuple[int, int, int, int]:
-    r"""(direction, batch, time, head) strides of a tangent: [D, B, T, H, *] or, if chunked, [D, B, H, N, C, *]."""
-    if chunked:
-        # [D, B, H, N, C, *]: time t = n * C + c has stride C-stride (N and C are contiguous with each other)
-        assert x.stride(3) == x.shape[4] * x.stride(4)
-        return x.stride(0), x.stride(1), x.stride(4), x.stride(2)
-    return x.stride(0), x.stride(1), x.stride(2), x.stride(3)
-
-
 def chunk_gated_delta_rule_jvp_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -652,80 +690,78 @@ def chunk_gated_delta_rule_jvp_fwd(
     scale: float,
     chunk_size: int = 64,
     input_precision: str | None = None,
-    intra_impl: str = 'triton',
     fuse_output: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
-    Implementation of :func:`chunk_gated_delta_rule_jvp` (no argument checking). Primal inputs contiguous;
-    tangents with feature stride 1. Returns (o [B, T, H, V], o_dot [D, B, T, H, V]).
-    ``intra_impl``: 'triton' (fused kernel) or 'torch' (batched PyTorch ops; the slow-but-simple path).
-    ``fuse_output``: compute the output terms that need h_dot and nu_dot inside the recurrence kernel, so neither
-    is stored (saves D * B * T * H * (K * V / BT + V) elements); False stores them for a separate output pass.
+    :func:`chunk_gated_delta_rule_jvp` without argument checks.
+    The primal inputs, `g_dot` and `beta_dot` are contiguous; `q_dot`, `k_dot` and `v_dot` have unit feature stride.
     """
     B, T, H, K = q.shape
     V = v.shape[-1]
     D = q_dot.shape[0]
     BT = chunk_size
     NT = triton.cdiv(T, BT)
-    precision = _resolve_precision(input_precision)
-
-    # ---- primal forward: the library's own kernels (identical to chunk_gated_delta_rule_fwd without initial state)
-    g_cum = chunk_local_cumsum(g, chunk_size=BT, scale=RCP_LN2)                    # [B, T, H], log2 units, fp32
-    w, u, A = chunk_gated_delta_rule_fwd_intra(k=k, v=v, g=g_cum, beta=beta, chunk_size=BT)
-    h, nu, _ = chunk_gated_delta_rule_fwd_h(k=k, w=w, u=u, g=g_cum, chunk_size=BT)  # h [B, NT, H, K, V], nu = v_new
-    o = chunk_fwd_o(q=q, k=k, v=nu, h=h, g=g_cum, scale=scale, chunk_size=BT)
-
-    # ---- tangent of the within-chunk cumulative gate, natural units: [D, B, T, H] fp32
-    G_dot = chunk_local_cumsum(g_dot.reshape(D * B, T, H).contiguous(), chunk_size=BT).view(D, B, T, H)
-
-    # ---- intra-chunk tangents u_dot, w_dot, batched over chunks and directions
-    if intra_impl == 'triton':
-        u_dot = torch.empty(D, B, T, H, V, dtype=k.dtype, device=k.device)
-        w_dot = torch.empty(D, B, T, H, K, dtype=k.dtype, device=k.device)
-        chunk_gated_delta_rule_jvp_fwd_kernel_intra[(NT, D * B * H)](
-            k, v, beta, g_cum, A, u, w,
-            k_dot, v_dot, beta_dot, G_dot,
-            u_dot, w_dot,
-            *_strides4(k_dot, False),
-            *_strides4(v_dot, False),
-            *_strides4(beta_dot, False),
-            *_strides4(G_dot, False),
-            T, B,
-            H=H, K=K, V=V, BT=BT,
-            DOT_PRECISION=precision,
-        )
-        ud_chunked = wd_chunked = False
-    else:
-        # slow-but-simple PyTorch path (fp32; IEEE unless the caller enabled TF32 matmuls in PyTorch, or
-        # input_precision='ieee' forces it here)
-        f32 = torch.float32
-        kc, vc = _chunk(k, BT, 0).to(f32), _chunk(v, BT, 0).to(f32)                # [B, H, N, C, *]
-        bc = _chunk(beta, BT, 0).to(f32)                                            # [B, H, N, C]
-        Gc = _chunk(g_cum, BT, 0) * LN2                                             # natural units, exp(Gc) = exp2(g_cum)
-        Ac = _chunk(A, BT, 0).to(f32)                                               # [B, H, N, C, C]
-        uc, wc = _chunk(u, BT, 0).to(f32), _chunk(w, BT, 0).to(f32)
-        kdc, vdc = _chunk(k_dot, BT, 1).to(f32), _chunk(v_dot, BT, 1).to(f32)      # [D, B, H, N, C, *]
-        bdc, Gdc = _chunk(beta_dot, BT, 1).to(f32), _chunk(G_dot, BT, 1)            # [D, B, H, N, C]
-        prev_tf32 = torch.backends.cuda.matmul.allow_tf32
-        if precision == 'ieee':
-            torch.backends.cuda.matmul.allow_tf32 = False
-        try:
-            u_dot, w_dot = _intra_chunk_tangents(kc, vc, bc, Gc, Ac, uc, wc, kdc, vdc, bdc, Gdc)
-        finally:
-            torch.backends.cuda.matmul.allow_tf32 = prev_tf32
-        del kc, vc, bc, Gc, Ac, uc, wc, kdc, vdc, bdc, Gdc
-        if k.dtype != f32:
-            u_dot, w_dot = u_dot.to(k.dtype), w_dot.to(k.dtype)
-        ud_chunked = wd_chunked = True
-
-    # ---- sequential tangent recurrence (Triton), and with fuse_output the output terms that need h_dot, nu_dot
     BK = max(triton.next_power_of_2(K), 16)
     assert K <= 256, "the JVP state kernel supports head dimension K <= 256"
+    precision = _resolve_precision(input_precision)
+
+    # the library's forward kernels, as in chunk_gated_delta_rule_fwd without an initial state
+    g_cum = chunk_local_cumsum(g=g, chunk_size=BT, scale=RCP_LN2)
+    w, u, A = chunk_gated_delta_rule_fwd_intra(k=k, v=v, g=g_cum, beta=beta, chunk_size=BT)
+    # h [B, NT, H, K, V] is the state entering each chunk and nu is v_new
+    h, nu, _ = chunk_gated_delta_rule_fwd_h(k=k, w=w, u=u, g=g_cum, chunk_size=BT)
+    o = chunk_fwd_o(q=q, k=k, v=nu, h=h, g=g_cum, scale=scale, chunk_size=BT)
+
+    # [D, B, T, H] within-chunk cumulative gate tangent in natural units, fp32
+    G_dot = chunk_local_cumsum(g=g_dot.view(D * B, T, H), chunk_size=BT).view(D, B, T, H)
+
+    u_dot = torch.empty(D, B, T, H, V, dtype=k.dtype, device=k.device)
+    w_dot = torch.empty(D, B, T, H, K, dtype=k.dtype, device=k.device)
+    # 1D grid: D * B * H can exceed the 65535 limit of the second grid dimension
+    chunk_gated_delta_rule_jvp_fwd_kernel_intra[(NT * D * B * H,)](
+        k=k,
+        v=v,
+        beta=beta,
+        g=g_cum,
+        A=A,
+        u=u,
+        w=w,
+        kd=k_dot,
+        vd=v_dot,
+        bd=beta_dot,
+        gd=G_dot,
+        ud=u_dot,
+        wd=w_dot,
+        s_kd_d=k_dot.stride(0),
+        s_kd_b=k_dot.stride(1),
+        s_kd_t=k_dot.stride(2),
+        s_kd_h=k_dot.stride(3),
+        s_vd_d=v_dot.stride(0),
+        s_vd_b=v_dot.stride(1),
+        s_vd_t=v_dot.stride(2),
+        s_vd_h=v_dot.stride(3),
+        T=T,
+        B=B,
+        H=H,
+        K=K,
+        V=V,
+        BT=BT,
+        DOT_PRECISION=precision,
+    )
+
     o_dot = torch.empty(D, B, T, H, V, dtype=v.dtype, device=v.device)
     if fuse_output:
         P = torch.empty(B, T, H, BT, dtype=k.dtype, device=k.device)
         chunk_gated_delta_rule_jvp_fwd_kernel_qk[(NT, B * H)](
-            q, k, g_cum, P, T, H=H, K=K, BT=BT, DOT_PRECISION=precision,
+            q=q,
+            k=k,
+            g=g_cum,
+            P=P,
+            T=T,
+            H=H,
+            K=K,
+            BT=BT,
+            DOT_PRECISION=precision,
         )
         h_dot = nu_dot = None
     else:
@@ -735,40 +771,72 @@ def chunk_gated_delta_rule_jvp_fwd(
 
     def grid_h(meta): return (triton.cdiv(V, meta['BV']) * B * H * D,)
     chunk_gated_delta_rule_jvp_fwd_kernel_h[grid_h](
-        q, k, w, nu, h, g_cum, P,
-        k_dot, w_dot, u_dot, G_dot,
-        h_dot, nu_dot, o_dot,
-        *_strides4(k_dot, False),
-        *_strides4(w_dot, wd_chunked),
-        *_strides4(u_dot, ud_chunked),
-        *_strides4(G_dot, False),
-        scale,
-        T, B,
-        H=H, K=K, V=V, BT=BT, BK=BK,
+        q=q,
+        k=k,
+        w=w,
+        nu=nu,
+        h=h,
+        g=g_cum,
+        P=P,
+        kd=k_dot,
+        wd=w_dot,
+        ud=u_dot,
+        gd=G_dot,
+        hd=h_dot,
+        nud=nu_dot,
+        od=o_dot,
+        s_kd_d=k_dot.stride(0),
+        s_kd_b=k_dot.stride(1),
+        s_kd_t=k_dot.stride(2),
+        s_kd_h=k_dot.stride(3),
+        scale=scale,
+        T=T,
+        B=B,
+        H=H,
+        K=K,
+        V=V,
+        BT=BT,
+        BK=BK,
         FUSE_O=fuse_output,
         DOT_PRECISION=precision,
     )
     del w_dot, u_dot, P
 
-    # ---- output tangent (Triton): all of it, or (fuse_output) the terms without h_dot and nu_dot, added to o_dot
-    def grid_o(meta): return (triton.cdiv(V, meta['BV']) * NT, D * B * H)
+    def grid_o(meta): return (triton.cdiv(V, meta['BV']) * NT * D * B * H,)
     chunk_gated_delta_rule_jvp_fwd_kernel_o[grid_o](
-        q, k, nu, h, g_cum,
-        q_dot, k_dot, nu_dot, h_dot, G_dot,
-        o_dot,
-        *_strides4(q_dot, False),
-        *_strides4(k_dot, False),
-        *_strides4(G_dot, False),
-        scale,
-        T, B,
-        H=H, K=K, V=V, BT=BT,
+        q=q,
+        k=k,
+        nu=nu,
+        h=h,
+        g=g_cum,
+        qd=q_dot,
+        kd=k_dot,
+        nud=nu_dot,
+        hd=h_dot,
+        gd=G_dot,
+        od=o_dot,
+        s_qd_d=q_dot.stride(0),
+        s_qd_b=q_dot.stride(1),
+        s_qd_t=q_dot.stride(2),
+        s_qd_h=q_dot.stride(3),
+        s_kd_d=k_dot.stride(0),
+        s_kd_b=k_dot.stride(1),
+        s_kd_t=k_dot.stride(2),
+        s_kd_h=k_dot.stride(3),
+        scale=scale,
+        T=T,
+        B=B,
+        H=H,
+        K=K,
+        V=V,
+        BT=BT,
         FUSE_O=fuse_output,
         DOT_PRECISION=precision,
     )
     return o.to(q.dtype), o_dot
 
 
-@input_guard(no_guard_contiguous=['q_dot', 'k_dot', 'v_dot', 'g_dot', 'beta_dot'])
+@input_guard(no_guard_contiguous=['q_dot', 'k_dot', 'v_dot'])
 def chunk_gated_delta_rule_jvp(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -786,32 +854,50 @@ def chunk_gated_delta_rule_jvp(
     fuse_output: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
-    Forward-mode derivative (JVP) of :func:`chunk_gated_delta_rule` along D tangent directions at once.
+    Forward-mode derivative (JVP) of :func:`chunk_gated_delta_rule` along `D` tangent directions at once.
+    Initial and final states, variable lengths and grouped value heads are not supported.
 
     Args:
-        q, k (torch.Tensor): `[B, T, H, K]` (the caller applies any l2 normalization).
-        v (torch.Tensor): `[B, T, H, V]`.
-        g (torch.Tensor): `[B, T, H]` per-step log decay (NOT cumulative).
-        beta (torch.Tensor): `[B, T, H]`.
-        q_dot, k_dot, v_dot, g_dot, beta_dot (torch.Tensor): tangents of the same shapes with a leading
-            direction dimension `D`, e.g. `q_dot` is `[D, B, T, H, K]`. Any strides with unit feature stride.
-        scale (float): defaults to `K ** -0.5`.
-        chunk_size (int): 16, 32 or 64.
-        input_precision (str): fp32 tl.dot precision of the three JVP kernels (intra-chunk tangents, tangent
-            recurrence, output tangent): 'ieee', 'tf32' or 'tf32x3'. Default (None): TRITON_F32_DEFAULT if set,
-            else 'tf32' (Triton's default). The library's forward kernels, run unchanged for the primal, use
-            Triton's default (TRITON_F32_DEFAULT) and keep TF32 in the solve_tril block merge. 'ieee' compiles
-            slowly (minutes on first use per shape) and runs slower; 'tf32x3' is close to IEEE accuracy at
-            tensor-core speed.
-        fuse_output (bool): compute the output terms that need the state tangent inside the recurrence kernel, so
-            that h_dot [D, B, T/BT, H, K, V] and nu_dot [D, B, T, H, V] are never stored (default). False stores them
-            and computes the whole output tangent in a separate pass.
-
-    No initial state, no final state, no variable lengths, no GVA (v has the heads of q and k).
+        q (torch.Tensor):
+            Queries of shape `[B, T, H, K]`, with any l2 normalization already applied.
+        k (torch.Tensor):
+            Keys of shape `[B, T, H, K]`, with any l2 normalization already applied.
+        v (torch.Tensor):
+            Values of shape `[B, T, H, V]`.
+        g (torch.Tensor):
+            Per-step log decay of shape `[B, T, H]`, not cumulative.
+        beta (torch.Tensor):
+            Betas of shape `[B, T, H]`.
+        q_dot (torch.Tensor):
+            Tangent of `q` of shape `[D, B, T, H, K]`. Any strides with a unit feature stride are read in place.
+        k_dot (torch.Tensor):
+            Tangent of `k` of shape `[D, B, T, H, K]`. Any strides with a unit feature stride are read in place.
+        v_dot (torch.Tensor):
+            Tangent of `v` of shape `[D, B, T, H, V]`. Any strides with a unit feature stride are read in place.
+        g_dot (torch.Tensor):
+            Tangent of `g` of shape `[D, B, T, H]`.
+        beta_dot (torch.Tensor):
+            Tangent of `beta` of shape `[D, B, T, H]`.
+        scale (float, Optional):
+            Scale of the attention scores. Default: `K ** -0.5`.
+        chunk_size (int, Optional):
+            Chunk size, one of 16, 32 and 64. Default: 64.
+        input_precision (str, Optional):
+            Precision of the fp32 `tl.dot` in the JVP kernels: `'ieee'`, `'tf32'` or `'tf32x3'`.
+            `None` uses `TRITON_F32_DEFAULT` if set, else `'tf32'` where supported and `'ieee'` elsewhere.
+            The primal runs through the library's forward kernels and is not affected.
+            `'ieee'` takes minutes to compile per shape on NVIDIA GPUs; `'tf32x3'` is close to it in accuracy.
+            Default: `None`.
+        fuse_output (bool, Optional):
+            Whether the recurrence kernel computes the output terms that need the state tangent,
+            so that the state tangent `[D, B, NT, H, K, V]` is never stored.
+            With 16-bit inputs, `True` rounds those terms to the output dtype before the rest is added. Default: `True`.
 
     Returns:
-        o (torch.Tensor): `[B, T, H, V]`, equal to `chunk_gated_delta_rule(q, k, v, g, beta, scale)[0]`.
-        o_dot (torch.Tensor): `[D, B, T, H, V]`, the derivative of o along each direction.
+        o (torch.Tensor):
+            Output of shape `[B, T, H, V]`, equal to `chunk_gated_delta_rule(q, k, v, g, beta, scale)[0]`.
+        o_dot (torch.Tensor):
+            Derivative of `o` along each direction, of shape `[D, B, T, H, V]`.
     """
     B, T, H, K = q.shape
     if k.shape != q.shape or v.shape[:3] != (B, T, H) or g.shape != (B, T, H) or beta.shape != (B, T, H):
@@ -830,8 +916,19 @@ def chunk_gated_delta_rule_jvp(
     def unit_feature_stride(x):
         return x if x.stride(-1) == 1 else x.contiguous()
     q_dot, k_dot, v_dot = (unit_feature_stride(x) for x in (q_dot, k_dot, v_dot))
-    # g_dot, beta_dot are reshaped/chunked in PyTorch; any strides work there
     return chunk_gated_delta_rule_jvp_fwd(
-        q, k, v, g, beta, q_dot, k_dot, v_dot, g_dot, beta_dot,
-        scale=scale, chunk_size=chunk_size, input_precision=input_precision, fuse_output=fuse_output,
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        beta=beta,
+        q_dot=q_dot,
+        k_dot=k_dot,
+        v_dot=v_dot,
+        g_dot=g_dot,
+        beta_dot=beta_dot,
+        scale=scale,
+        chunk_size=chunk_size,
+        input_precision=input_precision,
+        fuse_output=fuse_output,
     )

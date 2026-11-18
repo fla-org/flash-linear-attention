@@ -16,7 +16,9 @@ from einops import repeat
 
 from fla import backends
 from fla.ops.common.chunk_o import chunk_bwd_dqkwg
-from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
+from fla.ops.gated_delta_rule import chunk_gated_delta_rule, chunk_gated_delta_rule_jvp, fused_recurrent_gated_delta_rule
+from fla.ops.gated_delta_rule.chunk_jvp import chunk_gated_delta_rule_jvp_ref
+from fla.ops.gated_delta_rule.custom_ops import chunk_gated_delta_rule_jvp_op, chunk_gated_delta_rule_op
 from fla.ops.gated_delta_rule.gate import fused_gdn_gate, naive_gdn_gate
 from fla.ops.gated_delta_rule.naive import naive_recurrent_gated_delta_rule
 from fla.ops.gated_delta_rule.wy_fast import prepare_wy_repr_bwd, recompute_w_u_fwd
@@ -30,6 +32,7 @@ from fla.utils import (
     TRITON_ABOVE_3_8_0,
     assert_close,
     device,
+    get_err_ratio,
 )
 
 
@@ -1816,3 +1819,284 @@ def test_chunk_bwd_tilelang_backend():
     expected = [(p.name, p.kind, p.default) for p in inspect.signature(chunk_bwd_dqkwg).parameters.values()]
     actual = [(p.name, p.kind, p.default) for p in inspect.signature(chunk_bwd_dqkwg_tilelang).parameters.values()]
     assert actual == expected
+
+
+JVP_ARGS = ('q', 'k', 'v', 'g', 'beta', 'q_dot', 'k_dot', 'v_dot', 'g_dot', 'beta_dot')
+JVP_TOL = {torch.float32: 0.005, torch.float16: 0.005, torch.bfloat16: 0.008}
+_SKIP_JVP_NPU = pytest.mark.skipif(IS_NPU, reason='The JVP and its custom operators are not supported on NPU')
+
+
+def _jvp_inputs(B, T, H, K, V, D, dtype):
+    """Primal inputs as a model feeds them (unit-norm keys, log-sigmoid gates, beta in (0, 1)) and D tangents."""
+    q = torch.randn(B, T, H, K, dtype=torch.float64, device=device)
+    k = F.normalize(torch.randn(B, T, H, K, dtype=torch.float64, device=device), dim=-1)
+    v = torch.randn(B, T, H, V, dtype=torch.float64, device=device)
+    g = F.logsigmoid(torch.randn(B, T, H, dtype=torch.float64, device=device))
+    beta = torch.rand(B, T, H, dtype=torch.float64, device=device)
+    tangents = [torch.randn(D, *x.shape, dtype=torch.float64, device=device) for x in (q, k, v, g, beta)]
+    return {name: x.to(dtype) for name, x in zip(JVP_ARGS, (q, k, v, g, beta, *tangents))}
+
+
+@_SKIP_JVP_NPU
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'K', 'V', 'D'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-K{}-V{}-D{}".format(*test))
+        for test in [
+            (2, 64, 3, 32, 32, 3),
+            # partial last chunk and V != K
+            (2, 100, 3, 32, 48, 3),
+            (1, 200, 2, 32, 32, 2),
+        ]
+    ],
+)
+def test_chunk_jvp_ref(B: int, T: int, H: int, K: int, V: int, D: int):
+    """The chunked reference equals torch.func.jvp of the token-by-token recurrence in fp64."""
+    torch.manual_seed(42)
+    inputs = _jvp_inputs(B, T, H, K, V, D, torch.float64)
+    tri, tri_dot = chunk_gated_delta_rule_jvp_ref(**inputs)
+
+    def naive(q, k, v, g, beta):
+        return naive_recurrent_gated_delta_rule(q=q, k=k, v=v, beta=beta, g=g)[0]
+    primals = tuple(inputs[name] for name in JVP_ARGS[:5])
+    for d in range(D):
+        ref, ref_dot = torch.func.jvp(naive, primals, tuple(inputs[name][d] for name in JVP_ARGS[5:]))
+        assert_close(f'o_dot[{d}]', ref_dot, tri_dot[d], 1e-10, err_atol=0)
+    assert_close('o', ref, tri, 1e-10, err_atol=0)
+
+
+@_SKIP_JVP_NPU
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'K', 'V', 'D', 'fuse_output', 'dtype'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-K{}-V{}-D{}-fuse_output{}-{}".format(*test))
+        for test in [
+            # a single partial chunk
+            (1, 63, 1, 64, 64, 1, True, torch.float32),
+            # exact chunk boundary
+            (2, 64, 2, 64, 64, 8, True, torch.float32),
+            # two-token last chunk, h_dot and nu_dot stored
+            (2, 130, 4, 128, 128, 3, False, torch.float32),
+            (1, 1000, 16, 64, 64, 8, True, torch.float32),
+            (2, 2048, 2, 128, 128, 1, True, torch.float32),
+            (1, 500, 3, 64, 128, 2, False, torch.float32),
+            (2, 300, 2, 128, 64, 2, True, torch.float32),
+            # head dims that are not powers of 2
+            (2, 500, 4, 60, 60, 2, True, torch.float32),
+            (2, 1024, 4, 128, 128, 4, True, torch.bfloat16),
+            (1, 777, 2, 64, 64, 3, False, torch.float16),
+        ]
+    ],
+)
+def test_chunk_jvp(B: int, T: int, H: int, K: int, V: int, D: int, fuse_output: bool, dtype: torch.dtype):
+    torch.manual_seed(42)
+    inputs = _jvp_inputs(B, T, H, K, V, D, dtype)
+    ref, ref_dot = chunk_gated_delta_rule_jvp_ref(**{name: x.double() for name, x in inputs.items()})
+    tri, tri_dot = chunk_gated_delta_rule_jvp(**inputs, fuse_output=fuse_output)
+    assert tri_dot.shape == (D, B, T, H, V) and tri_dot.dtype == dtype
+    assert_close('o', ref, tri, JVP_TOL[dtype])
+    assert_close('o_dot', ref_dot, tri_dot, JVP_TOL[dtype])
+    # the primal output is the library's forward, bit for bit
+    assert torch.equal(tri, chunk_gated_delta_rule(**{name: inputs[name] for name in JVP_ARGS[:5]})[0])
+
+
+@_SKIP_JVP_NPU
+def test_chunk_jvp_strided_tangents():
+    """Tangents read through their strides, including a stride-0 broadcast over D, give the contiguous result."""
+    torch.manual_seed(42)
+    B, T, H, K, D = 2, 200, 4, 64, 3
+    inputs = _jvp_inputs(B, T, H, K, K, D, torch.float32)
+    _, ref_dot = chunk_gated_delta_rule_jvp(**inputs)
+    # [D, B, H, T, *] storage viewed as [D, B, T, H, *]
+    strided = {name: x.transpose(2, 3).contiguous().transpose(2, 3) if name in JVP_ARGS[5:] else x
+               for name, x in inputs.items()}
+    assert not strided['q_dot'].is_contiguous()
+    _, tri_dot = chunk_gated_delta_rule_jvp(**strided)
+    assert torch.equal(tri_dot, ref_dot)
+
+    single = {name: x[:1] if name in JVP_ARGS[5:] else x for name, x in inputs.items()}
+    _, ref_dot = chunk_gated_delta_rule_jvp(**single)
+    broadcast = {name: x.expand(D, *x.shape[1:]) if name in JVP_ARGS[5:] else x for name, x in single.items()}
+    _, tri_dot = chunk_gated_delta_rule_jvp(**broadcast)
+    for d in range(D):
+        assert torch.equal(tri_dot[d], ref_dot[0])
+
+
+@_SKIP_JVP_NPU
+def test_chunk_jvp_ieee():
+    """IEEE fp32 dots in the JVP kernels are at least as accurate as TF32."""
+    torch.manual_seed(42)
+    B, T, H, K, D = 1, 1024, 4, 128, 2
+    inputs = _jvp_inputs(B, T, H, K, K, D, torch.float64)
+    _, ref_dot = chunk_gated_delta_rule_jvp_ref(**inputs)
+    inputs = {name: x.float() for name, x in inputs.items()}
+    _, tf32_dot = chunk_gated_delta_rule_jvp(**inputs, input_precision='tf32')
+    _, ieee_dot = chunk_gated_delta_rule_jvp(**inputs, input_precision='ieee')
+    assert_close('o_dot', ref_dot, ieee_dot, JVP_TOL[torch.float32])
+    assert get_err_ratio(ref_dot, ieee_dot) <= get_err_ratio(ref_dot, tf32_dot) * 1.05
+
+
+@_SKIP_JVP_NPU
+def test_chunk_op():
+    """fla::chunk_gated_delta_rule equals the library's autograd Function, forward and gradients, bit for bit,
+    and supports repeated autograd.grad(..., retain_graph=True)."""
+    torch.manual_seed(42)
+    B, T, H, K = 2, 130, 4, 64
+    inputs = {name: x for name, x in _jvp_inputs(B, T, H, K, K, 1, torch.float32).items() if name in JVP_ARGS[:5]}
+    xs = {name: x.clone().requires_grad_() for name, x in inputs.items()}
+    ys = {name: x.clone().requires_grad_() for name, x in inputs.items()}
+    zs = {name: x.double().requires_grad_() for name, x in inputs.items()}
+    tri = chunk_gated_delta_rule_op(**xs)
+    ref = chunk_gated_delta_rule(**ys)[0]
+    ref64 = naive_recurrent_gated_delta_rule(**zs)[0]
+    assert torch.equal(tri, ref)
+    do = torch.randn_like(tri)
+    tri_grads = [torch.autograd.grad(tri, list(xs.values()), do, retain_graph=True) for _ in range(3)]
+    ref_grads = torch.autograd.grad(ref, list(ys.values()), do)
+    ref64_grads = torch.autograd.grad(ref64, list(zs.values()), do.double())
+    for i, name in enumerate(inputs):
+        assert torch.equal(tri_grads[0][i], ref_grads[i])
+        assert torch.equal(tri_grads[1][i], tri_grads[0][i]) and torch.equal(tri_grads[2][i], tri_grads[0][i])
+        assert_close(f'd{name}', ref64_grads[i], tri_grads[0][i], 0.01)
+
+
+@_SKIP_JVP_NPU
+def test_chunk_jvp_op_backward():
+    """Gradients of <lam, o> + <lam_dot, o_dot> through fla::chunk_gated_delta_rule_jvp with respect to all ten
+    inputs, to the tangents only and to the primal only, match the fp64 chunked reference."""
+    torch.manual_seed(42)
+    B, T, H, K, D = 1, 130, 2, 64, 2
+    inputs = _jvp_inputs(B, T, H, K, K, D, torch.float64)
+    lam = torch.randn(B, T, H, K, dtype=torch.float64, device=device)
+    lam_dot = torch.randn(D, B, T, H, K, dtype=torch.float64, device=device)
+
+    xs = {name: x.clone().requires_grad_() for name, x in inputs.items()}
+    o, o_dot = chunk_gated_delta_rule_jvp_ref(**xs)
+    refs = torch.autograd.grad((o * lam).sum() + (o_dot * lam_dot).sum(), list(xs.values()), retain_graph=True)
+    ref_primal = torch.autograd.grad((o * lam).sum(), list(xs.values())[:5])
+
+    xs = {name: x.float().requires_grad_() for name, x in inputs.items()}
+    o, o_dot = chunk_gated_delta_rule_jvp_op(**xs)
+    tris = torch.autograd.grad((o * lam.float()).sum() + (o_dot * lam_dot.float()).sum(), list(xs.values()))
+    for name, ref, tri in zip(JVP_ARGS, refs, tris):
+        assert_close(f'd{name}', ref, tri, JVP_TOL[torch.float32])
+
+    xs = {name: x.float().requires_grad_(name in JVP_ARGS[5:]) for name, x in inputs.items()}
+    _, o_dot = chunk_gated_delta_rule_jvp_op(**xs)
+    tris = torch.autograd.grad((o_dot * lam_dot.float()).sum(), list(xs.values())[5:])
+    for name, ref, tri in zip(JVP_ARGS[5:], refs[5:], tris):
+        assert_close(f'd{name}', ref, tri, JVP_TOL[torch.float32])
+
+    xs = {name: x.float().requires_grad_(name in JVP_ARGS[:5]) for name, x in inputs.items()}
+    o, _ = chunk_gated_delta_rule_jvp_op(**xs)
+    tris = torch.autograd.grad((o * lam.float()).sum(), list(xs.values())[:5])
+    for name, ref, tri in zip(JVP_ARGS[:5], ref_primal, tris):
+        assert_close(f'd{name}', ref, tri, JVP_TOL[torch.float32])
+
+
+@_SKIP_JVP_NPU
+def test_chunk_op_opcheck():
+    """torch.library.opcheck: schemas, fake implementations, autograd registration and AOT dispatch."""
+    torch.manual_seed(42)
+    B, T, H, K, D = 1, 100, 2, 64, 2
+    inputs = _jvp_inputs(B, T, H, K, K, D, torch.float32)
+    primals = [inputs[name].requires_grad_() for name in JVP_ARGS[:5]]
+    tangents = [inputs[name] for name in JVP_ARGS[5:]]
+    scale = K ** -0.5
+    torch.library.opcheck(torch.ops.fla.chunk_gated_delta_rule.default, (*primals, scale, 64))
+    torch.library.opcheck(torch.ops.fla.chunk_gated_delta_rule_jvp.default, (*primals, *tangents, scale, 64, None))
+    primals = [x.detach() for x in primals]
+    for do in (torch.randn(B, T, H, K, device=device), torch.randn(D, B, T, H, K, device=device)):
+        torch.library.opcheck(torch.ops.fla.chunk_gated_delta_rule_vjp.default, (*primals, do, scale, 64))
+
+
+class _TinyGDN(torch.nn.Module):
+    """Projections, the gated delta rule and an output projection, as in a model layer."""
+
+    def __init__(self, C=96, H=2, K=64):
+        super().__init__()
+        self.H, self.K = H, K
+        self.qkv = torch.nn.Linear(C, 3 * H * K)
+        self.gb = torch.nn.Linear(C, 2 * H)
+        self.out = torch.nn.Linear(H * K, C)
+
+    def parts(self, x):
+        q, k, v = self.qkv(x).view(*x.shape[:2], 3, self.H, self.K).unbind(2)
+        a, b = self.gb(x).view(*x.shape[:2], 2, self.H).unbind(2)
+        return F.normalize(q, dim=-1), F.normalize(k, dim=-1), v, F.logsigmoid(a), b.sigmoid()
+
+    def forward(self, x):
+        q, k, v, g, beta = self.parts(x)
+        return self.out(chunk_gated_delta_rule_op(q=q, k=k, v=v, g=g, beta=beta).flatten(2))
+
+    def jvp(self, x, x_dot):
+        """(y, y_dot [D, ...]) with the op's input tangents from torch.func.jvp through the projections."""
+        primals = self.parts(x)
+        tangents = [torch.func.jvp(self.parts, (x,), (x_dot[d],))[1] for d in range(x_dot.shape[0])]
+        tangents = [torch.stack(t) for t in zip(*tangents)]
+        o, o_dot = chunk_gated_delta_rule_jvp_op(**dict(zip(JVP_ARGS, (*primals, *tangents))))
+        return self.out(o.flatten(2)), o_dot.flatten(3) @ self.out.weight.T
+
+
+def _assert_no_graph_break(fn, *args):
+    explanation = torch._dynamo.explain(fn)(*args)
+    assert explanation.graph_break_count == 0, explanation.break_reasons
+    assert explanation.graph_count == 1
+
+
+@_SKIP_JVP_NPU
+def test_chunk_op_compile():
+    """The custom operators run in torch.compile(fullgraph=True) without graph breaks and match eager,
+    and the layer's JVP matches torch.func.jvp of the fp64 naive layer."""
+    torch._dynamo.reset()
+    torch.manual_seed(42)
+    B, T, C, D = 2, 130, 96, 3
+    model = _TinyGDN(C).to(device)
+    x = torch.randn(B, T, C, device=device)
+    x_dot = torch.randn(D, B, T, C, device=device)
+
+    ref = model(x)
+    ref_grads = torch.autograd.grad(ref.square().sum(), list(model.parameters()))
+    tri = torch.compile(model, fullgraph=True, dynamic=False)(x)
+    tri_grads = torch.autograd.grad(tri.square().sum(), list(model.parameters()))
+    assert_close('y', ref, tri, 1e-5)
+    for (name, _), ref_grad, tri_grad in zip(model.named_parameters(), ref_grads, tri_grads):
+        assert_close(f'd{name}', ref_grad, tri_grad, 1e-3)
+    _assert_no_graph_break(model, x)
+
+    with torch.no_grad():
+        ref, ref_dot = model.jvp(x, x_dot)
+        tri, tri_dot = torch.compile(model.jvp, fullgraph=True, dynamic=False)(x, x_dot)
+        assert_close('y', ref, tri, 1e-5)
+        assert_close('y_dot', ref_dot, tri_dot, 1e-4)
+        _assert_no_graph_break(model.jvp, x, x_dot)
+
+        model64 = _TinyGDN(C).to(device).double()
+        model64.load_state_dict(model.state_dict())
+
+        def naive_layer(x):
+            q, k, v, g, beta = model64.parts(x)
+            return model64.out(naive_recurrent_gated_delta_rule(q=q, k=k, v=v, beta=beta, g=g)[0].flatten(2))
+        for d in range(D):
+            _, ref_dot = torch.func.jvp(naive_layer, (x.double(),), (x_dot[d].double(),))
+            assert_close(f'y_dot[{d}]', ref_dot, tri_dot[d], JVP_TOL[torch.float32])
+
+
+@_SKIP_JVP_NPU
+def test_chunk_jvp_op_backward_compile():
+    """A loss on the layer's JVP differentiated with respect to the parameters under torch.compile(fullgraph=True)
+    equals eager; the backward traces fla::chunk_gated_delta_rule_vjp and the second-order reference operator."""
+    torch._dynamo.reset()
+    torch.manual_seed(42)
+    B, T, C, D = 1, 100, 96, 2
+    model = _TinyGDN(C).to(device)
+    x = torch.randn(B, T, C, device=device)
+    x_dot = torch.randn(D, B, T, C, device=device)
+
+    def loss(x, x_dot):
+        y, y_dot = model.jvp(x, x_dot)
+        return y.square().mean() + y_dot.square().mean()
+    ref_grads = torch.autograd.grad(loss(x, x_dot), list(model.parameters()))
+    tri_grads = torch.autograd.grad(torch.compile(loss, fullgraph=True, dynamic=False)(x, x_dot), list(model.parameters()))
+    for (name, _), ref_grad, tri_grad in zip(model.named_parameters(), ref_grads, tri_grads):
+        assert_close(f'd{name}', ref_grad, tri_grad, 1e-3)
