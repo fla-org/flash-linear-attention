@@ -20,6 +20,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+import fla.backends as backends
 from fla.ops.cp import FLACPContext
 from fla.ops.kda import chunk_kda
 from fla.utils import IS_AMD, IS_NPU, IS_NVIDIA, assert_close, device
@@ -424,6 +425,7 @@ def _assert_training_case(case: _GraphCase, offsets: list[int] | tuple[list[int]
 
 @pytest.mark.parametrize("cu_dtype", [torch.int32, torch.int64])
 @pytest.mark.skipif(not IS_NPU, reason="graphed callable coverage is currently validated on Ascend NPU")
+@pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
 def test_chunk_kda_graph_callable_multi_replay_matches_eager(cu_dtype):
     _assert_training_case(
         case=_GraphCase(cu_dtype=cu_dtype, normalize_q=False, initial_state_scale=1.0),
@@ -433,6 +435,7 @@ def test_chunk_kda_graph_callable_multi_replay_matches_eager(cu_dtype):
 
 
 @pytest.mark.skipif(not IS_NPU, reason="graphed callable coverage is currently validated on Ascend NPU")
+@pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
 def test_chunk_kda_graph_callable_skips_sentinels_between_tasks(monkeypatch):
     """Invalid tasks must not prevent the same core from processing later valid tasks."""
     for name in (
@@ -557,6 +560,7 @@ def test_chunk_kda_graph_callable_skips_sentinels_between_tasks(monkeypatch):
     ],
 )
 @pytest.mark.skipif(not IS_NPU, reason="graphed callable coverage is currently validated on Ascend NPU")
+@pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
 def test_chunk_kda_graph_callable_option_matrix_matches_eager(case, offsets):
     _assert_training_case(case, offsets)
 

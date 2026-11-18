@@ -562,6 +562,7 @@ def _run_npu_graph(
     ],
 )
 @pytest.mark.skipif(not IS_NPU, reason='requires Ascend NPU graphs')
+@pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
 def test_chunk_kda_npu_graph(run_distributed, capture, training, dtype, options, cu_dtype, world_size, layout, shape):
     """Check replay invariants and eager parity across representative CP execution paths."""
     run_distributed(
@@ -608,6 +609,7 @@ def test_chunk_kda_npu_graph(run_distributed, capture, training, dtype, options,
     ],
 )
 @pytest.mark.skipif(not IS_NPU, reason='requires Ascend NPU graphs')
+@pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
 def test_chunk_kda_npu_graph_reference(run_distributed, capture, training, dtype, options, cu_dtype, world_size, layout, shape):
     """Check cross-rank graph outputs and gradients against the independent CPU recurrence."""
     run_distributed(
