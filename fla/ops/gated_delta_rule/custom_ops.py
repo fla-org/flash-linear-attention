@@ -54,7 +54,7 @@ def _gdn_fwd(
     r"""Returns (o [B, T, H, V] in q.dtype, A [B, T, H, BT], g_cum [B, T, H] fp32); A and g_cum feed the backward."""
     _check(q, k, v, g, beta, chunk_size)
     q, k, v, g, beta = (x.contiguous() for x in (q, k, v, g, beta))
-    g_cum, o, A, _, _, _ = chunk_gated_delta_rule_fwd(
+    g_cum, o, A, *_ = chunk_gated_delta_rule_fwd(
         q=q, k=k, v=v, g=g, beta=beta, scale=scale,
         initial_state=None, output_final_state=False, chunk_size=chunk_size,
     )
