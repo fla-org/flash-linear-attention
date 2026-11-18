@@ -257,3 +257,19 @@ def test_custom_op_jvp_backward():
     got = torch.autograd.grad((o_dot * lam_dot.float()).sum(), ts)
     for a, b in zip(got, ref[5:]):
         assert rel(a, b) < JVP_TF32_TOL
+
+
+def test_custom_ops_opcheck():
+    """torch.library.opcheck: schema, fake (meta) implementations, autograd registration, AOT dispatch."""
+    import fla.ops.gated_delta_rule.custom_ops  # noqa: F401  (registers the operators)
+    B, T, H, K, D = 1, 100, 2, 64, 2
+    q, k, v, g, beta, *tans = make_inputs(B, T, H, K, K, D, torch.float32)
+    scale = K ** -0.5
+    do = torch.randn_like(v)
+    xs = [x.requires_grad_() for x in (q, k, v, g, beta)]
+    torch.library.opcheck(torch.ops.fla.chunk_gated_delta_rule.default, (*xs, scale, 64))
+    torch.library.opcheck(torch.ops.fla.chunk_gated_delta_rule_jvp.default, (*xs, *tans, scale, 64, None))
+    xs = [x.detach() for x in xs]
+    torch.library.opcheck(torch.ops.fla.chunk_gated_delta_rule_vjp.default, (*xs, do, scale, 64))
+    torch.library.opcheck(torch.ops.fla.chunk_gated_delta_rule_vjp.default,
+                          (*xs, torch.randn(D, *v.shape, device=device), scale, 64))
