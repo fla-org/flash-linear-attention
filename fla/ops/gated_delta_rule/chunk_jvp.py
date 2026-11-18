@@ -52,7 +52,7 @@ from fla.ops.gated_delta_rule.chunk_fwd import chunk_gated_delta_rule_fwd_intra
 from fla.ops.utils import chunk_local_cumsum
 from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.op import exp2
-from fla.utils import IS_NVIDIA_BLACKWELL, IS_TF32_SUPPORTED, input_guard
+from fla.utils import IS_NVIDIA_BLACKWELL, IS_TF32_SUPPORTED, TRITON_ABOVE_3_8_0, input_guard
 
 __all__ = ['chunk_gated_delta_rule_jvp', 'chunk_gated_delta_rule_jvp_fwd', 'chunk_gated_delta_rule_jvp_ref']
 
@@ -213,9 +213,11 @@ def chunk_gated_delta_rule_jvp_ref(
 
 LN2 = math.log(2.0)
 
-# The forward state kernel of the library stays at num_warps=2 on Blackwell (a tl.dot recurrence race in Triton
-# before 3.8); the tangent recurrence below has the same structure and follows the same rule.
-JVP_H_NUM_WARPS = [2] if IS_NVIDIA_BLACKWELL else [2, 4]
+# The library's forward state kernel stays at num_warps=2 on Blackwell because of a tl.dot recurrence race in Triton
+# before 3.8 (chunk_o.py lifts its own Blackwell restriction from Triton 3.8 on). The tangent recurrence has the same
+# structure: 2 warps only on Blackwell with Triton < 3.8. With Triton 3.8.0 on an RTX 5090, 4 warps gave bit-identical
+# results over 60 repeated runs (B=1, H=16, K=V=128, T=2048, D=8), and the fused recurrence runs 2.2x faster.
+JVP_H_NUM_WARPS = [2] if (IS_NVIDIA_BLACKWELL and not TRITON_ABOVE_3_8_0) else [2, 4]
 
 
 def _resolve_precision(input_precision: str | None) -> str:
@@ -781,6 +783,7 @@ def chunk_gated_delta_rule_jvp(
     scale: float | None = None,
     chunk_size: int = 64,
     input_precision: str | None = None,
+    fuse_output: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     Forward-mode derivative (JVP) of :func:`chunk_gated_delta_rule` along D tangent directions at once.
@@ -800,6 +803,9 @@ def chunk_gated_delta_rule_jvp(
             Triton's default (TRITON_F32_DEFAULT) and keep TF32 in the solve_tril block merge. 'ieee' compiles
             slowly (minutes on first use per shape) and runs slower; 'tf32x3' is close to IEEE accuracy at
             tensor-core speed.
+        fuse_output (bool): compute the output terms that need the state tangent inside the recurrence kernel, so
+            that h_dot [D, B, T/BT, H, K, V] and nu_dot [D, B, T, H, V] are never stored (default). False stores them
+            and computes the whole output tangent in a separate pass.
 
     No initial state, no final state, no variable lengths, no GVA (v has the heads of q and k).
 
@@ -827,5 +833,5 @@ def chunk_gated_delta_rule_jvp(
     # g_dot, beta_dot are reshaped/chunked in PyTorch; any strides work there
     return chunk_gated_delta_rule_jvp_fwd(
         q, k, v, g, beta, q_dot, k_dot, v_dot, g_dot, beta_dot,
-        scale=scale, chunk_size=chunk_size, input_precision=input_precision,
+        scale=scale, chunk_size=chunk_size, input_precision=input_precision, fuse_output=fuse_output,
     )

@@ -135,18 +135,18 @@ def chunk_gated_delta_rule_op(
 def _gdn_jvp(
     q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, g: torch.Tensor, beta: torch.Tensor,
     q_dot: torch.Tensor, k_dot: torch.Tensor, v_dot: torch.Tensor, g_dot: torch.Tensor, beta_dot: torch.Tensor,
-    scale: float, chunk_size: int, input_precision: str | None,
+    scale: float, chunk_size: int, input_precision: str | None, fuse_output: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""(o [B, T, H, V], o_dot [D, B, T, H, V]); see :func:`fla.ops.gated_delta_rule.chunk_jvp.chunk_gated_delta_rule_jvp`."""
     _check(q, k, v, g, beta, chunk_size)
     return _chunk_gated_delta_rule_jvp(
         q, k, v, g, beta, q_dot, k_dot, v_dot, g_dot, beta_dot,
-        scale=scale, chunk_size=chunk_size, input_precision=input_precision,
+        scale=scale, chunk_size=chunk_size, input_precision=input_precision, fuse_output=fuse_output,
     )
 
 
 @_gdn_jvp.register_fake
-def _(q, k, v, g, beta, q_dot, k_dot, v_dot, g_dot, beta_dot, scale, chunk_size, input_precision):
+def _(q, k, v, g, beta, q_dot, k_dot, v_dot, g_dot, beta_dot, scale, chunk_size, input_precision, fuse_output=True):
     D = q_dot.shape[0]
     o = v.new_empty(v.shape, dtype=q.dtype)
     o_dot = v.new_empty((D, *v.shape))
@@ -225,7 +225,7 @@ def _(q, k, v, g, beta, q_dot, k_dot, v_dot, g_dot, beta_dot, do_dot, scale, chu
 
 
 def _jvp_setup_context(ctx, inputs, output):
-    q, k, v, g, beta, q_dot, k_dot, v_dot, g_dot, beta_dot, scale, chunk_size, _ = inputs
+    q, k, v, g, beta, q_dot, k_dot, v_dot, g_dot, beta_dot, scale, chunk_size = inputs[:12]
     ctx.save_for_backward(q, k, v, g, beta, q_dot, k_dot, v_dot, g_dot, beta_dot)
     ctx.scale = scale
     ctx.chunk_size = chunk_size
@@ -234,7 +234,7 @@ def _jvp_setup_context(ctx, inputs, output):
 def _jvp_backward(ctx, do, do_dot):
     q, k, v, g, beta, q_dot, k_dot, v_dot, g_dot, beta_dot = ctx.saved_tensors
     needs = ctx.needs_input_grad
-    grads = [None] * 13
+    grads = [None] * 14
     if do_dot is not None and any(needs[5:10]):
         grads[5:10] = torch.ops.fla.chunk_gated_delta_rule_vjp(q, k, v, g, beta, do_dot, ctx.scale, ctx.chunk_size)
     if any(needs[:5]):
@@ -255,17 +255,20 @@ torch.library.register_autograd('fla::chunk_gated_delta_rule_jvp', _jvp_backward
 def chunk_gated_delta_rule_jvp_op(
     q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, g: torch.Tensor, beta: torch.Tensor,
     q_dot: torch.Tensor, k_dot: torch.Tensor, v_dot: torch.Tensor, g_dot: torch.Tensor, beta_dot: torch.Tensor,
-    scale: float | None = None, chunk_size: int = 64, input_precision: str | None = None,
+    scale: float | None = None, chunk_size: int = 64, input_precision: str | None = None, fuse_output: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
-    Compilable forward-mode derivative of ``chunk_gated_delta_rule`` along D directions (no autograd through it).
+    Compilable forward-mode derivative of ``chunk_gated_delta_rule`` along D directions, with a registered
+    reverse mode (see the section comment above for its cost).
 
     Args: primal q, k [B, T, H, K]; v [B, T, H, V]; g, beta [B, T, H]; tangents with a leading D:
     q_dot [D, B, T, H, K], ..., g_dot [D, B, T, H]. ``input_precision``: 'ieee' / 'tf32' / 'tf32x3' / None.
+    ``fuse_output``: see :func:`fla.ops.gated_delta_rule.chunk_jvp.chunk_gated_delta_rule_jvp`.
     Returns: (o [B, T, H, V], o_dot [D, B, T, H, V]).
     """
     if scale is None:
         scale = q.shape[-1] ** -0.5
     return torch.ops.fla.chunk_gated_delta_rule_jvp(
         q, k, v, g, beta, q_dot, k_dot, v_dot, g_dot, beta_dot, float(scale), int(chunk_size), input_precision,
+        bool(fuse_output),
     )
