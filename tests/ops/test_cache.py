@@ -38,7 +38,10 @@ def _optional_restore_kernel(x, y, N, BLOCK_SIZE: tl.constexpr):
         tl.store(y + idx, tl.zeros_like(idx), mask=mask)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.skipif(
+    not torch.cuda.is_available() and device != "npu",
+    reason="requires CUDA or NPU",
+)
 def test_fla_cache_autotune_handles_none_restore_value():
     """A None argument listed in restore_value must not crash autotuning.
 
