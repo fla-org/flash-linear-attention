@@ -360,9 +360,15 @@ def test_chunk_invalid_chunk_size(chunk_size):
             (2, 256, 2, 64, 64, 0.5, True, False, False, torch.float32),
             (2, 100, 3, 64, 64, 1.0, True, False, False, torch.float16),
             (1, 64, 1, 128, 128, 1.0, True, False, False, torch.bfloat16),
+            (1, 65, 2, 128, 48, 1.0, True, False, False, torch.float16),
+            (1, 64, 2, 256, 128, 1.0, True, False, False, torch.float16),
             (1, 64, 1, 256, 256, 1.0, True, False, False, torch.bfloat16),
+            (1, 126, 2, 256, 64, 1.0, True, False, False, torch.bfloat16),
+            (1, 129, 1, 256, 256, 1.0, True, False, False, torch.float16),
             (1, 65, 2, 48, 32, 1.0, True, False, False, torch.float16),
             (1, 65, 2, 32, 48, 1.0, True, False, False, torch.float16),
+            # exercise the V=48 gate_dw reduction with a full time tile as well as the tail above.
+            (1, 64, 2, 32, 48, 1.0, True, False, False, torch.float16),
             (2, 256, 2, 64, 64, 1.0, True, True, False, torch.float32),
             (1, 128, 2, 64, 64, 1.0, True, True, True, torch.float32),
         ]
@@ -384,6 +390,10 @@ def test_chunk_invalid_chunk_size(chunk_size):
 )
 def test_chunk(B, T, H, K, V, scale, use_qk_l2norm_in_kernel, use_gate_in_kernel, safe_gate, dtype):
     """Forward + gradient comparison: chunk kernel vs autograd through the naive reference."""
+    _check_chunk(B, T, H, K, V, scale, use_qk_l2norm_in_kernel, use_gate_in_kernel, safe_gate, dtype)
+
+
+def _check_chunk(B, T, H, K, V, scale, use_qk_l2norm_in_kernel, use_gate_in_kernel, safe_gate, dtype):
     q, k, v, g, b, w, A_log, dt_bias = _rand_inputs(B, T, H, H, K, V, dtype, gate_in_kernel=use_gate_in_kernel)
     lower_bound = -5.0 if safe_gate else None
     h0 = torch.randn(B, H, K, V, dtype=torch.float32, device=device)
@@ -1385,11 +1395,14 @@ def test_chunk_npu_compile_options():
     from triton.backends.ascend.compiler import AscendBackend
     from triton.runtime import driver
 
+    from fla.ops.gdn2.backends.triton_ascend.chunk_bwd import _get_wy_backward_config
     from fla.ops.gdn2.backends.triton_ascend.chunk_intra import INTER_COMPILE_KWARGS
     from fla.utils import ascend_compile_kwargs
 
     backend = AscendBackend(driver.active.get_current_target())
-    for kwargs in (ascend_compile_kwargs(), INTER_COMPILE_KWARGS):
+    wy_kwargs = ascend_compile_kwargs()
+    wy_kwargs.update(_get_wy_backward_config().compile_overrides)
+    for kwargs in (ascend_compile_kwargs(), INTER_COMPILE_KWARGS, wy_kwargs):
         options = backend.parse_options(kwargs.copy())
         for name, value in kwargs.items():
             assert getattr(options, name) == value
@@ -1500,3 +1513,49 @@ def test_recompute_w_u_fwd_gdn2_ub_budget(store_qg, expected, monkeypatch):
         monkeypatch.setattr(ascend_ub_manager, '_ub_manager', ascend_ub_manager.UBManager(capacity))
         plans.append(_get_fwd_tiles(64, 256, 512, store_qg=store_qg, ub_capacity_bits=capacity))
     assert plans == expected
+
+
+@pytest.mark.skipif(not IS_NPU, reason='Ascend backward device policy')
+@pytest.mark.parametrize(('arch', 'is_950'), [
+    ('Ascend950DT_9582', True), ('ascend910_9599', True),
+    ('Ascend910_9382', False), ('Ascend910B2', False), ('Unknown950', False),
+])
+def test_chunk_npu_backward_device_policy(monkeypatch, arch, is_950):
+    """Keep the 950 compiler workarounds isolated from other Ascend devices."""
+    from fla.ops.gdn2.backends.triton_ascend import chunk_bwd
+
+    monkeypatch.setattr(chunk_bwd, 'get_npu_target_arch', lambda: arch)
+    config = chunk_bwd._get_wy_backward_config()
+    assert config.compile_overrides == ({'buf_slot_num_of_veccore': 1} if is_950 else {})
+    assert config.gate_dw_tiles == ({48: 16} if is_950 else {})
+
+
+@pytest.mark.skipif(not IS_NPU, reason='Ascend state recurrence policy')
+@pytest.mark.parametrize(
+    ('arch', 'K', 'expected'),
+    [
+        pytest.param('Ascend950DT_9582', 256, False, id='950-wide-tail'),
+        pytest.param('Ascend950DT_9582', 128, False, id='950-medium-tail'),
+        pytest.param('Ascend950DT_9582', 64, False, id='950-small-tail'),
+        pytest.param('Ascend910_9599', 64, False, id='950-alias-small-tail'),
+        pytest.param('Ascend910_9382', 128, True, id='a3-medium-unchanged'),
+        pytest.param('Ascend910_9382', 64, True, id='a3-small-unchanged'),
+        pytest.param('Ascend910_9382', 256, True, id='a3-unchanged'),
+        pytest.param('Ascend910B2', 256, True, id='a2-unchanged'),
+    ],
+)
+def test_chunk_npu_state_tail_policy(arch, K, expected, monkeypatch):
+    from fla.ops.common.backends.triton_ascend import chunk_delta_h
+
+    monkeypatch.setattr(chunk_delta_h, 'get_npu_target_arch', lambda: arch)
+    monkeypatch.setattr(chunk_delta_h, '_select_fwd_h_tiles', lambda k, v, state_v_first: (k, 64))
+    assert chunk_delta_h._dense_single_slab_tail(K, 64, False, None, None) is expected
+
+
+@pytest.mark.skipif(not IS_NPU, reason='Ascend dense state tail regression')
+@pytest.mark.parametrize(
+    ('T', 'K', 'V', 'dtype'),
+    [(129, 128, 128, torch.float16), (1537, 128, 128, torch.float16), (65, 64, 64, torch.bfloat16)],
+)
+def test_chunk_npu_dense_state_tail(T, K, V, dtype):
+    _check_chunk(1, T, 2, K, V, 1.0, True, False, False, dtype)

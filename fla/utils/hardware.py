@@ -22,6 +22,10 @@ from fla.utils.env import check_pytorch_version
 
 logger = logging.getLogger(__name__)
 
+_NPU_ARCH_SERIES = {
+    'ascend950': ('ascend950', 'ascend910_95'),
+}
+
 
 def _cpu_device_warning():
     warnings.warn(('Triton is not supported on current platform, roll back to CPU.'), stacklevel=2)
@@ -71,6 +75,37 @@ def get_device_arch() -> str:
         return str(triton.runtime.driver.active.get_current_target().arch).split(':')[0]
     except Exception:
         return ''
+
+
+@cache
+def _get_npu_target_arch() -> str:
+    target = triton.runtime.driver.active.get_current_target()
+    if target.backend != 'npu' or not target.arch:
+        raise RuntimeError('Triton did not report an NPU target architecture.')
+    return str(target.arch)
+
+
+def get_npu_target_arch() -> str:
+    """Return the process-wide Triton NPU compile target, retrying once on failure.
+
+    All NPUs visible to this process are assumed to belong to the same SoC series.
+    """
+    try:
+        return _get_npu_target_arch()
+    except Exception as first_error:
+        try:
+            return _get_npu_target_arch()
+        except Exception as retry_error:
+            raise first_error from retry_error
+
+
+def get_npu_arch_series(arch: str) -> str:
+    """Return the canonical NPU architecture series, or an empty string if unknown."""
+    arch = arch.lower()
+    for series, prefixes in _NPU_ARCH_SERIES.items():
+        if arch.startswith(prefixes):
+            return series
+    return ''
 
 
 def map_triton_backend_to_torch_device() -> str:

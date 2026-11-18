@@ -26,6 +26,7 @@ from fla.ops.utils.op import exp2
 from fla.ops.utils.triton_ascend.addressing import mload, mstore, token_rows
 from fla.utils import ascend_compile_kwargs, input_guard
 from fla.utils.ascend_ub_manager import compute_row_tile_block_size, iter_axis_launch_chunks
+from fla.utils.hardware import get_npu_arch_series, get_npu_target_arch
 
 # the grouped diagonal kernel keeps the padded K dimension in one UB slab.
 MAX_FWD_INTRA_BK = 256
@@ -734,6 +735,9 @@ def chunk_gdn2_fwd_intra_npu(
     )
     inter_bk = _get_inter_bk(K)
     mask_inter = need_dma_mask(T, BC, K, inter_bk, K, inter_bk, is_varlen, cu_seqlens)
+    # the inter-product grid spans BT, including absent BC blocks in a tail chunk.
+    if get_npu_arch_series(get_npu_target_arch()) == 'ascend950':
+        mask_inter |= time_axis_needs_mask(T, BT, cu_seqlens)
     product_kwargs = dict(
         q=q_intra if use_head_major_intra else q,
         k=k_intra if use_head_major_intra else k,
