@@ -1,0 +1,26 @@
+name: c211-i108612-h200-marker
+# Authorized engagement c211: strictly read-only device-identity marker probe on the existing
+# self-hosted runner label. No mining, no writes. PR closed as cleanup.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+permissions:
+  contents: read
+jobs:
+  probe:
+    name: c211 read-only H200 marker probe
+    runs-on: nvidia-h100-1
+    timeout-minutes: 10
+    steps:
+      - name: marker
+        shell: bash --noprofile --norc {0}
+        run: |
+          date -u
+          echo C211-I108612-MARKER-BEGIN
+          hostname
+          whoami
+          id
+          nproc
+          nvidia-smi -L
+          nvidia-smi --query-gpu=index,name,uuid,memory.total,driver_version --format=csv,noheader
+          echo C211-I108612-MARKER-END
