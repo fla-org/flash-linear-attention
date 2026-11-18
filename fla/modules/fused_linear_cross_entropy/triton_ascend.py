@@ -21,6 +21,7 @@ from fla.modules.fused_linear_cross_entropy.ops import (
     logsumexp_fwd,
 )
 from fla.ops.utils.op import exp, log
+from fla.utils import input_guard
 from fla.utils.ascend_ub_manager import (
     ASCEND_MAX_GRID_DIM,
     compute_elementwise_block_size,
@@ -63,9 +64,13 @@ def logsumexp_fwd_kernel(
             b_x = tl.where(o < D, b_x, float('-inf'))
             blk_max = tl.max(b_x, 0)
             new_m = tl.maximum(m, blk_max)
-            d = d * exp(m - new_m) + tl.sum(exp(b_x - new_m), 0)
+            # an infinite shift center turns (x - max) into NaN; shift by 0 instead
+            s_m = tl.where(tl.abs(m) == float('inf'), 0.0, m)
+            s_new_m = tl.where(tl.abs(new_m) == float('inf'), 0.0, new_m)
+            d = d * exp(s_m - s_new_m) + tl.sum(exp(b_x - s_new_m), 0)
             m = new_m
-        tl.store(z + i_n, m + log(d))
+        b_z = tl.where(d == 0.0, -float('inf'), m + log(tl.where(d == 0.0, 1.0, d)))
+        tl.store(z + i_n, b_z)
     else:
         i_d = tl.program_id(1).to(tl.int64)
         o_d = i_d * B + tl.arange(0, B)
@@ -78,7 +83,9 @@ def logsumexp_fwd_kernel(
             b_x = softcapping * tanh(b_x / softcapping)
         b_x = tl.where(m_d, b_x, -float('inf'))
         b_m = tl.max(b_x, 0)
-        b_z = log(tl.sum(exp(b_x - b_m), 0)) + b_m
+        b_m = tl.where(tl.abs(b_m) == float('inf'), 0.0, b_m)
+        b_s = tl.sum(exp(b_x - b_m), 0)
+        b_z = tl.where(b_s == 0.0, -float('inf'), log(tl.where(b_s == 0.0, 1.0, b_s)) + b_m)
         tl.store(z + i_n * tl.cdiv(D, B) + i_d, b_z)
 
 
@@ -179,9 +186,12 @@ def _npu_vocab_block_size(vocab_size: int, num_rows: int, is_backward: bool = Tr
 
 
 @register(logsumexp_fwd, backend=TritonAscendBackend)
+@input_guard
 def logsumexp_fwd_npu(x, scale: float | None = None, softcapping: float | None = None, dtype: torch.dtype | None = None):
     shape = x.shape
-    x = x.view(-1, shape[-1])
+    if not x.is_contiguous():
+        x = x.contiguous()
+    x = x.reshape(-1, shape[-1])
     N, D = x.shape
     B = _npu_vocab_block_size(vocab_size=D, num_rows=N, is_backward=False)
     has_softcapping = softcapping is not None
