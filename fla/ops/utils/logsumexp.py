@@ -10,7 +10,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils.op import exp, log
-from fla.utils import autotune_cache_kwargs
+from fla.utils import autotune_cache_kwargs, input_guard
 
 
 @triton.heuristics({
@@ -37,15 +37,18 @@ def logsumexp_fwd_kernel(
     o_d = i_d * B + tl.arange(0, B)
     m_d = o_d < D
 
-    b_x = tl.load(x + i_n * D + o_d, mask=m_d, other=-float('inf'))
+    b_x = tl.load(x + i_n * D + o_d, mask=m_d, other=-float('inf')).to(tl.float32)
     if HAS_SCALE:
         b_x = b_x * scale
     b_x = tl.where(m_d, b_x, -float('inf'))
     b_m = tl.max(b_x, 0)
-    b_z = log(tl.sum(exp(b_x - b_m), 0)) + b_m
+    b_m = tl.where(tl.abs(b_m) == float('inf'), 0.0, b_m)
+    b_s = tl.sum(exp(b_x - b_m), 0)
+    b_z = tl.where(b_s == 0.0, -float('inf'), log(tl.where(b_s == 0.0, 1.0, b_s)) + b_m)
     tl.store(z + i_n * tl.cdiv(D, B) + i_d, b_z)
 
 
+@input_guard
 def logsumexp_fwd(
     x,
     scale: float | None = None,
@@ -66,7 +69,9 @@ def logsumexp_fwd(
     """
 
     shape = x.shape
-    x = x.view(-1, shape[-1])
+    if not x.is_contiguous():
+        x = x.contiguous()
+    x = x.reshape(-1, shape[-1])
     N, D = x.shape
     B = min(triton.next_power_of_2(D), 64 * 1024)
     ND = triton.cdiv(D, B)
