@@ -59,7 +59,8 @@ def torch_chunk_gdn(q, k, v, g, beta, scale, C=64):
 
 def measure(fn, warmup=5, rep=50):
     device_torch_lib.synchronize()
-    # compile and autotune
+    # compile and autotune, then reach a steady state: the peak right after autotuning undercounts
+    fn()
     fn()
     device_torch_lib.synchronize()
     device_torch_lib.reset_peak_memory_stats()
