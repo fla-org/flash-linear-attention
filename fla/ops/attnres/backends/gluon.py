@@ -594,6 +594,9 @@ def _fused_attnres_bwd(
 
     dvs = [torch.empty_like(r) for r in residuals]
     dres = _check_sources(dvs)
+    # cp.async needs a 16-byte-aligned source; contiguous() keeps the base pointer of an offset view
+    if do.data_ptr() % 16 != 0:
+        do = do.clone(memory_format=torch.contiguous_format)
     dqw = torch.empty(NP, D, device=do.device, dtype=torch.float32)
     dq = torch.empty_like(q)
     dw = torch.empty_like(w)
