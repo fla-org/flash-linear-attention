@@ -939,7 +939,7 @@ def chunk_gdn2_bwd_wy_dqkg_fused_npu(
         MASK_DMA=mask_dma,
         FP32_H=h.dtype == torch.float32,
     )
-    for k_off in range(triton.cdiv(K, BK)):
+    for k_off in range(NK):
         k_part_kwargs['K_OFFSET'] = k_off
         chunk_kda_bwd_kernel_wy_k_part_npu[(num_core,)](**k_part_kwargs, **ascend_compile_kwargs())
 

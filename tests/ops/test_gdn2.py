@@ -25,7 +25,7 @@ from fla.ops.kda.gate import naive_kda_gate, naive_kda_lowerbound_gate
 from fla.utils import IS_AMD, IS_NPU, IS_NVIDIA, assert_close, device, device_platform, testing
 
 
-@pytest.mark.skipif(not IS_NVIDIA, reason="CUDA required")
+@pytest.mark.skipif(not (IS_NVIDIA or IS_NPU), reason="CUDA or Ascend required")
 @pytest.mark.parametrize(('dtype', 'K', 'V', 'packed', 'with_q'), [
     pytest.param(torch.float32, 32, 64, False, True, id='fp32-k32-v64-dense'),
     pytest.param(torch.float16, 60, 32, True, False, id='fp16-k60-v32-packed-no-q'),
@@ -35,8 +35,14 @@ from fla.utils import IS_AMD, IS_NPU, IS_NVIDIA, assert_close, device, device_pl
 def test_wy_parallel_tiles(dtype, K, V, packed, with_q, monkeypatch):
     from fla.ops.gdn2 import wy_fast
 
-    parallel_run = Mock(wraps=wy_fast.recompute_w_u_fwd_gdn2_parallel_kernel.run)
-    monkeypatch.setattr(wy_fast.recompute_w_u_fwd_gdn2_parallel_kernel, 'run', parallel_run)
+    monkeypatch.setattr(testing, 'FLA_CI_ENV', False)
+    if IS_NPU:
+        candidate = backends._function_registries[inspect.unwrap(recompute_w_u_fwd_gdn2)]._backends['triton_ascend']
+        native_run = Mock(wraps=candidate.implementation)
+        monkeypatch.setattr(candidate, 'implementation', native_run)
+    else:
+        parallel_run = Mock(wraps=wy_fast.recompute_w_u_fwd_gdn2_parallel_kernel.run)
+        monkeypatch.setattr(wy_fast.recompute_w_u_fwd_gdn2_parallel_kernel, 'run', parallel_run)
 
     torch.manual_seed(42)
     B, T, H, BT = 1 if packed else 2, 130, 2, 64
@@ -70,7 +76,10 @@ def test_wy_parallel_tiles(dtype, K, V, packed, with_q, monkeypatch):
     cu = torch.tensor(offsets, device=device, dtype=torch.int64) if packed else None
     values = recompute_w_u_fwd_gdn2(k, v, b, wg, A, q=q if with_q else None,
                                     gk=prefix, g_raw=raw, cu_seqlens=cu)
-    assert parallel_run.call_count == (0 if packed else 1)
+    if IS_NPU:
+        native_run.assert_called_once()
+    else:
+        assert parallel_run.call_count == (0 if packed else 1)
     for name, expected, actual in zip(('w', 'u', 'qg', 'kg'), refs, values):
         if name == 'qg' and not with_q:
             assert actual is None
@@ -1679,6 +1688,7 @@ def test_recompute_w_u_fwd_gdn2_npu_large_offsets(dtype, has_q):
         u=pointer,
         A=pointer,
         gk=MockTensor(torch.float32),
+        g_raw=None,
         cu_seqlens=None,
         chunk_indices=None,
         T=65,
@@ -1694,6 +1704,7 @@ def test_recompute_w_u_fwd_gdn2_npu_large_offsets(dtype, has_q):
         STORE_QG=has_q,
         IS_VARLEN=False,
         IS_ALIGNED=False,
+        USE_RAW_G=False,
         grid=(1,),
         **ascend_compile_kwargs(),
     )
@@ -1776,6 +1787,7 @@ def test_chunk_fwd_intra_grouped_npu(K, dtype, varlen, monkeypatch):
         IS_HEAD_MAJOR=not varlen,
         IS_VARLEN=varlen,
         MASK_DMA=True,
+        USE_RAW_G=False,
     )
     for row_group in range(BC // 8):
         launch_diag_kernel(
