@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+from functools import cache
+
 import torch
 import triton
 import triton.language as tl
@@ -20,15 +22,17 @@ from fla.ops.kda.backends.triton_ascend.wy_fast import recompute_w_u_fwd_kda_npu
 from fla.ops.kda.chunk_intra import chunk_kda_bwd_intra, chunk_kda_fwd_intra
 from fla.ops.kda.chunk_intra_token_parallel import chunk_kda_fwd_intra_token_parallel
 from fla.ops.utils import prepare_chunk_indices
+from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.graph import get_static_buffer
 from fla.ops.utils.index import ensure_cu_seqlens_cpu, partition_chunk_indices_full_tail
 from fla.ops.utils.op import exp2
-from fla.utils import ascend_compile_kwargs, input_guard
+from fla.utils import ascend_compile_kwargs, autotune_cache_kwargs, input_guard
 from fla.utils.ascend_ub_manager import (
     ASCEND_MAX_GRID_DIM,
     compute_row_tile_block_size,
     get_npu_properties,
+    get_ub_manager,
     max_grid_axis_chunks,
 )
 
@@ -97,7 +101,9 @@ def _aligned_tile_mask(
     return K % BK != 0
 
 
-def _get_inter_bk(K: int) -> int:
+@cache
+def _get_inter_bk(K: int, *, ub_capacity_bits: int) -> int:
+    # the budget keys the cache; the shared helper owns the resource calculation.
     return compute_row_tile_block_size(
         row_dim=SUB_CHUNK_SIZE,
         fixed_dim=K,
@@ -111,7 +117,7 @@ def _get_inter_bk(K: int) -> int:
 
 
 def get_inter_bk(K: int) -> int:
-    return _get_inter_bk(K)
+    return _get_inter_bk(K, ub_capacity_bits=get_ub_manager().ub_capacity_bits)
 
 
 def _recompute_w_u_fwd(*args, **kwargs):
@@ -769,7 +775,7 @@ def _chunk_kda_fwd_intra_tail(
         ),
     )
 
-    inter_bk = _get_inter_bk(K)
+    inter_bk = get_inter_bk(K)
     _launch_full_tail_chunks(
         launch_inter_kernel,
         chunk_kda_fwd_kernel_inter_solve_fused_npu,
@@ -816,7 +822,7 @@ def _chunk_kda_fwd_intra_tail(
     return w, u, qg, kg, Aqk, Akk
 
 
-@triton.jit(do_not_specialize=['B', 'T', 'NT_TOTAL'])
+@triton.jit(do_not_specialize=['B', 'T', 'NT_TOTAL', 'UB_CAPACITY'])
 def chunk_kda_bwd_kernel_intra_npu(
     q,
     k,
@@ -847,7 +853,9 @@ def chunk_kda_bwd_kernel_intra_npu(
     FULL_TIME: tl.constexpr,
     GATE_SHIFT: tl.constexpr,
     NT_TOTAL,
+    UB_CAPACITY,
     USE_GRAPH: tl.constexpr = False,
+    LOOP_UNROLL: tl.constexpr = 1,
 ):
     NC = tl.cdiv(BT, BC)
     i_core = tl.program_id(0)
@@ -974,7 +982,7 @@ def chunk_kda_bwd_kernel_intra_npu(
                 else:
                     # pairwise per-column diag for unbounded (non-safe) gates
                     o_dA_c = i_ti * (HV * BT) + o_i * (HV * BT) + i_i * BC
-                    for j in range(0, min(BC, T - tl.cast(i_t, tl.int64) * BT - i_i * BC)):
+                    for j in tl.range(0, min(BC, T - tl.cast(i_t, tl.int64) * BT - i_i * BC), loop_unroll_factor=LOOP_UNROLL):
                         b_dAqk_j = mload(p_dAqk + o_dA_c + j, m_row, MASK_DMA)
                         b_dAkk_j = mload(p_dAkk + o_dA_c + j, m_row, MASK_DMA)
                         b_kj = mload(p_k + i_ti * (H * K) + j * (H * K) + o_k, m_k, MASK_DMA).to(tl.float32)
@@ -1062,7 +1070,7 @@ def chunk_kda_bwd_kernel_intra_npu(
                     b_dkt += tl.dot(b_dAkk_t, b_kb_exp, allow_tf32=False) * b_gk
                 else:
                     # pairwise per-column diag (future side) for unbounded gates
-                    for j in range(0, min(BC, T - tl.cast(i_t, tl.int64) * BT - i_i * BC)):
+                    for j in tl.range(0, min(BC, T - tl.cast(i_t, tl.int64) * BT - i_i * BC), loop_unroll_factor=LOOP_UNROLL):
                         b_dAqk_j = tl.load(p_dAqk + i_ti * (HV * BT) + j * (HV * BT) + i_i * BC + o_i)
                         b_dAkk_j = tl.load(p_dAkk + i_ti * (HV * BT) + j * (HV * BT) + i_i * BC + o_i)
                         b_qj = mload(p_q + i_ti * (H * K) + j * (H * K) + o_k, m_k, MASK_DMA).to(tl.float32)
@@ -1268,6 +1276,36 @@ def chunk_kda_fwd_intra_npu(
     return w, u, qg, kg, Aqk, Akk
 
 
+def prune_bwd_intra_configs(configs, nargs, **kwargs):
+    args = {**nargs, **kwargs}
+    # retain the validated 8-row fallback when UB detection is unavailable.
+    limit = compute_row_tile_block_size(
+        row_dim=args['BT'],
+        fixed_dim=args['BK'],
+        memory_multiplier=12.0,
+        safety_margin=0.75,
+        fallback=8,
+        min_block=8,
+        max_block=args['BT'],
+    )
+    return [config for config in configs
+            if config.kwargs.get('BC') in (8, 16, 32) and config.kwargs['BC'] <= limit
+            and config.kwargs.get('LOOP_UNROLL', 1) in (1, 2)
+            and (config.kwargs.get('multibuffer', True),
+                 config.kwargs.get('set_workspace_multibuffer')) in ((True, None), (False, 1))]
+
+
+_autotuned_bwd_intra = fla_cache_autotune(
+    configs=[triton.Config({'BC': bc, 'LOOP_UNROLL': factor, **compile_options})
+             for bc in (8, 16, 32) for factor in (1, 2)
+             for compile_options in ({}, ascend_compile_kwargs())],
+    key=['B', 'T', 'NT_TOTAL', 'UB_CAPACITY', 'H', 'HV', 'K', 'K_OUT',
+         'BT', 'BK', 'MASK_DMA', 'FULL_TIME', 'SAFE_GATE', 'USE_GRAPH'],
+    prune_configs_by={'early_config_prune': prune_bwd_intra_configs},
+    **autotune_cache_kwargs,
+)(chunk_kda_bwd_kernel_intra_npu)
+
+
 def chunk_kda_bwd_intra_verifier(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -1364,9 +1402,7 @@ def chunk_kda_bwd_intra_npu(
             lower_bound=lower_bound,
             use_graph=use_graph,
         )
-    # The 192KB UB budget caps how many BCxBK fp32 tiles stay live, so BC must
-    # follow the padded BK (non-pow2 K like 192 lands in the BK=256 tier).
-    # safe_gate matches the forward tile. The anchor is the same fixed shift.
+    # fixed safe-gate and graph launches retain their validated UB envelope.
     if safe_gate:
         BC = min(32, BT) if (BT >= 64 and BK <= 256) else min(16, BT)
     else:
@@ -1393,17 +1429,21 @@ def chunk_kda_bwd_intra_npu(
     elif (not use_graph and BT == 64 and K == output_width == 128 and cu_seqlens is not None
           and not time_axis_needs_mask(T, BT, cu_seqlens, ensure_cu_seqlens_cpu(cu_seqlens))):
         compile_kwargs = ascend_compile_kwargs()
-    chunk_kda_bwd_kernel_intra_npu[(num_core,)](
+    # graph capture cannot benchmark configurations.
+    kernel = chunk_kda_bwd_kernel_intra_npu if safe_gate or use_graph else _autotuned_bwd_intra
+    launch_kwargs = {'BC': BC, **compile_kwargs} if safe_gate or use_graph else {}
+    kernel[(num_core,)](
         NT_TOTAL=NT,
+        UB_CAPACITY=0 if safe_gate or use_graph else get_ub_manager().ub_capacity_bits,
         q=q, k=k, g=g, beta=beta, dAqk=dAqk, dAkk=dAkk,
         dq=dq, dq2=dq2, dk=dk, dk2=dk2, dg=dg, dg2=dg2, db=db2,
         cu_seqlens=cu_seqlens, chunk_indices=chunk_indices,
-        B=B, T=T, H=H, HV=HV, K=K, K_OUT=output_width, BT=BT, BC=BC, BK=BK,
+        B=B, T=T, H=H, HV=HV, K=K, K_OUT=output_width, BT=BT, BK=BK,
         SAFE_GATE=safe_gate,
         GATE_SHIFT=_gate_shift(lower_bound, BC),
         MASK_DMA=_aligned_tile_mask(T, BT, K, BK, cu_seqlens) or BT % BC != 0,
         FULL_TIME=cu_seqlens is None and T % BT == 0,
         USE_GRAPH=use_graph,
-        **compile_kwargs,
+        **launch_kwargs,
     )
     return dq2, dk2, db2.sum(0).add_(db), dg2
