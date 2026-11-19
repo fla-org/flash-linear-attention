@@ -16,8 +16,8 @@ import triton
 import triton.language as tl
 
 from fla.backends import TritonAscendBackend, register
-from fla.ops.gdn2.wy_fast import recompute_w_u_fwd_gdn2
 from fla.ops.gdn2.gate import gdn2_local_log_cumsum
+from fla.ops.gdn2.wy_fast import recompute_w_u_fwd_gdn2
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp2
 from fla.ops.utils.triton_ascend.addressing import chunk_token_rows

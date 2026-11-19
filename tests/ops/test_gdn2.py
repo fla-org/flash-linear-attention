@@ -32,8 +32,11 @@ from fla.utils import IS_AMD, IS_NPU, IS_NVIDIA, assert_close, device, device_pl
     pytest.param(torch.bfloat16, 128, 60, True, True, id='bf16-k128-v60-packed'),
     pytest.param(torch.bfloat16, 256, 128, False, False, id='bf16-k256-v128-dense-no-q'),
 ])
-def test_wy_parallel_tiles(dtype, K, V, packed, with_q):
-    from fla.ops.gdn2.wy_fast import recompute_w_u_fwd_gdn2
+def test_wy_parallel_tiles(dtype, K, V, packed, with_q, monkeypatch):
+    from fla.ops.gdn2 import wy_fast
+
+    parallel_run = Mock(wraps=wy_fast.recompute_w_u_fwd_gdn2_parallel_kernel.run)
+    monkeypatch.setattr(wy_fast.recompute_w_u_fwd_gdn2_parallel_kernel, 'run', parallel_run)
 
     torch.manual_seed(42)
     B, T, H, BT = 1 if packed else 2, 130, 2, 64
@@ -67,6 +70,7 @@ def test_wy_parallel_tiles(dtype, K, V, packed, with_q):
     cu = torch.tensor(offsets, device=device, dtype=torch.int64) if packed else None
     values = recompute_w_u_fwd_gdn2(k, v, b, wg, A, q=q if with_q else None,
                                     gk=prefix, g_raw=raw, cu_seqlens=cu)
+    assert parallel_run.call_count == (0 if packed else 1)
     for name, expected, actual in zip(('w', 'u', 'qg', 'kg'), refs, values):
         if name == 'qg' and not with_q:
             assert actual is None
@@ -934,6 +938,7 @@ def _wy_verifier_inputs():
         pytest.param('oversized_k', 'K=257', id='reject-k257'),
         pytest.param('chunk_size', 'chunk_size=64', id='reject-chunk32'),
         pytest.param('q_shape', 'shapes to match k', id='reject-q-shape'),
+        pytest.param('raw_shape', 'shapes to match k', id='reject-raw-gate-shape'),
         pytest.param('chunk_indices', 'shape [NT, 2]', id='reject-index-shape'),
     ],
 )
@@ -949,6 +954,8 @@ def test_recompute_w_u_fwd_gdn2_npu_verifier_shapes(case, reason):
         inputs['A'].shape = (1, 65, 2, 32)
     elif case == 'q_shape':
         inputs['q'].shape = (1, 65, 2, 128)
+    elif case == 'raw_shape':
+        inputs['g_raw'] = Mock(spec=torch.Tensor, ndim=4, shape=(1, 64, 2, 256))
     elif case == 'chunk_indices':
         inputs['chunk_indices'].shape = (2, 3)
     accepted, actual_reason = recompute_w_u_fwd_gdn2_verifier(**inputs)
@@ -990,7 +997,7 @@ def test_recompute_w_u_fwd_gdn2_npu_verifier_metadata(case, reason):
     assert reason in actual_reason
 
 
-@pytest.mark.parametrize('mode', ['accepted', 'mixed', 'rejected', 'disabled'])
+@pytest.mark.parametrize('mode', ['accepted', 'mixed', 'raw', 'rejected', 'disabled'])
 def test_recompute_w_u_fwd_gdn2_npu_routing(mode, run_python):
     """Check public WY selection and fallback without launching accelerator kernels."""
     # the global disable flag is read at import; an in-process patch would miss that contract.
@@ -1023,10 +1030,13 @@ def test_recompute_w_u_fwd_gdn2_npu_routing(mode, run_python):
         dtype = torch.bfloat16 if mode == 'mixed' else torch.float32
         inputs = {{name: torch.zeros(1, 2, 1, 32, dtype=dtype) for name in ('k', 'v', 'b', 'w_gate', 'gk')}}
         inputs['A'] = torch.zeros(1, 2, 1, 64)
-        if mode in ('accepted', 'mixed'):
+        if mode in ('accepted', 'mixed', 'raw'):
             npu = SimpleNamespace(type='npu', index=0)
             inputs = {{name: Mock(spec=torch.Tensor, shape=tensor.shape, ndim=4, dtype=tensor.dtype, device=npu)
                        for name, tensor in inputs.items()}}
+
+        if mode == 'raw':
+            inputs['g_raw'] = inputs['gk']
 
         launcher = Mock()
         with (
@@ -1034,7 +1044,7 @@ def test_recompute_w_u_fwd_gdn2_npu_routing(mode, run_python):
             patch.object(wy_fast, 'recompute_w_u_fwd_gdn2_kernel', new={{(1, 1): launcher}}),
         ):
             result = entry(**inputs)
-        if mode in ('accepted', 'mixed'):
+        if mode in ('accepted', 'mixed', 'raw'):
             verifier.assert_called_once()
             implementation.assert_called_once_with(**inputs)
             assert result is implementation.return_value
