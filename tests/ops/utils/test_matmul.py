@@ -19,7 +19,7 @@ from fla.utils import assert_close, device
         pytest.param((16, 1), 1, torch.float32, False, id='fp32-saturation'),
         pytest.param((65, 33), 17, torch.float16, False, id='fp16-partial-tiles'),
         pytest.param((2, 63, 65), 33, torch.bfloat16, False, id='bf16-batched'),
-        pytest.param((129, 17), 65, torch.float32, True, id='fp32-strided'),
+        pytest.param((129, 17), 65, torch.float32, True, id='fp32-transposed-input'),
     ],
 )
 def test_matmul_tanh(shape, n, dtype, noncontiguous):
