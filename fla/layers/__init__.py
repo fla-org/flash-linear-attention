@@ -40,6 +40,7 @@ from .multiscale_retention import MultiScaleRetention
 from .nsa import NativeSparseAttention
 from .parallax import Parallax
 from .path_attn import PaTHAttention
+from .phba import PHBA
 from .precond_gated_deltanet import PrecondGatedDeltaNet
 from .precond_kda import PrecondKDA
 from .raven import Raven
@@ -52,6 +53,7 @@ from .wall_attn import WallAttention
 from .yoco import YOCOCrossAttention, YOCOGatedRetention, YOCOSharedKVBuilder
 
 __all__ = [
+    'PHBA',
     'ABCAttention',
     'Attention',
     'BasedLinearAttention',

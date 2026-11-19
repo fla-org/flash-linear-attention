@@ -11,42 +11,12 @@ import torch
 from torch import nn
 from transformers.modeling_layers import GradientCheckpointingLayer
 
-from fla.layers.phba import PHBA, PHBALinear
+from fla.layers.phba import PHBA
 from fla.models.generation_utils import FLAUnsupportedCacheGenerationMixin
 from fla.models.modeling_utils import FLAForCausalLM, FLAModel, FLAPreTrainedModel
 from fla.models.phba.configuration_phba import PHBAConfig
-from fla.modules import RMSNorm
-from fla.modules.activations import swiglu
-from fla.ops.phba.backends.cublaslt import _SwiGLULinear
+from fla.modules import GatedMLP, RMSNorm
 from fla.ops.phba.plans import _resolve_length_plan
-
-
-class PHBAMLP(nn.Module):
-    def __init__(
-        self,
-        hidden_size: int,
-        hidden_ratio: int | None = None,
-        intermediate_size: int | None = None,
-        hidden_act: str = 'swish',
-        fuse_swiglu: bool = True,
-    ):
-        super().__init__()
-        if hidden_act != 'swish':
-            raise ValueError('PHBA supports the swish-gated MLP')
-        hidden_ratio = 4 if hidden_ratio is None else hidden_ratio
-        if intermediate_size is None:
-            intermediate_size = int(hidden_size * hidden_ratio * 2 / 3)
-            intermediate_size = 256 * ((intermediate_size + 255) // 256)
-        self.fuse_swiglu = fuse_swiglu
-        self.gate_proj = PHBALinear(hidden_size, intermediate_size, bias=False)
-        self.up_proj = PHBALinear(hidden_size, intermediate_size, bias=False)
-        self.down_proj = PHBALinear(intermediate_size, hidden_size, bias=False)
-
-    def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
-        gate, value = self.gate_proj(x), self.up_proj(x)
-        if self.fuse_swiglu:
-            return _SwiGLULinear.apply(gate, value, self.down_proj.weight, self.down_proj.bias)
-        return self.down_proj(swiglu(gate, value))
 
 
 class PHBABlock(GradientCheckpointingLayer):
@@ -82,7 +52,7 @@ class PHBABlock(GradientCheckpointingLayer):
             eps=config.norm_eps,
             elementwise_affine=config.elementwise_affine,
         )
-        self.mlp = PHBAMLP(
+        self.mlp = GatedMLP(
             hidden_size=config.hidden_size,
             hidden_ratio=config.hidden_ratio,
             intermediate_size=config.intermediate_size,

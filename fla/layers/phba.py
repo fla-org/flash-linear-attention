@@ -8,41 +8,13 @@
 from __future__ import annotations
 
 import torch
-import torch.nn.functional as F
 from einops import rearrange
 from torch import nn
 
 from fla.layers.utils import pad_input, unpad_input
 from fla.modules import FusedRMSNormGated, RMSNorm, RotaryEmbedding
 from fla.ops.phba import chunk_phba
-from fla.ops.phba.backends.cublaslt import _Linear, exact_backend
 from fla.ops.phba.plans import _resolve_length_plan
-
-
-class PHBALinear(nn.Linear):
-    """PHBA projection with an optional byte-validated H20 weight-gradient path."""
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        eligible = (
-            not torch.compiler.is_compiling()
-            and type(x) in (torch.Tensor, nn.Parameter)
-            and type(self.weight) in (torch.Tensor, nn.Parameter)
-            and self.bias is None
-            and self.training
-            and torch.is_grad_enabled()
-            and x.is_cuda
-            and torch.is_autocast_enabled("cuda")
-            and torch.get_autocast_dtype("cuda") == torch.bfloat16
-            and x.is_contiguous()
-            and self.weight.is_contiguous()
-            and x.shape[-1] == 2048
-            and x.numel() == 8192 * 2048
-            and self.out_features in (2048, 4272)
-        )
-        backend = exact_backend(x.device) if eligible else None
-        if backend is None:
-            return F.linear(x, self.weight, self.bias)
-        return _Linear.apply(backend.autocast.cached_bf16(x), backend.autocast.cached_bf16(self.weight))
 
 
 class PHBA(nn.Module):
@@ -89,18 +61,18 @@ class PHBA(nn.Module):
         self.gsa_num_slots = gsa_num_slots
         self.gate_logit_normalizer = gate_logit_normalizer
         self.use_output_gate = use_output_gate
-        self.q_proj = PHBALinear(hidden_size, hidden_size, bias=qkv_bias)
-        self.k_proj = PHBALinear(hidden_size, hidden_size, bias=qkv_bias)
-        self.v_proj = PHBALinear(hidden_size, hidden_size, bias=qkv_bias)
-        self.o_proj = PHBALinear(hidden_size, hidden_size, bias=False)
-        self.gsa_gate_proj = PHBALinear(hidden_size, num_heads * gsa_num_slots, bias=False)
+        self.q_proj = nn.Linear(hidden_size, hidden_size, bias=qkv_bias)
+        self.k_proj = nn.Linear(hidden_size, hidden_size, bias=qkv_bias)
+        self.v_proj = nn.Linear(hidden_size, hidden_size, bias=qkv_bias)
+        self.o_proj = nn.Linear(hidden_size, hidden_size, bias=False)
+        self.gsa_gate_proj = nn.Linear(hidden_size, num_heads * gsa_num_slots, bias=False)
         self.q_norm = RMSNorm(self.head_dim, eps=1e-6, elementwise_affine=elementwise_affine) if qk_norm else nn.Identity()
         self.k_norm = RMSNorm(self.head_dim, eps=1e-6, elementwise_affine=elementwise_affine) if qk_norm else nn.Identity()
         self.rotary = RotaryEmbedding(dim=self.head_dim, base=rope_theta)
         if use_output_gate:
             self.g_proj = nn.Sequential(
-                PHBALinear(hidden_size, self.head_dim, bias=False),
-                PHBALinear(self.head_dim, hidden_size, bias=False),
+                nn.Linear(hidden_size, self.head_dim, bias=False),
+                nn.Linear(self.head_dim, hidden_size, bias=False),
             )
             self.o_norm = FusedRMSNormGated(
                 self.head_dim,

@@ -8,7 +8,8 @@
 import pytest
 import torch
 
-from fla.ops.phba import SequenceLengthPlan, chunk_phba, flash_attention
+from fla.ops import SequenceLengthPlan, chunk_phba
+from fla.ops.phba import flash_attention
 from fla.ops.phba.naive import HostLayout, highest_precision, reference_a_chunkwise, rstate_from_rtok
 from fla.ops.phba.routing import build_routes
 from fla.utils import IS_NVIDIA, assert_close, device, find_spec_cached
@@ -33,6 +34,8 @@ pytestmark = pytest.mark.skipif(
         pytest.param((33,), 1, 16, 16, 32, 1, torch.float16, id="no-token-history"),
         pytest.param((65, 65), 1, 32, 17, 64, 3, torch.bfloat16, id="nonpower-slots"),
         pytest.param((513,), 2, 128, 128, 256, 4, torch.bfloat16, id="chunk256"),
+        pytest.param((2049,), 2, 32, 32, 64, 16, torch.bfloat16, id="multi-window-topk16"),
+        pytest.param((1500, 999), 2, 32, 32, 64, 4, torch.bfloat16, id="packed-multi-window"),
         pytest.param((1025,), 2, 128, 64, 512, 2, torch.float16, id="chunk512"),
     ],
 )

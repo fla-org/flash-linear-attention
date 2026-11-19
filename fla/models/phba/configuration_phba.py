@@ -64,6 +64,8 @@ class PHBAConfig(PreTrainedConfig):
 
         self.hidden_ratio = hidden_ratio
         self.intermediate_size = intermediate_size
+        if hidden_act != "swish":
+            raise ValueError("PHBA supports the swish-gated MLP")
         self.hidden_act = hidden_act
 
         self.initializer_range = initializer_range

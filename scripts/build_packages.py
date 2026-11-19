@@ -5,7 +5,6 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-import json
 import re
 import shutil
 import subprocess
@@ -45,7 +44,7 @@ def categorize_dependencies(deps):
     return core_deps, ext_deps
 
 
-def create_pyproject_toml(package_dir, name, version, dependencies, extras=None, package_data=None):
+def create_pyproject_toml(package_dir, name, version, dependencies, extras=None):
     """Create pyproject.toml for a package."""
     if extras is None:
         extras = {}
@@ -94,15 +93,6 @@ include = ["fla*"]
 namespaces = true
 """
 
-    owned_data = {
-        package: patterns for package, patterns in (package_data or {}).items()
-        if package in ('', '*') or (package_dir / package.replace('.', '/')).is_dir()
-    }
-    if owned_data:
-        content += '\n[tool.setuptools.package-data]\n'
-        for package, patterns in owned_data.items():
-            content += f'{json.dumps(package)} = {json.dumps(patterns)}\n'
-
     with open(package_dir / 'pyproject.toml', 'w') as f:
         f.write(content)
 
@@ -124,8 +114,6 @@ def build_split_packages(output_dir: str | Path | None = None):
 
     # extract dependencies
     all_deps, extras = extract_dependencies()
-    with open(root_dir / 'pyproject.toml', 'rb') as f:
-        package_data = tomllib.load(f).get('tool', {}).get('setuptools', {}).get('package-data', {})
     core_deps, ext_deps = categorize_dependencies(all_deps)
     core_extras = {k: v for k, v in extras.items() if k in BACKEND_EXTRAS}
     # extension forwards backend extras to fla-core so flash-linear-attention[cuda]
@@ -170,7 +158,7 @@ def build_split_packages(output_dir: str | Path | None = None):
             shutil.copy(src, core_dir / fname)
 
     # create fla-core configs
-    create_pyproject_toml(core_dir, 'fla-core', version, core_deps, core_extras, package_data)
+    create_pyproject_toml(core_dir, 'fla-core', version, core_deps, core_extras)
 
     # create flash-linear-attention package
     ext_dir = output_dir / 'flash-linear-attention'
@@ -193,7 +181,7 @@ def build_split_packages(output_dir: str | Path | None = None):
             shutil.copy(src, ext_dir / fname)
 
     # create extension configs
-    create_pyproject_toml(ext_dir, 'flash-linear-attention', version, ext_deps, ext_extras, package_data)
+    create_pyproject_toml(ext_dir, 'flash-linear-attention', version, ext_deps, ext_extras)
 
     # create build script
     build_script = output_dir / 'build.sh'

@@ -38,7 +38,7 @@ The public entry is `chunk.py`, with sequence geometry and workspace limits in `
 | `utils.py`     | Input contracts, structured errors and gradient alignment                  |
 | `naive.py`     | FP64 and storage-aware references, including routing and metadata oracles  |
 
-`flash_attention.py` adapts the local-attention interface. `backends/cublaslt.py` owns projection autograd wrappers and optional acceleration, with native fallbacks. `backends/resources.py` carries the H20 C++ sources and screened algorithms in Python wheels. Internal module paths are implementation details; use the exports from `fla.ops.phba` for the public operator and sequence plan.
+`flash_attention.py` adapts the local-attention interface. Internal module paths are implementation details; use the exports from `fla.ops.phba` for the public operator and sequence plan.
 
 Production FlashAttention initialization checks dependencies, device support and the low-level parameter schema. Numerical ABI checks and layout/route assertions live in `tests/ops/test_phba.py`.
 
@@ -78,7 +78,7 @@ with torch.autocast('cuda', dtype=torch.bfloat16):
 loss.backward()
 ```
 
-The public model classes are `PHBAConfig`, `PHBAModel`, and `PHBAForCausalLM` in `fla.models.phba`. The layer is `fla.layers.phba.PHBA`; the operator is `fla.ops.phba.chunk_phba`. `fla.models` exports all three classes; importing `fla` also registers PHBA with Transformers. Checkpoints retain the PHBA projection, normalization, MLP, embedding and language-head parameter names.
+The public model classes are `PHBAConfig`, `PHBAModel`, and `PHBAForCausalLM` in `fla.models.phba`. `fla.layers` exports `PHBA`, and `fla.ops` exports `chunk_phba` and `SequenceLengthPlan`. `fla.models` exports all three classes; importing `fla` also registers PHBA with Transformers. Checkpoints retain the PHBA projection, normalization, MLP, embedding and language-head parameter names.
 
 ## Supported execution
 
@@ -90,12 +90,6 @@ For language-model loss, mask padding and the first label of each packed or padd
 
 The model supports cache-free training, prefill and greedy generation with `use_cache=False`. `output_attentions=True`, persistent KV/prefix caching, an additional sliding window, and unequal query/key/value head counts are not implemented by this deterministic path. Final prefix states returned by the operator are FP32 and nondifferentiable. Context parallelism, tensor parallelism and full-graph compilation are outside the current validation scope.
 
-## Optional H20 acceleration
-
-PHBA projections retain the native linear path unless the exact-screened H20 geometry and runtime match. The accelerated path is restricted to PyTorch 2.9.0, CUDA 12.8, the validated cuBLASLt library, BF16 autocast and its three weight-gradient geometries. Actual GEMM operands must have 16-byte-aligned addresses; a contiguous view alone is insufficient. Unsupported alignment uses native weight-gradient operations without adding an alignment copy. The fused SwiGLU path checks its recomputed activation and incoming gradient and retains the native einsum fallback. The C++ helpers build from the Python-packaged source into the Torch extension cache; no prebuilt machine-specific binary is included. CUDA development headers and a C++ compiler are needed for this optional path. Other supported cases retain native PyTorch operations.
-
-Training uses the optimizer selected by the training framework.
-
 ## Tests and benchmarks
 
 ```bash
@@ -105,4 +99,4 @@ FLA_CI_ENV=0 pytest tests/ops/test_phba.py tests/models/test_modeling_phba.py \
 python -m benchmarks.ops.run --op chunk_phba --no-base
 ```
 
-The standard operator benchmark includes dense and packed shapes. Complete-step throughput and peak-memory results are recorded in the PR description.
+The standard operator benchmark includes dense and packed shapes.
