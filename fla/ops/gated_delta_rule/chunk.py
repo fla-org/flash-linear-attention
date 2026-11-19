@@ -536,6 +536,9 @@ def chunk_gated_delta_rule(
         )
         state_v_first = kwargs.pop('transpose_state_layout')
 
+    if beta.shape != v.shape[:3]:
+        raise ValueError(f"beta must have shape [B, T, HV]={list(v.shape[:3])}, got {list(beta.shape)}.")
+
     # Validate head dimensions
     if q.shape[2] != k.shape[2]:
         raise ValueError(
