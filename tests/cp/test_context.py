@@ -169,25 +169,33 @@ def test_contiguous_graph_boundaries_non_npu(cu_dtype, monkeypatch):
         post_num_ranks_dev=torch.ones(1, dtype=torch.int32),
     )
     x = torch.empty(1, 4, 1, 16)
-    initial = inspect.unwrap(chunk_delta_h.chunk_gated_delta_rule_fwd_h_pre_process)(
-        k=x, w=x, u=x, cu_seqlens=cu, context=cp_context, use_graph=True,
-    )
-    torch.testing.assert_close(calls['fwd']['cu_seqlens'], torch.tensor([2, 4], dtype=cu_dtype))
-    torch.testing.assert_close(calls['merge']['h_seq_idx'], torch.tensor([1]))
-    assert calls['merge']['h'] is initial
-    final, _ = inspect.unwrap(chunk_delta_h.chunk_gated_delta_rule_bwd_dhu_pre_process)(
-        q=x, k=x, w=x, do=x, dv=x, cu_seqlens=cu, context=cp_context, use_graph=True,
-    )
-    torch.testing.assert_close(calls['bwd']['cu_seqlens'], torch.tensor([0, 2], dtype=cu_dtype))
-    torch.testing.assert_close(calls['merge']['h_seq_idx'], torch.tensor([3]))
-    assert calls['merge']['h'] is final
+    for first_row, last_row, first_window, last_window in (
+        (1, 3, [0, 2], [2, 4]),
+        (0, -1, [0, 0], [0, 0]),
+    ):
+        if last_row < 0:
+            cu.zero_()
+            cp_context.pre_num_ranks_dev.zero_()
+            cp_context.post_num_ranks_dev.zero_()
+        initial = inspect.unwrap(chunk_delta_h.chunk_gated_delta_rule_fwd_h_pre_process)(
+            k=x, w=x, u=x, cu_seqlens=cu, context=cp_context, use_graph=True,
+        )
+        torch.testing.assert_close(calls['fwd']['cu_seqlens'], torch.tensor(last_window, dtype=cu_dtype))
+        torch.testing.assert_close(calls['merge']['h_seq_idx'], torch.tensor([first_row]))
+        assert calls['merge']['h'] is initial
+        final, _ = inspect.unwrap(chunk_delta_h.chunk_gated_delta_rule_bwd_dhu_pre_process)(
+            q=x, k=x, w=x, do=x, dv=x, cu_seqlens=cu, context=cp_context, use_graph=True,
+        )
+        torch.testing.assert_close(calls['bwd']['cu_seqlens'], torch.tensor(first_window, dtype=cu_dtype))
+        torch.testing.assert_close(calls['merge']['h_seq_idx'], torch.tensor([last_row]))
+        assert calls['merge']['h'] is final
 
 
 @pytest.mark.skipif(not IS_NPU, reason='requires Ascend graph metadata kernels')
 @pytest.mark.parametrize(
     ('layout', 'cu_dtype', 'capacity', 'total', 'stride'),
     [
-        pytest.param('contiguous', torch.int32, 2, 128, 1, id='contiguous-int32-two-sequences'),
+        pytest.param('contiguous', torch.int32, 8, 128, 1, id='contiguous-int32-tail-capacity'),
         pytest.param('zigzag', torch.int64, 8, 128, 1, id='zigzag-int64-tail-capacity'),
         pytest.param('zigzag', torch.int64, 1024, 1 << 34, 1, id='zigzag-int64-reduction-tile-large-offsets'),
         pytest.param('contiguous', torch.int32, 1025, 128, 2, id='contiguous-int32-strided-two-tiles'),

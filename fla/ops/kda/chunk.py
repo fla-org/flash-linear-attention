@@ -337,6 +337,7 @@ def chunk_kda(
             - A graph-capturable communicator (non-blocking NCCL on CUDA, or HCCL on Ascend);
               all ranks must capture and replay the same collectives in the same order.
             - A persistent padded ``cp_context.cu_seqlens`` buffer, refreshed in place before each replay.
+              Reserve at least one sequence slot for contiguous layouts and two for zigzag layouts.
             - Persistent int32 device tensors ``cp_context.pre_num_ranks_dev`` and ``post_num_ranks_dev``,
               refreshed in place before each replay.
               Contiguous layouts use one value; zigzag layouts use shape ``[2]`` in front/back order.
@@ -478,6 +479,13 @@ def chunk_kda(
         assert output_final_state is False, "Output final state is not supported for CP"
         assert cp_context.cu_seqlens is not None, "cu_seqlens is required for CP"
         cu_seqlens = cp_context.cu_seqlens
+        if use_graph:
+            min_slots = 2 if cp_context.layout == 'zigzag' else 1
+            if cu_seqlens.ndim != 1 or cu_seqlens.numel() <= min_slots:
+                raise ValueError(
+                    f"KDA CP graph mode requires one-dimensional cu_seqlens with at least "
+                    f"{min_slots} sequence slot(s) for the {cp_context.layout} layout."
+                )
         if cp_context.cu_seqlens_cpu is not None:
             cu_seqlens_cpu = cp_context.cu_seqlens_cpu
 

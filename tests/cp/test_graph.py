@@ -24,13 +24,16 @@ import pytest
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
+import triton
 
 import fla.backends as backends
 from fla.ops.cp import FLACPContext, build_cp_context
+from fla.ops.cp.chunk_delta_h import _graph_metadata
+from fla.ops.cp.chunk_merge import chunk_cp_merge
 from fla.ops.kda import chunk_kda
 from fla.ops.kda.gate import naive_kda_gate, naive_kda_lowerbound_gate
 from fla.ops.kda.naive import naive_recurrent_kda
-from fla.utils import IS_NPU, IS_TF32_SUPPORTED, assert_close, device, device_torch_lib
+from fla.utils import IS_NPU, IS_TF32_SUPPORTED, ascend_compile_kwargs, assert_close, device, device_torch_lib
 from tests.cp.utils import shard_tensor
 from tests.ops.kda_graph import MAX_NUM_SEQS, VARLEN_CASES, D, H, T, make_inputs
 
@@ -188,6 +191,100 @@ def test_chunk_kda(run_distributed):
     run_distributed(worker=_run_graph, world_size=2, destroy_process_group=False)
 
 
+@pytest.mark.parametrize(
+    ('layout', 'state_v_first', 'native'),
+    [
+        pytest.param('contiguous', False, True, id='ascend-contiguous-k-first', marks=pytest.mark.skipif(
+            not IS_NPU, reason='requires Ascend merge kernel',
+        )),
+        pytest.param('zigzag', True, True, id='ascend-zigzag-v-first', marks=pytest.mark.skipif(
+            not IS_NPU, reason='requires Ascend merge kernel',
+        )),
+        pytest.param('contiguous', True, False, id='shared-contiguous-v-first'),
+    ],
+)
+def test_chunk_cp_backward_merge_empty_graph(layout, state_v_first, native):
+    """Preserve both guard rows when replay has no active boundary state to write."""
+    HV, K, V = 1, 64, 32 if state_v_first else 64
+    num_parts = 2 if layout == 'zigzag' else 1
+    cu = torch.tensor([0, 32, 32, 64], device=device, dtype=torch.long)
+    post = torch.ones(num_parts, device=device, dtype=torch.int32)
+    state_shape = (HV, V, K) if state_v_first else (HV, K, V)
+    storage = torch.full((5, *state_shape), 123., device=device, dtype=torch.float32)
+    dht = storage[1:-1]
+    summaries = torch.zeros((2, HV, K, V + K), device=device, dtype=torch.float32)
+    summaries[1, ..., :V] = 2
+
+    if native:
+        from fla.ops.cp.backends.triton_ascend.chunk_delta_h import merge_fwd_bwd_kernel_npu
+
+    def step():
+        _, last, _, _ = _graph_metadata(cu, layout=layout)
+        for part in range(num_parts):
+            h_seq_idx = last[part:part + 1]
+            if native:
+                merge_fwd_bwd_kernel_npu[(triton.cdiv(V, 32), HV)](
+                    h=dht,
+                    ag_hm=summaries,
+                    pre_or_post_num_ranks=post[part:part + 1],
+                    rank=0,
+                    seq_offsets=None,
+                    init_offsets=None,
+                    h0_seq_ids=None,
+                    h0=None,
+                    h_seq_idx=h_seq_idx,
+                    HV=HV,
+                    K=K,
+                    V=V,
+                    BV=32,
+                    BK=K,
+                    FORWARD=False,
+                    INTRACARD_MODE=False,
+                    NUM_SEQ_ENTRIES=0,
+                    STATE_V_FIRST=state_v_first,
+                    AFFINE_CHAIN_PRECISION='ieee',
+                    NUM_RANKS_ON_DEVICE=True,
+                    **ascend_compile_kwargs(),
+                )
+            else:
+                chunk_cp_merge(
+                    h=dht,
+                    ag_hm=summaries,
+                    num_ranks=post,
+                    rank=0,
+                    state_v_first=state_v_first,
+                    forward=False,
+                    h_seq_idx=h_seq_idx,
+                    use_graph=True,
+                )
+
+    stream = device_torch_lib.Stream()
+    stream.wait_stream(device_torch_lib.current_stream())
+    with device_torch_lib.stream(stream):
+        step()
+    device_torch_lib.current_stream().wait_stream(stream)
+    device_torch_lib.synchronize()
+    graph = torch.npu.NPUGraph() if IS_NPU else torch.cuda.CUDAGraph()
+    with device_torch_lib.graph(graph):
+        step()
+
+    for offsets, active_rows in (
+        ([0, 32, 32, 64], (0, 2) if num_parts == 2 else (2,)),
+        ([0, 0, 0, 0], ()),
+        ([0, 32, 64, 64], (0, 1) if num_parts == 2 else (1,)),
+    ):
+        cu.copy_(torch.tensor(offsets, device=device, dtype=cu.dtype))
+        post.fill_(bool(active_rows))
+        dht.fill_(-1)
+        expected = torch.full_like(storage, 123.)
+        expected[1:-1].fill_(-1)
+        for row in active_rows:
+            expected[row + 1].fill_(2)
+        graph.replay()
+        device_torch_lib.synchronize()
+        torch.testing.assert_close(storage, expected, rtol=0, atol=0, msg=f'boundaries {offsets}')
+
+
 def _make_npu_inputs(
     seed: int,
     device: torch.device,
@@ -262,6 +359,7 @@ def _npu_replay_cases(total_tokens, world_size, layout):
         ('leading-empty-sequence', [0, total_tokens]),
         ('internal-empty-sequence', [0, part // 4, part + part // 2, total_tokens]),
         ('half-capacity', [0, 1, part // 2 + 1, total_tokens // 2, total_tokens // 2]),
+        ('all-empty', [0]),
         varlen_cases[0],
     ]
 
@@ -468,7 +566,12 @@ def _run_npu_graph(
         empty_sequence = {
             'leading-empty-sequence': 'leading', 'internal-empty-sequence': 'internal', 'split-empty-sequence': 'split',
         }.get(tag)
-        refresh(build_cp_context(cu, group=group, layout=layout), empty_sequence)
+        if actual_tokens:
+            refresh(build_cp_context(cu, group=group, layout=layout), empty_sequence)
+        else:
+            cu_static.zero_()
+            pre_dev.zero_()
+            post_dev.zero_()
 
         dist.barrier()
         logger.info('rank=%d: replay %s', rank, tag)
@@ -488,6 +591,12 @@ def _run_npu_graph(
         got = _npu_graph_results(o, leaves, active_names, training=training, actual_part=actual_part, part=part)
         assert tuple(tensor.data_ptr() for tensor in (cu_static, pre_dev, post_dev)) == metadata_addresses
         dist.barrier()
+
+        if not actual_tokens:
+            # Token rows were checked before trimming; gate parameters also receive no gradient.
+            for result in got.values():
+                torch.testing.assert_close(result, torch.zeros_like(result), rtol=0, atol=0)
+            continue
 
         ref = _npu_eager_reference(
             inputs,

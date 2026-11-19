@@ -631,6 +631,23 @@ def _make_cp_graph_context(case, layout):
 
 
 @pytest.mark.parametrize(
+    ('layout', 'offsets', 'min_slots'),
+    [
+        pytest.param('contiguous', [0], 1, id='contiguous-no-sequence-slots'),
+        pytest.param('zigzag', [0, 128], 2, id='zigzag-one-sequence-slot'),
+        pytest.param('contiguous', [[0, 64, 128]], 1, id='contiguous-non-vector-offsets'),
+    ],
+)
+def test_chunk_kda_graph_rejects_invalid_cp_capacity(layout, offsets, min_slots):
+    case = _GraphCase()
+    inputs = _make_case_inputs(case, seed=0)
+    context = _make_cp_graph_context(case, layout)
+    context.cu_seqlens = torch.tensor(offsets, dtype=case.cu_dtype, device=device)
+    with pytest.raises(ValueError, match=rf"at least {min_slots} sequence slot"):
+        chunk_kda(*inputs[:5], cp_context=context, use_graph=True)
+
+
+@pytest.mark.parametrize(
     ('layout', 'field', 'message'),
     [
         pytest.param('contiguous', 'group', 'process group', id='missing-process-group'),

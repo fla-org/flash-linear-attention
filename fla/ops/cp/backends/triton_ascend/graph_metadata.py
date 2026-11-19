@@ -91,8 +91,10 @@ def cp_graph_metadata_kernel(
     else:
         seq = tl.where(row == 0, first_front, last_front)
     # each selected row contributes its two adjacent cumulative offsets: [start, end).
-    # empty metadata has no final segment; do not read before the sequence buffer.
-    bounds = tl.load(cu_seqlens + (seq + lanes % 2) * CU_STRIDE, (seq >= 0) & (seq < N), other=0)
+    # keep inactive addresses inside the allocation when Ascend lowers the masked load.
+    valid = (seq >= 0) & (seq < N)
+    offset = tl.where(valid, seq + lanes % 2, 0) * CU_STRIDE
+    bounds = tl.load(cu_seqlens + offset, valid, other=0)
     tl.store(windows + lanes, bounds)
 
 

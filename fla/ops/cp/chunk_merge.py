@@ -178,7 +178,11 @@ def chunk_cp_fwd_bwd_kernel_merge(
     else:
         i_h = tl.program_id(1).to(tl.int64)
         if USE_H_SEQ_IDX:
-            h += tl.load(h_seq_idx).to(tl.int64) * HV * K * V
+            seq_idx = tl.load(h_seq_idx).to(tl.int64)
+            # a negative row marks a graph partition with no active sequence.
+            if seq_idx < 0:
+                return
+            h += seq_idx * HV * K * V
         if NUM_RANKS_ON_DEVICE:
             # graph replay must read refreshed rank counts instead of capture-time Python scalars
             NR = tl.load(num_ranks).to(tl.int32)

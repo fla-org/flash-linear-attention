@@ -512,7 +512,11 @@ def merge_fwd_bwd_kernel_npu(
     else:
         i_h = tl.program_id(1).to(tl.int64)
         if HAS_H_SEQ_IDX:
-            h += tl.load(h_seq_idx).to(tl.int64) * HV * K * V
+            seq_idx = tl.load(h_seq_idx).to(tl.int64)
+            # a negative row marks a graph partition with no active sequence.
+            if seq_idx < 0:
+                return
+            h += seq_idx * HV * K * V
         if NUM_RANKS_ON_DEVICE:
             num_ranks = tl.load(pre_or_post_num_ranks).to(tl.int64)
         else:
