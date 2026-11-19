@@ -503,6 +503,13 @@ class FusedAttnresFunction(torch.autograd.Function):
         return (dq, dw, dow, None, None, None, None, *dvs)
 
 
+def _flatten_residual(residual: torch.Tensor, D: int) -> torch.Tensor:
+    flat = residual.reshape(-1, D).contiguous()
+    if flat.data_ptr() % 16 != 0:
+        flat = flat.clone(memory_format=torch.contiguous_format)
+    return flat
+
+
 @dispatch
 def fused_attnres(
     query: torch.Tensor,
@@ -556,7 +563,7 @@ def fused_attnres(
 
     output_shape = residuals[0].shape
     D = output_shape[-1]
-    flat_residuals = tuple(r.reshape(-1, D).contiguous() for r in residuals)
+    flat_residuals = tuple(_flatten_residual(r, D) for r in residuals)
 
     o, p = FusedAttnresFunction.apply(
         query, rms_weight, output_rms_weight, rms_eps, scale, return_weights, checkpoint_level, *flat_residuals,
