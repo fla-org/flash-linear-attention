@@ -1516,7 +1516,8 @@ def _precision_tokens(x, length):
 
 @pytest.mark.skipif(IS_NPU, reason="generic Triton WY kernel")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16], ids=["fp16", "bf16"])
-def test_chunk_wy_gate_precision(dtype):
+def test_chunk_wy_gate_precision(dtype, monkeypatch):
+    monkeypatch.setattr(testing, "FLA_CI_ENV", False)
     torch.manual_seed(42)
     B, T, H, K, V, BT = 1, 64, 2, 32, 48, 64
     k = torch.randn(B, T, H, K, device=device, dtype=dtype)
@@ -1539,10 +1540,18 @@ def test_chunk_wy_gate_precision(dtype):
 
 
 @pytest.mark.skipif(not IS_NVIDIA, reason="NVIDIA precision path")
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16], ids=["fp16", "bf16"])
-@pytest.mark.parametrize("fp32_values", [False, True], ids=["input-values", "fp32-values"])
-@pytest.mark.parametrize("state_v_first", [False, True], ids=["k-first", "v-first"])
-def test_chunk_output_precision(dtype, fp32_values, state_v_first):
+@pytest.mark.parametrize(("dtype", "fp32_values", "state_v_first"), [
+    pytest.param(torch.float16, False, False, id="float16-input-k-first"),
+    pytest.param(torch.float16, False, True, id="float16-input-v-first"),
+    pytest.param(torch.float16, True, False, id="float16-fp32-k-first"),
+    pytest.param(torch.float16, True, True, id="float16-fp32-v-first"),
+    pytest.param(torch.bfloat16, False, False, id="bfloat16-input-k-first"),
+    pytest.param(torch.bfloat16, False, True, id="bfloat16-input-v-first"),
+    pytest.param(torch.bfloat16, True, False, id="bfloat16-fp32-k-first"),
+    pytest.param(torch.bfloat16, True, True, id="bfloat16-fp32-v-first"),
+])
+def test_chunk_output_precision(dtype, fp32_values, state_v_first, monkeypatch):
+    monkeypatch.setattr(testing, "FLA_CI_ENV", False)
     torch.manual_seed(42)
     B, T, H, K, V, BT = 1, 129, 2, 32, 48, 64
     value_dtype = torch.float32 if fp32_values else dtype
@@ -1566,9 +1575,14 @@ def test_chunk_output_precision(dtype, fp32_values, state_v_first):
 
 
 @pytest.mark.skipif(not IS_NVIDIA, reason="NVIDIA precision path")
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16], ids=["fp16", "bf16"])
-@pytest.mark.parametrize("fp32_values", [False, True], ids=["input-values", "fp32-values"])
-def test_chunk_output_gradient_precision(dtype, fp32_values):
+@pytest.mark.parametrize(("dtype", "fp32_values"), [
+    pytest.param(torch.float16, False, id="float16-input"),
+    pytest.param(torch.float16, True, id="float16-fp32"),
+    pytest.param(torch.bfloat16, False, id="bfloat16-input"),
+    pytest.param(torch.bfloat16, True, id="bfloat16-fp32"),
+])
+def test_chunk_output_gradient_precision(dtype, fp32_values, monkeypatch):
+    monkeypatch.setattr(testing, "FLA_CI_ENV", False)
     torch.manual_seed(42)
     B, T, H, K, V, BT = 1, 129, 2, 32, 48, 64
     value_dtype = torch.float32 if fp32_values else dtype
