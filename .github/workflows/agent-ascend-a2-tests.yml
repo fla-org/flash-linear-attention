@@ -63,6 +63,14 @@ jobs:
         HF_ENDPOINT: https://hf-mirror.com
     env:
       FLA_CI_ENV: 1
+      HTTP_PROXY: http://proxy.example.com:3128
+      HTTPS_PROXY: http://proxy.example.com:3128
+      ALL_PROXY: http://proxy.example.com:3128
+      NO_PROXY: localhost,127.0.0.1,::1,msh.team,msh.work
+      http_proxy: http://proxy.example.com:3128
+      https_proxy: http://proxy.example.com:3128
+      all_proxy: http://proxy.example.com:3128
+      no_proxy: localhost,127.0.0.1,::1,msh.team,msh.work
       FLA_NPU_XDIST: ${{ inputs.suite == 'cp' && '0' || '1' }}
       ASCEND_RT_VISIBLE_DEVICES: '0,1,2,3,4,5,6,7'
       TRITON_CACHE_DIR: ${{ github.workspace }}/.triton-agent-${{ inputs.attempt_id }}
