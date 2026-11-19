@@ -25,16 +25,6 @@
         "both"
       ]
     },
-    "conv": {
-      "root": "tests/modules/test_conv.py",
-      "platforms": [
-        "ascend-a2",
-        "ascend-a5"
-      ],
-      "dispatch": [
-        "on"
-      ]
-    },
     "layers": {
       "root": "tests/layers",
       "platforms": [

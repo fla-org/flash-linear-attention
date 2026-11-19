@@ -84,26 +84,12 @@ class AgentCITest(unittest.TestCase):
         with self.assertRaises(agent_ci.AgentCIError):
             agent_ci.validate_platform(self.catalog, "ops", "amd-mi300")
 
-    def test_repository_catalog_limits_ascend_a5_to_utils_and_conv(self):
+    def test_repository_catalog_limits_ascend_a5_to_utils(self):
         catalog = agent_ci.load_catalog(Path(__file__).parents[2] / ".github/agent-tests/catalog.json")
         agent_ci.validate_platform(catalog, "utils", "ascend-a5")
-        agent_ci.validate_platform(catalog, "conv", "ascend-a5")
         for suite in ("ops", "modules", "scripts", "top-level", "op-utils", "benchmarks", "cp", "layers", "models"):
             with self.assertRaises(agent_ci.AgentCIError):
                 agent_ci.validate_platform(catalog, suite, "ascend-a5")
-
-    def test_repository_conv_suite_limits_targets_and_dispatch(self):
-        repo = Path(__file__).parents[2]
-        catalog = agent_ci.load_catalog(repo / ".github/agent-tests/catalog.json")
-        for target in ("tests/modules/test_conv.py", "tests/modules/test_conv.py::test_conv_varlen"):
-            self.assertEqual(agent_ci.validate_targets(catalog, "conv", target, repo), [target])
-        for target in ("tests/modules", "tests/modules/test_norm.py", "tests/cp/test_conv.py"):
-            with self.assertRaises(agent_ci.AgentCIError):
-                agent_ci.validate_targets(catalog, "conv", target, repo)
-        self.assertEqual(agent_ci.validate_dispatch(catalog, "conv", "on"), ["on"])
-        for dispatch in ("off", "both"):
-            with self.assertRaises(agent_ci.AgentCIError):
-                agent_ci.validate_dispatch(catalog, "conv", dispatch)
 
     def test_zero_tests_is_not_evidence(self):
         with self.assertRaises(agent_ci.AgentCIError):
