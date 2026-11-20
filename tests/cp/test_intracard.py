@@ -7,7 +7,10 @@
 
 """Check intra-card CP routing, cache reuse, and grouped-head outputs and final states."""
 
+import inspect
 import os
+from types import SimpleNamespace
+from unittest.mock import create_autospec
 
 import pytest
 import torch
@@ -16,6 +19,7 @@ import torch.nn.functional as F
 from fla import backends
 from fla.ops.common import intracard_cp
 from fla.ops.common.backends.intracard import IntraCardCPBackend
+from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_fwd_h
 from fla.ops.common.intracard_cp import _intracard_cache
 from fla.ops.gated_delta_rule import chunk_gated_delta_rule
 from fla.ops.kda import chunk_kda
@@ -35,6 +39,8 @@ def test_chunk_kda_cache(monkeypatch):
     """Reuse the intracard precompute cache for repeated calls with the same cu_seqlens object."""
     # intracard CP is disabled by default.
     monkeypatch.setenv("FLA_INTRACARD_CP", "1")
+    # Ascend fwd_h is priority 0. Raise intra-card above it for this test only.
+    monkeypatch.setattr(IntraCardCPBackend, 'priority', -1)
     torch.manual_seed(0)
     dtype = torch.bfloat16
 
@@ -115,6 +121,8 @@ def test_backend_enabled(monkeypatch, enabled: bool):
 def test_chunk_gdn_grouped_heads(monkeypatch):
     """Compare intra-card splitting with the ordinary chunk path when query heads are shared by value heads."""
     monkeypatch.setenv("FLA_INTRACARD_CP", "1")
+    # Ascend fwd_h is priority 0. Raise intra-card above it for this test only.
+    monkeypatch.setattr(IntraCardCPBackend, 'priority', -1)
     monkeypatch.setenv("FLA_FLASH_QLA", "0")
     monkeypatch.setenv("FLA_TILELANG", "0")
     torch.manual_seed(0)
@@ -156,7 +164,7 @@ def test_chunk_gdn_grouped_heads(monkeypatch):
 
     assert split_calls == 1, "the grouped-head case must execute intra-card splitting"
 
-    common_registry = backends._load_operation_registry('common')
+    common_registry = backends._function_registries[inspect.unwrap(chunk_gated_delta_rule_fwd_h)]
     with monkeypatch.context() as patch:
         patch.setattr(common_registry, '_backends', {})
         with torch.inference_mode():
@@ -178,3 +186,34 @@ def test_chunk_gdn_grouped_heads(monkeypatch):
     assert torch.allclose(ht_intra, ht_ref, atol=1e-2, rtol=1e-2), (
         f"Final state mismatch: max diff={(ht_intra - ht_ref).abs().max().item()}"
     )
+
+
+@pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
+@pytest.mark.parametrize('extra', [{}, {'chunk_offsets': None}], ids=['chunk_offsets_omitted', 'chunk_offsets_none'])
+def test_intracard_backend_dispatch(monkeypatch, extra):
+    """KDA's eager forward passes chunk_offsets=None; the opt-in intra-card backend must still be selected."""
+    from fla.ops.common.backends.intracard import IntraCardCPBackend
+    from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_fwd_h
+
+    monkeypatch.setattr(backends.TritonAscendBackend, 'is_available', classmethod(lambda cls: False))
+    monkeypatch.setenv('FLA_INTRACARD_CP', '1')
+    result = object()
+    implementation = create_autospec(IntraCardCPBackend.chunk_gated_delta_rule_fwd_h, return_value=result)
+    monkeypatch.setattr(IntraCardCPBackend, 'chunk_gated_delta_rule_fwd_h', implementation)
+
+    x = SimpleNamespace(shape=(1, 64, 2, 64))
+    with torch.inference_mode():
+        assert chunk_gated_delta_rule_fwd_h(k=x, w=x, u=x, cu_seqlens=torch.tensor([0, 64]), **extra) is result
+    implementation.assert_called_once()
+
+
+def test_intracard_backend_verifier_rejects_graph_mode():
+    """Graph-mode callers pass fixed-shape chunk_offsets; intra-card CP cannot be captured."""
+    from fla.ops.common.backends.intracard import IntraCardCPBackend
+
+    x = SimpleNamespace(shape=(1, 64, 2, 64))
+    with torch.inference_mode():
+        verdict = IntraCardCPBackend().chunk_gated_delta_rule_fwd_h_verifier(
+            k=x, w=x, u=x, cu_seqlens=torch.tensor([0, 64]), chunk_offsets=torch.tensor([0, 1]),
+        )
+    assert verdict == (False, 'chunk_offsets is given (CUDA Graph mode)')

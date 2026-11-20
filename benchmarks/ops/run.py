@@ -152,6 +152,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
 
 import torch
 
@@ -356,6 +357,8 @@ def benchmark_op(
     print(f"\n  [{op_name}] Warming up {len(valid_shapes)} shape(s)...")
     failed_shapes = set()
     for shape_name, shape_dict in valid_shapes.items():
+        warmup_started = time.perf_counter()
+        warmup_status = 'ok'
         B, T, H, D = shape_dict['B'], shape_dict['T'], shape_dict['H'], shape_dict['D']
         extra_shape_kw = {k: v for k, v in shape_dict.items() if k not in ('B', 'T', 'H', 'D')}
         try:
@@ -374,6 +377,10 @@ def benchmark_op(
         except Exception as e:
             logger.warning(f"Warmup failed for {op_name} @ {shape_name}: {e}")
             failed_shapes.add(shape_name)
+            warmup_status = 'failed'
+        finally:
+            warmup_elapsed = time.perf_counter() - warmup_started
+            print(f"  Warmup {op_name} @ {shape_name}: {warmup_elapsed:.2f}s ({warmup_status})")
 
     for name in failed_shapes:
         del valid_shapes[name]
@@ -404,13 +411,23 @@ def benchmark_op(
                     t = result[0] if config.output_is_tuple else result
                     t.backward(do)
 
+            bench_started = time.perf_counter()
             try:
                 ms = triton.testing.do_bench(
                     fn, quantiles=[0.5, 0.2, 0.8], **_do_bench_kw()
                 )
             except Exception as e:
                 logger.warning(f"Bench failed for {op_name} {mode} @ {shape_name}: {e}")
+                print(
+                    f"  Measure {op_name} {mode} @ {shape_name}: "
+                    f"{time.perf_counter() - bench_started:.2f}s (failed)"
+                )
                 continue
+            bench_elapsed = time.perf_counter() - bench_started
+            print(
+                f"  Measure {op_name} {mode} @ {shape_name}: {bench_elapsed:.2f}s "
+                f"(median={ms[0]:.3f}ms)"
+            )
 
             results.append({
                 'op': op_label,

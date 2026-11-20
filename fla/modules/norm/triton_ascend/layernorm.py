@@ -262,7 +262,7 @@ def layer_norm_fwd_npu(
             "Column-tiled kernels are not yet implemented for this size."
         )
 
-    # Ascend: use row-wise kernel1 (no make_block_ptr) for all feature dims.
+    # Ascend: use row-wise kernel1 for all feature dims.
     # split along rows when T exceeds the Ascend grid limit.
     for row_start, row_len in iter_axis_launch_chunks(axis_size=T, other_grid_product=1, max_grid=ASCEND_MAX_GRID_DIM):
         row_end = row_start + row_len

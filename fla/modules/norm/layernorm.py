@@ -1088,13 +1088,22 @@ class RMSNorm(nn.Module):
         eps: float = 1e-5,
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
+        *,
+        zero_centered_weight: bool = False,
     ) -> None:
+        r"""
+        Args:
+            zero_centered_weight (bool, Optional):
+                Whether to initialize the weight to zero and scale by `1 + weight` in fp32.
+                Ignored when `elementwise_affine=False`. Default: `False`.
+        """
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
 
         self.hidden_size = hidden_size
         self.elementwise_affine = elementwise_affine
         self.eps = eps
+        self.zero_centered_weight = zero_centered_weight
 
         self.register_parameter("weight", None)
         self.register_parameter("bias", None)
@@ -1107,7 +1116,7 @@ class RMSNorm(nn.Module):
 
     def reset_parameters(self):
         if self.elementwise_affine:
-            nn.init.ones_(self.weight)
+            nn.init.constant_(self.weight, 0. if self.zero_centered_weight else 1.)
             if self.bias is not None:
                 nn.init.zeros_(self.bias)
 
@@ -1116,13 +1125,18 @@ class RMSNorm(nn.Module):
         if not self.elementwise_affine:
             s += f", elementwise_affine={self.elementwise_affine}"
         s += f", eps={self.eps}"
+        if self.zero_centered_weight:
+            s += ", zero_centered_weight=True"
         s += ")"
         return s
 
     def forward(self, x, residual=None, prenorm=False, residual_in_fp32=False):
+        weight = self.weight
+        if self.zero_centered_weight and weight is not None:
+            weight = weight.float() + 1
         return rms_norm(
             x=x,
-            weight=self.weight,
+            weight=weight,
             bias=self.bias,
             residual=residual,
             eps=self.eps,

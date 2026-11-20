@@ -684,7 +684,7 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
             tl.store(p_dh3, b_dh4.to(p_dh3.dtype.element_ty), mask=m_dh3)
 
 
-@dispatch('common')
+@dispatch
 def chunk_gated_delta_rule_fwd_h(
     k: torch.Tensor,
     w: torch.Tensor,
@@ -747,7 +747,7 @@ def chunk_gated_delta_rule_fwd_h(
     return h, v_new, final_state
 
 
-@dispatch('common')
+@dispatch
 def chunk_gated_delta_rule_bwd_dhu(
     q: torch.Tensor,
     k: torch.Tensor,

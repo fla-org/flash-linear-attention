@@ -27,7 +27,8 @@ from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
 from triton.experimental.gluon.language.nvidia.ampere import async_copy as cp
 
-from fla.backends import BaseBackend, register
+from fla.backends import GluonBackend, register
+from fla.ops.attnres.fused import fused_attnres
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.op import barrier
 from fla.utils import (
@@ -705,7 +706,29 @@ class FusedAttnresGluonFunction(torch.autograd.Function):
         return (dq, dw, dow, None, None, None, None, *dvs)
 
 
-def _run(
+def fused_attnres_verifier(
+    query: torch.Tensor,
+    residuals: Sequence[torch.Tensor],
+    rms_weight: torch.Tensor,
+    output_rms_weight: torch.Tensor | None = None,
+    rms_eps: float = 1e-6,
+    scale: float = 1.0,
+    return_weights: bool = False,
+    checkpoint_level: int = 1,
+    **kwargs,
+) -> tuple[bool, str | None]:
+    if not residuals or not residuals[0].is_cuda:
+        return False, "gluon AttnRes backend requires CUDA tensors"
+    v = residuals[0]
+    if torch.cuda.get_device_capability(v.device)[0] < 8:
+        return False, "gluon AttnRes backend requires NVIDIA SM80+ (cp.async)"
+    if v.shape[-1] * v.element_size() < 128:
+        return False, "gluon AttnRes backend requires D * itemsize >= 128 bytes"
+    return True, None
+
+
+@register(fused_attnres, backend=GluonBackend, verifier=fused_attnres_verifier, env_var="FLA_ATTNRES_GLUON", priority=3)
+def fused_attnres_gluon(
     query: torch.Tensor,
     residuals: Sequence[torch.Tensor],
     rms_weight: torch.Tensor,
@@ -728,45 +751,3 @@ def _run(
         p = p.view(len(residuals), *output_shape[:-1])
         return o, p
     return o
-
-
-@register('attnres')
-class AttnResGluonBackend(BaseBackend):
-    """Dispatch entry for the Gluon AttnRes kernels (see the module docstring for the design).
-
-    Off by default; enable with ``FLA_GLUON=1`` or ``FLA_ATTNRES_GLUON=1``.
-    The verifier accepts CUDA calls on SM80+ with ``D * itemsize >= 128`` bytes and otherwise defers to Triton.
-    """
-
-    backend_type = "gluon"
-    package_name = "triton.experimental.gluon"  # ships with Triton 3.5+; absent on older builds
-    env_var = "FLA_ATTNRES_GLUON"
-    default_enable = False
-    priority = 3
-
-    def fused_attnres_verifier(
-        self,
-        query: torch.Tensor,
-        residuals: Sequence[torch.Tensor],
-        rms_weight: torch.Tensor,
-        output_rms_weight: torch.Tensor | None = None,
-        rms_eps: float = 1e-6,
-        scale: float = 1.0,
-        return_weights: bool = False,
-        checkpoint_level: int = 1,
-        **kwargs,
-    ) -> tuple[bool, str | None]:
-        if not residuals or not residuals[0].is_cuda:
-            return False, "gluon AttnRes backend requires CUDA tensors"
-        v = residuals[0]
-        if torch.cuda.get_device_capability(v.device)[0] < 8:
-            return False, "gluon AttnRes backend requires NVIDIA SM80+ (cp.async)"
-        if v.shape[-1] * v.element_size() < 128:
-            return False, "gluon AttnRes backend requires D * itemsize >= 128 bytes"
-        return True, None
-
-    def fused_attnres(self, *args, **kwargs):
-        return _run(*args, **kwargs)
-
-
-__all__ = ["AttnResGluonBackend"]

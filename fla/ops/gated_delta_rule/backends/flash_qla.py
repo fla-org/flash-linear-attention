@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 import torch
 
 from fla.backends import BaseBackend, register
+from fla.ops.gated_delta_rule.chunk import chunk_gated_delta_rule
 from fla.utils import IS_NVIDIA_HOPPER, IS_NVIDIA_SM100, IS_NVIDIA_SM120
 
 if TYPE_CHECKING:
@@ -29,7 +30,7 @@ def _needs_backward(*tensors: torch.Tensor | None) -> bool:
     return any(isinstance(t, torch.Tensor) and t.requires_grad for t in tensors)
 
 
-@register('gated_delta_rule')
+@register(chunk_gated_delta_rule)
 class FlashQLABackend(BaseBackend):
     """Copyright (c) 2026 Qwen Team, Alibaba Cloud
 
@@ -65,7 +66,9 @@ class FlashQLABackend(BaseBackend):
         state_v_first: bool = False,
         cu_seqlens: torch.LongTensor | None = None,
         cu_seqlens_cpu: torch.LongTensor | None = None,
+        chunk_indices: torch.LongTensor | None = None,
         cp_context: FLACPContext | None = None,
+        return_intermediate_states: bool = False,
         **kwargs,
     ) -> tuple[bool, str | None]:
         if not (IS_NVIDIA_HOPPER or IS_NVIDIA_SM100 or IS_NVIDIA_SM120):
@@ -94,6 +97,8 @@ class FlashQLABackend(BaseBackend):
             return False, "FlashQLA does not support the deprecated transpose_state_layout"
         if cp_context is not None:
             return False, "FlashQLA does not support inter-card context parallel"
+        if return_intermediate_states:
+            return False, "FlashQLA does not support return_intermediate_states"
         return True, None
 
     def chunk_gated_delta_rule(
@@ -112,7 +117,9 @@ class FlashQLABackend(BaseBackend):
         state_v_first: bool = False,
         cu_seqlens: torch.LongTensor | None = None,
         cu_seqlens_cpu: torch.LongTensor | None = None,
+        chunk_indices: torch.LongTensor | None = None,
         cp_context: FLACPContext | None = None,
+        return_intermediate_states: bool = False,
         **kwargs,
     ):
         import flash_qla

@@ -701,7 +701,7 @@ def chunk_gdn2_bwd_kernel_intra(
     tl.store(p_dg2, b_dg2.to(p_dg2.dtype.element_ty), mask=m_kc)
 
 
-@dispatch('gdn2')
+@dispatch
 def chunk_gdn2_fwd_intra(
     q: torch.Tensor,
     k: torch.Tensor,
