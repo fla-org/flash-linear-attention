@@ -9,6 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.backends import dispatch
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp2
 from fla.utils import autotune_cache_kwargs
@@ -131,6 +132,7 @@ def chunk_gka_solve_fwd_kernel(
         tl.store(fro + o_t * H, b_fro.to(fro.dtype.element_ty), mask=m_t)
 
 
+@dispatch
 def chunk_gka_solve_fwd(
     q: torch.Tensor,
     k: torch.Tensor,

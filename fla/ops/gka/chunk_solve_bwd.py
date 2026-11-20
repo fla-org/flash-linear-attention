@@ -9,6 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.backends import dispatch
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.op import exp2
@@ -261,6 +262,7 @@ def chunk_gka_bwd_kernel_dk_inter(
         tl.store(dh0 + i_nh * K*K + o_k[:, None] * K + o_k[None, :], b_hs.to(dh0.dtype.element_ty), mask=m_kk)
 
 
+@dispatch
 def chunk_gka_solve_bwd(
     k: torch.Tensor,
     x: torch.Tensor,

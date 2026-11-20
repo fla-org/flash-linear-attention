@@ -207,7 +207,7 @@ jobs:
             --custom-shapes "$PRECOND_KDA_SHAPES" --json benchmark_chunk_precond_kda.json
           echo "Benchmark chunk_precond_kda prewarm: elapsed=$((SECONDS - precond_started))s"
 
-      - name: Benchmark chunk_gdn, fused_recurrent_gdn2, chunk_gdn2, chunk_kda, KDA graph, fused_attnres, conv1d, chunk_momentum_delta, chunk_precond_gdn, parallel_wall_attn, fused_recurrent_oja, chunk_precond_kda, chunk_ttt, and parallel_parallax
+      - name: Benchmark chunk_gdn, fused_recurrent_gdn2, chunk_gdn2, chunk_kda, KDA graph, fused_attnres, conv1d, chunk_momentum_delta, chunk_precond_gdn, parallel_wall_attn, fused_recurrent_oja, chunk_precond_kda, chunk_ttt, parallel_parallax and chunk_gka
         id: benchmark
         if: github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
         shell: bash
@@ -237,6 +237,8 @@ jobs:
               --op fused_recurrent_gdn2 --base '' --json benchmark_fused_recurrent_gdn2.json || status=1
             run_benchmark fused_recurrent_oja 0 python -m benchmarks.ops.run \
               --op fused_recurrent_oja --base '' --json benchmark_fused_recurrent_oja.json || status=1
+            run_benchmark chunk_gka 0 python -m benchmarks.ops.run \
+              --op chunk_gka --base '' --json benchmark_chunk_gka.json || status=1
             exit "$status"
           ) &
           pid_gdn=$!
@@ -332,6 +334,8 @@ jobs:
 
           echo "========== chunk_gdn =========="
           cat chunk_gdn.log
+          echo "========== chunk_gka =========="
+          cat chunk_gka.log
           echo "========== fused_recurrent_gdn2 =========="
           cat fused_recurrent_gdn2.log
           echo "========== fused_recurrent_oja =========="
@@ -486,6 +490,7 @@ jobs:
           name: ascend-a2-benchmark-results
           path: |
             benchmark_chunk_gdn.json
+            benchmark_chunk_gka.json
             benchmark_fused_recurrent_gdn2.json
             benchmark_fused_recurrent_oja.json
             benchmark_chunk_gdn2.json
