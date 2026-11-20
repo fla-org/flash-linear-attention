@@ -46,6 +46,8 @@ def _build_chunk_bwd_dqkwg_kernel(
     tile_hD1, tile_hD2 = (BV, BK) if STATE_V_FIRST else (BK, BV)
 
     G = HV // H
+    # grouped value heads: dq/dk leave the kernel as fp32 shares; the wrapper sums them and rounds once
+    dqk_dtype = _dtype if G == 1 else T.float32
 
     T_d, NT_d, total_h_d, Ncu_d = T.dynamic("T, NT, total_h, Ncu")
 
@@ -192,17 +194,17 @@ def _build_chunk_bwd_dqkwg_kernel(
             T.copy(f_dg_diff, s_dg)
 
             # shared staging converts MMA fragments to an indexable layout
-            f_out = T.alloc_fragment((BT, BK), _dtype)
-            s_out = T.alloc_shared((BT, BK), _dtype)
+            f_out = T.alloc_fragment((BT, BK), dqk_dtype)
+            s_out = T.alloc_shared((BT, BK), dqk_dtype)
             for _i, _j in T.Parallel(BT, BK):
-                f_out[_i, _j] = T.cast(b_dq[_i, _j], _dtype)
+                f_out[_i, _j] = T.cast(b_dq[_i, _j], dqk_dtype)
             T.copy(f_out, s_out)
             T.sync_threads()
             for _i, _j in T.Parallel(BT, BK):
                 if (i_t_local * BT + _i) < T_seq:
                     dq[i_b, t_s + _i, i_h, k_off + _j] = s_out[_i, _j]
             for _i, _j in T.Parallel(BT, BK):
-                f_out[_i, _j] = T.cast(b_dk[_i, _j], _dtype)
+                f_out[_i, _j] = T.cast(b_dk[_i, _j], dqk_dtype)
             T.copy(f_out, s_out)
             T.sync_threads()
             for _i, _j in T.Parallel(BT, BK):
@@ -224,8 +226,8 @@ def _build_chunk_bwd_dqkwg_kernel(
             h: T.Tensor(h_s, _dtype),
             do: T.Tensor(v_s, _dtype),
             dh: T.Tensor(h_s, _dtype),
-            dq: T.Tensor(dqk_s, _dtype),
-            dk: T.Tensor(dqk_s, _dtype),
+            dq: T.Tensor(dqk_s, dqk_dtype),
+            dk: T.Tensor(dqk_s, dqk_dtype),
             dw: T.Tensor(dqk_s, _dtype),
             dv: T.Tensor(v_s, _dtype),
             dg: T.Tensor(dg_s, T.float32),
@@ -273,8 +275,8 @@ def _build_chunk_bwd_dqkwg_kernel(
             h: T.Tensor(h_s, _dtype),
             do: T.Tensor(v_s, _dtype),
             dh: T.Tensor(h_s, _dtype),
-            dq: T.Tensor(dqk_s, _dtype),
-            dk: T.Tensor(dqk_s, _dtype),
+            dq: T.Tensor(dqk_s, dqk_dtype),
+            dk: T.Tensor(dqk_s, dqk_dtype),
             dw: T.Tensor(dqk_s, _dtype),
             dv: T.Tensor(v_s, _dtype),
             dg: T.Tensor(dg_s, T.float32),
@@ -367,8 +369,8 @@ def chunk_bwd_dqkwg_tilelang(
     USE_DW = w is not None
 
     # dq/dk are computed per value head and reduced to query/key heads after the kernel
-    dq = torch.empty(B, T, HV, K, dtype=q.dtype, device=q.device)
-    dk = torch.empty(B, T, HV, K, dtype=k.dtype, device=k.device)
+    dq = torch.empty(B, T, HV, K, dtype=q.dtype if H == HV else torch.float32, device=q.device)
+    dk = torch.empty(B, T, HV, K, dtype=k.dtype if H == HV else torch.float32, device=k.device)
     dw_out = torch.empty_like(w) if USE_DW else None
     dg = torch.zeros(NK, B, T, HV, dtype=torch.float32, device=q.device) if USE_G else None
 
@@ -430,6 +432,6 @@ def chunk_bwd_dqkwg_tilelang(
         dg = dg.sum(0)
     if H != HV:
         G = HV // H
-        dq = dq.view(B, T, H, G, K).sum(3)
-        dk = dk.view(B, T, H, G, K).sum(3)
+        dq = dq.view(B, T, H, G, K).sum(3).to(q.dtype)
+        dk = dk.view(B, T, H, G, K).sum(3).to(k.dtype)
     return dq, dk, dw_out, dg
