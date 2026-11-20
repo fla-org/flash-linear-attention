@@ -186,7 +186,7 @@ jobs:
           assert IS_NPU, "Expected NPU backend (IS_NPU=True)"
           PY
 
-      - name: Run utils tests
+      - name: Run utils and causal_conv1d tests
         id: pytest
         if: github.event_name != 'schedule' || steps.triton-cache.outputs.cache-hit != 'true'
         shell: bash
@@ -194,9 +194,9 @@ jobs:
           FLA_NPU_XDIST: "1"
         run: |
           source /usr/local/Ascend/ascend-toolkit/set_env.sh
-          # Scope is tests/utils until the remaining A5 suites have been verified.
           pytest -s -v --exitfirst -n 8 --dist load \
-            tests/utils
+            tests/utils \
+            tests/modules/test_conv.py
 
       - name: Save A5 pytest Triton-Ascend kernel cache
         if: |

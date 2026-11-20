@@ -13,6 +13,7 @@ import torch
 import triton
 import triton.language as tl
 from einops import rearrange
+from triton.backends.ascend.utils import is_compile_on_910_95
 
 from fla.backends import TritonAscendBackend, register
 from fla.modules.causal_conv1d.ops import (
@@ -24,6 +25,7 @@ from fla.modules.causal_conv1d.ops import (
 )
 from fla.ops.utils import prepare_chunk_indices
 from fla.utils import get_multiprocessor_count, input_guard
+from fla.utils.hardware import get_npu_target_arch
 
 # triton-ascend exposes extract_slice/insert_slice via cann.extension on some versions.
 try:
@@ -35,6 +37,13 @@ try:
         tl.insert_slice = insert_slice
 except ImportError:
     pass
+
+
+def _conv1d_ub_options(device_index: int) -> dict[str, dict[str, int]]:
+    """Use single buffering for UB on 950 to fit the existing Conv1D tiles."""
+    if is_compile_on_910_95(get_npu_target_arch(device_index)):
+        return {'multibuffer_mode': {'gm': 2, 'l1': 2, 'l0c': 2, 'ub': 1}}
+    return {}
 
 
 def _select_coregrid_bd(D: int, preferred: int) -> int | None:
@@ -965,6 +974,7 @@ def _launch_bwd_dx_core(dy, weight, dht, cu_seqlens, cu_seqlens_cpu, B, T, D, W,
         stride_dx_n=stride_dx_n,
         stride_dx_t=stride_dx_t,
         stride_dx_d=stride_dx_d,
+        **_conv1d_ub_options(dy.device.index),
     )
     for nt_off in range(0, NT, max_nt):
         nt_len = min(max_nt, NT - nt_off)
@@ -1622,6 +1632,7 @@ def _launch_fwd_coregrid(
         NUM_CHKS=NUM_CHKS,
         NUM_BLKS_D=NUM_BLKS_D,
         NT_STRIDE=nt_stride,
+        **_conv1d_ub_options(x.device.index),
     )
     return y, y_linear
 

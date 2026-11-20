@@ -6,6 +6,7 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import inspect
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -14,7 +15,7 @@ from einops import rearrange
 
 from fla import backends
 from fla.modules.convolution import ShortConvolution, causal_conv1d, causal_conv1d_update
-from fla.utils import IS_NVIDIA, IS_NVIDIA_BLACKWELL, assert_close, device
+from fla.utils import IS_NPU, IS_NVIDIA, IS_NVIDIA_BLACKWELL, assert_close, device
 
 try:
     from causal_conv1d import causal_conv1d_fn
@@ -23,6 +24,63 @@ except ImportError:
 
 
 _CONV_REF_FP32_DTYPES = (torch.float16, torch.bfloat16)
+
+
+@pytest.mark.skipif(not IS_NPU, reason='Ascend compile options require the NPU backend')
+@pytest.mark.parametrize(
+    ('arch', 'single_buffer', 'has_residual', 'dtype', 'bwd_bt', 'bwd_bd'),
+    [
+        pytest.param('Ascend950DT', True, True, torch.float32, 64, 16, id='950-fp32-residual'),
+        pytest.param('Ascend910_9599', True, False, torch.bfloat16, 256, 64, id='950-bf16-dx'),
+        pytest.param('Ascend910_9391', False, False, torch.float16, 256, 64, id='a2-a3-default'),
+        pytest.param('Unknown950Test', False, True, torch.float32, 64, 16, id='unknown-default'),
+    ],
+)
+def test_conv_ascend_ub_buffer_policy(monkeypatch, arch, single_buffer, has_residual, dtype, bwd_bt, bwd_bd):
+    from fla.modules.causal_conv1d.backends import triton_ascend
+
+    monkeypatch.setattr(triton_ascend, 'get_npu_target_arch', lambda index: arch)
+    monkeypatch.setattr(triton_ascend, 'get_multiprocessor_count', lambda index: 64)
+    fwd_kernel, bwd_kernel = MagicMock(), MagicMock()
+    monkeypatch.setattr(triton_ascend, 'causal_conv1d_fwd_coregrid_kernel', fwd_kernel)
+    monkeypatch.setattr(triton_ascend, 'causal_conv1d_bwd_dx_kernel', bwd_kernel)
+    x = torch.empty(1, 2048, 256, dtype=dtype)
+    triton_ascend._launch_fwd_coregrid(
+        x=x,
+        weight=torch.empty(256, 4, dtype=dtype),
+        bias=None,
+        residual=x if has_residual else None,
+        activation=None,
+        cu_seqlens=None,
+        cu_seqlens_cpu=None,
+    )
+    fwd_kwargs = fwd_kernel.__getitem__.return_value.call_args.kwargs
+    assert fwd_kwargs['BD'] == 256
+    assert fwd_kwargs['BT'] == 32
+    assert fwd_kwargs['NUM_BLKS_D'] == 1
+
+    triton_ascend._launch_bwd_dx_core(
+        dy=torch.empty(4, 300, 32, dtype=dtype),
+        weight=torch.empty(32, 4, dtype=dtype),
+        dht=None,
+        cu_seqlens=None,
+        cu_seqlens_cpu=None,
+        B=4,
+        T=300,
+        D=32,
+        W=4,
+        BT=64,
+    )
+    bwd_kwargs = bwd_kernel.__getitem__.return_value.call_args.kwargs
+    assert bwd_kwargs['BT'] == bwd_bt
+    assert bwd_kwargs['BD'] == bwd_bd
+    for kwargs in (fwd_kwargs, bwd_kwargs):
+        assert 'multibuffer' not in kwargs
+        assert 'set_workspace_multibuffer' not in kwargs
+        if single_buffer:
+            assert kwargs['multibuffer_mode'] == {'gm': 2, 'l1': 2, 'l0c': 2, 'ub': 1}
+        else:
+            assert 'multibuffer_mode' not in kwargs
 
 
 def _conv_ref_compute_dtype(*tensors: torch.Tensor | None) -> torch.dtype:
@@ -133,6 +191,8 @@ def conv_backend_calls(monkeypatch: pytest.MonkeyPatch) -> list[str] | None:
             (2, 1024, 1024, 4, None, False, True, torch.float32, 'triton'),
             (2, 64, 128, 3, None, True, False, torch.float16, 'triton'),
             (2, 128, 128, 4, None, False, False, torch.float16, 'triton'),
+            (2, 2048, 256, 4, "swish", True, True, torch.float32, 'triton'),
+            (2, 1024, 8, 4, None, True, False, torch.bfloat16, 'triton'),
             (2, 64, 128, 3, "swish", True, True, torch.float32, 'cuda'),
             (2, 128, 128, 4, "swish", False, True, torch.float32, 'cuda'),
             (2, 64, 128, 3, "swish", True, False, torch.float32, 'cuda'),
@@ -203,6 +263,8 @@ def test_conv(
             (4, 1024, 200, 4, "swish", False, True, torch.float32, 'triton'),
             (4, 500, 128, 3, None, True, False, torch.float16, 'triton'),
             (4, 1024, 1024, 4, None, False, False, torch.float16, 'triton'),
+            (4, 2048, 256, 4, "swish", True, True, torch.float32, 'triton'),
+            (4, 129, 8, 4, None, True, False, torch.bfloat16, 'triton'),
             (4, 500, 128, 3, "swish", True, True, torch.float32, 'cuda'),
             (4, 1024, 200, 4, "swish", False, True, torch.float32, 'cuda'),
             (4, 500, 128, 3, None, True, False, torch.float16, 'cuda'),
@@ -239,12 +301,16 @@ def test_conv_varlen(
     residual = x.detach().clone().requires_grad_(True) if has_residual else None
     dy = torch.randn(1, T, D).to(device, dtype)
 
+    # share the casts so sequence gradients accumulate before low-precision rounding.
+    compute_dtype = _conv_ref_compute_dtype(x, weight, bias)
+    ref_weight = weight.to(compute_dtype)
+    ref_bias = bias.to(compute_dtype) if bias is not None else None
     ref = torch.cat([
         rearrange(
             causal_conv1d_ref(
                 x=rearrange(x[:, bos:eos].contiguous(), "b t d -> b d t"),
-                weight=weight,
-                bias=bias,
+                weight=ref_weight,
+                bias=ref_bias,
                 activation=activation,
             ),
             "b t d -> b d t",
@@ -360,6 +426,7 @@ def test_fast_conv_varlen(N: int, T: int, D: int, W: int, activation: str | None
     [
         pytest.param(*test, id="B{}_T{}_D{}_W{}_{}_bias{}_residual{}_state{}_{}".format(*test))
         for test in [
+            (4, 300, 32, 4, 'silu', False, False, False, torch.bfloat16),
             (2, 64, 100, 3, 'swish', True, True, True, torch.float32),
             (2, 128, 128, 4, 'swish', True, True, True, torch.float32),
             (3, 128, 128, 4, 'swish', True, True, True, torch.float32),
@@ -626,6 +693,7 @@ def test_conv_non_contiguous_qkv(
             (2, 128, 128, 3, "silu", torch.float32),
             (1, 15, 64, 2, None, torch.bfloat16),
             (4, 300, 32, 4, "silu", torch.bfloat16),
+            (4, 300, 32, 4, "silu", torch.float16),
         ]
     ],
 )
