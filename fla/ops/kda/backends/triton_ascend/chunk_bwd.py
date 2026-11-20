@@ -593,6 +593,7 @@ def chunk_kda_bwd_kernel_wy_k_part_npu(
     K_OFFSET: tl.constexpr,
     USE_GRAPH: tl.constexpr = False,
     FP32_H: tl.constexpr = False,
+    g_suffix=None,
 ):
     i_k = K_OFFSET
     core_id = tl.program_id(0)
@@ -710,7 +711,14 @@ def chunk_kda_bwd_kernel_wy_k_part_npu(
                         b_dk_t = tl.dot(b_dh.to(b_v_new.dtype), tl.trans(b_v_new), b_dk_t, allow_tf32=False)
                     b_dk = tl.trans(b_dk_t)
 
-                b_dk = b_dk * tl.where(m_s[:, None], exp2(b_gn[None, :] - b_g), 0)
+                b_gs = b_gn[None, :] - b_g
+                if g_suffix is not None:
+                    o_s = tl.cast(i_t, tl.int64) * BT + s * BC + tl.arange(0, BC)
+                    b_gs = tl.load(
+                        g_suffix + ((bos + o_s[:, None]) * HV + i_hv) * K + o_k_2[None, :],
+                        mask=m_p_k, other=0,
+                    ).to(tl.float32)
+                b_dk = b_dk * tl.where(m_s[:, None], exp2(b_gs), 0)
                 b_kdk_sum += tl.sum(b_k * b_dk, axis=0)
                 p_dk = add_token_rows(dk_ptr, row_base, rows[:, None], HV * K, not MASK_DMA) + o_k_2[None, :]
                 mstore(p_dk,  b_dk.to(p_dk.dtype.element_ty), m_p_k, MASK_DMA)
