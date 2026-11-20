@@ -145,9 +145,7 @@ def test_causal_lm_loss_fused(linear, use_l2warp, num_items, make_model):
         assert_close(name, parameter.grad, fused_parameter.grad, 1e-3)
 
 
-@pytest.mark.parametrize('config_class', [GLAConfig, MemoryAttnConfig, pytest.param(
-    MomConfig, marks=pytest.mark.skipif(device_name == 'cpu', reason='MoM normalization requires an accelerator.'),
-)])
+@pytest.mark.parametrize('config_class', [GLAConfig, MemoryAttnConfig, MomConfig])
 @pytest.mark.parametrize('selection', [None, 0, 2, torch.tensor([0, 2, 5])])
 @pytest.mark.parametrize('return_dict', [False, True])
 def test_causal_lm_logits(config_class, selection, return_dict, full_precision_matmul, make_model):
