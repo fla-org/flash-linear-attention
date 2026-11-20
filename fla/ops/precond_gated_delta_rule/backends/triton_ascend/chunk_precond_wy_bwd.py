@@ -13,28 +13,15 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.gated_delta_rule.backends.triton_ascend.wy_fast import (
-    _MAX_TILE_BWD,
-    _MAX_TILE_BWD_KV,
-    _PREPARE_BWD_K_MEM_MULT,
-    _PREPARE_BWD_KV_MEM_MULT,
-    _beta_npu_arg,
-    _bwd_col_tile,
-    _g_contig_base,
-    _g_npu_arg,
-    _launch_wy_core_grid,
-    _launch_wy_kernel,
-    _t_npu_buf,
-    prepare_wy_repr_bwd_da_dot2_npu,
-    prepare_wy_repr_bwd_da_gate_npu,
-    prepare_wy_repr_bwd_da_mask_dot1_npu,
-    prepare_wy_repr_bwd_kv_npu,
-)
+from fla.backends import TritonAscendBackend, register
+from fla.ops.common.backends.triton_ascend.chunk_delta_h import need_dma_mask, time_axis_needs_mask
+from fla.ops.gated_delta_rule.backends.triton_ascend import wy_fast
+from fla.ops.precond_gated_delta_rule.chunk_precond_wy_bwd import prepare_precond_wy_repr_bwd
 from fla.ops.utils import prepare_chunk_indices
 from fla.utils import ascend_compile_kwargs, input_guard
 
 # Extra k_precond / dk_precond tiles vs the symmetric GDN finalize_k.
-_PRECOND_BWD_K_MEM_MULT = _PREPARE_BWD_K_MEM_MULT + 1.0
+PRECOND_BWD_K_MEM_MULT = wy_fast.PREPARE_BWD_K_MEM_MULT + 1.0
 
 
 @triton.heuristics({
@@ -70,12 +57,12 @@ def prepare_precond_wy_repr_bwd_finalize_k_npu(
         o_t = i_t * BT + tl.arange(0, BT)
         m_t = o_t < T
         if BETA_T_CONTIG:
-            beta_ptr = _g_contig_base(beta, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
+            beta_ptr = wy_fast.get_gate_base(beta, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
             b_b = tl.load(beta_ptr + o_t, mask=m_t, other=0).to(tl.float32)
         else:
             b_b = tl.load(beta + (bos * HV + i_h) + o_t * HV, mask=m_t, other=0).to(tl.float32)
         if DB_T_CONTIG:
-            db_ptr = _g_contig_base(db, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
+            db_ptr = wy_fast.get_gate_base(db, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
             b_db = tl.load(db_ptr + o_t, mask=m_t, other=0).to(tl.float32)
         else:
             b_db = tl.load(db + (bos * HV + i_h) + o_t * HV, mask=m_t, other=0).to(tl.float32)
@@ -84,7 +71,6 @@ def prepare_precond_wy_repr_bwd_finalize_k_npu(
             dA_out + (bos * HV + i_h) * BT + o_i[:, None] + o_t[None, :] * (HV * BT),
             mask=m_t[None, :], other=0,
         ).to(tl.float32)
-        b_dA_c = b_dA + 0.0
         i_key = i_h // (HV // H)
 
         for i_k in range(tl.cdiv(K, BK)):
@@ -97,13 +83,13 @@ def prepare_precond_wy_repr_bwd_finalize_k_npu(
             b_k = tl.load(p_k, mask=m_tk, other=0).to(tl.float32)
             b_kp = tl.load(p_kp, mask=m_tk, other=0).to(tl.float32)
             b_kb = b_k * b_b[:, None]
-            # Ascend tl.dot clobbers lhs; keep a pristine copy for the rhs dot.
+            # lhs dot consumes its copy; the original dA stays for the rhs dot.
             b_dA_lhs = b_dA + 0.0
             b_dkb = tl.dot(b_dA_lhs, b_kp, allow_tf32=False)
             b_db += tl.sum(b_dkb * b_k, 1)
             b_dk = b_dkb * b_b[:, None]
             b_dk += tl.load(p_dk, mask=m_tk, other=0).to(tl.float32)
-            b_dkp = tl.trans(tl.dot(tl.trans(b_kb), b_dA_c, allow_tf32=False))
+            b_dkp = tl.trans(tl.dot(tl.trans(b_kb), b_dA, allow_tf32=False))
             tl.store(p_dk, b_dk.to(dk.dtype.element_ty), mask=m_tk)
             tl.store(p_dkp, b_dkp.to(dk_precond.dtype.element_ty), mask=m_tk)
 
@@ -138,12 +124,12 @@ def prepare_precond_wy_repr_bwd_finalize_a2_dg_npu(
     o_t = i_t * BT + tl.arange(0, BT)
     m_t = o_t < T
     if BETA_T_CONTIG:
-        beta_ptr = _g_contig_base(beta, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
+        beta_ptr = wy_fast.get_gate_base(beta, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
         b_b = tl.load(beta_ptr + o_t, mask=m_t, other=0).to(tl.float32)
     else:
         b_b = tl.load(beta + (bos * HV + i_h) + o_t * HV, mask=m_t, other=0).to(tl.float32)
     if DG_T_CONTIG:
-        dg_ptr = _g_contig_base(dg, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
+        dg_ptr = wy_fast.get_gate_base(dg, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
     o_i = tl.arange(0, BT)
     b_A_asymm = tl.zeros([BT, BT], dtype=tl.float32)
     i_key = i_h // (HV // H)
@@ -159,8 +145,7 @@ def prepare_precond_wy_repr_bwd_finalize_a2_dg_npu(
             mask=m_tk, other=0,
         ).to(tl.float32)
         b_kb = b_k * b_b[:, None]
-        b_kp_c = b_kp + 0.0
-        b_A_asymm = tl.dot(b_kb, tl.trans(b_kp_c), b_A_asymm, allow_tf32=False)
+        b_A_asymm = tl.dot(b_kb, tl.trans(b_kp), b_A_asymm, allow_tf32=False)
     b_dA = tl.load(
         dA_out + (bos * HV + i_h) * BT + o_i[:, None] + o_t[None, :] * (HV * BT),
         mask=m_t[None, :], other=0,
@@ -177,6 +162,17 @@ def prepare_precond_wy_repr_bwd_finalize_a2_dg_npu(
         tl.store(dg + (bos * HV + i_h) + o_t * HV, b_dg.to(dg.dtype.element_ty), mask=m_t)
 
 
+def prepare_precond_wy_repr_bwd_verifier(k, k_precond, v, *args, **kwargs):
+    from fla.utils import IS_NPU
+    if not IS_NPU:
+        return False, "not running on NPU"
+    for tensor in (k, k_precond, v):
+        if isinstance(tensor, torch.Tensor) and tensor.device.type != "npu":
+            return False, "input device is not NPU"
+    return True, None
+
+
+@register(prepare_precond_wy_repr_bwd, backend=TritonAscendBackend, verifier=prepare_precond_wy_repr_bwd_verifier)
 @input_guard
 def prepare_precond_wy_repr_bwd_npu(
     k: torch.Tensor,
@@ -190,31 +186,32 @@ def prepare_precond_wy_repr_bwd_npu(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    B, T, H, K, V, HV = *k.shape, v.shape[-1], v.shape[2]
+    B, T, H, K = k.shape
+    HV, V = v.shape[2], v.shape[-1]
     BT = A.shape[-1]
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
-    BK, BV = _bwd_col_tile(BT, K, _PREPARE_BWD_KV_MEM_MULT, _MAX_TILE_BWD_KV), _bwd_col_tile(
-        BT, V, _PREPARE_BWD_KV_MEM_MULT, _MAX_TILE_BWD_KV)
-    BK_FIN = _bwd_col_tile(BT, K, _PRECOND_BWD_K_MEM_MULT, _MAX_TILE_BWD)
+    BK = wy_fast.get_wy_block_size(BT, K, wy_fast.PREPARE_BWD_KV_MEM_MULT, wy_fast.MAX_TILE_BWD_KV)
+    BV = wy_fast.get_wy_block_size(BT, V, wy_fast.PREPARE_BWD_KV_MEM_MULT, wy_fast.MAX_TILE_BWD_KV)
+    BK_FIN = wy_fast.get_wy_block_size(BT, K, PRECOND_BWD_K_MEM_MULT, wy_fast.MAX_TILE_BWD)
     use_g = g is not None
     is_varlen = cu_seqlens is not None
-    # Shared WY kernels still store with boundary_check, so partial chunks stay zero-filled.
-    zero_ws = is_varlen or T % BT != 0
+    # Shared WY kernels mask partial chunks, so the unwritten tail stays zero-filled.
+    zero_ws = time_axis_needs_mask(T, BT, cu_seqlens)
     KP = K
     dk = k.new_zeros(B, T, HV, K) if zero_ws else k.new_empty(B, T, HV, K)
     dk_precond = k.new_zeros(B, T, HV, K) if zero_ws else k.new_empty(B, T, HV, K)
     dv = v.new_zeros(B, T, HV, V) if zero_ws else v.new_empty(B, T, HV, V)
-    db, db_t_contig = _t_npu_buf(B, T, HV, dtype=beta.dtype, device=k.device)
-    beta_arg, beta_t_contig = _beta_npu_arg(beta, HV)
+    db, db_t_contig = wy_fast.allocate_time_buffer(B, T, HV, dtype=beta.dtype, device=k.device)
+    beta_arg, beta_t_contig = wy_fast.prepare_beta_input(beta, HV)
     dg, dg_t_contig = None, False
     g_gate, g_t_contig = None, False
     g_k_arg = k
     g_exp_precomp = False
     if use_g:
-        dg, dg_t_contig = _t_npu_buf(B, T, HV, dtype=g.dtype, device=k.device)
-        g_gate, g_t_contig = _g_npu_arg(g, HV)
+        dg, dg_t_contig = wy_fast.allocate_time_buffer(B, T, HV, dtype=g.dtype, device=k.device)
+        g_gate, g_t_contig = wy_fast.prepare_gate_input(g, HV)
         g_k_arg = g_gate
         if not is_varlen:
             g_k_arg = torch.exp2(g_gate.float()).to(g_gate.dtype)
@@ -224,6 +221,8 @@ def prepare_precond_wy_repr_bwd_npu(
     dA_mid = torch.empty_like(A, dtype=torch.float32)
     dA_out = torch.empty_like(A)
 
+    mask_dma = need_dma_mask(T, BT, K, BK, V, BV, is_varlen, cu_seqlens)
+    mask_time = time_axis_needs_mask(T, BT, cu_seqlens)
     base = dict(
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
@@ -233,69 +232,116 @@ def prepare_precond_wy_repr_bwd_npu(
     )
     core_base = dict(B=B, **base)
     task_num = NT * B * HV
-    _launch_wy_core_grid(
-        prepare_wy_repr_bwd_kv_npu,
+    wy_fast.launch_wy_core_grid(
+        wy_fast.prepare_wy_repr_bwd_kv_npu,
         task_num=task_num,
         kernel_kwargs=dict(
-            k=k, v=v, beta=beta_arg, g=g_k_arg, A=A, dw=dw, du=du,
-            dk=dk, dv=dv, dA_scr=dA_scr, db=db, dg=dg_arg,
-            H=H, HV=HV, K=K, V=V, BK=BK, BV=BV, USE_G=use_g,
-            G_T_CONTIG=g_t_contig, BETA_T_CONTIG=beta_t_contig,
-            DG_T_CONTIG=dg_t_contig, DB_T_CONTIG=db_t_contig,
+            k=k,
+            v=v,
+            beta=beta_arg,
+            g=g_k_arg,
+            A=A,
+            dw=dw,
+            du=du,
+            dk=dk,
+            dv=dv,
+            dA=dA_scr,
+            db=db,
+            dg=dg_arg,
+            H=H,
+            HV=HV,
+            K=K,
+            V=V,
+            BK=BK,
+            BV=BV,
+            USE_G=use_g,
+            G_T_CONTIG=g_t_contig,
+            BETA_T_CONTIG=beta_t_contig,
+            DG_T_CONTIG=dg_t_contig,
+            DB_T_CONTIG=db_t_contig,
+            MASK_DMA=mask_dma,
             G_EXP_PRECOMP=g_exp_precomp,
             **core_base,
         ),
     )
-    _launch_wy_kernel(
-        prepare_wy_repr_bwd_da_mask_dot1_npu,
+    wy_fast.launch_wy_kernel(
+        wy_fast.prepare_wy_repr_bwd_da_mask_dot1_npu,
         NT=NT,
         bh_total=B * HV,
         kernel_kwargs=dict(
-            A=A, dA_scr=dA_scr, dA_mid=dA_mid,
+            A=A,
+            dA_scr=dA_scr,
+            dA_mid=dA_mid,
             HV=HV,
+            MASK_DMA=mask_time,
             **base,
         ),
     )
-    _launch_wy_kernel(
-        prepare_wy_repr_bwd_da_dot2_npu,
+    wy_fast.launch_wy_kernel(
+        wy_fast.prepare_wy_repr_bwd_da_dot2_npu,
         NT=NT,
         bh_total=B * HV,
         kernel_kwargs=dict(
-            A=A, dA_mid=dA_mid, dA_out=dA_out,
+            A=A,
+            dA_mid=dA_mid,
+            dA_out=dA_out,
             HV=HV,
+            MASK_DMA=mask_time,
             **base,
         ),
     )
     if use_g:
-        _launch_wy_kernel(
-            prepare_wy_repr_bwd_da_gate_npu,
+        wy_fast.launch_wy_kernel(
+            wy_fast.prepare_wy_repr_bwd_da_gate_npu,
             NT=NT,
             bh_total=B * HV,
             kernel_kwargs=dict(
-                g=g_gate, dA_out=dA_out,
-                HV=HV, G_T_CONTIG=g_t_contig,
+                g=g_gate,
+                dA_out=dA_out,
+                HV=HV,
+                G_T_CONTIG=g_t_contig,
+                MASK_DMA=mask_time,
                 **base,
             ),
         )
-    _launch_wy_core_grid(
+    wy_fast.launch_wy_core_grid(
         prepare_precond_wy_repr_bwd_finalize_k_npu,
         task_num=task_num,
         kernel_kwargs=dict(
-            k=k, k_precond=k_precond, beta=beta_arg, dA_out=dA_out,
-            dk=dk, dk_precond=dk_precond, db=db,
-            H=H, HV=HV, K=K, BK=BK_FIN, KP=KP, BETA_T_CONTIG=beta_t_contig, DB_T_CONTIG=db_t_contig,
+            k=k,
+            k_precond=k_precond,
+            beta=beta_arg,
+            dA_out=dA_out,
+            dk=dk,
+            dk_precond=dk_precond,
+            db=db,
+            H=H,
+            HV=HV,
+            K=K,
+            BK=BK_FIN,
+            KP=KP,
+            BETA_T_CONTIG=beta_t_contig,
+            DB_T_CONTIG=db_t_contig,
             **core_base,
         ),
     )
     if use_g:
-        _launch_wy_kernel(
+        wy_fast.launch_wy_kernel(
             prepare_precond_wy_repr_bwd_finalize_a2_dg_npu,
             NT=NT,
             bh_total=B * HV,
             kernel_kwargs=dict(
-                k=k, k_precond=k_precond, beta=beta_arg, dA_out=dA_out, dg=dg_arg,
-                H=H, HV=HV, K=K, BK=BK_FIN,
-                BETA_T_CONTIG=beta_t_contig, DG_T_CONTIG=dg_t_contig,
+                k=k,
+                k_precond=k_precond,
+                beta=beta_arg,
+                dA_out=dA_out,
+                dg=dg_arg,
+                H=H,
+                HV=HV,
+                K=K,
+                BK=BK_FIN,
+                BETA_T_CONTIG=beta_t_contig,
+                DG_T_CONTIG=dg_t_contig,
                 **base,
                 **ascend_compile_kwargs(),
             ),

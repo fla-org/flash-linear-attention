@@ -7,6 +7,7 @@
 
 import pytest
 import torch
+from transformers import AutoModelForCausalLM
 
 from fla.models import RWKV7Config
 
@@ -56,3 +57,10 @@ def test_generation(
     dtype: torch.dtype,
 ):
     check_generation(L, B, T, H, D, RWKV7Config, dtype)
+
+
+def test_single_layer():
+    # the per-layer init interpolates over num_hidden_layers - 1 layers
+    config = RWKV7Config(hidden_size=64, head_dim=32, num_hidden_layers=1, vocab_size=128)
+    model = AutoModelForCausalLM.from_config(config)
+    assert all(torch.isfinite(p).all() for p in model.parameters())

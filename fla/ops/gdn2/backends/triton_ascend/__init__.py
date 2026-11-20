@@ -155,3 +155,6 @@ class TritonAscendGDN2Backend(BaseBackend):
     def fused_recurrent_gdn2_fwd(self, *args, **kwargs):
         from fla.ops.gdn2.backends.triton_ascend.fused_recurrent import fused_recurrent_gdn2_fwd_npu
         return fused_recurrent_gdn2_fwd_npu(*args, **kwargs)
+
+
+from fla.ops.gdn2.backends.triton_ascend import chunk_bwd, chunk_intra, fused_recurrent, wy_fast  # noqa: E402, F401

@@ -556,7 +556,8 @@ class ParallelDeltaformerFunction(torch.autograd.Function):
         chunk_base = 0
         for b in range(B):
             grad_v_seq = torch.empty(T, H, D, device=ko.device, dtype=ko.dtype)
-            for i in range(T - C, -1, -C):
+            # walk the chunks the forward made, starting at 0, C, 2C, ...; the last one may be shorter than C
+            for i in range(((T - 1) // C) * C, -1, -C):
                 Ci = min(C, T - i)
                 do = grad_u[b, i:i + Ci, :, :]
 

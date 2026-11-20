@@ -5,15 +5,17 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+import inspect
 import os
 
 import pytest
 import torch
 
+from fla import backends
 from fla.ops.attn.decoding import attn_decoding_one_step
 from fla.ops.attn.naive import naive_attn_decoding, naive_parallel_attn
-from fla.ops.attn.parallel import parallel_attn
-from fla.utils import assert_close, check_shared_mem, device
+from fla.ops.attn.parallel import parallel_attn, parallel_attn_bwd, parallel_attn_fwd
+from fla.utils import IS_NVIDIA_HOPPER, TRITON_ABOVE_3_4_0, assert_close, check_shared_mem, device
 
 
 @pytest.mark.parametrize(
@@ -143,6 +145,53 @@ def test_parallel(
     ref_dv, v.grad = v.grad.clone(), None
 
     tri = parallel_attn(q=q, k=k, v=v, scale=scale, output_dtype=output_dtype)
+    tri.backward(do)
+    tri_dq, q.grad = q.grad.clone(), None
+    tri_dk, k.grad = k.grad.clone(), None
+    tri_dv, v.grad = v.grad.clone(), None
+
+    assert_close(" o", ref, tri, 0.005)
+    assert_close("dq", ref_dq, tri_dq, 0.005)
+    assert_close("dk", ref_dk, tri_dk, 0.005)
+    assert_close("dv", ref_dv, tri_dv, 0.005)
+
+
+@pytest.mark.parametrize(
+    ("B", "T", "H", "HQ", "K", "V", "scale"),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-HQ{}-K{}-V{}-scale{}".format(*test))
+        for test in [
+            (1, 63, 2, 2, 64, 64, 1.0),
+            (2, 127, 2, 8, 64, 64, 0.1),
+        ]
+    ],
+)
+def test_parallel_fp32(
+    B: int,
+    T: int,
+    H: int,
+    HQ: int,
+    K: int,
+    V: int,
+    scale: float,
+):
+    # Regression test for #1590: float32 inputs used to make the TileLang backend
+    # fail at kernel-build time ("Layout infer conflict"). The verifier now rejects
+    # float32 so dispatch falls back to Triton; this test pins that fallback path.
+    torch.manual_seed(42)
+    os.environ["TRITON_F32_DEFAULT"] = "ieee"
+    q = torch.randn((B, T, HQ, K), dtype=torch.float32, device=device).requires_grad_(True)
+    k = torch.randn((B, T, H, K), dtype=torch.float32, device=device).requires_grad_(True)
+    v = torch.randn((B, T, H, V), dtype=torch.float32, device=device).requires_grad_(True)
+    do = torch.randn((B, T, HQ, V), dtype=torch.float32, device=device)
+
+    ref, _ = naive_parallel_attn(q=q.float(), k=k.float(), v=v.float(), scale=scale)
+    ref.backward(do)
+    ref_dq, q.grad = q.grad.clone(), None
+    ref_dk, k.grad = k.grad.clone(), None
+    ref_dv, v.grad = v.grad.clone(), None
+
+    tri = parallel_attn(q=q, k=k, v=v, scale=scale)
     tri.backward(do)
     tri_dq, q.grad = q.grad.clone(), None
     tri_dk, k.grad = k.grad.clone(), None
@@ -593,3 +642,19 @@ def test_attn_decoding_one_step(HQ, V, lengths, use_sink, use_g, do_gate_scale, 
     )
     assert torch.isfinite(tri).all()
     assert_close('o', ref, tri, 0.01)
+
+
+@pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
+@pytest.mark.parametrize('entry', [parallel_attn_fwd, parallel_attn_bwd])
+def test_parallel_tilelang_backend(entry):
+    if not backends.TileLangBackend.is_available():
+        pytest.skip('TileLang is unavailable')
+    from fla.ops.attn.backends import tilelang
+
+    candidate = backends._function_registries[inspect.unwrap(entry)]._backends['tilelang']
+    implementation = getattr(tilelang, f'{entry.__name__}_tilelang')
+    assert candidate.implementation is implementation
+    assert candidate.default_enable is (IS_NVIDIA_HOPPER and TRITON_ABOVE_3_4_0)
+    expected = [(p.name, p.kind, p.default) for p in inspect.signature(entry).parameters.values()]
+    actual = [(p.name, p.kind, p.default) for p in inspect.signature(implementation).parameters.values()]
+    assert actual == expected

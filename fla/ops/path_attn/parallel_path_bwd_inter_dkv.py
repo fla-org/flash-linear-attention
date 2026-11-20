@@ -66,7 +66,7 @@ def parallel_path_bwd_dkv_kernel(
 
     do += (bos * HQ + i_hq) * V
     dk += (bos * HQ + i_hq) * K
-    dv += (bos * HQ + i_hq) * K
+    dv += (bos * HQ + i_hq) * V
     L += (bos * HQ + i_hq)
     D += (bos * HQ + i_hq)
 

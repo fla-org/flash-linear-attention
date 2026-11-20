@@ -116,6 +116,9 @@ def naive_deltaformer_u(q, k, v, beta):
             (2, 192, 2, 64, 16, torch.float16),
             (2, 192, 2, 64, 48, torch.float16),
             (2, 192, 2, 64, 64, torch.float16),
+            # T not a multiple of C, so the last chunk is shorter than C
+            (2, 200, 2, 64, 64, torch.float16),
+            (2, 200, 2, 64, 48, torch.float16),
         ]
     ],
 )

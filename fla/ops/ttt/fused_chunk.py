@@ -9,6 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.backends import dispatch
 from fla.modules.layernorm import group_norm
 from fla.utils import IS_NVIDIA_HOPPER, autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, input_guard
 
@@ -425,8 +426,8 @@ def fused_chunk_ttt_linear_bwd_kernel_dh(
         mask = (o_i == i_last)
         b_dk -= b_e_last * tl.dot(b_v2, tl.trans(b_dh).to(b_v2.dtype))
         b_dk -= tl.dot(tl.trans(b_ds), tl.trans(b_q) * b_e[:, None])
-        b_de = mask * tl.sum(- b_dh * tl.trans(tl.dot(tl.trans(b_v2), b_k))).to(b_k.dtype)
-        b_de -= mask * tl.sum(b_dhb * tl.sum(b_v2, axis=0)).to(b_k.dtype)
+        b_de = tl.where(mask, tl.sum(- b_dh * tl.trans(tl.dot(tl.trans(b_v2), b_k))), 0.0)
+        b_de -= tl.where(mask, tl.sum(b_dhb * tl.sum(b_v2, axis=0)), 0.0)
         b_de -= tl.sum(tl.dot(b_ds, b_k) * tl.trans(b_q).to(b_k.dtype), axis=1)
         b_de -= tl.sum(b_ds, axis=1)
         b_dh += tl.dot(b_q, b_do.to(b_q.dtype)) + tl.dot(tl.trans(b_k).to(b_dkh.dtype), b_dkh)
@@ -448,6 +449,7 @@ def fused_chunk_ttt_linear_bwd_kernel_dh(
         tl.store(p_dhb0, b_dhb.to(p_dhb0.dtype.element_ty), mask=o_v < V)
 
 
+@dispatch('ttt')
 def fused_chunk_ttt_linear_bwd_h(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -506,6 +508,7 @@ def fused_chunk_ttt_linear_bwd_h(
     return dq, h, v2, x, y, r
 
 
+@dispatch('ttt')
 def fused_chunk_ttt_linear_bwd_dh(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -579,6 +582,7 @@ def fused_chunk_ttt_linear_bwd_dh(
     return dk, dv, de, dw, db, dh0, dhb0
 
 
+@dispatch('ttt')
 def fused_chunk_ttt_linear_fwd(
     q: torch.Tensor,
     k: torch.Tensor,

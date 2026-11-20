@@ -62,7 +62,8 @@ def chunk_abc_fwd_kernel_h(
         # [BT, BV]
         b_v = tl.load(p_v, mask=m_tv, other=0.0)
         if NORMK:
-            o_zc = (i_t * BT + BT - 1).to(tl.int64) * K + i_k * BK + tl.arange(0, BK)
+            # the last row of the chunk, which is row T - 1 for a partial last chunk
+            o_zc = (tl.minimum(i_t * BT + BT, T) - 1).to(tl.int64) * K + i_k * BK + tl.arange(0, BK)
             p_zc = z + i_bh * T*K + o_zc
             # [BK,]
             b_zc = tl.load(p_zc, mask=o_zc < T*K, other=0.0)
@@ -71,7 +72,8 @@ def chunk_abc_fwd_kernel_h(
             b_h = b_h * b_r[:, None]
             b_k = exp(b_k - b_zc[:, None]).to(b_k.dtype)
         else:
-            o_zc = (i_t * BT + BT - 1).to(tl.int64) * V + i_v * BV + tl.arange(0, BV)
+            # the last row of the chunk, which is row T - 1 for a partial last chunk
+            o_zc = (tl.minimum(i_t * BT + BT, T) - 1).to(tl.int64) * V + i_v * BV + tl.arange(0, BV)
             p_zc = z + i_bh * T*V + o_zc
             # [BV,]
             b_zc = tl.load(p_zc, mask=o_zc < T*V, other=0.0)

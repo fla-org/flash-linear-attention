@@ -1,6 +1,6 @@
 # Stick-Breaking Attention
 
-This note describes the formulation and parallel implementation of stick-breaking attention.[^1][^2]
+This note describes the formulation and the parallel and decoding implementations of stick-breaking attention.[^1][^2]
 
 ## Formulation
 
@@ -35,6 +35,10 @@ For a key block $\mathcal{B}$, let $\alpha_i$ be the log of the stick left by ne
 ```
 
 After accumulating the block's contribution to $\mathbf{o}_i$, update $\alpha_i$ by adding the sum of $b_{ij}$ over its visible keys. This computes the output and $r_i = 2^{\alpha_i}$ without materializing the full attention matrix.
+
+## Decoding
+
+With a KV cache, each call appends the keys and values of its new tokens and evaluates their queries over everything cached. The queries of a sequence are its last tokens, so each sees the same keys as its row of the full forward, and `stickbreaking_attn_decoding` walks them from nearest to farthest with the same carry $\alpha_i$, one query per program. Query and key/value lengths are independent and, with `cu_seqlens_q` and `cu_seqlens_k`, can differ per sequence. As in the parallel kernel, logits and outputs accumulate in fp32, and the weights are rounded to the value dtype before they multiply the values. For fp16 and bf16 inputs the result matches those rows of the parallel forward up to the order of the reductions; for fp32 inputs the parallel kernel's dots use TF32 on NVIDIA GPUs and the decoding products do not. Decoding is forward only.
 
 ## Backward Pass
 
