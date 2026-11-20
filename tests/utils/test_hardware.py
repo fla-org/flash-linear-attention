@@ -9,33 +9,28 @@ from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-import pytest
-
 from fla.utils import hardware
 
 
-@pytest.mark.parametrize(
-    ('target_arch', 'expected'),
-    [
-        ('NPU 910B4', 'a2/a3'),
-        ('Ascend910_9391', 'a2/a3'),
-        ('Ascend950DT', '950'),
-        ('Ascend950PR', '950'),
-        ('Ascend910_9599', '950'),
-    ],
-)
-def test_get_npu_arch(monkeypatch, target_arch, expected):
-    device_context = MagicMock(side_effect=lambda index: nullcontext())
-    get_target = MagicMock(return_value=SimpleNamespace(backend='npu', arch=target_arch))
+def test_get_npu_target_arch_retries_per_device(monkeypatch, request):
+    device_context = MagicMock(side_effect=nullcontext)
+    get_target = MagicMock()
     monkeypatch.setattr(hardware.torch, 'npu', SimpleNamespace(device=device_context), raising=False)
     monkeypatch.setattr(hardware.triton.runtime, 'driver', SimpleNamespace(
         active=SimpleNamespace(get_current_target=get_target)))
-    hardware.get_npu_arch.cache_clear()
-    try:
-        assert hardware.get_npu_arch(0) == expected
-        assert hardware.get_npu_arch(0) == expected
-        assert hardware.get_npu_arch(1) == expected
-        assert get_target.call_count == 2
-        assert [call.args[0] for call in device_context.call_args_list] == [0, 1]
-    finally:
-        hardware.get_npu_arch.cache_clear()
+    hardware._get_npu_target_arch.cache_clear()
+    request.addfinalizer(hardware._get_npu_target_arch.cache_clear)
+    get_target.side_effect = [
+        RuntimeError('target temporarily unavailable'),
+        SimpleNamespace(backend='npu', arch='Ascend910_9391'),
+        SimpleNamespace(backend='npu', arch='Ascend950DT'),
+        SimpleNamespace(backend='cuda', arch=90),
+    ]
+    assert hardware.get_npu_target_arch(0) == ''
+    assert hardware.get_npu_target_arch(1) == 'Ascend910_9391'
+    assert hardware.get_npu_target_arch(0) == 'Ascend950DT'
+    assert hardware.get_npu_target_arch(2) == ''
+    assert hardware.get_npu_target_arch(1) == 'Ascend910_9391'
+    assert hardware.get_npu_target_arch(0) == 'Ascend950DT'
+    assert [call.args[0] for call in device_context.call_args_list] == [0, 1, 0, 2]
+    assert get_target.call_count == 4

@@ -13,6 +13,7 @@ import torch
 import triton
 import triton.language as tl
 from einops import rearrange
+from triton.backends.ascend.utils import is_compile_on_910_95
 
 from fla.backends import TritonAscendBackend, register
 from fla.modules.causal_conv1d.ops import (
@@ -24,7 +25,7 @@ from fla.modules.causal_conv1d.ops import (
 )
 from fla.ops.utils import prepare_chunk_indices
 from fla.utils import get_multiprocessor_count, input_guard
-from fla.utils.hardware import get_npu_arch
+from fla.utils.hardware import get_npu_target_arch
 
 # triton-ascend exposes extract_slice/insert_slice via cann.extension on some versions.
 try:
@@ -40,7 +41,7 @@ except ImportError:
 
 def _conv1d_ub_options(device_index: int) -> dict[str, dict[str, int]]:
     """Use single buffering for UB on 950 to fit the existing Conv1D tiles."""
-    if get_npu_arch(device_index) == '950':
+    if is_compile_on_910_95(get_npu_target_arch(device_index)):
         return {'multibuffer_mode': {'gm': 2, 'l1': 2, 'l0c': 2, 'ub': 1}}
     return {}
 

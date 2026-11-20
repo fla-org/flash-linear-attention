@@ -27,20 +27,19 @@ _CONV_REF_FP32_DTYPES = (torch.float16, torch.bfloat16)
 
 
 @pytest.mark.skipif(not IS_NPU, reason='Ascend compile options require the NPU backend')
-@pytest.mark.parametrize('arch', ['a2/a3', '950', ''])
-@pytest.mark.parametrize('has_residual', [False, True])
 @pytest.mark.parametrize(
-    ('dtype', 'bwd_bt', 'bwd_bd'),
+    ('arch', 'single_buffer', 'has_residual', 'dtype', 'bwd_bt', 'bwd_bd'),
     [
-        (torch.float32, 64, 16),
-        (torch.bfloat16, 256, 64),
-        (torch.float16, 256, 64),
+        pytest.param('Ascend950DT', True, True, torch.float32, 64, 16, id='950-fp32-residual'),
+        pytest.param('Ascend910_9599', True, False, torch.bfloat16, 256, 64, id='950-bf16-dx'),
+        pytest.param('Ascend910_9391', False, False, torch.float16, 256, 64, id='a2-a3-default'),
+        pytest.param('Unknown950Test', False, True, torch.float32, 64, 16, id='unknown-default'),
     ],
 )
-def test_conv_ascend_ub_buffer_policy(monkeypatch, arch, has_residual, dtype, bwd_bt, bwd_bd):
+def test_conv_ascend_ub_buffer_policy(monkeypatch, arch, single_buffer, has_residual, dtype, bwd_bt, bwd_bd):
     from fla.modules.causal_conv1d.backends import triton_ascend
 
-    monkeypatch.setattr(triton_ascend, 'get_npu_arch', lambda index: arch)
+    monkeypatch.setattr(triton_ascend, 'get_npu_target_arch', lambda index: arch)
     monkeypatch.setattr(triton_ascend, 'get_multiprocessor_count', lambda index: 64)
     fwd_kernel, bwd_kernel = MagicMock(), MagicMock()
     monkeypatch.setattr(triton_ascend, 'causal_conv1d_fwd_coregrid_kernel', fwd_kernel)
@@ -78,7 +77,7 @@ def test_conv_ascend_ub_buffer_policy(monkeypatch, arch, has_residual, dtype, bw
     for kwargs in (fwd_kwargs, bwd_kwargs):
         assert 'multibuffer' not in kwargs
         assert 'set_workspace_multibuffer' not in kwargs
-        if arch == '950':
+        if single_buffer:
             assert kwargs['multibuffer_mode'] == {'gm': 2, 'l1': 2, 'l0c': 2, 'ub': 1}
         else:
             assert 'multibuffer_mode' not in kwargs
@@ -427,6 +426,7 @@ def test_fast_conv_varlen(N: int, T: int, D: int, W: int, activation: str | None
     [
         pytest.param(*test, id="B{}_T{}_D{}_W{}_{}_bias{}_residual{}_state{}_{}".format(*test))
         for test in [
+            (4, 300, 32, 4, 'silu', False, False, False, torch.bfloat16),
             (2, 64, 100, 3, 'swish', True, True, True, torch.float32),
             (2, 128, 128, 4, 'swish', True, True, True, torch.float32),
             (3, 128, 128, 4, 'swish', True, True, True, torch.float32),
