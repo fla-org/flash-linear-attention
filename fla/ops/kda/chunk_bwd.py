@@ -515,8 +515,8 @@ def chunk_kda_bwd(
         )
         if cp_context is not None:
             # Restore the full initial_state tensor from the compressed version.
-            # Only the first sequence's state is non-zero as it's the only one that could be cross-rank.
-            initial_state = expand_h0(initial_state, context=cp_context)
+            # only the first sequence of each local part can carry a cross-rank state.
+            initial_state = expand_h0(initial_state, context=cp_context, use_graph=use_graph)
         h, v_new, _ = chunk_gated_delta_rule_fwd_h(
             k=kg,
             w=w,
@@ -534,8 +534,8 @@ def chunk_kda_bwd(
         w, u, qg, kg, v_new, h = kwargs["w"], kwargs["u"], kwargs["qg"], kwargs["kg"], kwargs["v_new"], kwargs["h"]
         if cp_context is not None:
             # Restore the full initial_state tensor from the compressed version.
-            # Only the first sequence's state is non-zero as it's the only one that could be cross-rank.
-            initial_state = expand_h0(initial_state, context=cp_context)
+            # only the first sequence of each local part can carry a cross-rank state.
+            initial_state = expand_h0(initial_state, context=cp_context, use_graph=use_graph)
 
     # dAqk = do @ v.T
     # dv = A @ do

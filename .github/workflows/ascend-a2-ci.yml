@@ -255,7 +255,7 @@ jobs:
             tests/ops/test_triadic_gdn.py \
             tests/ops/test_kda_graph.py
 
-      # Phases run in order. Each pytest in a phase sees a disjoint device set.
+      # Each four-device block runs its own two-device shards before its four-device tests.
       - name: Run CP tests on disjoint device groups
         id: pytest-cp
         if: github.event_name != 'schedule' || steps.triton-cache.outputs.cache-hit != 'true'
@@ -265,8 +265,15 @@ jobs:
           PYTHONUNBUFFERED: "1"
         run: |
           source /usr/local/Ascend/ascend-toolkit/set_env.sh
+          wait_for_lanes() {
+            local status=0 pid
+            for pid in "$@"; do
+              wait "$pid" || status=$?
+            done
+            (( status == 0 )) || exit "$status"
+          }
           phase() {
-            local selector=$1 status=0 pid lane devices
+            local selector=$1 lane devices
             shift
             local pids=()
             for lane in "$@"; do
@@ -274,20 +281,26 @@ jobs:
               ASCEND_RT_VISIBLE_DEVICES=$devices pytest -s -v --exitfirst -k "$selector" ${lane#*:} &
               pids+=("$!")
             done
-            for pid in "${pids[@]}"; do
-              wait "$pid" || status=$?
-            done
-            (( status == 0 )) || exit "$status"
+            wait_for_lanes "${pids[@]}"
           }
-          phase 'not (cp4 or cp8)' \
-            0,1:tests/cp/test_dplr.py \
-            '2,3:tests/cp/test_gdn.py tests/cp/test_token_shift.py tests/cp/test_state.py' \
-            '4,5:tests/cp/test_kda.py tests/cp/test_conv.py' \
-            '6,7:tests/cp/test_gdp.py tests/cp/test_intracard.py tests/cp/test_context.py tests/cp/test_graph.py tests/cp/test_gdn2.py'
-          phase cp4 \
-            '0,1,2,3:tests/cp/test_kda.py tests/cp/test_conv.py' \
-            '4,5,6,7:tests/cp/test_dplr.py tests/cp/test_gdn.py tests/cp/test_token_shift.py tests/cp/test_gdn2.py'
-          phase cp8 '0,1,2,3,4,5,6,7:tests/cp/test_gdn.py tests/cp/test_kda.py tests/cp/test_gdn2.py'
+          run_cp_block() {
+            local four_device_lane=$1
+            shift
+            phase 'not (cp4 or cp8)' "$@"
+            phase cp4 "$four_device_lane"
+          }
+          # Balance total time across blocks. Longer two-device shards get less four-device work.
+          run_cp_block \
+            '0,1,2,3:tests/cp/test_kda.py tests/cp/test_conv.py tests/cp/test_graph.py tests/cp/test_dplr.py tests/cp/test_token_shift.py' \
+            '0,1:tests/cp/test_gdn.py tests/cp/test_gdn2.py' \
+            '2,3:tests/cp/test_kda.py tests/cp/test_context.py' &
+          first_block=$!
+          run_cp_block \
+            '4,5,6,7:tests/cp/test_gdn.py tests/cp/test_gdn2.py' \
+            '4,5:tests/cp/test_dplr.py tests/cp/test_state.py tests/cp/test_gdp.py' \
+            '6,7:tests/cp/test_intracard.py tests/cp/test_graph.py tests/cp/test_conv.py tests/cp/test_token_shift.py' &
+          wait_for_lanes "$first_block" "$!"
+          phase cp8 '0,1,2,3,4,5,6,7:tests/cp/test_gdn.py tests/cp/test_kda.py tests/cp/test_graph.py tests/cp/test_gdn2.py'
 
       - name: Save A2 pytest Triton-Ascend kernel cache
         if: |

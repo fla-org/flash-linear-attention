@@ -115,9 +115,8 @@ def chunk_kda_fwd(
     if cp_context is not None:
         # In Context Parallel (CP) mode, global initial states are not supported at the entry point.
         # The `initial_state` here is computed internally via inter-rank communication.
-        # Since only the first sequence in the local batch can be a continuation of a cross-rank sequence,
-        # only the first state in the tensor is relevant. We compress it to optimize memory for `save_for_backward`.
-        initial_state = compress_h0(initial_state, context=cp_context)
+        # only the first sequence of each local part can continue a cross-rank sequence.
+        initial_state = compress_h0(initial_state, context=cp_context, use_graph=use_graph)
 
     o = chunk_gla_fwd_o_gk(
         q=q,

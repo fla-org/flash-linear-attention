@@ -12,17 +12,25 @@ import triton.language as tl
 from fla.ops.cp.chunk_merge import CP_DOT_PRECISION, _prune_cp_configs
 from fla.ops.cp.context import _check_cp_device
 from fla.ops.utils.op import exp2
-from fla.utils import autotune_cache_kwargs
+from fla.utils import IS_NPU, ascend_compile_kwargs, autotune_cache_kwargs
+
+if IS_NPU:
+    from fla.ops.cp.backends.triton_ascend.affine import (
+        chunk_cp_affine_update,
+        cp_state_column_block_size,
+        cp_state_requires_tiling,
+    )
 
 
 @triton.heuristics({
+    'TILED': lambda args: IS_NPU and cp_state_requires_tiling(args['K']),
     'USE_G': lambda args: args['g'] is not None,
     'USE_GK': lambda args: args['gk'] is not None,
     'USE_BG': lambda args: args['bg'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
-    configs=[
+    configs=[triton.Config({})] if IS_NPU else [
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [2, 4]
         for num_stages in [1, 2, 3, 4]
@@ -55,6 +63,7 @@ def chunk_cp_fwd_kernel_h(
     USE_BG: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     MULTI_SEQS: tl.constexpr,
+    TILED: tl.constexpr,
 ):
     """Summarize a local sequence as h_out = M @ h_in + h_local.
 
@@ -275,15 +284,23 @@ def chunk_cp_fwd_kernel_h(
             else:
                 b_diag = tl.where(o_k[:, None] == o_k[None, :], 1.0, 0.0)
 
-            # each chunk left-composes its transform: diag + bg.T @ w for DPLR, diag - k.T @ w for GDN/KDA
-            if USE_BG:
-                b_kw = tl.dot(tl.trans(b_k.to(b_w.dtype)), b_w)
-                b_m_chunk = b_diag + b_kw
+            if TILED:
+                decay = tl.full((BK,), 1.0, tl.float32)
+                if USE_G:
+                    decay = tl.full((BK,), b_g_last, tl.float32)
+                elif USE_GK:
+                    decay = b_gk_last
+                b_m = chunk_cp_affine_update(b_k.to(b_w.dtype), b_w, decay, b_m, BK, USE_BG)
             else:
-                b_kw = tl.dot(tl.trans(b_k.to(b_w.dtype)), b_w)
-                b_m_chunk = b_diag - b_kw
-            # keep the composed transform in fp32; repeated bf16 casts accumulate error along the chain
-            b_m = tl.dot(b_m_chunk.to(tl.float32), b_m.to(tl.float32), input_precision=CP_DOT_PRECISION)
+                # each chunk left-composes its transform: diag + bg.T @ w for DPLR, diag - k.T @ w for GDN/KDA
+                if USE_BG:
+                    b_kw = tl.dot(tl.trans(b_k.to(b_w.dtype)), b_w)
+                    b_m_chunk = b_diag + b_kw
+                else:
+                    b_kw = tl.dot(tl.trans(b_k.to(b_w.dtype)), b_w)
+                    b_m_chunk = b_diag - b_kw
+                # keep the composed transform in fp32; repeated bf16 casts accumulate error along the chain
+                b_m = tl.dot(b_m_chunk.to(tl.float32), b_m.to(tl.float32), input_precision=CP_DOT_PRECISION)
 
         stride_hm = K + V
         p_m = hm + V + o_k[:, None] * stride_hm + o_kc[None, :]
@@ -307,8 +324,10 @@ def chunk_cp_fwd_h(
     _check_cp_device(k.device)
     _, T, H, K = k.shape
     HV, V = u.shape[2:]
-    BK = triton.next_power_of_2(K)
+    BK = max(16, triton.next_power_of_2(K)) if IS_NPU else triton.next_power_of_2(K)
     BV = 32 if K <= 64 else 64
+    if IS_NPU and cp_state_requires_tiling(K):
+        BV = cp_state_column_block_size(K)
     grid = (triton.cdiv(V, BV) + triton.cdiv(K, BV), HV)
     if multi_seqs:
         grid += (hm.shape[0],)
@@ -332,4 +351,5 @@ def chunk_cp_fwd_h(
         BV=BV,
         BK=BK,
         MULTI_SEQS=multi_seqs,
+        **ascend_compile_kwargs(),
     )

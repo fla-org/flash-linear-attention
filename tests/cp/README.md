@@ -12,7 +12,7 @@ Each component keeps its inputs, reference, CP call, and assertions in one test 
 | File                                  | Coverage                                                                                |
 | ------------------------------------- | --------------------------------------------------------------------------------------- |
 | `test_context.py`                     | Sequence partitions, precision keywords, and hardware requirements.                     |
-| `test_state.py`                       | Per-head vector-gate addressing in backward summaries.                                  |
+| `test_state.py`                       | Forward/backward affine summaries, per-head vector gates, and key-dimension boundaries.  |
 | `test_intracard.py`                   | Backend selection, index caching, and grouped heads.                                    |
 | `test_graph.py`                       | KDA graph replay with one or multiple ranks and changing sequence cuts.                 |
 | `test_conv.py`, `test_token_shift.py` | Boundary exchange, outputs, and gradients for convolution and token shift.              |
@@ -27,5 +27,13 @@ Distributed cases spawn their own local ranks. Run pytest once per host, without
 Test functions name the operation, and parameter IDs identify the scenario: `test_chunk[cp2-sequence-cut]`, for example. Cases cover sequence cuts, aligned boundaries, short sequences, state orientation, grouped heads, gate modes, recomputation, and zigzag layouts. Affine chains use TF32x3 on NVIDIA and IEEE FP32 on Ascend. The `legacy-precision-true` cases check the accepted compatibility keyword; passing `False` is covered by rejection tests. References and tolerances remain specific to each operator. KDA and GDN-2 retain their existing warning-only gradient diagnostics; those warnings are not strict numerical passes, even with `FLA_CI_ENV=0`.
 
 Single-rank graph and intra-card cache tests retain the NaN allocation guard used by their original operator tests. Distributed graph workers keep captured communicators alive until process exit.
+
+State-summary tests compare affine transforms with independent CPU recurrences. Graph tests check replay against eager execution; independent-reference cases additionally check outputs and gradients against a CPU recurrence.
+
+```bash
+FLA_CI_ENV=0 FLA_NPU_XDIST=0 pytest tests/cp/test_graph.py -q
+```
+
+For Ascend, initialize CANN and select visible devices before running.
 
 See [the CP implementation](../../fla/ops/cp/README.md) for the algorithm and [debugging notes](debug.md) for numerical investigations.

@@ -16,6 +16,12 @@ import torch.distributed as dist
 import triton
 import triton.language as tl
 
+from fla.ops.cp.backends.triton_ascend.affine import (
+    chunk_cp_affine_update,
+    cp_state_column_block_size,
+    cp_state_requires_tiling,
+)
+from fla.ops.cp.chunk_merge import chunk_cp_merge_state
 from fla.ops.cp.comm import all_gather_into_tensor
 from fla.ops.utils.op import exp2
 from fla.utils import ascend_compile_kwargs, input_guard
@@ -42,7 +48,7 @@ _MAX_BLOCK = 64
 def _m_tiles_per_program(K: int, block_size: int) -> int:
     """Pair K-column tiles so one program forms k^T w once.
 
-    K=256 keeps a single tile: a second [256, 64] fp32 slab does not fit with the KxK factor.
+    Wide transforms keep one accumulator tile per program to bound live storage.
     """
     nm = triton.cdiv(K, block_size)
     if triton.next_power_of_2(K) <= 128 and nm >= 2 and nm % 2 == 0:
@@ -66,7 +72,7 @@ def _h_block_size(K: int, V: int) -> int:
 
 def _get_block_size(K: int, V: int) -> int:
     """Compute UB-safe block size for pre-process kernels."""
-    return compute_row_tile_block_size(
+    block_size = compute_row_tile_block_size(
         min(K, 64),
         V,
         _PREPROCESS_MEM_MULT,
@@ -76,6 +82,8 @@ def _get_block_size(K: int, V: int) -> int:
         min_block=16,
         max_block=min(_MAX_BLOCK, triton.next_power_of_2(V)),
     )
+    # Paired accumulator columns keep their budget even when the forward matrix fits whole.
+    return min(block_size, cp_state_column_block_size(K))
 
 
 def _contig_gate(g: torch.Tensor | None, hv: int) -> torch.Tensor | None:
@@ -99,6 +107,7 @@ def _launch_preprocess_kernel(kernel, *, nv_chunks: int, nh_total: int, kernel_k
 
 
 @triton.heuristics({
+    'TILED': lambda args: cp_state_requires_tiling(args['K']),
     'USE_G': lambda args: args['g'] is not None,
     'USE_GK': lambda args: args['gk'] is not None,
     'USE_BG': lambda args: args['bg'] is not None,
@@ -134,6 +143,7 @@ def pre_process_fwd_kernel_merged_npu(
     # 0: h and m share one grid. 1: h tiles only. 2: m tiles only.
     PART: tl.constexpr = 0,
     AFFINE_CHAIN_PRECISION: tl.constexpr = None,
+    TILED: tl.constexpr = False,
 ):
     """Forward pre-process kernel for CP on NPU.
 
@@ -364,20 +374,30 @@ def pre_process_fwd_kernel_merged_npu(
             else:
                 b_diag = tl.where(row[:, None] == row[None, :], 1.0, 0.0)
 
-            if USE_BG:
-                b_kw = tl.dot(tl.trans(b_k.to(b_w.dtype)), b_w)
-                b_m_i = b_diag + b_kw
+            if TILED:
+                decay = tl.full((BK1,), 1.0, tl.float32)
+                if USE_G:
+                    decay = tl.full((BK1,), b_g_last, tl.float32)
+                elif USE_GK:
+                    decay = b_gk_last
+                if M_GROUP > 1:
+                    b_m2 = chunk_cp_affine_update(b_k.to(b_w.dtype), b_w, decay, b_m2, BK1, USE_BG)
+                b_m = chunk_cp_affine_update(b_k.to(b_w.dtype), b_w, decay, b_m, BK1, USE_BG)
             else:
-                b_kw = tl.dot(tl.trans(b_k.to(b_w.dtype)), b_w)
-                b_m_i = b_diag - b_kw
-            # += keeps the accumulator in one address space on NPU.
-            b_m += tl.dot(
-                b_m_i.to(tl.float32), b_m.to(tl.float32), input_precision=AFFINE_CHAIN_PRECISION,
-            ) - b_m
-            if M_GROUP > 1:
-                b_m2 += tl.dot(
-                    b_m_i.to(tl.float32), b_m2.to(tl.float32), input_precision=AFFINE_CHAIN_PRECISION,
-                ) - b_m2
+                if USE_BG:
+                    b_kw = tl.dot(tl.trans(b_k.to(b_w.dtype)), b_w)
+                    b_m_i = b_diag + b_kw
+                else:
+                    b_kw = tl.dot(tl.trans(b_k.to(b_w.dtype)), b_w)
+                    b_m_i = b_diag - b_kw
+                # += keeps the accumulator in one address space on NPU.
+                b_m += tl.dot(
+                    b_m_i.to(tl.float32), b_m.to(tl.float32), input_precision=AFFINE_CHAIN_PRECISION,
+                ) - b_m
+                if M_GROUP > 1:
+                    b_m2 += tl.dot(
+                        b_m_i.to(tl.float32), b_m2.to(tl.float32), input_precision=AFFINE_CHAIN_PRECISION,
+                    ) - b_m2
 
         stride_hm_kv = K + V
         p_m = hm + V + row[:, None] * stride_hm_kv + col[None, :]
@@ -460,21 +480,24 @@ def merge_fwd_bwd_kernel_npu(
             i_ss = ss_start + idx
             base = i_ss * stride_hm_s + i_h * stride_hm_h
 
-            p_he = ag_hm + base + o_k[:, None] * (V + K) + o_v[None, :]
-            b_he = tl.load(p_he, mask=m_k[:, None] & m_v[None, :], other=0.0).to(tl.float32)
-            p_m = ag_hm + base + V + o_k[:, None] * (V + K) + o_k[None, :]
-            b_m = tl.load(p_m, mask=m_k[:, None] & m_k[None, :], other=0.0).to(tl.float32)
-            if STATE_V_FIRST:
-                # a new accumulator keeps b_h in one address space on NPU.
-                b_h_new = tl.dot(
-                    b_h.to(tl.float32), tl.trans(b_m), input_precision=AFFINE_CHAIN_PRECISION,
-                ) + tl.trans(b_he)
-                b_h = b_h_new
+            if BK > 128:
+                b_h = chunk_cp_merge_state(ag_hm + base, b_h, o_k, o_v, K, V, BK, BV, STATE_V_FIRST)
             else:
-                b_h_new = tl.dot(
-                    b_m.to(tl.float32), b_h.to(tl.float32), input_precision=AFFINE_CHAIN_PRECISION,
-                ) + b_he.to(tl.float32)
-                b_h = b_h_new
+                p_he = ag_hm + base + o_k[:, None] * (V + K) + o_v[None, :]
+                b_he = tl.load(p_he, mask=m_k[:, None] & m_v[None, :], other=0.0).to(tl.float32)
+                p_m = ag_hm + base + V + o_k[:, None] * (V + K) + o_k[None, :]
+                b_m = tl.load(p_m, mask=m_k[:, None] & m_k[None, :], other=0.0).to(tl.float32)
+                if STATE_V_FIRST:
+                    # a new accumulator keeps b_h in one address space on NPU.
+                    b_h_new = tl.dot(
+                        b_h.to(tl.float32), tl.trans(b_m), input_precision=AFFINE_CHAIN_PRECISION,
+                    ) + tl.trans(b_he)
+                    b_h = b_h_new
+                else:
+                    b_h_new = tl.dot(
+                        b_m.to(tl.float32), b_h.to(tl.float32), input_precision=AFFINE_CHAIN_PRECISION,
+                    ) + b_he.to(tl.float32)
+                    b_h = b_h_new
 
             if idx < num_subseqs - 1:
                 init_idx = init_base + idx
@@ -489,7 +512,11 @@ def merge_fwd_bwd_kernel_npu(
     else:
         i_h = tl.program_id(1).to(tl.int64)
         if HAS_H_SEQ_IDX:
-            h += tl.load(h_seq_idx).to(tl.int64) * HV * K * V
+            seq_idx = tl.load(h_seq_idx).to(tl.int64)
+            # a negative row marks a graph partition with no active sequence.
+            if seq_idx < 0:
+                return
+            h += seq_idx * HV * K * V
         if NUM_RANKS_ON_DEVICE:
             num_ranks = tl.load(pre_or_post_num_ranks).to(tl.int64)
         else:
@@ -506,21 +533,25 @@ def merge_fwd_bwd_kernel_npu(
                 cur_rank = rank - num_ranks + idx
             else:
                 cur_rank = rank + num_ranks - idx
-            p_ag_h = ag_hm + cur_rank * stride + o_k[:, None] * (K + V) + o_v[None, :]
-            b_ag_h = tl.load(p_ag_h, mask=m_k[:, None] & m_v[None, :], other=0.0)
-            p_ag_m = ag_hm + cur_rank * stride + V + o_k[:, None] * (K + V) + o_k[None, :]
-            b_ag_m = tl.load(p_ag_m, mask=m_k[:, None] & m_k[None, :], other=0.0)
-            if STATE_V_FIRST:
-                # a new accumulator keeps b_h in one address space on NPU.
-                b_h_new = tl.dot(
-                    b_h.to(tl.float32), tl.trans(b_ag_m).to(tl.float32), input_precision=AFFINE_CHAIN_PRECISION,
-                ) + tl.trans(b_ag_h).to(tl.float32)
-                b_h = b_h_new
+            if BK > 128:
+                b_h = chunk_cp_merge_state(ag_hm + cur_rank * stride, b_h, o_k, o_v, K, V, BK, BV, STATE_V_FIRST)
             else:
-                b_h_new = tl.dot(
-                    b_ag_m.to(tl.float32), b_h.to(tl.float32), input_precision=AFFINE_CHAIN_PRECISION,
-                ) + b_ag_h.to(tl.float32)
-                b_h = b_h_new
+                p_ag_h = ag_hm + cur_rank * stride + o_k[:, None] * (K + V) + o_v[None, :]
+                b_ag_h = tl.load(p_ag_h, mask=m_k[:, None] & m_v[None, :], other=0.0)
+                p_ag_m = ag_hm + cur_rank * stride + V + o_k[:, None] * (K + V) + o_k[None, :]
+                b_ag_m = tl.load(p_ag_m, mask=m_k[:, None] & m_k[None, :], other=0.0)
+                if STATE_V_FIRST:
+                    # a new accumulator keeps b_h in one address space on NPU.
+                    b_h_new = tl.dot(
+                        b_h.to(tl.float32), tl.trans(b_ag_m).to(tl.float32), input_precision=AFFINE_CHAIN_PRECISION,
+                    ) + tl.trans(b_ag_h).to(tl.float32)
+                    b_h = b_h_new
+                else:
+                    b_h_new = tl.dot(
+                        b_ag_m.to(tl.float32), b_h.to(tl.float32), input_precision=AFFINE_CHAIN_PRECISION,
+                    ) + b_ag_h.to(tl.float32)
+                    b_h = b_h_new
+
         if STATE_V_FIRST:
             p_h = h + o_v[:, None] * K + o_k[None, :]
             m_h = m_v[:, None] & m_k[None, :]
@@ -531,6 +562,7 @@ def merge_fwd_bwd_kernel_npu(
 
 
 @triton.heuristics({
+    'TILED': lambda args: cp_state_requires_tiling(args['K'], backward=True),
     'USE_G': lambda args: args['g'] is not None,
     'USE_GK': lambda args: args['gk'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
@@ -562,6 +594,7 @@ def pre_process_bwd_kernel_merged_npu(
     V_OFFSET: tl.constexpr = 0,
     NH_OFFSET: tl.constexpr = 0,
     AFFINE_CHAIN_PRECISION: tl.constexpr = None,
+    TILED: tl.constexpr = False,
 ):
     """Backward pre-process kernel for CP on NPU.
 
@@ -783,15 +816,23 @@ def pre_process_bwd_kernel_merged_npu(
             else:
                 b_diag = tl.where(row[:, None] == row[None, :], 1.0, 0.0)
 
-            b_kw = tl.dot(tl.trans(b_w), b_k.to(b_w.dtype))
-            if USE_BG:
-                b_m_i = b_diag + b_kw
+            if TILED:
+                decay = tl.full((BK1,), 1.0, tl.float32)
+                if USE_G:
+                    decay = tl.full((BK1,), b_g_last, tl.float32)
+                elif USE_GK:
+                    decay = b_gk_last
+                b_m = chunk_cp_affine_update(b_w, b_k.to(b_w.dtype), decay, b_m, BK1, USE_BG)
             else:
-                b_m_i = b_diag - b_kw
-            # += keeps the accumulator in one address space on NPU.
-            b_m += tl.dot(
-                b_m_i.to(tl.float32), b_m.to(tl.float32), input_precision=AFFINE_CHAIN_PRECISION,
-            ) - b_m
+                b_kw = tl.dot(tl.trans(b_w), b_k.to(b_w.dtype))
+                if USE_BG:
+                    b_m_i = b_diag + b_kw
+                else:
+                    b_m_i = b_diag - b_kw
+                # += keeps the accumulator in one address space on NPU.
+                b_m += tl.dot(
+                    b_m_i.to(tl.float32), b_m.to(tl.float32), input_precision=AFFINE_CHAIN_PRECISION,
+                ) - b_m
 
         p_m = dhm + V + row[:, None] * (V + K) + col[None, :]
         tl.store(p_m, b_m.to(p_m.dtype.element_ty), mask=(row < K)[:, None] & (col < K)[None, :])
@@ -823,7 +864,7 @@ def chunk_gated_delta_rule_fwd_h_pre_process_npu(
 
     B, T, H, K, V, HV = *k.shape, u.shape[-1], u.shape[2]
     BT = chunk_size
-    BK = triton.next_power_of_2(K)
+    BK = max(16, triton.next_power_of_2(K))
 
     if cu_seqlens is None:
         N = B
@@ -880,7 +921,7 @@ def chunk_gated_delta_rule_fwd_h_pre_process_npu(
             kernel_kwargs={**base, 'BLOCK_SIZE': block_size, 'M_GROUP': m_group, 'PART': 2},
         )
 
-    def merge_fwd(h, ag, num_ranks, merge_rank, num_ranks_on_device):
+    def merge_fwd(h, ag, num_ranks, merge_rank, num_ranks_on_device, h_seq_idx=None):
         def grid(meta):
             return (triton.cdiv(V, meta['BV']), HV)
         merge_fwd_bwd_kernel_npu[grid](
@@ -892,7 +933,7 @@ def chunk_gated_delta_rule_fwd_h_pre_process_npu(
             init_offsets=None,
             h0_seq_ids=None,
             h0=None,
-            h_seq_idx=None,
+            h_seq_idx=h_seq_idx,
             HV=HV,
             K=K,
             V=V,
@@ -908,31 +949,35 @@ def chunk_gated_delta_rule_fwd_h_pre_process_npu(
         )
 
     if context.layout == 'zigzag':
-        if use_graph:
-            raise NotImplementedError("use_graph is not supported with zigzag CP layout")
         fns = context.front_num_seqs
+        if use_graph:
+            from fla.ops.cp.chunk_delta_h import _graph_metadata
+            first, _, _, last_windows = _graph_metadata(cu_seqlens, context)
+        else:
+            last_windows = (cu_seqlens[fns - 1: fns + 1], cu_seqlens[-2:])
         hm = k.new_zeros(2, HV, K, V + K, dtype=torch.float32)
         if state_v_first:
             initial_state = k.new_zeros(N, HV, V, K, dtype=torch.float32)
         else:
             initial_state = k.new_zeros(N, HV, K, V, dtype=torch.float32)
         # each part exports the affine chain of its last segment, skipped when chain-last
-        for part, (cu_win, is_last) in enumerate(zip(
-                (cu_seqlens[fns - 1: fns + 1], cu_seqlens[-2:]), context.is_last_by_part)):
+        for part, (last_window, is_last) in enumerate(zip(
+                last_windows, (False, False) if use_graph else context.is_last_by_part)):
             if not is_last:
-                launch_fwd(hm[part], cu_win)
+                launch_fwd(hm[part], last_window)
         ag_hm, _ = all_gather_into_tensor(hm, group=context.group)
         # chain order: front parts of ranks 0..W-1, then back parts of ranks W-1..0
         slots = torch.cat([ag_hm[:, 0], ag_hm[:, 1].flip(0)])
         world_size = dist.get_world_size(context.group)
         for part in range(2):
-            if not context.is_first_by_part[part]:
+            if use_graph or not context.is_first_by_part[part]:
                 merge_fwd(
-                    initial_state[0] if part == 0 else initial_state[fns],
+                    initial_state if use_graph else initial_state[0] if part == 0 else initial_state[fns],
                     slots,
-                    context.pre_num_ranks_by_part[part],
+                    context.pre_num_ranks_dev[part:part + 1] if use_graph else context.pre_num_ranks_by_part[part],
                     rank if part == 0 else 2 * world_size - 1 - rank,
-                    False,
+                    use_graph,
+                    first[part:part + 1] if use_graph else None,
                 )
         return initial_state
 
@@ -944,23 +989,23 @@ def chunk_gated_delta_rule_fwd_h_pre_process_npu(
     cu_last = cu_seqlens[-2:]
     if use_graph:
         assert context.pre_num_ranks_dev is not None, "use_graph with CP requires context.pre_num_ranks_dev"
-        # last non-empty sequence window, on-device; zero-length tail padding would
-        # otherwise make cu_seqlens[-2:] point at a padding sequence
-        i_last = (cu_seqlens[1:] > cu_seqlens[:-1]).sum() - 1
-        cu_last = cu_seqlens.index_select(0, torch.stack((i_last, i_last + 1)))
+        from fla.ops.cp.chunk_delta_h import _graph_metadata
+        first, _, _, last_windows = _graph_metadata(cu_seqlens, context)
+        cu_last = last_windows[0]
     # graph mode always launches: a last rank's hm is never read, but the all-gather
     # needs every rank, and host-side flags are frozen at capture
     if use_graph or not context.is_last_rank:
         launch_fwd(hm, cu_last)
     ag_hm, _ = all_gather_into_tensor(hm, group=context.group)
-    # a zero num_ranks merge just re-stores the zeros initial_state[0] already holds
+    # a zero num_ranks merge just re-stores the zeros initial_state already holds
     if use_graph or not context.is_first_rank:
         merge_fwd(
-            initial_state[0],
+            initial_state if use_graph else initial_state[0],
             ag_hm,
             context.pre_num_ranks_dev if use_graph else context.pre_num_ranks,
             rank,
             use_graph,
+            h_seq_idx=first if use_graph else None,
         )
     return initial_state
 
@@ -995,7 +1040,7 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process_npu(
     B, T, H, K, V, HV = *q.shape, do.shape[-1], do.shape[2]
     BT = chunk_size
     assert K <= 256, "current kernel does not support head dimension being larger than 256."
-    BK = triton.next_power_of_2(K)
+    BK = max(16, triton.next_power_of_2(K))
 
     if cu_seqlens is None:
         N = B
@@ -1064,32 +1109,35 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process_npu(
         )
 
     if context.layout == 'zigzag':
-        if use_graph:
-            raise NotImplementedError("use_graph is not supported with zigzag CP layout")
         fns = context.front_num_seqs
+        if use_graph:
+            from fla.ops.cp.chunk_delta_h import _graph_metadata
+            _, last, first_windows, _ = _graph_metadata(cu_seqlens, context)
+        else:
+            first_windows = (cu_seqlens[:2], cu_seqlens[fns: fns + 2])
         dhm = q.new_zeros(2, HV, K, V + K, dtype=torch.float32)
         if state_v_first:
             dht = q.new_zeros(N, HV, V, K, dtype=torch.float32)
         else:
             dht = q.new_zeros(N, HV, K, V, dtype=torch.float32)
         # each part exports the backward affine chain of its first segment, skipped when chain-first
-        for part, (cu_win, is_first) in enumerate(zip(
-                (cu_seqlens[:2], cu_seqlens[fns: fns + 2]), context.is_first_by_part)):
+        for part, (first_window, is_first) in enumerate(zip(
+                first_windows, (False, False) if use_graph else context.is_first_by_part)):
             if not is_first:
-                launch_bwd(dhm[part], cu_win)
+                launch_bwd(dhm[part], first_window)
         ag_dhm, _ = all_gather_into_tensor(dhm, group=context.group)
         # chain order: front parts of ranks 0..W-1, then back parts of ranks W-1..0
         slots = torch.cat([ag_dhm[:, 0], ag_dhm[:, 1].flip(0)])
         world_size = dist.get_world_size(context.group)
         for part in range(2):
-            if not context.is_last_by_part[part]:
+            if use_graph or not context.is_last_by_part[part]:
                 merge_bwd(
-                    dht[fns - 1] if part == 0 else dht[-1],
+                    dht if use_graph else dht[fns - 1] if part == 0 else dht[-1],
                     slots,
-                    context.post_num_ranks_by_part[part],
+                    context.post_num_ranks_dev[part:part + 1] if use_graph else context.post_num_ranks_by_part[part],
                     rank if part == 0 else 2 * world_size - 1 - rank,
-                    None,
-                    False,
+                    last[part:part + 1] if use_graph else None,
+                    use_graph,
                 )
         return dht, None
 
@@ -1099,10 +1147,16 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process_npu(
     else:
         dht = q.new_zeros(N, HV, K, V, dtype=torch.float32)
 
+    cu_first = cu_seqlens[:2]
+    if use_graph:
+        assert context.post_num_ranks_dev is not None, "use_graph with CP requires context.post_num_ranks_dev"
+        from fla.ops.cp.chunk_delta_h import _graph_metadata
+        _, last, first_windows, _ = _graph_metadata(cu_seqlens, context)
+        cu_first = first_windows[0]
     # graph mode always launches: a first rank's dhm is never read, but the all-gather
     # needs every rank, and host-side flags are frozen at capture
     if use_graph or not context.is_first_rank:
-        launch_bwd(dhm, cu_seqlens[:2])
+        launch_bwd(dhm, cu_first)
 
     ag_dhm, _ = all_gather_into_tensor(dhm, group=context.group)
 
@@ -1111,10 +1165,7 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process_npu(
         h_seq_idx = None
         h = dht[-1]
         if use_graph:
-            assert context.post_num_ranks_dev is not None, "use_graph with CP requires context.post_num_ranks_dev"
-            # merge target is the last non-empty sequence; zero-length tail padding
-            # would otherwise make dht[-1] a padding row
-            h_seq_idx = (cu_seqlens[1:] > cu_seqlens[:-1]).sum() - 1
+            h_seq_idx = last
             h = dht
         merge_bwd(
             h,
