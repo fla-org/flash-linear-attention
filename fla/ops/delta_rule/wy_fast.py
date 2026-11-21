@@ -17,8 +17,11 @@ from fla.utils import IS_NVIDIA_HOPPER, autotune_cache_kwargs, check_shared_mem
 
 # Triton miscompiles `prepare_wy_repr_bwd_kernel` with num_warps=4 on Hopper
 # (sm_90) for BT=64: it produces incorrect dk/dbeta (and can raise an illegal
-# memory access), while num_warps=2 is correct (see #984). Restrict the Hopper
-# autotune configs to num_warps=2 until the upstream compiler issue is resolved.
+# memory access), while num_warps=2 is correct (see #984). The same Hopper WGMMA
+# invalid-__shared__-read class is reachable from `recompute_w_u_fwd_kernel` when
+# BK=32 and num_warps=4 (see triton-lang/triton#11366 and #1402). num_warps=2
+# avoids the WGMMA path, so restrict the Hopper autotune configs to num_warps=2
+# until the compiler issue is resolved.
 NUM_WARPS = [2] if IS_NVIDIA_HOPPER else [2, 4, 8]
 
 
@@ -28,7 +31,7 @@ NUM_WARPS = [2] if IS_NVIDIA_HOPPER else [2, 4, 8]
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [2, 4, 8]
+        for num_warps in NUM_WARPS
         for num_stages in [2, 3, 4]
     ],
     key=['H', 'K', 'V', 'BT', 'BK', 'BV', 'IS_VARLEN'],
