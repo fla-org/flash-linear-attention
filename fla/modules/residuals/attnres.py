@@ -5,18 +5,41 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from fla.modules.residuals.base import BaseResidual
 from fla.ops.attnres import fused_attnres
 
+if TYPE_CHECKING:
+    from transformers.configuration_utils import PretrainedConfig
+
 
 class AttentionResidualState(NamedTuple):
     blocks: list[torch.Tensor]
     num_branches: int
+
+    @property
+    def hidden_states(self) -> torch.Tensor:
+        return self.blocks[-1]
+
+
+class AttentionResidualQuery(nn.Module):
+    """Depth query with zero initialization, giving equal initial weights to all residual sources."""
+
+    def __init__(self, hidden_size: int):
+        super().__init__()
+        self.weight = nn.Parameter(torch.empty(1, hidden_size))
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        nn.init.zeros_(self.weight)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return F.linear(x, self.weight)
 
 
 class AttentionResidual(BaseResidual[AttentionResidualState, AttentionResidualState]):
@@ -30,7 +53,7 @@ class AttentionResidual(BaseResidual[AttentionResidualState, AttentionResidualSt
         = \operatorname{softmax}_i\!\left(w_l^\top\operatorname{RMSNorm}(v_i)\right),
         \qquad h_l = \sum_{i=0}^{l-1} \alpha_{i\to l} v_i.
 
-    `readout` computes h_l; `pre` additionally applies the branch norm and returns the existing state as context.
+    `pre` computes the normalized h_l and returns the existing state as context.
     `attnres_norm` normalizes keys to compute attention weights; the values v_i remain unnormalized.
     `post` appends the new branch output v_l, making it available to the next residual module's query.
 
@@ -53,18 +76,24 @@ class AttentionResidual(BaseResidual[AttentionResidualState, AttentionResidualSt
 
     supports_reentrant_checkpointing = False
 
-    def __init__(self, hidden_size: int, block_size: int = 1, norm_eps: float = 1e-6, fuse_norm: bool = True):
-        super().__init__(hidden_size=hidden_size, norm_eps=norm_eps, fuse_norm=fuse_norm)
+    def __init__(self, hidden_size: int, block_size: int = 1, norm_eps: float = 1e-6):
+        super().__init__(hidden_size=hidden_size)
+        self.norm = nn.RMSNorm(hidden_size, eps=norm_eps)
         if isinstance(block_size, bool) or not isinstance(block_size, int) or block_size < 1:
             raise ValueError('block_size must be a positive integer')
         self.block_size = block_size
-        self.query = nn.Linear(hidden_size, 1, bias=False)
+        self.query = AttentionResidualQuery(hidden_size)
         self.attnres_norm = nn.RMSNorm(hidden_size, eps=self.norm.eps)
         self.reset_parameters()
 
+    @classmethod
+    def from_config(cls, config: 'PretrainedConfig', **kwargs) -> 'AttentionResidual':
+        kwargs.setdefault('block_size', config.attnres_block_size if config.attnres_block_size is not None else 1)
+        return cls(hidden_size=config.hidden_size, norm_eps=config.norm_eps, **kwargs)
+
     def reset_parameters(self) -> None:
-        super().reset_parameters()
-        nn.init.zeros_(self.query.weight)
+        self.norm.reset_parameters()
+        self.query.reset_parameters()
         self.attnres_norm.reset_parameters()
 
     def initialize(self, x: torch.Tensor) -> AttentionResidualState:
@@ -85,16 +114,6 @@ class AttentionResidual(BaseResidual[AttentionResidualState, AttentionResidualSt
         else:
             blocks = [*blocks[:-1], blocks[-1] + branch_output]
         return AttentionResidualState(blocks, num_branches + 1)
-
-    def readout(self, state: AttentionResidualState) -> torch.Tensor:
-        if state.num_branches == 0:
-            return state.blocks[0]
-        return fused_attnres(
-            query=self.query.weight.squeeze(0),
-            residuals=state.blocks,
-            rms_weight=self.attnres_norm.weight,
-            rms_eps=self.norm.eps,
-        )
 
     def forward(self, state: AttentionResidualState) -> torch.Tensor:
         return fused_attnres(
