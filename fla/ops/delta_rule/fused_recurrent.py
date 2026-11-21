@@ -265,7 +265,9 @@ def fused_recurrent_delta_rule_fwd(
     scale: float,
     initial_state: torch.Tensor,
     output_final_state: bool,
+    inplace_final_state: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
+    out: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
@@ -277,8 +279,15 @@ def fused_recurrent_delta_rule_fwd(
     num_stages = 1
     num_warps = 1
 
-    o = q.new_empty(NK, *v.shape)
-    if output_final_state:
+    if out is None:
+        o = q.new_empty(NK, *v.shape)
+    else:
+        assert out.shape == v.shape
+        o = out.unsqueeze(0)
+    if inplace_final_state:
+        assert initial_state is not None, "inplace_final_state=True requires an initial_state"
+        final_state = initial_state
+    elif output_final_state:
         final_state = q.new_empty(N, H, K, V, dtype=torch.float32)
     else:
         final_state = None

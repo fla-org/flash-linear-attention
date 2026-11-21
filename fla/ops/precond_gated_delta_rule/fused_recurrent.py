@@ -222,12 +222,14 @@ def fused_recurrent_precond_gated_delta_rule_fwd(
     initial_state: torch.Tensor = None,
     initial_A_state: torch.Tensor = None,
     output_final_state: bool = False,
+    inplace_final_state: bool = False,
     use_qk_l2norm_in_kernel: bool = True,
     cu_seqlens: torch.LongTensor | None = None,
     transpose_state_layout: bool = False,
     x: float = 1.5,
     eps: float = 1e-6,
     log_atk_scale: torch.Tensor = None,
+    out: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
@@ -245,15 +247,24 @@ def fused_recurrent_precond_gated_delta_rule_fwd(
     if log_atk_scale is None:
         log_atk_scale = torch.full((H,), -0.2, device=k.device, dtype=torch.float32)
 
-    o = torch.empty_like(v)
-    if output_final_state:
+    if out is None:
+        o = torch.empty_like(v)
+    else:
+        assert out.shape == v.shape
+        o = out
+    if inplace_final_state:
+        assert initial_state is not None, "inplace_final_state=True requires an initial_state"
+        final_state = initial_state
+    elif output_final_state:
         if transpose_state_layout:
             final_state = q.new_empty(N, HV, V, K, dtype=torch.float32)
         else:
             final_state = q.new_empty(N, HV, K, V, dtype=torch.float32)
-        final_A_state = q.new_empty(N, H, K, dtype=torch.float32)
     else:
         final_state = None
+    if output_final_state or inplace_final_state:
+        final_A_state = q.new_empty(N, H, K, dtype=torch.float32)
+    else:
         final_A_state = None
 
     grid = (NV * N * HV,)

@@ -469,3 +469,43 @@ def test_chunk_varlen(
     assert_close('dv', ref_dv, tri_dv, 0.005)
     assert_close('dg', ref_dg, tri_dg, 0.005)
     assert_close('dh0', ref_dh0, tri_dh0, 0.005)
+
+
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'D', 'cu_seqlens', 'dtype'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-cu_seqlens{}-{}".format(*test))
+        for test in [
+            (16, 1, 4, 64, None, torch.bfloat16),
+            (16, 1, 4, 128, None, torch.bfloat16),
+            (2, 300, 4, 128, None, torch.float),
+            (1, 400, 4, 64, [0, 15, 250, 400], torch.bfloat16),
+        ]
+    ],
+)
+def test_fused_recurrent_inplace_out(
+    B: int,
+    T: int,
+    H: int,
+    D: int,
+    cu_seqlens: list[int] | None,
+    dtype: torch.dtype,
+):
+    torch.manual_seed(42)
+    q = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    k = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    v = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    gk = F.logsigmoid(torch.randn(B, T, H, D, dtype=dtype, device=device))
+    if cu_seqlens is not None:
+        cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
+    N = B if cu_seqlens is None else len(cu_seqlens) - 1
+    h0 = torch.randn(N, H, D, D, dtype=torch.float32, device=device)
+
+    kwargs = dict(q=q, k=k, v=v, gk=gk, scale=D ** -0.5, cu_seqlens=cu_seqlens)
+    ref, ref_ht = fused_recurrent_gla(initial_state=h0.clone(), output_final_state=True, **kwargs)
+    out = torch.empty_like(v)
+    tri, tri_ht = fused_recurrent_gla(initial_state=h0.clone(), output_final_state=True, out=out, **kwargs)
+
+    assert tri.data_ptr() == out.data_ptr()
+    assert torch.equal(ref, tri)
+    assert torch.equal(ref_ht, tri_ht)

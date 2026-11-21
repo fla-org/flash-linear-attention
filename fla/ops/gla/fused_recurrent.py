@@ -9,9 +9,11 @@ import warnings
 
 import torch
 
-from fla.ops.common.fused_recurrent import fused_recurrent
+from fla.ops.common.fused_recurrent import fused_recurrent, fused_recurrent_fwd
+from fla.utils import input_guard
 
 
+@input_guard
 def fused_recurrent_gla(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -24,6 +26,7 @@ def fused_recurrent_gla(
     reverse: bool = False,
     state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
+    out: torch.Tensor | None = None,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
@@ -115,6 +118,21 @@ def fused_recurrent_gla(
             )
     if scale is None:
         scale = k.shape[-1] ** -0.5
+    if out is not None:
+        return fused_recurrent_fwd(
+            q=q,
+            k=k,
+            v=v,
+            gk=gk,
+            gv=gv,
+            scale=scale,
+            initial_state=initial_state,
+            output_final_state=output_final_state,
+            reverse=reverse,
+            state_v_first=state_v_first,
+            cu_seqlens=cu_seqlens,
+            out=out,
+        )
     o, final_state = fused_recurrent(
         q=q,
         k=k,

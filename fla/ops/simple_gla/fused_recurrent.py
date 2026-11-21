@@ -10,7 +10,7 @@ import warnings
 import torch
 
 from fla.backends import dispatch
-from fla.ops.common.fused_recurrent import fused_recurrent
+from fla.ops.common.fused_recurrent import fused_recurrent, fused_recurrent_fwd
 
 
 @dispatch
@@ -26,6 +26,7 @@ def fused_recurrent_simple_gla(
     reverse: bool = False,
     state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
+    out: torch.Tensor | None = None,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
@@ -117,6 +118,21 @@ def fused_recurrent_simple_gla(
             )
     if scale is None:
         scale = k.shape[-1] ** -0.5
+    if out is not None:
+        return fused_recurrent_fwd(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            g_gamma=g_gamma,
+            scale=scale,
+            initial_state=initial_state,
+            output_final_state=output_final_state,
+            reverse=reverse,
+            state_v_first=state_v_first,
+            cu_seqlens=cu_seqlens,
+            out=out,
+        )
     o, final_state = fused_recurrent(
         q=q,
         k=k,

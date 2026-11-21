@@ -98,6 +98,59 @@ def fused_recurrent_gka_solve_fwd_kernel(
         tl.store(ht + i_nh * K*K + o_k[:, None] * K + o_k[None, :], b_h.to(ht.dtype.element_ty), mask=m_kk)
 
 
+def fused_recurrent_gka_fwd(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor | None,
+    gk: torch.Tensor | None,
+    alpha: torch.Tensor | None,
+    scale: float,
+    ridge_ratio: float,
+    num_iter: int,
+    h_kk0: torch.Tensor | None,
+    h_kv0: torch.Tensor | None,
+    output_final_state: bool,
+    cu_seqlens: torch.LongTensor | None,
+    out: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    B, T, H, K = q.shape
+    N = B if cu_seqlens is None else len(cu_seqlens) - 1
+    x = torch.empty_like(q)
+    h_kk = q.new_empty(N, H, K, K, dtype=torch.float) if output_final_state else None
+    BK = max(triton.next_power_of_2(K), 16)
+    # one warp is 2-4x faster for BK <= 64; at BK = 128 fewer than 4 warps spill the [BK, BK] state
+    fused_recurrent_gka_solve_fwd_kernel[(N * H,)](
+        q=q,
+        k=k,
+        gk=gk,
+        x=x,
+        h0=h_kk0,
+        ht=h_kk,
+        cu_seqlens=cu_seqlens,
+        ridge_ratio=ridge_ratio,
+        T=T,
+        H=H,
+        K=K,
+        BK=BK,
+        NUM_ITER=num_iter,
+        num_warps=1 if BK <= 64 else 4,
+    )
+    q_mix = x if alpha is None else (q + alpha[..., None] * (x - q)).to(q.dtype)
+    o, h_kv = fused_recurrent_simple_gla(
+        q=q_mix,
+        k=k,
+        v=v,
+        g=g,
+        scale=scale,
+        initial_state=h_kv0,
+        output_final_state=output_final_state,
+        cu_seqlens=cu_seqlens,
+        out=out,
+    )
+    return o, h_kk, h_kv
+
+
 class FusedRecurrentGKAFunction(torch.autograd.Function):
 
     @staticmethod
@@ -118,40 +171,21 @@ class FusedRecurrentGKAFunction(torch.autograd.Function):
         output_final_state: bool,
         cu_seqlens: torch.LongTensor | None,
     ):
-        B, T, H, K = q.shape
-        N = B if cu_seqlens is None else len(cu_seqlens) - 1
-        x = torch.empty_like(q)
-        h_kk = q.new_empty(N, H, K, K, dtype=torch.float) if output_final_state else None
-        BK = max(triton.next_power_of_2(K), 16)
-        # one warp is 2-4x faster for BK <= 64; at BK = 128 fewer than 4 warps spill the [BK, BK] state
-        fused_recurrent_gka_solve_fwd_kernel[(N * H,)](
+        return fused_recurrent_gka_fwd(
             q=q,
-            k=k,
-            gk=gk,
-            x=x,
-            h0=h_kk0,
-            ht=h_kk,
-            cu_seqlens=cu_seqlens,
-            ridge_ratio=ridge_ratio,
-            T=T,
-            H=H,
-            K=K,
-            BK=BK,
-            NUM_ITER=num_iter,
-            num_warps=1 if BK <= 64 else 4,
-        )
-        q_mix = x if alpha is None else (q + alpha[..., None] * (x - q)).to(q.dtype)
-        o, h_kv = fused_recurrent_simple_gla(
-            q=q_mix,
             k=k,
             v=v,
             g=g,
+            gk=gk,
+            alpha=alpha,
             scale=scale,
-            initial_state=h_kv0,
+            ridge_ratio=ridge_ratio,
+            num_iter=num_iter,
+            h_kk0=h_kk0,
+            h_kv0=h_kv0,
             output_final_state=output_final_state,
             cu_seqlens=cu_seqlens,
         )
-        return o, h_kk, h_kv
 
     @staticmethod
     def backward(ctx, do, dht_kk, dht_kv):

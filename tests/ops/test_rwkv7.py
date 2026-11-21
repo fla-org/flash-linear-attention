@@ -24,7 +24,7 @@ from fla.ops.rwkv7.channel_mixing import (
 )
 from fla.ops.rwkv7.fused_addcmul import fused_addcmul_rwkv7, torch_addcmul_rwkv7
 from fla.ops.rwkv7.fused_k_update import fused_k_rwkv7, k_update_ref
-from fla.ops.rwkv7.fused_recurrent import fused_mul_recurrent_rwkv7
+from fla.ops.rwkv7.fused_recurrent import fused_mul_recurrent_rwkv7, fused_recurrent_rwkv7_fwd
 from fla.ops.rwkv7.gate_output_correction import gate_output_correction
 from fla.ops.rwkv7.naive import naive_gate_output_correction
 from fla.utils import IS_NVIDIA_HOPPER, assert_close, device
@@ -392,3 +392,44 @@ def test_gate_output_correction(
     assert_close("drk", r_k.grad, tri_dr_k, 0.002)
     assert_close("dv", v.grad, tri_dv, 0.002)
     assert_close("dg", g.grad, tri_dg, 0.002)
+
+
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'D', 'cu_seqlens', 'dtype'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-cu_seqlens{}-{}".format(*test))
+        for test in [
+            (16, 1, 4, 64, None, torch.bfloat16),
+            (2, 300, 4, 64, None, torch.float),
+            (1, 400, 4, 64, [0, 15, 250, 400], torch.bfloat16),
+        ]
+    ],
+)
+def test_fused_recurrent_inplace_out(
+    B: int,
+    T: int,
+    H: int,
+    D: int,
+    cu_seqlens: list[int] | None,
+    dtype: torch.dtype,
+):
+    torch.manual_seed(42)
+    r = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    w = F.logsigmoid(torch.randn(B, T, H, D, dtype=torch.float32, device=device)).to(dtype)
+    k = F.normalize(torch.randn(B, T, H, D, dtype=torch.float32, device=device), p=2, dim=-1).to(dtype)
+    v = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    kk = F.normalize(torch.randn(B, T, H, D, dtype=torch.float32, device=device), p=2, dim=-1).to(dtype)
+    a = torch.rand(B, T, H, D, dtype=dtype, device=device).sigmoid()
+    if cu_seqlens is not None:
+        cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
+    N = B if cu_seqlens is None else len(cu_seqlens) - 1
+    h0 = torch.randn(N, H, D, D, dtype=torch.float32, device=device)
+
+    kwargs = dict(r=r, w=w, k=k, v=v, kk=kk, a=a, scale=D ** -0.5, cu_seqlens=cu_seqlens)
+    ref, ref_ht = fused_recurrent_rwkv7_fwd(initial_state=h0.clone(), output_final_state=True, **kwargs)
+    out = torch.empty_like(v)
+    tri, tri_ht = fused_recurrent_rwkv7_fwd(initial_state=h0.clone(), output_final_state=True, out=out, **kwargs)
+
+    assert tri.data_ptr() == out.data_ptr()
+    assert torch.equal(ref, tri)
+    assert torch.equal(ref_ht, tri_ht)

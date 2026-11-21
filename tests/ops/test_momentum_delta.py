@@ -434,3 +434,42 @@ def test_momentum_deltanet_layer_sum_norm(monkeypatch: pytest.MonkeyPatch):
     expected = F.normalize(x, p=1, dim=-1, eps=1e-6).unsqueeze(2)
     assert_close('q', expected, op.call_args.kwargs['q'], 1e-6)
     assert_close('k', expected, op.call_args.kwargs['k'], 1e-6)
+
+
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'D', 'dtype'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-{}".format(*test))
+        for test in [
+            (16, 1, 4, 128, torch.bfloat16),
+            (2, 300, 4, 64, torch.float),
+            (4, 128, 2, 64, torch.bfloat16),
+        ]
+    ],
+)
+def test_fused_recurrent_inplace_out(
+    B: int,
+    T: int,
+    H: int,
+    D: int,
+    dtype: torch.dtype,
+):
+    torch.manual_seed(42)
+    q = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    k = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    v = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    log_alpha = -0.1 * F.softplus(torch.randn(B, T, H, dtype=torch.float32, device=device))
+    log_mu = -0.1 * F.softplus(torch.randn(B, T, H, dtype=torch.float32, device=device))
+    beta = torch.rand(B, T, H, dtype=dtype, device=device).sigmoid()
+    h0 = torch.randn(2, B, H, D, D, dtype=torch.float32, device=device)
+
+    kwargs = dict(q=q, k=k, v=v, log_alpha=log_alpha, log_mu=log_mu, beta=beta, scale=D ** -0.5)
+    ref, ref_ht = fused_recurrent_momentum_delta_rule(initial_state=h0.clone(), output_final_state=True, **kwargs)
+    state = h0.clone()
+    out = torch.empty_like(v)
+    tri, tri_ht = fused_recurrent_momentum_delta_rule(initial_state=state, inplace_final_state=True, out=out, **kwargs)
+
+    assert tri.data_ptr() == out.data_ptr()
+    assert tri_ht.data_ptr() == state.data_ptr()
+    assert torch.equal(ref, tri)
+    assert torch.equal(ref_ht, state)

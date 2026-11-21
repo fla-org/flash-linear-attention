@@ -9,8 +9,10 @@ import torch
 
 from fla.ops.linear_attn.utils import normalize_with_z_state
 from fla.ops.simple_gla.fused_recurrent import fused_recurrent_simple_gla
+from fla.utils import input_guard
 
 
+@input_guard
 def fused_recurrent_linear_attn(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -21,6 +23,7 @@ def fused_recurrent_linear_attn(
     reverse: bool = False,
     normalize: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
+    out: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
@@ -72,6 +75,8 @@ def fused_recurrent_linear_attn(
             )
     if scale is None:
         scale = q.shape[-1] ** -0.5
+    if out is not None:
+        assert not normalize, "out= is not supported when normalize=True"
     o, final_state = fused_recurrent_simple_gla(
         q=q,
         k=k,
@@ -81,6 +86,7 @@ def fused_recurrent_linear_attn(
         output_final_state=output_final_state,
         reverse=reverse,
         cu_seqlens=cu_seqlens,
+        out=out,
     )
     if normalize:
         o, z_state = normalize_with_z_state(o, q, k, scale, z_init, reverse, cu_seqlens)

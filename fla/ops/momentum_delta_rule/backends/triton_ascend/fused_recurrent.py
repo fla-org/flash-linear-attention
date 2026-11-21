@@ -100,16 +100,26 @@ class FusedRecurrentMomentumDeltaRuleFunctionNPU(torch.autograd.Function):
         return dq, dk, dv, dp, dlog_alpha, dlog_mu, dbeta, deta, None, ds0, dm0, None, None, None, None
 
 
-def fused_recurrent_momentum_delta_rule_npu(q, k, v, log_alpha, log_mu, p=None, beta=None, eta=None, scale=None, initial_state=None, output_final_state=False, cu_seqlens=None, use_qk_l2norm_in_kernel=True, use_p_times_alpha=True):
+def fused_recurrent_momentum_delta_rule_npu(q, k, v, log_alpha, log_mu, p=None, beta=None, eta=None, scale=None, initial_state=None, output_final_state=False, inplace_final_state=False, cu_seqlens=None, use_qk_l2norm_in_kernel=True, use_p_times_alpha=True, out=None):
     """NPU entry for the community ``fused_recurrent_momentum_delta_rule`` (same contract)."""
     scale = k.shape[-1] ** -0.5 if scale is None else scale
     beta = torch.ones_like(q[..., 0]) if beta is None else beta
     eta = torch.ones_like(q[..., 0]) if eta is None else eta
     p = k if p is None else p
     initial_S, initial_M = (initial_state[0], initial_state[1]) if initial_state is not None else (None, None)
+    if inplace_final_state:
+        assert initial_state is not None, "inplace_final_state=True requires an initial_state"
     o, final_S, final_M = FusedRecurrentMomentumDeltaRuleFunctionNPU.apply(
         q, k, v, p, log_alpha, log_mu, beta, eta, scale, initial_S, initial_M,
-        output_final_state, cu_seqlens, use_qk_l2norm_in_kernel, use_p_times_alpha,
+        output_final_state or inplace_final_state, cu_seqlens, use_qk_l2norm_in_kernel, use_p_times_alpha,
     )
-    final_state = torch.stack([final_S, final_M], dim=0) if output_final_state else None
+    if out is not None:
+        assert out.shape == v.shape
+        o = out.copy_(o)
+    if inplace_final_state:
+        initial_state[0].copy_(final_S)
+        initial_state[1].copy_(final_M)
+        final_state = initial_state
+    else:
+        final_state = torch.stack([final_S, final_M], dim=0) if output_final_state else None
     return o, final_state

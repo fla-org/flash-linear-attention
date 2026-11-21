@@ -426,6 +426,7 @@ def fused_recurrent_fwd(
     reverse: bool = False,
     state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
+    out: torch.Tensor | None = None,
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
@@ -440,7 +441,11 @@ def fused_recurrent_fwd(
             ht = q.new_empty(N, H, K, V, dtype=torch.float32)
     else:
         ht = None
-    o = q.new_empty(NK, *v.shape, dtype=torch.float32)
+    if out is None:
+        o = q.new_empty(NK, *v.shape, dtype=torch.float32)
+    else:
+        assert out.shape == v.shape
+        o = out.unsqueeze(0) if NK == 1 else q.new_empty(NK, *v.shape, dtype=torch.float32)
 
     grid = (NV * NK * N * H,)
     fwd_kwargs = dict(
@@ -480,7 +485,12 @@ def fused_recurrent_fwd(
         )
     else:
         fused_recurrent_fwd_kernel[grid](**fwd_kwargs)
-    o = o.sum(0)
+    if out is not None and NK == 1:
+        o = o.squeeze(0)
+    elif NK > 1:
+        o = torch.sum(o, 0, out=out) if out is not None else o.sum(0)
+    else:
+        o = o.sum(0)
     return o, ht
 
 
@@ -697,6 +707,7 @@ def fused_recurrent_simple_gla_npu(
     reverse: bool = False,
     state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
+    out: torch.Tensor | None = None,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Ascend realization of `fused_recurrent_simple_gla`."""
@@ -723,6 +734,21 @@ def fused_recurrent_simple_gla_npu(
             )
     if scale is None:
         scale = k.shape[-1] ** -0.5
+    if out is not None:
+        return fused_recurrent_fwd(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            g_gamma=g_gamma,
+            scale=scale,
+            initial_state=initial_state,
+            output_final_state=output_final_state,
+            reverse=reverse,
+            state_v_first=state_v_first,
+            cu_seqlens=cu_seqlens,
+            out=out,
+        )
     return fused_recurrent(
         q=q,
         k=k,
