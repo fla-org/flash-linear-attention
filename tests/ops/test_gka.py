@@ -8,6 +8,7 @@
 import pytest
 import torch
 import torch.nn.functional as F
+from triton.runtime.errors import OutOfResources
 
 from fla.ops.gka import chunk_gka, fused_recurrent_gka, naive_recurrent_gka, naive_recurrent_gka_chebyshev
 from fla.utils import assert_close, device
@@ -348,7 +349,10 @@ def test_chunk_bwd_split_matches_fused(
     dq, _ = chunk_gka_solve_fwd(torch.randn_like(x), k, h, gk=gk, fro=fro)
     dh, _ = chunk_bwd_dh(q=dq, k=k, v=k, do=x, h0=None, dht=torch.randn_like(initial_state[0]), scale=1., g=gk)
 
-    fused = chunk_gka_solve_bwd(k, x, dq, h, dh, fro, gk=gk, output_dh0=True, split=False)
+    try:
+        fused = chunk_gka_solve_bwd(k, x, dq, h, dh, fro, gk=gk, output_dh0=True, split=False)
+    except OutOfResources:
+        pytest.skip("the single-launch backward does not fit in this GPU's shared memory")
     split = chunk_gka_solve_bwd(k, x, dq, h, dh, fro, gk=gk, output_dh0=True, split=True)
     for name, ref, tri in zip(('dk', 'dg', 'dh0_lamb'), fused, split):
         if ref is None:
