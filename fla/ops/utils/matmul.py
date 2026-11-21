@@ -25,6 +25,8 @@ from fla.utils import autotune_cache_kwargs, input_guard
 @triton.heuristics({
     'HAS_ALPHA': lambda args: args['alpha'] is not None,
     'HAS_BETA': lambda args: args['beta'] is not None,
+    'IS_ALPHA_TENSOR': lambda args: isinstance(args['alpha'], torch.Tensor),
+    'IS_BETA_TENSOR': lambda args: isinstance(args['beta'], torch.Tensor),
 })
 @triton.autotune(
     configs=[
@@ -77,6 +79,8 @@ def matmul_kernel(
     HAS_INPUT: tl.constexpr,
     HAS_ALPHA: tl.constexpr,
     HAS_BETA: tl.constexpr,
+    IS_ALPHA_TENSOR: tl.constexpr,
+    IS_BETA_TENSOR: tl.constexpr,
     ALLOW_TF32: tl.constexpr,
     X_DIM: tl.constexpr = 1,
 ):
@@ -136,15 +140,28 @@ def matmul_kernel(
         b_c = tanh(b_c)
 
     if HAS_ALPHA:
-        b_c *= tl.load(alpha)
+        b_alpha = tl.load(alpha).to(tl.float32) if IS_ALPHA_TENSOR else alpha
+        if b_alpha == 0.0:
+            b_c = tl.zeros((BM, BN), dtype=tl.float32)
+        else:
+            b_c *= b_alpha
 
     if HAS_INPUT:
-        p_i = input + (stride_cm * o_cm[:, None] if X_DIM == 2 else 0) + stride_cn * o_cn[None, :]
+        p_i = (
+            input
+            + (i_b * stride_cb if X_DIM == 3 else 0)
+            + (stride_cm * o_cm[:, None] if X_DIM >= 2 else 0)
+            + stride_cn * o_cn[None, :]
+        )
         mask_p = (o_cn[None, :] < N) if X_DIM == 1 else mask
-        b_i = tl.load(p_i, mask=mask_p, other=0.0).to(tl.float32)
         if HAS_BETA:
-            b_i *= tl.load(beta)
-        b_c += b_i
+            b_beta = tl.load(beta).to(tl.float32) if IS_BETA_TENSOR else beta
+            if b_beta != 0.0:
+                b_i = tl.load(p_i, mask=mask_p, other=0.0).to(tl.float32)
+                b_c += b_i * b_beta
+        else:
+            b_i = tl.load(p_i, mask=mask_p, other=0.0).to(tl.float32)
+            b_c += b_i
 
     # -----------------------------------------------------------
     # Write back the block of the output matrix C with masks.
