@@ -15,15 +15,20 @@ from fla.utils import IS_NVIDIA
 
 
 def _generate_softplus(num_pack):
+    # 1 + exp(x) rounds to 1 for x < -16, so use exp(x) directly in the tail.
     template = """
-        .reg .pred p;
-        setp.gt.f32  p, ${in_reg}, 20.;
-        @p  mov.f32  ${out_reg}, ${in_reg};
-        @!p mul.f32            ${out_reg}, ${in_reg}, 1.4426950408889634;
-        @!p ex2.approx.ftz.f32 ${out_reg}, ${out_reg};
-        @!p add.f32            ${out_reg}, ${out_reg}, 1.0;
-        @!p lg2.approx.ftz.f32 ${out_reg}, ${out_reg};
-        @!p mul.f32            ${out_reg}, ${out_reg}, 0.6931471805599453;
+        .reg .f32 t, e;
+        .reg .pred p, q;
+        mul.f32 e, ${in_reg}, 1.4426950408889634;
+        ex2.approx.ftz.f32 e, e;
+        mov.f32 t, e;
+        add.f32 t, t, 1.0;
+        lg2.approx.ftz.f32 t, t;
+        mul.f32 t, t, 0.6931471805599453;
+        setp.lt.f32 q, ${in_reg}, -8.;
+        selp.f32 t, e, t, q;
+        setp.gt.f32 p, ${in_reg}, 20.;
+        selp.f32 ${out_reg}, ${in_reg}, t, p;
     """
     out_str = ""
 
@@ -83,7 +88,13 @@ def softplus_nv(x):
 
 @triton.jit
 def softplus_triton(x):
-    return tl.where(x < 20.0, tl.math.log(1 + tl.math.exp(x)), x)
+    # Adding exp(x) to 1 loses precision in the negative tail; use exp(x)
+    # directly there, where log(1 + exp(x)) is close to exp(x).
+    return tl.where(
+        x < -8.0,
+        tl.math.exp(x),
+        tl.where(x < 20.0, tl.math.log(1.0 + tl.math.exp(x)), x),
+    )
 
 
 @triton.jit
