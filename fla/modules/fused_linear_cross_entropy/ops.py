@@ -18,7 +18,7 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 from torch.distributed import DeviceMesh
-from torch.distributed.tensor import Replicate, Shard, distribute_module
+from torch.distributed.tensor import Partial, Replicate, Shard, distribute_module
 from torch.distributed.tensor.parallel import ParallelStyle
 
 from fla.backends import dispatch
@@ -510,26 +510,41 @@ class LinearLossParallel(ParallelStyle):
 
         if not isinstance(weight, DTensor):
             weight = DTensor.from_local(weight, device_mesh, [Replicate()])
-        if weight.placements != [Replicate()]:
-            # we replicate the weight/bias in FLCE
-            weight = weight.redistribute(placements=[Replicate()], async_op=True)
+        # keep the redistribution autograd edge so partial gradients reduce to the original layout.
+        weight = weight.redistribute(placements=[Replicate()], async_op=True)
 
         if bias is not None and not isinstance(bias, DTensor):
             bias = DTensor.from_local(bias, device_mesh, [Replicate()])
-        if bias is not None and bias.placements != [Replicate()]:
+        if bias is not None:
             bias = bias.redistribute(placements=[Replicate()], async_op=True)
 
-        return x.to_local(), target.to_local(), weight.to_local(), bias.to_local() if bias is not None else bias
+        return (
+            x.to_local(),
+            target.to_local(),
+            weight.to_local(grad_placements=[Partial()]),
+            bias.to_local(grad_placements=[Partial()]) if bias is not None else bias,
+        )
 
     @staticmethod
-    def _prepare_output_fn(use_local_output, mod, outputs, device_mesh):
-        return outputs.to_local() if use_local_output and isinstance(outputs, DTensor) else outputs
+    def _prepare_output_fn(use_local_output, device_mesh, mod, inputs, outputs):
+        if mod.reduction == "mean":
+            count = inputs[1].ne(mod.ignore_index).sum().to(outputs.dtype)
+            outputs = torch.stack((outputs * count, count))
+
+        outputs = DTensor.from_local(outputs, device_mesh, [Partial()]).redistribute(placements=[Replicate()])
+        if mod.reduction == "mean":
+            outputs = outputs[0] / outputs[1].clamp_min(1)
+        return outputs.to_local(grad_placements=[Replicate()]) if use_local_output else outputs
 
     def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
-        return distribute_module(
+        if getattr(module, "use_l2warp", False):
+            raise NotImplementedError("LinearLossParallel does not support use_l2warp=True")
+
+        module = distribute_module(
             module,
             device_mesh,
             partition_fn=None,
             input_fn=partial(self._prepare_input_fn, self.sequence_sharding),
-            output_fn=partial(self._prepare_output_fn, self.use_local_output),
         )
+        module.register_forward_hook(partial(self._prepare_output_fn, self.use_local_output, device_mesh))
+        return module
