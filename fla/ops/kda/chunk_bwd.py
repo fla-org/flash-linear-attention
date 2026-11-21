@@ -21,7 +21,9 @@ from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.graph import get_static_buffer
 from fla.ops.utils.op import exp2
-from fla.utils import IS_NVIDIA_HOPPER, IS_NVIDIA_SM100, autotune_cache_kwargs, check_shared_mem
+from fla.utils import IS_NVIDIA_HOPPER, IS_NVIDIA_SM100, IS_TF32_SUPPORTED, autotune_cache_kwargs, check_shared_mem
+
+MIXED_DOT_PRECISION = tl.constexpr("tf32x3" if IS_TF32_SUPPORTED else "ieee")
 
 BK_LIST = [32, 64] if check_shared_mem() else [16, 32]
 BV_LIST = [64, 128] if check_shared_mem('ampere') else [16, 32]
@@ -92,7 +94,7 @@ def chunk_kda_bwd_kernel_dAv(
     b_A = tl.load(p_A, mask=m_AT, other=0.0)
 
     m_A = (o_t[:, None] <= o_t[None, :]) & (m_t[:, None] & m_t)
-    b_A = tl.where(m_A, b_A, 0).to(do.dtype.element_ty)
+    b_A = tl.where(m_A, b_A, 0)
 
     b_dA = tl.zeros([BT, BT], dtype=tl.float32)
     for i_v in range(tl.cdiv(V, BV)):
@@ -108,9 +110,12 @@ def chunk_kda_bwd_kernel_dAv(
         # [BT, BV]
         b_do = tl.load(p_do, mask=m_tv, other=0.0)
         # [BT, BT]
-        b_dA = tl.dot(b_do, b_v, b_dA)
-        # [BT, BV]
-        b_dv = tl.dot(b_A.to(b_do.dtype), b_do)
+        if v.dtype.element_ty != do.dtype.element_ty:
+            b_dA = tl.dot(b_do.to(tl.float32), b_v, b_dA, input_precision=MIXED_DOT_PRECISION)
+            b_dv = tl.dot(b_A.to(tl.float32), b_do.to(tl.float32), input_precision=MIXED_DOT_PRECISION)
+        else:
+            b_dA = tl.dot(b_do, b_v, b_dA)
+            b_dv = tl.dot(b_A.to(b_do.dtype), b_do)
         tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), mask=m_tv)
 
     m_dA = m_t[:, None] & (o_A[None, :] < BT)
@@ -353,7 +358,7 @@ def chunk_kda_bwd_dAv(
         dv = get_static_buffer("dAv_dv", tuple(do.shape), do.dtype, do.device)
     else:
         dA = v.new_empty(B, T, HV, BT, dtype=torch.float)
-        dv = torch.empty_like(do)
+        dv = torch.empty_like(do, dtype=v.dtype)
     grid = (NT, B * HV)
     chunk_kda_bwd_kernel_dAv[grid](
         q=q,
