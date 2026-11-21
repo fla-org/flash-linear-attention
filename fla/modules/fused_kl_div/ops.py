@@ -13,7 +13,8 @@ import triton.language as tl
 
 from fla.backends import dispatch
 from fla.ops.utils.op import exp, log
-from fla.utils import IS_AMD, input_guard
+from fla.utils import IS_AMD, IS_NPU, input_guard
+from fla.utils.ascend_ub_manager import compute_vocab_block_size
 
 # the hard limit of TRITON_MAX_TENSOR_NUMEL is 1048576
 # https://github.com/triton-lang/triton/blob/ba42a5c68fd0505f8c42f4202d53be0f8d9a5fe0/python/triton/language/core.py#L19
@@ -117,7 +118,11 @@ def fused_kl_div_fwd(
     # C = ceil(N / NC)
     # for ex: N = 4096*4, V = 32000, H = 4096 ==> NC = 8, C = ceil(N / NC) = 2048
     N, H, V = *x.shape, weight.shape[0]
-    BV = min(MAX_FUSED_SIZE, triton.next_power_of_2(V))
+    if IS_NPU:
+        # 32K-element fp32 tiles exceed the 192 KiB Ascend UB; use the UB-safe tile
+        BV = compute_vocab_block_size(vocab_size=V, num_rows=N, memory_multiplier=12.0)
+    else:
+        BV = min(MAX_FUSED_SIZE, triton.next_power_of_2(V))
     # TODO: in real cases, we may need to limit the number of chunks NC to
     # ensure the precisions of accumulated gradients
     NC = min(8, triton.cdiv(V, H))
