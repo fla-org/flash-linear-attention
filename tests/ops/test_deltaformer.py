@@ -95,13 +95,13 @@ def test_deltaformer_attn(
 @pytest.mark.skipif(IS_INTEL_ALCHEMIST, reason="Skipping test on Intel Alchemist due to known issues with SRAM.")
 def test_deltaformer_attn_padding_mask(with_beta: bool, mixed_empty: bool):
     torch.manual_seed(42)
-    B, T, H, D = 3, 96, 2, 64
+    B, T, H, D = 3 + int(mixed_empty), 96, 2, 64
     mask = torch.ones((B, T), dtype=torch.bool, device=device)
     mask[0, :19] = False
     mask[1, 25:48] = False
     mask[2, 70:] = False
     if mixed_empty:
-        mask[2] = False
+        mask[3] = False
 
     q, k, v = [torch.randn((B, T, H, D), dtype=torch.float16, device=device).requires_grad_() for _ in range(3)]
     beta = torch.rand((B, T, H), dtype=q.dtype, device=device).requires_grad_() if with_beta else None
