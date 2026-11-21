@@ -50,6 +50,7 @@ def chunk_cp_fwd_kernel_h(
     BT: tl.constexpr,
     BV: tl.constexpr,
     BK: tl.constexpr,
+    CU_SEQLENS_STRIDE: tl.constexpr,
     USE_G: tl.constexpr,
     USE_GK: tl.constexpr,
     USE_BG: tl.constexpr,
@@ -69,7 +70,8 @@ def chunk_cp_fwd_kernel_h(
         i_n = 0
         hm += i_h * K * (K + V)
     if IS_VARLEN:
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        bos = tl.load(cu_seqlens + i_n * CU_SEQLENS_STRIDE).to(tl.int64)
+        eos = tl.load(cu_seqlens + i_n * CU_SEQLENS_STRIDE + 1).to(tl.int64)
         T = (eos - bos).to(tl.int32)
         NT = tl.cdiv(T, BT)
     else:
@@ -331,5 +333,6 @@ def chunk_cp_fwd_h(
         BT=chunk_size,
         BV=BV,
         BK=BK,
+        CU_SEQLENS_STRIDE=cu_seqlens.stride(0) if cu_seqlens is not None else 1,
         MULTI_SEQS=multi_seqs,
     )
