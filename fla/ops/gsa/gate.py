@@ -10,7 +10,7 @@ import triton
 import triton.language as tl
 
 from fla.backends import dispatch
-from fla.ops.utils.op import exp, logaddexp, unflatten_program_id
+from fla.ops.utils.op import exp, log, unflatten_program_id
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, input_guard
 
 
@@ -68,8 +68,12 @@ def fused_additive_gate_fwd_kernel(
         o_t = i_t + o_i
         m_x = (o_t[:, None] < T) & m_s[None, :]
         b_x = tl.load(p_x + o_t[:, None] * S, mask=m_x, other=float('-inf')).to(tl.float32)
-        b_z = tl.associative_scan(b_x, axis=0, combine_fn=logaddexp)
-        b_z = logaddexp(b_z, b_zp[None, :])
+        # cumulative logsumexp via max + exp + cumsum + log; a logaddexp scan combine
+        # does not link on Ascend (undefined `expf` from the scalar exp in the combine)
+        b_m = tl.maximum(tl.max(b_x, 0), b_zp)
+        b_m = tl.where(b_m == float('-inf'), 0., b_m)
+        b_c = tl.cumsum(exp(b_x - b_m[None, :]), axis=0) + exp(b_zp - b_m)
+        b_z = tl.where(b_c > 0, b_m + log(b_c), float('-inf'))
         o_prev = tl.broadcast_to(tl.maximum(o_i - 1, 0)[:, None], (BT, BS))
         b_zc = tl.gather(b_z, o_prev, axis=0)
         b_zc = tl.where(o_i[:, None] == 0, b_zp[None, :], b_zc)
