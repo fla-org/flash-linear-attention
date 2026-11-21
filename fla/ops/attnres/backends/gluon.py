@@ -28,7 +28,7 @@ from triton.experimental.gluon import language as gl
 from triton.experimental.gluon.language.nvidia.ampere import async_copy as cp
 
 from fla.backends import GluonBackend, register
-from fla.ops.attnres.fused import fused_attnres
+from fla.ops.attnres.fused import _flatten_residual, fused_attnres
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.op import barrier
 from fla.utils import (
@@ -740,7 +740,7 @@ def fused_attnres_gluon(
 ) -> torch.Tensor | tuple[torch.Tensor, ...]:
     output_shape = residuals[0].shape
     D = output_shape[-1]
-    flat_residuals = tuple(r.reshape(-1, D).contiguous() for r in residuals)
+    flat_residuals = tuple(_flatten_residual(r, D) for r in residuals)
 
     o, p = FusedAttnresGluonFunction.apply(
         query, rms_weight, output_rms_weight, rms_eps, scale, return_weights, checkpoint_level, *flat_residuals,
