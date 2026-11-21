@@ -46,3 +46,36 @@ def test_utils_import_without_transformers(run_python):
         assert not supports_transformers_next_sequence_length()
         """,
     )
+
+
+@pytest.mark.parametrize('error_name', ['ImportError', 'OSError'])
+def test_causal_conv_import_with_unloadable_extension(run_python, error_name):
+    run_python(
+        f"""
+        import importlib
+        import importlib.abc
+        import importlib.util
+        import sys
+
+        class UnloadableCausalConv(importlib.abc.MetaPathFinder, importlib.abc.Loader):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname == 'causal_conv1d':
+                    return importlib.util.spec_from_loader(fullname, self, is_package=True)
+
+            def create_module(self, spec):
+                return None
+
+            def exec_module(self, module):
+                raise {error_name}('optional causal-conv1d extension cannot be loaded')
+
+        sys.meta_path.insert(0, UnloadableCausalConv())
+
+        conv = importlib.import_module('fla.modules.causal_conv1d.ops')
+        assert conv.causal_conv1d_fn_cuda is None
+        assert conv.causal_conv1d_update_cuda is None
+
+        cuda = importlib.import_module('fla.modules.causal_conv1d.backends.cuda.ops')
+        assert cuda.causal_conv1d_fn_cuda is None
+        assert cuda.causal_conv1d_bwd_function is None
+        """,
+    )
