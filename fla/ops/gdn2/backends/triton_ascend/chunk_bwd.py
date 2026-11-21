@@ -42,8 +42,8 @@ def get_bwd_tile(size: int, block_rows: int) -> int:
     )
 
 
-def prepare_time_contiguous_input(x: torch.Tensor, num_heads: int) -> tuple[torch.Tensor, bool]:
-    if num_heads == 1:
+def prepare_time_contiguous_input(x: torch.Tensor, num_heads: int, *, transpose: bool = True) -> tuple[torch.Tensor, bool]:
+    if num_heads == 1 or not transpose:
         return x, False
     return x.transpose(1, 2).contiguous(), True
 
@@ -872,11 +872,13 @@ def chunk_gdn2_bwd_wy_dqkg_fused_npu(
     bh_total = B * H
     task_num = NT * bh_total
     num_core = get_npu_properties()['num_vectorcore']
+    channel_tiles = max(NK, triton.cdiv(V, BV))
+    transpose_inputs = not is_varlen or task_num * channel_tiles > num_core
 
-    v_arg, t_contig = prepare_time_contiguous_input(v, H)
-    w_arg = prepare_time_contiguous_input(w_gate, H)[0]
-    A_arg = prepare_time_contiguous_input(A, H)[0]
-    dv_arg = prepare_time_contiguous_input(dv, H)[0]
+    v_arg, t_contig = prepare_time_contiguous_input(v, H, transpose=transpose_inputs)
+    w_arg = prepare_time_contiguous_input(w_gate, H, transpose=transpose_inputs)[0]
+    A_arg = prepare_time_contiguous_input(A, H, transpose=transpose_inputs)[0]
+    dv_arg = prepare_time_contiguous_input(dv, H, transpose=transpose_inputs)[0]
     chunk_gdn2_bwd_kernel_wy_v_part_npu[(num_core,)](
         v=v_arg,
         w_gate=w_arg,
@@ -937,9 +939,9 @@ def chunk_gdn2_bwd_wy_dqkg_fused_npu(
         k_part_kwargs['K_OFFSET'] = k_off
         chunk_kda_bwd_kernel_wy_k_part_npu[(num_core,)](**k_part_kwargs, **ascend_compile_kwargs())
 
-    k_arg, k_t_contig = prepare_time_contiguous_input(k, H)
-    g_arg, g_t_contig = prepare_time_contiguous_input(g, H)
-    b_arg = prepare_time_contiguous_input(b, H)[0]
+    k_arg, k_t_contig = prepare_time_contiguous_input(k, H, transpose=transpose_inputs)
+    g_arg, g_t_contig = prepare_time_contiguous_input(g, H, transpose=transpose_inputs)
+    b_arg = prepare_time_contiguous_input(b, H, transpose=transpose_inputs)[0]
     gate_dw = torch.empty(B, T, H, K, dtype=torch.float32, device=k.device)
     compile_kwargs = ascend_compile_kwargs()
     dw_kwargs = dict(

@@ -821,38 +821,57 @@ def test_fused_recurrent_npu_verifier(case, dtype, reason):
 
 
 @pytest.mark.skipif(not IS_NPU, reason='Ascend dispatch and launch splitting require NPU')
-@pytest.mark.parametrize('varlen', [False, True], ids=['dense', 'varlen'])
-def test_chunk_npu_launch_splits(varlen, monkeypatch):
-    """Split launches must retain native-reference numerics and dispatch both leaf stages."""
+@pytest.mark.parametrize(
+    ('varlen', 'aligned', 'K'),
+    [(False, False, 48), (True, False, 48), (False, True, 64), (False, True, 128), (True, False, 128), (False, True, 256)],
+    ids=['dense', 'varlen', 'aligned', 'aligned-K128', 'varlen-K128', 'aligned-K256'],
+)
+@pytest.mark.parametrize('disable_recompute', [False, True], ids=['recompute', 'saved-forward'])
+def test_chunk_npu_launch_splits(varlen, aligned, K, disable_recompute, monkeypatch):
+    """Split launches retain reference numerics and select each Ascend intra/WY stage."""
+    monkeypatch.setattr(testing, 'FLA_CI_ENV', False)
     from fla.ops.gdn2.backends.triton_ascend import chunk_intra
     from fla.ops.gdn2.chunk_bwd import chunk_gdn2_bwd_wy_dqkg_fused
-    from fla.ops.gdn2.chunk_intra import chunk_gdn2_fwd_intra
+    from fla.ops.gdn2.chunk_intra import chunk_gdn2_bwd_intra, chunk_gdn2_fwd_intra
 
     # exercise multiple launches and packed sequence boundaries with a small reference workload.
     monkeypatch.setattr(chunk_intra, 'LAUNCH_BLOCK_BUDGET', 4)
+    monkeypatch.setitem(globals(), 'chunk_gdn2', partial(chunk_gdn2, disable_recompute=disable_recompute))
     fwd = backends._function_registries[inspect.unwrap(chunk_gdn2_fwd_intra)]._backends['triton_ascend']
     bwd = backends._function_registries[inspect.unwrap(chunk_gdn2_bwd_wy_dqkg_fused)]._backends['triton_ascend']
+    intra = backends._function_registries[inspect.unwrap(chunk_gdn2_bwd_intra)]._backends['triton_ascend']
+    wy = backends._function_registries[inspect.unwrap(recompute_w_u_fwd_gdn2)]._backends['triton_ascend']
+    wy_spy = Mock(wraps=wy.implementation)
+    monkeypatch.setattr(wy, 'implementation', wy_spy)
+    inter_kernel = chunk_intra.chunk_gdn2_fwd_kernel_inter_products_npu
+    inter_spy = Mock(wraps=inter_kernel.run)
+    monkeypatch.setattr(inter_kernel, 'run', inter_spy)
     fwd_spy = Mock(wraps=fwd.implementation)
     bwd_spy = Mock(wraps=bwd.implementation)
+    intra_spy = Mock(wraps=intra.implementation)
     monkeypatch.setattr(fwd, 'implementation', fwd_spy)
     monkeypatch.setattr(bwd, 'implementation', bwd_spy)
+    monkeypatch.setattr(intra, 'implementation', intra_spy)
+    kernel = chunk_intra.chunk_gdn2_bwd_kernel_intra_npu.fn
+    kernel_spy = Mock(wraps=kernel.run)
+    monkeypatch.setattr(kernel, 'run', kernel_spy)
     if varlen:
         test_chunk_varlen(
             cu_seqlens=[0, 15, 100, 257],
             H=2,
-            K=48,
+            K=K,
             V=32,
             use_gate_in_kernel=False,
             dtype=torch.float16,
             state_v_first=False,
-            disable_recompute=False,
+            disable_recompute=disable_recompute,
         )
     else:
         test_chunk(
             B=2,
-            T=257,
+            T=256 if aligned else 257,
             H=2,
-            K=48,
+            K=K,
             V=32,
             scale=1.0,
             use_qk_l2norm_in_kernel=True,
@@ -862,6 +881,178 @@ def test_chunk_npu_launch_splits(varlen, monkeypatch):
         )
     fwd_spy.assert_called_once()
     bwd_spy.assert_called_once()
+    intra_spy.assert_called_once()
+    assert kernel_spy.call_args.kwargs['IS_ALIGNED'] is aligned
+    assert [call.kwargs['q'] is None for call in wy_spy.call_args_list] == (
+        [False] if disable_recompute else [True, False]
+    )
+    assert inter_spy.call_count > 0
+    assert {call.kwargs['BK'] for call in inter_spy.call_args_list} == {K if aligned and K >= 128 else 64}
+
+
+@pytest.mark.skipif(not IS_NPU, reason='Ascend intra backward routing')
+def test_chunk_bwd_intra_npu_saved_state(monkeypatch):
+    """Saved forward intermediates still dispatch intra backward for ragged BF16 training."""
+    from fla.ops.gdn2.chunk_intra import chunk_gdn2_bwd_intra
+
+    monkeypatch.setattr(testing, 'FLA_CI_ENV', False)
+    candidate = backends._function_registries[inspect.unwrap(chunk_gdn2_bwd_intra)]._backends['triton_ascend']
+    spy = Mock(wraps=candidate.implementation)
+    monkeypatch.setattr(candidate, 'implementation', spy)
+    test_chunk_varlen(
+        cu_seqlens=[0, 15, 80],
+        H=1,
+        K=32,
+        V=48,
+        use_gate_in_kernel=False,
+        dtype=torch.bfloat16,
+        state_v_first=True,
+        disable_recompute=True,
+    )
+    spy.assert_called_once()
+
+
+@pytest.mark.skipif(not IS_NPU, reason='Ascend packed WY layout selection')
+@pytest.mark.parametrize(
+    ('K', 'V', 'dtype', 'state_v_first', 'disable_recompute'),
+    [
+        (48, 32, torch.float16, False, False), (32, 48, torch.bfloat16, True, True),
+        (256, 256, torch.float16, False, True), (256, 256, torch.bfloat16, False, False),
+        (256, 256, torch.float32, False, False),
+    ],
+)
+def test_chunk_bwd_wy_npu_packed_layout(K, V, dtype, state_v_first, disable_recompute, monkeypatch):
+    """Small packed WY batches select their input layout and retain reference gradients."""
+    from fla.ops.gdn2.backends.triton_ascend import chunk_bwd
+
+    kernel = chunk_bwd.chunk_gdn2_bwd_kernel_wy_v_part_npu
+    spy = Mock(wraps=kernel.run)
+    layout_spy = Mock(wraps=chunk_bwd.prepare_time_contiguous_input)
+    monkeypatch.setattr(kernel, 'run', spy)
+    monkeypatch.setattr(chunk_bwd, 'prepare_time_contiguous_input', layout_spy)
+    test_chunk_varlen(
+        cu_seqlens=[0, 15, 80, 145], H=2, K=K, V=V, use_gate_in_kernel=False,
+        dtype=dtype, state_v_first=state_v_first, disable_recompute=disable_recompute,
+    )
+    assert layout_spy.call_count == 7
+    modes = {call.kwargs['transpose'] for call in layout_spy.call_args_list}
+    assert len(modes) == 1
+    spy.assert_called_once()
+    assert spy.call_args.kwargs['T_CONTIG'] is modes.pop()
+
+
+@pytest.mark.skipif(not IS_NPU, reason='Ascend packed WY layout boundary')
+@pytest.mark.parametrize('V', [32, 512])
+@pytest.mark.parametrize('above_wave', [False, True])
+def test_chunk_bwd_wy_npu_packed_wave_boundary(above_wave, V, monkeypatch):
+    """Both sides of one vector-core wave preserve reference gradients."""
+    from fla.ops.gdn2.backends.triton_ascend import chunk_bwd
+
+    tiles = triton.cdiv(V, chunk_bwd.get_bwd_tile(V, 32))
+    H = max(1, chunk_bwd.get_npu_properties()['num_vectorcore'] // (5 * tiles)) + int(above_wave)
+    kernel = chunk_bwd.chunk_gdn2_bwd_kernel_wy_v_part_npu
+    spy = Mock(wraps=kernel.run)
+    monkeypatch.setattr(kernel, 'run', spy)
+    test_chunk_varlen(
+        cu_seqlens=[0, 15, 80, 145], H=H, K=32, V=V, use_gate_in_kernel=False,
+        dtype=torch.bfloat16, state_v_first=False, disable_recompute=False,
+    )
+    spy.assert_called_once()
+    assert spy.call_args.kwargs['T_CONTIG'] is above_wave
+
+
+@pytest.mark.parametrize(
+    ('K', 'dtype', 'chunk_size', 'on_npu', 'ub_kib', 'expected'),
+    [
+        (48, torch.float16, 64, True, 192, True),
+        (256, torch.bfloat16, 64, True, 192, True),
+        (32, torch.float32, 64, True, 96, True),
+        (256, torch.float32, 64, True, 96, True),
+        (256, torch.float32, 64, True, 95, False),
+        (256, torch.float32, 64, True, 64, False),
+        (257, torch.float32, 64, True, 192, False),
+        (0, torch.float32, 64, True, 192, False),
+        (32, torch.int32, 64, True, 192, False),
+        (32, torch.float32, 32, True, 192, False),
+        (32, torch.float32, 64, False, 192, False),
+    ],
+)
+def test_chunk_bwd_intra_npu_verifier(K, dtype, chunk_size, on_npu, ub_kib, expected, monkeypatch):
+    """Check device, dtype, chunk and K/UB boundaries without an accelerator."""
+    from fla.ops.gdn2.backends.triton_ascend.chunk_intra import (
+        _get_bwd_bk,
+        chunk_gdn2_bwd_intra_npu,
+        chunk_gdn2_bwd_intra_verifier,
+    )
+    from fla.utils import ascend_ub_manager
+
+    monkeypatch.setattr(ascend_ub_manager, '_ub_manager', ascend_ub_manager.UBManager(ub_kib * 1024 * 8))
+    tensor_device = SimpleNamespace(type='npu' if on_npu else 'cpu', index=0)
+    x = SimpleNamespace(shape=(1, 65, 2, K), ndim=4, dtype=dtype, device=tensor_device)
+    a = SimpleNamespace(shape=(1, 65, 2, 64), ndim=4, dtype=dtype, device=tensor_device)
+    kwargs = dict.fromkeys(('q', 'k', 'g', 'b', 'dq', 'dk', 'db', 'dg'), x)
+    kwargs.update(dAqk=a, dAkk=a, chunk_size=chunk_size, safe_gate=True, lower_bound=-2.0)
+    accepted, reason = chunk_gdn2_bwd_intra_verifier(**kwargs)
+    assert accepted == expected
+    assert (reason is None) == expected
+    if expected:
+        inspect.signature(chunk_gdn2_bwd_intra_npu).bind(**kwargs)
+        assert _get_bwd_bk(K) == (16 if ub_kib == 96 else 32)
+
+
+@pytest.mark.parametrize(
+    ('case', 'reason'),
+    [
+        ('q_shape', 'matching rank-4'),
+        ('score_shape', 'shaped [B, T, H, 64]'),
+        ('mixed_device', 'same NPU device'),
+        ('packed_batch', 'batch size 1'),
+        ('sequence_rank', 'rank-1 cu_seqlens'),
+        ('index_shape', 'shaped [NT, 2]'),
+        ('index_dtype', 'int32 or int64'),
+    ],
+)
+def test_chunk_bwd_intra_npu_verifier_metadata(case, reason):
+    """Reject malformed leaf metadata before the NPU launch."""
+    from fla.ops.gdn2.backends.triton_ascend.chunk_intra import chunk_gdn2_bwd_intra_verifier
+
+    npu = SimpleNamespace(type='npu', index=0)
+    batch = 2 if case == 'packed_batch' else 1
+    shapes = dict.fromkeys(('q', 'k', 'g', 'b', 'dq', 'dk', 'db', 'dg'), (batch, 65, 2, 32))
+    shapes.update(dAqk=(batch, 65, 2, 64), dAkk=(batch, 65, 2, 64))
+    inputs = {
+        name: SimpleNamespace(shape=shape, ndim=4, dtype=torch.float32, device=npu) for name, shape in shapes.items()
+    }
+    inputs['cu_seqlens'] = SimpleNamespace(shape=(3,), ndim=1, dtype=torch.int64, device=npu)
+    inputs['chunk_indices'] = SimpleNamespace(shape=(4, 2), ndim=2, dtype=torch.int64, device=npu)
+    if case == 'q_shape':
+        inputs['q'].shape = (batch, 65, 2, 31)
+    elif case == 'score_shape':
+        inputs['dAkk'].shape = (batch, 65, 2, 63)
+    elif case == 'mixed_device':
+        inputs['dq'].device = SimpleNamespace(type='npu', index=1)
+    elif case == 'sequence_rank':
+        inputs['cu_seqlens'].ndim = 2
+    elif case == 'index_shape':
+        inputs['chunk_indices'].shape = (4, 3)
+    elif case == 'index_dtype':
+        inputs['chunk_indices'].dtype = torch.float32
+    accepted, actual_reason = chunk_gdn2_bwd_intra_verifier(**inputs)
+    assert not accepted
+    assert reason in actual_reason
+
+
+@pytest.mark.parametrize(
+    ('ub_kib', 'K', 'expected'),
+    [(64, 256, 64), (96, 128, 128), (192, 32, 32), (192, 48, 64), (192, 128, 128), (192, 256, 256)],
+)
+def test_chunk_fwd_inter_npu_tile(ub_kib, K, expected, monkeypatch):
+    """Channel tiles respect both the device budget and the supported K range."""
+    from fla.ops.gdn2.backends.triton_ascend.chunk_intra import get_inter_bk
+    from fla.utils import ascend_ub_manager
+
+    monkeypatch.setattr(ascend_ub_manager, '_ub_manager', ascend_ub_manager.UBManager(ub_kib * 1024 * 8))
+    assert get_inter_bk(K) == expected
 
 
 @pytest.mark.skipif(not (IS_NVIDIA or IS_AMD or IS_NPU), reason="CUDA/ROCm or Ascend NPU required")
@@ -1401,6 +1592,8 @@ def test_chunk_npu_compile_options():
     [
         pytest.param(48, torch.float16, True, id='varlen-K48-fp16'),
         pytest.param(256, torch.bfloat16, False, id='dense-K256-bf16'),
+        pytest.param(32, torch.float32, False, id='dense-K32-fp32'),
+        pytest.param(256, torch.bfloat16, True, id='varlen-K256-bf16'),
     ],
 )
 def test_chunk_fwd_intra_grouped_npu(K, dtype, varlen, monkeypatch):
