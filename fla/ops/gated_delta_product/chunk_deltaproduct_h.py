@@ -11,7 +11,7 @@ import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 from fla.ops.utils.op import exp2, unflatten_program_id
-from fla.utils import IS_NVIDIA_BLACKWELL, IS_NVIDIA_HOPPER, autotune_cache_kwargs
+from fla.utils import IS_NVIDIA_BLACKWELL, IS_NVIDIA_HOPPER, autotune_cache_kwargs, check_shared_mem
 
 NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8, 16]
 
@@ -228,10 +228,10 @@ def chunk_gated_delta_product_fwd_kernel_h_blockdim64(
     configs=[
         triton.Config({'BV': BV}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [2, 4]
-        for num_stages in [4, 3, 2]
-        for BV in [64, 32]
+        for num_stages in ([2, 3, 4] if check_shared_mem('ampere') else [1, 2, 3])
+        for BV in ([32, 64] if check_shared_mem('ada') else [32])
     ],
-    key=['H', 'K', 'V', 'BT', 'BV', 'USE_G'],
+    key=['H', 'K', 'V', 'BT', 'BQ', 'USE_G'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -250,10 +250,12 @@ def chunk_gated_delta_product_bwd_kernel_dhu_blockdim64(
     chunk_offsets,
     scale,
     T,
+    num_householder: tl.constexpr,
     H: tl.constexpr,
     K: tl.constexpr,
     V: tl.constexpr,
     BT: tl.constexpr,
+    BQ: tl.constexpr,
     BV: tl.constexpr,
     USE_G: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
@@ -264,13 +266,17 @@ def chunk_gated_delta_product_bwd_kernel_dhu_blockdim64(
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
-        T = eos - bos
-        NT = tl.cdiv(T, BT)
+        T_tok = eos - bos
+        T_dp = T_tok * num_householder
+        NT = tl.cdiv(T_dp, BT)
         boh = tl.load(chunk_offsets + i_n).to(tl.int64)
     else:
-        bos, eos = i_n * T, i_n * T + T
-        NT = tl.cdiv(T, BT)
+        T_tok = T.to(tl.int64)
+        T_dp = T_tok * num_householder
+        bos = i_n * T_tok
+        NT = tl.cdiv(T_dp, BT)
         boh = i_n * NT
+    bos_dp = bos * num_householder
 
     # [BK, BV]
     b_dh1 = tl.zeros([64, BV], dtype=tl.float32)
@@ -282,20 +288,20 @@ def chunk_gated_delta_product_bwd_kernel_dhu_blockdim64(
         b_dh4 = tl.zeros([64, BV], dtype=tl.float32)
 
     # calculate offset
-    dh += (boh * H + i_h) * K*V
-    dv += (bos * H + i_h) * V
-    dv2 += (bos * H + i_h) * V
+    dh += (boh * H + i_h) * K * V
+    dv += (bos_dp * H + i_h) * V
+    dv2 += (bos_dp * H + i_h) * V
     q += (bos * H + i_h) * K
-    k += (bos * H + i_h) * K
-    w += (bos * H + i_h) * K
+    k += (bos_dp * H + i_h) * K
+    w += (bos_dp * H + i_h) * K
     do += (bos * H + i_h) * V
-    stride_v = H*V
-    stride_h = H*K*V
-    stride_k = H*K
+    stride_v = H * V
+    stride_h = H * K * V
+    stride_k = H * K
     if USE_INITIAL_STATE:
-        dh0 += i_nh * K*V
+        dh0 += i_nh * K * V
     if USE_FINAL_STATE_GRADIENT:
-        dht += i_nh * K*V
+        dht += i_nh * K * V
 
     o_k1 = tl.arange(0, 64)
     o_k2 = 64 + tl.arange(0, 64)
@@ -324,41 +330,50 @@ def chunk_gated_delta_product_bwd_kernel_dhu_blockdim64(
     for i_t in range(NT - 1, -1, -1):
         i_t_int64 = i_t.to(tl.int64)
         o_t = i_t_int64 * BT + tl.arange(0, BT)
-        m_t = o_t < T
+        m_t = o_t < T_dp
         m_vv = m_t[:, None] & m_v[None, :]
-        p_dh1 = dh + i_t_int64*stride_h + o_k1[:, None] * V + o_v[None, :]
+
+        # tokens whose readout step (o_q * num_householder + num_householder - 1) falls in this chunk
+        q_start = (i_t_int64 * BT) // num_householder
+        q_end = tl.minimum((i_t_int64 + 1) * BT, T_dp) // num_householder
+        o_q = q_start + tl.arange(0, BQ)
+        m_q = o_q < q_end
+        o_q_dp = o_q * num_householder + (num_householder - 1)
+        m_qv = m_q[:, None] & m_v[None, :]
+
+        p_dh1 = dh + i_t_int64 * stride_h + o_k1[:, None] * V + o_v[None, :]
         tl.store(p_dh1, b_dh1.to(p_dh1.dtype.element_ty), mask=m_h1)
         if K > 64:
-            p_dh2 = dh + i_t_int64*stride_h + o_k2[:, None] * V + o_v[None, :]
+            p_dh2 = dh + i_t_int64 * stride_h + o_k2[:, None] * V + o_v[None, :]
             tl.store(p_dh2, b_dh2.to(p_dh2.dtype.element_ty), mask=m_h2)
         if K > 128:
-            p_dh3 = dh + i_t_int64*stride_h + o_k3[:, None] * V + o_v[None, :]
+            p_dh3 = dh + i_t_int64 * stride_h + o_k3[:, None] * V + o_v[None, :]
             tl.store(p_dh3, b_dh3.to(p_dh3.dtype.element_ty), mask=m_h3)
         if K > 192:
-            p_dh4 = dh + i_t_int64*stride_h + o_k4[:, None] * V + o_v[None, :]
+            p_dh4 = dh + i_t_int64 * stride_h + o_k4[:, None] * V + o_v[None, :]
             tl.store(p_dh4, b_dh4.to(p_dh4.dtype.element_ty), mask=m_h4)
 
         if USE_G:
-            last_idx = min((i_t + 1) * BT, T) - 1
-            bg_last = tl.load(g + (bos + last_idx) * H + i_h)
+            last_idx = tl.minimum((i_t_int64 + 1) * BT, T_dp) - 1
+            bg_last = tl.load(g + (bos_dp + last_idx) * H + i_h).to(tl.float32)
             bg_last_exp = exp2(bg_last)
-            p_g = g + bos * H + i_h + o_t * H
-            b_g = tl.load(p_g, mask=m_t, other=0.0)
-            b_g_exp = exp2(b_g)
+            b_g = tl.load(g + (bos_dp + o_t) * H + i_h, mask=m_t, other=0.0).to(tl.float32)
+            b_g_q = tl.load(g + (bos_dp + o_q_dp) * H + i_h, mask=m_q, other=0.0).to(tl.float32)
+            b_gq_exp = exp2(b_g_q)
         else:
             bg_last = None
-            last_idx = None
+            bg_last_exp = None
             b_g = None
-            b_g_exp = None
+            b_gq_exp = None
 
         p_dv = dv + o_t[:, None] * stride_v + o_v[None, :]
-        p_wo = do + o_t[:, None] * stride_v + o_v[None, :]
+        p_do = do + o_q[:, None] * stride_v + o_v[None, :]
         p_dv2 = dv2 + o_t[:, None] * stride_v + o_v[None, :]
 
-        b_wo = tl.load(p_wo, mask=m_vv, other=0.0)
+        b_do = tl.load(p_do, mask=m_qv, other=0.0)
         b_dv = tl.zeros([BT, BV], dtype=tl.float32)
 
-        # Update dv
+        # update dv
         p_k = k + o_t[:, None] * stride_k + o_k1[None, :]
         b_k = tl.load(p_k, mask=m_t[:, None] & (o_k1[None, :] < K), other=0.0)
         b_dv = tl.dot(b_k, b_dh1.to(b_k.dtype), b_dv)
@@ -379,51 +394,47 @@ def chunk_gated_delta_product_bwd_kernel_dhu_blockdim64(
             b_dv = tl.dot(b_k, b_dh4.to(b_k.dtype), b_dv)
 
         if USE_G:
-            m_t = (i_t * BT + tl.arange(0, BT)) < T
-            b_dv *= tl.where(m_t, exp2(bg_last - b_g), 0)[:, None]
+            b_dv *= tl.where(m_t, exp2(tl.where(m_t, bg_last - b_g, 0.0)), 0.0)[:, None]
         b_dv += tl.load(p_dv, mask=m_vv, other=0.0)
 
         tl.store(p_dv2, b_dv.to(p_dv.dtype.element_ty), mask=m_vv)
-        # Update dh
+
+        # update dh
         p_w = w + o_k1[:, None] + o_t[None, :] * stride_k
-        p_q = q + o_k1[:, None] + o_t[None, :] * stride_k
+        p_q = q + o_k1[:, None] + o_q[None, :] * stride_k
         b_w = tl.load(p_w, mask=(o_k1[:, None] < K) & m_t[None, :], other=0.0)
-        b_q = tl.load(p_q, mask=(o_k1[:, None] < K) & m_t[None, :], other=0.0)
+        b_q = tl.load(p_q, mask=(o_k1[:, None] < K) & m_q[None, :], other=0.0)
         if USE_G:
             b_dh1 *= bg_last_exp
-            b_q = b_q * b_g_exp[None, :]
-        b_q = (b_q * scale).to(b_q.dtype)
-        b_dh1 += tl.dot(b_q, b_wo.to(b_q.dtype))-tl.dot(b_w, b_dv.to(b_w.dtype))
+            b_q = b_q * b_gq_exp[None, :]
+        b_dh1 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) * scale - tl.dot(b_w, b_dv.to(b_w.dtype))
         if K > 64:
-            p_q = q + o_k2[:, None] + o_t[None, :] * stride_k
+            p_q = q + o_k2[:, None] + o_q[None, :] * stride_k
             p_w = w + o_k2[:, None] + o_t[None, :] * stride_k
-            b_q = tl.load(p_q, mask=(o_k2[:, None] < K) & m_t[None, :], other=0.0)
+            b_q = tl.load(p_q, mask=(o_k2[:, None] < K) & m_q[None, :], other=0.0)
             b_w = tl.load(p_w, mask=(o_k2[:, None] < K) & m_t[None, :], other=0.0)
             if USE_G:
                 b_dh2 *= bg_last_exp
-                b_q = b_q * b_g_exp[None, :]
-            b_q = (b_q * scale).to(b_q.dtype)
-            b_dh2 += tl.dot(b_q, b_wo.to(b_q.dtype))-tl.dot(b_w, b_dv.to(b_w.dtype))
+                b_q = b_q * b_gq_exp[None, :]
+            b_dh2 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) * scale - tl.dot(b_w, b_dv.to(b_w.dtype))
         if K > 128:
-            p_q = q + o_k3[:, None] + o_t[None, :] * stride_k
+            p_q = q + o_k3[:, None] + o_q[None, :] * stride_k
             p_w = w + o_k3[:, None] + o_t[None, :] * stride_k
-            b_q = tl.load(p_q, mask=(o_k3[:, None] < K) & m_t[None, :], other=0.0)
+            b_q = tl.load(p_q, mask=(o_k3[:, None] < K) & m_q[None, :], other=0.0)
             b_w = tl.load(p_w, mask=(o_k3[:, None] < K) & m_t[None, :], other=0.0)
             if USE_G:
                 b_dh3 *= bg_last_exp
-                b_q = b_q * b_g_exp[None, :]
-            b_q = (b_q * scale).to(b_q.dtype)
-            b_dh3 += tl.dot(b_q, b_wo.to(b_q.dtype))-tl.dot(b_w, b_dv.to(b_w.dtype))
+                b_q = b_q * b_gq_exp[None, :]
+            b_dh3 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) * scale - tl.dot(b_w, b_dv.to(b_w.dtype))
         if K > 192:
-            p_q = q + o_k4[:, None] + o_t[None, :] * stride_k
+            p_q = q + o_k4[:, None] + o_q[None, :] * stride_k
             p_w = w + o_k4[:, None] + o_t[None, :] * stride_k
-            b_q = tl.load(p_q, mask=(o_k4[:, None] < K) & m_t[None, :], other=0.0)
+            b_q = tl.load(p_q, mask=(o_k4[:, None] < K) & m_q[None, :], other=0.0)
             b_w = tl.load(p_w, mask=(o_k4[:, None] < K) & m_t[None, :], other=0.0)
             if USE_G:
                 b_dh4 *= bg_last_exp
-                b_q = b_q * b_g_exp[None, :]
-            b_q = (b_q * scale).to(b_q.dtype)
-            b_dh4 += tl.dot(b_q, b_wo.to(b_q.dtype))-tl.dot(b_w, b_dv.to(b_w.dtype))
+                b_q = b_q * b_gq_exp[None, :]
+            b_dh4 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) * scale - tl.dot(b_w, b_dv.to(b_w.dtype))
 
     if USE_INITIAL_STATE:
         p_dh0 = dh0 + o_k1[:, None] * V + o_v[None, :]
@@ -495,28 +506,30 @@ def chunk_gated_delta_product_bwd_dhu(
     q: torch.Tensor,
     k: torch.Tensor,
     w: torch.Tensor,
-    g: torch.Tensor,
-    h0: torch.Tensor,
+    g: torch.Tensor | None,
+    h0: torch.Tensor | None,
     dht: torch.Tensor | None,
     do: torch.Tensor,
     dv: torch.Tensor,
     scale: float,
+    num_householder: int = 1,
     cu_seqlens: torch.LongTensor | None = None,
-    chunk_size: int = 64,  # SY: remove this argument and force chunk size 64?
+    chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
     B, T, H, K, V = *q.shape, do.shape[-1]
-
-    # N: the actual number of sequences in the batch with either equal or variable lengths
-    BT = 64
+    T_dp = T * num_householder
+    BT = chunk_size
+    BQ = max(16, triton.next_power_of_2(triton.cdiv(BT, num_householder)))
     assert K <= 256, "current kernel does not support head dimension being larger than 256."
 
-    if chunk_indices is None and cu_seqlens is not None:
-        chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
     if cu_seqlens is None:
-        N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
+        N, NT, chunk_offsets = B, triton.cdiv(T_dp, BT), None
     else:
-        N, NT, chunk_offsets = len(cu_seqlens) - 1, len(chunk_indices), prepare_chunk_offsets(cu_seqlens, BT)
+        cu_seqlens_dp = cu_seqlens * num_householder
+        if chunk_indices is None:
+            chunk_indices = prepare_chunk_indices(cu_seqlens_dp, BT)
+        N, NT, chunk_offsets = len(cu_seqlens) - 1, len(chunk_indices), prepare_chunk_offsets(cu_seqlens_dp, BT)
 
     dh = q.new_empty(B, NT, H, K, V)
     dh0 = torch.empty_like(h0, dtype=torch.float32) if h0 is not None else None
@@ -538,9 +551,11 @@ def chunk_gated_delta_product_bwd_dhu(
         chunk_offsets=chunk_offsets,
         scale=scale,
         T=T,
+        num_householder=num_householder,
         H=H,
         K=K,
         V=V,
         BT=BT,
+        BQ=BQ,
     )
     return dh, dh0, dv2

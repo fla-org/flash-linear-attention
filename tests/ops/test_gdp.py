@@ -115,6 +115,7 @@ def test_chunk(
             (2, 128, 2, 0.5, [0, 31, 111, 799, 1000, 1500, 1800, 2000], torch.float16),
             (2, 128, 2, 0.5, [0, 63, 300, 800, 1000, 1399, 2048], torch.float16),
             (2, 256, 3, 0, [0, 100, 123, 300, 500, 800, 1000, 1500, 2048], torch.float16),
+            (2, 64, 4, 0.5, [0, 1, 15, 31, 65, 65, 130], torch.bfloat16),
         ]
     ],
 )
@@ -246,3 +247,110 @@ def test_naive_varlen():
 
     assert_close('o', ref, tri, 0.005)
     assert_close('ht', ref_ht, tri_ht, 0.005)
+
+
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'K', 'V', 'num_householder', 'use_g', 'allow_neg_eigval', 'use_qk_l2norm', 'state_mode', 'dtype'),
+    [
+        pytest.param(
+            *test,
+            id="B{}-T{}-H{}-K{}-V{}-n{}-g{}-neg{}-l2{}-{}-{}".format(*test),
+        )
+        for test in [
+            (2, 1, 2, 64, 64, 2, True, False, False, 'both', torch.bfloat16),
+            (2, 15, 2, 64, 128, 3, True, False, False, 'both', torch.bfloat16),
+            (2, 33, 2, 128, 64, 2, True, True, False, 'both', torch.bfloat16),
+            (2, 65, 2, 32, 64, 4, True, False, True, 'both', torch.bfloat16),
+            (1, 100, 2, 64, 64, 5, True, False, False, 'both', torch.float16),
+            (2, 65, 2, 64, 128, 3, False, True, False, 'both', torch.bfloat16),
+            (2, 31, 2, 128, 128, 2, True, False, False, 'dht_only', torch.bfloat16),
+            (2, 31, 2, 64, 128, 3, True, False, False, 'no_state', torch.bfloat16),
+        ]
+    ],
+)
+def test_chunk_bwd_edge_cases(
+    B: int,
+    T: int,
+    H: int,
+    K: int,
+    V: int,
+    num_householder: int,
+    use_g: bool,
+    allow_neg_eigval: bool,
+    use_qk_l2norm: bool,
+    state_mode: str,
+    dtype: torch.dtype,
+):
+    torch.manual_seed(42)
+    q = torch.randn(B, T, H, K, dtype=dtype)
+    k = torch.randn(B, T * num_householder, H, K, dtype=dtype)
+    v = torch.randn(B, T * num_householder, H, V, dtype=dtype)
+    beta = torch.rand(B, T * num_householder, H, dtype=dtype).sigmoid()
+    if allow_neg_eigval:
+        beta = beta * 2.0
+    g = F.logsigmoid(torch.rand(B, T, H, dtype=torch.float32)) if use_g else None
+    use_state = state_mode != 'no_state'
+    h0 = torch.randn(B, H, K, V, dtype=torch.float32) if use_state else None
+
+    q, k, v, beta = (x.to(device).requires_grad_(True) for x in (q, k, v, beta))
+    if g is not None:
+        g = g.to(device).requires_grad_(True)
+    if h0 is not None:
+        h0 = h0.to(device).requires_grad_(True)
+    scale = K ** -0.5
+
+    tri, tri_ht = chunk_gated_delta_product(
+        q=F.normalize(q.clone(), p=2, dim=-1) if not use_qk_l2norm else q.clone(),
+        k=F.normalize(k.clone(), p=2, dim=-1) if not use_qk_l2norm else k.clone(),
+        v=v.clone(),
+        g=g.clone() if g is not None else None,
+        beta=beta.clone(),
+        num_householder=num_householder,
+        scale=scale,
+        initial_state=h0.clone() if h0 is not None else None,
+        output_final_state=use_state,
+        use_qk_l2norm_in_kernel=use_qk_l2norm,
+    )
+    do = torch.zeros_like(tri) if state_mode == 'dht_only' else torch.randn_like(tri)
+    dht = torch.randn_like(tri_ht) if use_state else None
+    loss = (tri * do).sum()
+    if use_state:
+        loss = loss + (tri_ht * dht).sum()
+    loss.backward()
+    tri_grads = (q.grad, k.grad, v.grad, beta.grad, g.grad if g is not None else None, h0.grad if h0 is not None else None)
+    q.grad = k.grad = v.grad = beta.grad = None
+    if g is not None:
+        g.grad = None
+    if h0 is not None:
+        h0.grad = None
+
+    ref, ref_ht = chunk_gated_delta_product_ref(
+        q=F.normalize(q.clone(), p=2, dim=-1),
+        k=F.normalize(k.clone(), p=2, dim=-1),
+        v=v.clone(),
+        g=g.clone() if g is not None else None,
+        beta=beta.clone(),
+        num_householder=num_householder,
+        scale=scale,
+        initial_state=h0.clone() if h0 is not None else None,
+        output_final_state=use_state,
+    )
+    ref_loss = (ref * do).sum()
+    if use_state:
+        ref_loss = ref_loss + (ref_ht * dht).sum()
+    ref_loss.backward()
+    ref_grads = (q.grad, k.grad, v.grad, beta.grad, g.grad if g is not None else None, h0.grad if h0 is not None else None)
+
+    assert_close('o', ref, tri, 0.008)
+    if use_state:
+        assert_close('ht', ref_ht, tri_ht, 0.008)
+    for name, ref_g, tri_g, tol in (
+        ('dq', ref_grads[0], tri_grads[0], 0.01),
+        ('dk', ref_grads[1], tri_grads[1], 0.01),
+        ('dv', ref_grads[2], tri_grads[2], 0.01),
+        ('db', ref_grads[3], tri_grads[3], 0.02),
+        ('dg', ref_grads[4], tri_grads[4], 0.02),
+        ('dh0', ref_grads[5], tri_grads[5], 0.01),
+    ):
+        if ref_g is not None:
+            assert_close(name, ref_g, tri_g, tol)
