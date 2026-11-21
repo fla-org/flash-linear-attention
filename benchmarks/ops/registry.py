@@ -756,6 +756,29 @@ register_op(OpConfig(
     category='hgrn',
 ))
 
+
+def _dsa_post_init(inputs, B, T, H, D, **kw):
+    """Select the last 2048 tokens before every query, padded with -1, a dense-enough DSA selection."""
+    t = torch.arange(T, device=inputs['q'].device)
+    indices = t[:, None] - torch.arange(2048, device=t.device)[None, :]
+    inputs['indices'] = indices.masked_fill(indices < 0, -1).expand(B, T, 2048).contiguous()
+
+
+register_op(OpConfig(
+    name='parallel_dsa',
+    import_path='fla.ops.dsa',
+    inputs={
+        'q': TensorSpec(shape_BTHD),
+        # MQA as in DeepSeek-V3.2: one key/value head shared by all query heads
+        'k': TensorSpec(lambda B, T, H, D, **kw: (B, T, 1, D)),
+        'v': TensorSpec(lambda B, T, H, D, **kw: (B, T, 1, D)),
+    },
+    post_init=_dsa_post_init,
+    output_is_tuple=False,
+    category='attn',
+    test_file='tests/ops/test_dsa.py',
+))
+
 # --- Generalized delta rule (DPLR) ---
 
 register_op(OpConfig(
