@@ -39,7 +39,7 @@ def test_attnres(
     request.addfinalizer(lambda: setattr(torch.backends.cuda.matmul, 'allow_tf32', allow_tf32))
     torch.backends.cuda.matmul.allow_tf32 = False
     modules = nn.ModuleList([
-        AttentionResidual(hidden_size=128, block_size=block_size) for _ in range(7)
+        AttentionResidual(hidden_size=128, block_size=block_size, sub_layer_idx=i, num_sublayers=6) for i in range(7)
     ]).to(device=device, dtype=dtype)
     with torch.no_grad():
         for module in modules:

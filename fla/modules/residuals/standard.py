@@ -46,8 +46,17 @@ class StandardResidual(BaseResidual[StandardResidualState, torch.Tensor]):
         norm_eps: float = 1e-6,
         fuse_norm: bool = True,
         fuse_residual: bool = False,
+        *,
+        sub_layer_idx: int,
+        num_sublayers: int,
     ):
-        super().__init__(hidden_size=hidden_size, norm_eps=norm_eps, fuse_norm=fuse_norm)
+        super().__init__(
+            hidden_size=hidden_size,
+            norm_eps=norm_eps,
+            fuse_norm=fuse_norm,
+            sub_layer_idx=sub_layer_idx,
+            num_sublayers=num_sublayers,
+        )
         self.fuse_residual = fuse_residual
 
     def initialize(self, x: torch.Tensor) -> StandardResidualState:
