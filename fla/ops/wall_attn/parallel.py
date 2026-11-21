@@ -554,7 +554,7 @@ def parallel_wall_attn_bwd_kernel_dkv(
         b_Rq_bc_k = tl.broadcast_to(b_Rq, (BT, BK))
         b_Rq_bc_q = tl.broadcast_to(b_Rq, (BS, BK))
         b_q = tl.load(p_q, mask=m_q[:, None] & (o_d[None, :] < K), other=0.0)
-        b_pq = tl.load(p_pq, mask=m_q[:, None] & (o_d[None, :] < K), other=0.0).to(tl.float32)
+        b_pq = tl.load(p_pq, mask=m_q[:, None] & (o_d[None, :] < K), other=b_Rq_bc_q).to(tl.float32)
         b_exp_k = b_Rq_bc_k - b_pk
         # Non-causal keys (key_pos > last query in sub-block) can have
         # exp_k >> 110, overflowing the gradient headroom.  The causal mask
@@ -613,7 +613,7 @@ def parallel_wall_attn_bwd_kernel_dkv(
         b_Rq_bc_k = tl.broadcast_to(b_Rq, (BT, BK))
         b_Rq_bc_q = tl.broadcast_to(b_Rq, (BS, BK))
         b_q = tl.load(p_q, mask=m_q[:, None] & (o_d[None, :] < K), other=0.0)
-        b_pq = tl.load(p_pq, mask=m_q[:, None] & (o_d[None, :] < K), other=0.0).to(tl.float32)
+        b_pq = tl.load(p_pq, mask=m_q[:, None] & (o_d[None, :] < K), other=b_Rq_bc_q).to(tl.float32)
         b_q_til = (b_q.to(tl.float32) * exp2(b_pq - b_Rq_bc_q)).to(b_q.dtype)
         b_exp_k_off = b_Rq_bc_k - b_pk
         b_exp_k_off_val = exp2(b_exp_k_off)  # CSE: reused for k_til and final dk scaling
