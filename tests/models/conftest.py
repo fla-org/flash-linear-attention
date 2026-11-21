@@ -15,7 +15,7 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import Replicate, Shard
 from transformers import AutoModelForCausalLM
 
-from fla.models import RWKV7Config
+from fla.models import RWKV7Config, YOCOConfig
 
 
 @pytest.fixture
@@ -24,17 +24,18 @@ def make_model():
     def create(config_class, **kwargs):
         if config_class is RWKV7Config and not torch._C.has_lapack:
             pytest.skip('RWKV7 initialization requires LAPACK.')
-        config = config_class(**{
+        defaults = {
             'hidden_size': 64,
             'num_heads': 2,
             'num_hidden_layers': 0,
-            'num_self_decoder_layers': 0,
             'intermediate_size': 128,
             'vocab_size': 64,
             'fuse_norm': False,
             'fuse_cross_entropy': False,
-            **kwargs,
-        })
+        }
+        if config_class is YOCOConfig:
+            defaults['num_self_decoder_layers'] = 0
+        config = config_class(**{**defaults, **kwargs})
         return AutoModelForCausalLM.from_config(config)
 
     return create
