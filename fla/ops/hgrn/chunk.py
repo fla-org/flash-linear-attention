@@ -109,6 +109,8 @@ def chunk_hgrn_fwd_kernel_o(
     mask = o_d < D
 
     for i_t in range(1, tl.cdiv(T, BT)):
+        # The carry row was stored by other warps in the previous iteration.
+        tl.debug_barrier()
         o_t = (i_t * BT).to(tl.int64) + tl.arange(0, BT)
         m_g = (o_t[:, None] < T) & mask[None, :]
         p_gc = gc + i_b * s_b + o_t[:, None] * s_t + o_d[None, :] * s_d
@@ -199,6 +201,8 @@ def chunk_hgrn_bwd_kernel_o(
     mask = o_d < D
 
     for i_t in range(tl.cdiv(T, BT) - 1, -1, -1):
+        # The carry row was stored by other warps in the previous iteration.
+        tl.debug_barrier()
         o_t = (i_t * BT).to(tl.int64) + tl.arange(0, BT)
         o_to = (i_t * BT - 1).to(tl.int64) + tl.arange(0, BT)
         m_g = (o_t[:, None] < T) & mask[None, :]
