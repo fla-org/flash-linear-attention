@@ -37,12 +37,14 @@ def naive_recurrent_gated_delta_rule(
         o: [B, T, H, V]
         final_state: [B, H, K, V] if output_final_state else None
     """
-    q, k, v, beta, g = map(lambda x: x.transpose(1, 2).contiguous().to(torch.float32), [q, k, v, beta, g])
+    # compute in at least fp32; fp64 inputs stay fp64 (used as the high-precision reference in tests)
+    dtype = torch.promote_types(q.dtype, torch.float32)
+    q, k, v, beta, g = map(lambda x: x.transpose(1, 2).contiguous().to(dtype), [q, k, v, beta, g])
     B, H, T, K, V = *k.shape, v.shape[-1]
     o = torch.zeros(B, H, T, V).to(v)
     h = torch.zeros(B, H, K, V).to(v)
     if initial_state is not None:
-        h = initial_state.to(torch.float32)
+        h = initial_state.to(dtype)
     if scale is None:
         scale = 1 / (q.shape[-1] ** 0.5)
     q = q * scale

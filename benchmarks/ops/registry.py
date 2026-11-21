@@ -91,6 +91,20 @@ def shape_q_hq(B, T, H, D, HQ=None, **kw):
     return (B, T, HQ, D)
 
 
+def shape_NBTHD(B, T, H, D, N=None, **kw):
+    """Tangent of a [B, T, H, D] input along N directions. Used by forward-mode derivatives."""
+    if N is None:
+        raise ValueError("shape_NBTHD requires the 'N' (tangent direction) shape config key")
+    return (N, B, T, H, D)
+
+
+def shape_NBTH(B, T, H, D, N=None, **kw):
+    """Tangent of a [B, T, H] input along N directions. Used by forward-mode derivatives."""
+    if N is None:
+        raise ValueError("shape_NBTH requires the 'N' (tangent direction) shape config key")
+    return (N, B, T, H)
+
+
 # ---------------------------------------------------------------------------
 # Transform helpers
 # ---------------------------------------------------------------------------
@@ -462,6 +476,34 @@ register_op(OpConfig(
     category='gate_beta',
     dim_constraints={'D': [64, 128, 256]},
     test_file='tests/ops/test_gated_oja_rule2.py',
+))
+
+_gdn_jvp_default_shapes = {
+    'B1_T2048_H16_D128_N8': {'B': 1, 'T': 2048, 'H': 16, 'D': 128, 'N': 8},
+    'B4_T4096_H16_D128_N2': {'B': 4, 'T': 4096, 'H': 16, 'D': 128, 'N': 2},
+    'B8_T1024_H8_D64_N16':  {'B': 8, 'T': 1024, 'H': 8, 'D': 64, 'N': 16},
+}
+
+register_op(OpConfig(
+    name='chunk_gdn_jvp',
+    import_path='fla.ops.gated_delta_rule',
+    inputs={
+        'q': TensorSpec(shape_BTHD, requires_grad=False, transform=l2norm_fp32_transform),
+        'k': TensorSpec(shape_BTHD, requires_grad=False, transform=l2norm_fp32_transform),
+        'v': TensorSpec(shape_BTHD, requires_grad=False),
+        'g': TensorSpec(shape_BTH, requires_grad=False, transform=logsigmoid),
+        'beta': TensorSpec(shape_BTH, requires_grad=False, transform=sigmoid_transform),
+        'q_dot': TensorSpec(shape_NBTHD, requires_grad=False),
+        'k_dot': TensorSpec(shape_NBTHD, requires_grad=False),
+        'v_dot': TensorSpec(shape_NBTHD, requires_grad=False),
+        'g_dot': TensorSpec(shape_NBTH, requires_grad=False),
+        'beta_dot': TensorSpec(shape_NBTH, requires_grad=False),
+    },
+    func_name='chunk_gated_delta_rule_jvp',
+    skip_backward=True,
+    category='gate_beta',
+    default_shapes=_gdn_jvp_default_shapes,
+    test_file='tests/ops/test_gdn.py',
 ))
 
 register_op(OpConfig(
