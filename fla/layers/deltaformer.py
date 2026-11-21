@@ -32,10 +32,9 @@ class DeltaFormerAttention(nn.Module):
 
     Notes
         - DeltaFormer attention is implemented with Triton kernels in `fla.ops.deltaformer` and is tuned
-          for typical head dimensions (e.g., 64/128). It currently supports fixed-length inputs.
-        - For variable-length inputs (padding masks), the deltaformer computation falls back to using the
-          fixed-length path, while the second stage (softmax attention over U) uses FlashAttention's
-          varlen path when an attention mask is provided.
+          for typical head dimensions (e.g., 64/128).
+        - Padding masks are used to unpad inputs for the variable-length deltaformer computation and
+          FlashAttention, and the output is padded back to the original shape.
         - K/V grouping (GQA) is supported natively by FlashAttention via `num_kv_heads`.
         - Uses K-K similarity in deltaformer computation instead of Q-K similarity for better performance.
 
