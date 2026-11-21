@@ -55,6 +55,8 @@ class IntraCardCPBackend(BaseBackend):
         cu_seqlens_cpu: torch.LongTensor | None = None,
         chunk_indices: torch.LongTensor | None = None,
         chunk_offsets: torch.LongTensor | None = None,
+        use_first_initial_state: bool = False,
+        compact_h: bool = False,
     ) -> tuple[bool, str | None]:
         """Check if intracard CP should handle this call."""
         if not torch.is_inference_mode_enabled():
@@ -62,6 +64,14 @@ class IntraCardCPBackend(BaseBackend):
 
         if cu_seqlens is None:
             return False, "cu_seqlens is None"
+
+        if use_first_initial_state:
+            return False, "intra-card CP does not support a singleton first initial state"
+
+        # the compact layout keeps an explicit initial state in a trailing slot, which the split
+        # path seeds per subsequence instead of storing
+        if compact_h and initial_state is not None:
+            return False, "intra-card CP does not support the compact layout with an explicit initial state"
 
         # graph-mode callers pass chunk_offsets; splitting reads cu_seqlens on the host,
         # which CUDA Graph capture cannot record
@@ -86,6 +96,8 @@ class IntraCardCPBackend(BaseBackend):
         cu_seqlens_cpu: torch.LongTensor | None = None,
         chunk_indices: torch.LongTensor | None = None,
         chunk_offsets: torch.LongTensor | None = None,
+        use_first_initial_state: bool = False,
+        compact_h: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """Intra-card CP implementation of chunk_gated_delta_rule_fwd_h."""
         from fla.ops.common.intracard_cp import intracard_fwd_h
@@ -104,5 +116,6 @@ class IntraCardCPBackend(BaseBackend):
             cu_seqlens=cu_seqlens,
             cu_seqlens_cpu=cu_seqlens_cpu,
             chunk_indices=chunk_indices,
+            compact_h=compact_h,
             max_splits=MAX_SUBSEQS,
         )

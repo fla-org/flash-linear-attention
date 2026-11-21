@@ -16,6 +16,8 @@ def _verify_npu_input(args, kwargs) -> tuple[bool, str | None]:
     tensor = args[0] if args else kwargs.get('k')
     if tensor is None or tensor.device.type != 'npu':
         return False, 'input device is not NPU'
+    if kwargs.get('use_singleton_state'):
+        return False, 'Triton-Ascend CP does not support singleton cross-rank states'
     return True, None
 
 
