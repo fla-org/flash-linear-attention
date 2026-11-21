@@ -11,7 +11,14 @@ import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 from fla.ops.utils.op import exp2, unflatten_program_id
-from fla.utils import IS_NVIDIA_BLACKWELL, IS_NVIDIA_HOPPER, autotune_cache_kwargs, check_shared_mem
+from fla.utils import (
+    IS_NPU,
+    IS_NVIDIA_BLACKWELL,
+    IS_NVIDIA_HOPPER,
+    ascend_compile_kwargs,
+    autotune_cache_kwargs,
+    check_shared_mem,
+)
 
 NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8, 16]
 
@@ -227,8 +234,8 @@ def chunk_gated_delta_product_fwd_kernel_h_blockdim64(
 @triton.autotune(
     configs=[
         triton.Config({'BV': BV}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [2, 4]
-        for num_stages in ([2, 3, 4] if check_shared_mem('ampere') else [1, 2, 3])
+        for num_warps in ([4] if IS_NPU else [2, 4])
+        for num_stages in ([1] if IS_NPU else ([2, 3, 4] if check_shared_mem('ampere') else [1, 2, 3]))
         for BV in ([32, 64] if check_shared_mem('ada') else [32])
     ],
     key=['H', 'K', 'V', 'BT', 'BQ', 'USE_G'],
@@ -557,5 +564,6 @@ def chunk_gated_delta_product_bwd_dhu(
         V=V,
         BT=BT,
         BQ=BQ,
+        **ascend_compile_kwargs(),
     )
     return dh, dh0, dv2

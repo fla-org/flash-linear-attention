@@ -311,11 +311,14 @@ def test_chunk_bwd_edge_cases(
         output_final_state=use_state,
         use_qk_l2norm_in_kernel=use_qk_l2norm,
     )
-    do = torch.zeros_like(tri) if state_mode == 'dht_only' else torch.randn_like(tri)
+    do = None if state_mode == 'dht_only' else torch.randn_like(tri)
     dht = torch.randn_like(tri_ht) if use_state else None
-    loss = (tri * do).sum()
-    if use_state:
-        loss = loss + (tri_ht * dht).sum()
+    if state_mode == 'dht_only':
+        loss = (tri_ht * dht).sum()
+    else:
+        loss = (tri * do).sum()
+        if use_state:
+            loss = loss + (tri_ht * dht).sum()
     loss.backward()
     tri_grads = (q.grad, k.grad, v.grad, beta.grad, g.grad if g is not None else None, h0.grad if h0 is not None else None)
     q.grad = k.grad = v.grad = beta.grad = None
@@ -335,9 +338,12 @@ def test_chunk_bwd_edge_cases(
         initial_state=h0.clone() if h0 is not None else None,
         output_final_state=use_state,
     )
-    ref_loss = (ref * do).sum()
-    if use_state:
-        ref_loss = ref_loss + (ref_ht * dht).sum()
+    if state_mode == 'dht_only':
+        ref_loss = (ref_ht * dht).sum()
+    else:
+        ref_loss = (ref * do).sum()
+        if use_state:
+            ref_loss = ref_loss + (ref_ht * dht).sum()
     ref_loss.backward()
     ref_grads = (q.grad, k.grad, v.grad, beta.grad, g.grad if g is not None else None, h0.grad if h0 is not None else None)
 

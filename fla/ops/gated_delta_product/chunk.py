@@ -9,7 +9,8 @@ import torch
 from einops import rearrange
 
 from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
-from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_fwd_h
+from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu, chunk_gated_delta_rule_fwd_h
+from fla.ops.common.chunk_o import chunk_bwd_dqkwg, chunk_bwd_dv_local
 from fla.ops.common.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
 from fla.ops.cp import FLACPContext
 from fla.ops.cp.chunk_delta_h import (
@@ -199,27 +200,44 @@ def chunk_gated_delta_product_bwd(
         cu_seqlens=cu_seqlens_dp,
         chunk_indices=chunk_indices_dp,
     )
-    dv = chunk_gated_delta_product_bwd_dv_local(
-        q=q,
-        k=k,
-        do=do,
-        g=g,
-        scale=scale,
-        num_householder=num_householder,
-        cu_seqlens=cu_seqlens,
-        chunk_indices=chunk_indices_dp,
-    )
+    if num_householder == 1:
+        dv = chunk_bwd_dv_local(
+            q=q,
+            k=k,
+            do=do,
+            g=g,
+            scale=scale,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices_dp,
+        )
+    else:
+        dv = chunk_gated_delta_product_bwd_dv_local(
+            q=q,
+            k=k,
+            do=do,
+            g=g,
+            scale=scale,
+            num_householder=num_householder,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices_dp,
+        )
 
     if cp_context is not None:
-        q_dp = q.new_zeros(q.shape[0], q.shape[1], num_householder, q.shape[2], q.shape[3])
-        q_dp[:, :, -1] = q
-        do_dp = do.new_zeros(do.shape[0], do.shape[1], num_householder, do.shape[2], do.shape[3])
-        do_dp[:, :, -1] = do
+        if num_householder == 1:
+            q_cp, do_cp = q, do
+        else:
+            q_dp = q.new_zeros(q.shape[0], q.shape[1], num_householder, q.shape[2], q.shape[3])
+            q_dp[:, :, -1] = q
+            do_dp = do.new_zeros(do.shape[0], do.shape[1], num_householder, do.shape[2], do.shape[3])
+            do_dp[:, :, -1] = do
+            q_cp = rearrange(q_dp, 'b t n h d -> b (t n) h d')
+            do_cp = rearrange(do_dp, 'b t n h d -> b (t n) h d')
+            del q_dp, do_dp
         dht, initial_state = chunk_gated_delta_rule_bwd_dhu_pre_process(
-            q=rearrange(q_dp, 'b t n h d -> b (t n) h d'),
+            q=q_cp,
             k=k,
             w=w,
-            do=rearrange(do_dp, 'b t n h d -> b (t n) h d'),
+            do=do_cp,
             dv=dv,
             g=g,
             scale=scale,
@@ -228,37 +246,66 @@ def chunk_gated_delta_product_bwd(
             initial_state=initial_state,
             context=cp_context,
         )
-        del q_dp, do_dp
+        del q_cp, do_cp
 
-    dh, dh0, dv = chunk_gated_delta_product_bwd_dhu(
-        q=q,
-        k=k,
-        w=w,
-        g=g,
-        h0=initial_state,
-        dht=dht,
-        do=do,
-        dv=dv,
-        scale=scale,
-        num_householder=num_householder,
-        cu_seqlens=cu_seqlens,
-        chunk_indices=chunk_indices_dp,
-    )
-    dq, dk, dw, dg = chunk_gated_delta_product_bwd_dqkwg(
-        q=q,
-        k=k,
-        v=v_new,
-        do=do,
-        h=h,
-        dh=dh,
-        w=w,
-        g=g,
-        dv=dv,
-        scale=scale,
-        num_householder=num_householder,
-        cu_seqlens=cu_seqlens,
-        chunk_indices=chunk_indices_dp,
-    )
+    if num_householder == 1:
+        dh, dh0, dv = chunk_gated_delta_rule_bwd_dhu(
+            q=q,
+            k=k,
+            w=w,
+            g=g,
+            h0=initial_state,
+            dht=dht,
+            do=do,
+            dv=dv,
+            scale=scale,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices_dp,
+        )
+        dq, dk, dw, dg = chunk_bwd_dqkwg(
+            q=q,
+            k=k,
+            v=v_new,
+            w=w,
+            g=g,
+            h=h,
+            dv=dv,
+            do=do,
+            dh=dh,
+            scale=scale,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices_dp,
+        )
+    else:
+        dh, dh0, dv = chunk_gated_delta_product_bwd_dhu(
+            q=q,
+            k=k,
+            w=w,
+            g=g,
+            h0=initial_state,
+            dht=dht,
+            do=do,
+            dv=dv,
+            scale=scale,
+            num_householder=num_householder,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices_dp,
+        )
+        dq, dk, dw, dg = chunk_gated_delta_product_bwd_dqkwg(
+            q=q,
+            k=k,
+            v=v_new,
+            do=do,
+            h=h,
+            dh=dh,
+            w=w,
+            g=g,
+            dv=dv,
+            scale=scale,
+            num_householder=num_householder,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices_dp,
+        )
     if g is not None:
         dk2, dv, db, dg2 = gdn_prepare_wy_repr_bwd(
             k=k,
@@ -363,6 +410,7 @@ class ChunkGatedDeltaProductFunction(torch.autograd.Function):
             cu_seqlens,
             chunk_indices_dp,
         )
+        ctx.set_materialize_grads(False)
         ctx.scale = scale
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
         ctx.num_householder = num_householder
@@ -391,7 +439,7 @@ class ChunkGatedDeltaProductFunction(torch.autograd.Function):
             chunk_indices_dp,
         ) = ctx.saved_tensors
         if do is None:
-            do = v.new_zeros(q.shape[0], q.shape[1], q.shape[2], v.shape[-1])
+            do = q.new_zeros(q.shape[0], q.shape[1], q.shape[2], v.shape[-1])
         dq, dk, dv, db, dg, dh0 = chunk_gated_delta_product_bwd(
             q=q,
             k=k,

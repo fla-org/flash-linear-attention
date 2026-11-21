@@ -12,9 +12,11 @@ import triton.language as tl
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp2, unflatten_program_id
 from fla.utils import (
+    IS_NPU,
     IS_NVIDIA_BLACKWELL,
     IS_NVIDIA_HOPPER,
     TRITON_ABOVE_3_8_0,
+    ascend_compile_kwargs,
     autotune_cache_kwargs,
     check_shared_mem,
 )
@@ -183,8 +185,8 @@ def chunk_gated_delta_product_fwd_o(
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in CHUNK_BWD_DV_LOCAL_NUM_WARPS
-        for num_stages in ([2, 3, 4] if check_shared_mem('ada') else [1, 2, 3])
+        for num_warps in ([4] if IS_NPU else CHUNK_BWD_DV_LOCAL_NUM_WARPS)
+        for num_stages in ([1] if IS_NPU else ([2, 3, 4] if check_shared_mem('ada') else [1, 2, 3]))
     ],
     key=['H', 'K', 'V', 'BT', 'BQ', 'BK', 'BV', 'USE_G'],
     **autotune_cache_kwargs,
@@ -251,10 +253,8 @@ def chunk_gated_delta_product_bwd_kernel_dv_local(
         g += bos_dp * H + i_h
         b_g_k = tl.load(g + o_t * H, mask=m_t, other=0.0).to(tl.float32)
         b_g_q = tl.load(g + o_q_dp * H, mask=m_q, other=0.0).to(tl.float32)
-        b_A = tl.where(m_A, b_A * exp2(tl.where(m_A, b_g_q[None, :] - b_g_k[:, None], 0.0)) * scale, 0.0)
-    else:
-        b_A = tl.where(m_A, b_A * scale, 0.0)
-    b_A = b_A.to(do.dtype.element_ty)
+        b_A = b_A * exp2(tl.where(m_A, b_g_q[None, :] - b_g_k[:, None], 0.0))
+    b_A = tl.where(m_A, b_A * scale, 0.0).to(do.dtype.element_ty)
 
     for i_v in range(tl.cdiv(V, BV)):
         o_v = i_v * BV + tl.arange(0, BV)
@@ -274,8 +274,8 @@ def chunk_gated_delta_product_bwd_kernel_dv_local(
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in NUM_WARPS
-        for num_stages in ([2, 3, 4] if check_shared_mem('ada') else [1, 2, 3])
+        for num_warps in ([4] if IS_NPU else NUM_WARPS)
+        for num_stages in ([1] if IS_NPU else ([2, 3, 4] if check_shared_mem('ada') else [1, 2, 3]))
     ],
     key=['H', 'K', 'V', 'BT', 'BQ', 'BK', 'BV', 'USE_G', 'USE_DW'],
     **autotune_cache_kwargs,
@@ -442,7 +442,9 @@ def chunk_gated_delta_product_bwd_kernel_dqkwg(
         tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), mask=m_tk)
 
 
-def _get_bwd_tiling(device_idx: int, tensors: tuple[torch.Tensor | None, ...]) -> int:
+def _get_bwd_tiling(device_idx: int, tensors: tuple[torch.Tensor | None, ...], bq: int = 64) -> int:
+    if IS_NPU:
+        return 16 if bq >= 64 else 32
     if check_shared_mem('hopper', device_idx):
         return 128
     if check_shared_mem('ampere', device_idx):
@@ -470,7 +472,7 @@ def chunk_gated_delta_product_bwd_dv_local(
     BQ = max(16, triton.next_power_of_2(triton.cdiv(BT, num_householder)))
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens * num_householder, BT)
-    CONST_TILING = _get_bwd_tiling(k.device.index, (q, k, do))
+    CONST_TILING = _get_bwd_tiling(k.device.index, (q, k, do), bq=BQ)
     BK = min(max(triton.next_power_of_2(K), 16), CONST_TILING)
     BV = min(max(triton.next_power_of_2(V), 16), CONST_TILING)
     NT = triton.cdiv(T_dp, BT) if cu_seqlens is None else len(chunk_indices)
@@ -495,6 +497,7 @@ def chunk_gated_delta_product_bwd_dv_local(
         BQ=BQ,
         BK=BK,
         BV=BV,
+        **ascend_compile_kwargs(),
     )
     return dv
 
@@ -523,7 +526,7 @@ def chunk_gated_delta_product_bwd_dqkwg(
         chunk_indices = prepare_chunk_indices(cu_seqlens * num_householder, BT)
     NT = triton.cdiv(T_dp, BT) if cu_seqlens is None else len(chunk_indices)
 
-    CONST_TILING = _get_bwd_tiling(k.device.index, (q, k, v, do, h, dh, w, dv))
+    CONST_TILING = _get_bwd_tiling(k.device.index, (q, k, v, do, h, dh, w, dv), bq=BQ)
     BK = min(max(triton.next_power_of_2(K), 16), CONST_TILING)
     BV = min(max(triton.next_power_of_2(V), 16), CONST_TILING)
     NK = triton.cdiv(K, BK)
@@ -560,6 +563,7 @@ def chunk_gated_delta_product_bwd_dqkwg(
         BQ=BQ,
         BK=BK,
         BV=BV,
+        **ascend_compile_kwargs(),
     )
     if dg is not None:
         dg = dg.sum(0)
