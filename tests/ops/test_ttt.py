@@ -203,6 +203,54 @@ def test_fused_chunk(
 
 
 @pytest.mark.parametrize(
+    'op',
+    [
+        pytest.param(chunk_ttt_linear, id="chunk"),
+        pytest.param(fused_chunk_ttt_linear, id="fused_chunk"),
+    ],
+)
+def test_tail_final_state_bias_gradient(op):
+    torch.manual_seed(42)
+    B, T, H, D = 1, 8, 1, 64
+    q = torch.randn(B, T, H, D, device=device)
+    k = F.normalize(torch.randn(B, T, H, D, device=device), p=2, dim=-1)
+    v = torch.randn(B, T, H, D, device=device)
+    w = torch.randn(H, D, device=device)
+    b = torch.randn(H, D, device=device)
+    eta = (5e-3 * torch.sigmoid(torch.randn(B, T, H, 1, device=device))).requires_grad_()
+    h0 = torch.randn(B, H, D, D, device=device)
+    hb0 = torch.randn(B, H, 1, D, device=device)
+    dhbt = torch.randn_like(hb0)
+
+    def loss(eta_):
+        _, _, hbt = op(
+            q,
+            k,
+            v,
+            w,
+            b,
+            eta_,
+            chunk_size=16,
+            initial_state=h0,
+            initial_state_bias=hb0,
+            output_final_state=True,
+        )
+        return (hbt * dhbt).sum()
+
+    loss(eta).backward()
+    grad = eta.grad[0, -1, 0, 0]
+
+    step = 1e-2
+    eta_p = eta.detach().clone()
+    eta_m = eta.detach().clone()
+    eta_p[0, -1, 0, 0] += step
+    eta_m[0, -1, 0, 0] -= step
+    with torch.no_grad():
+        grad_ref = (loss(eta_p) - loss(eta_m)) / (2 * step)
+    torch.testing.assert_close(grad, grad_ref, rtol=1e-3, atol=1e-3)
+
+
+@pytest.mark.parametrize(
     ('H', 'D', 'chunk_size', 'cu_seqlens', 'dtype'),
     [
         pytest.param(*test, id="H{}-D{}-chunk_size{}-cu_seqlens{}-{}".format(*test))
