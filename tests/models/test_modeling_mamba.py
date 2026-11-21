@@ -281,3 +281,30 @@ def test_mamba_layer_gradient_vs_official(B, T, d_model, d_state, expand, dtype,
             diff = (cg - og).abs().max().item()
             assert torch.allclose(cg, og, atol=atol, rtol=0), \
                 f"Param '{name}' grad mismatch: max diff = {diff}"
+
+
+@pytest.mark.parametrize('rescale_prenorm_residual', [False, True])
+def test_initialization(rescale_prenorm_residual):
+    """Linear weights follow the PyTorch defaults kept by mamba_ssm, while dt_proj keeps its own initialization."""
+    from fla.models import MambaForCausalLM
+
+    torch.manual_seed(42)
+    config = MambaConfig(
+        hidden_size=256, num_hidden_layers=4, state_size=16, vocab_size=1000, fuse_cross_entropy=False,
+        rescale_prenorm_residual=rescale_prenorm_residual,
+    )
+    model = MambaForCausalLM(config)
+    layer = model.backbone.layers[0].mixer
+
+    def assert_uniform(w, bound):
+        w = w.detach()
+        assert w.abs().max().item() <= bound
+        assert w.std().item() == pytest.approx(bound / 3 ** 0.5, rel=0.05)
+
+    assert_uniform(layer.in_proj.weight, 1 / layer.in_proj.in_features ** 0.5)
+    assert_uniform(layer.x_proj.weight, 1 / layer.x_proj.in_features ** 0.5)
+    scale = config.num_hidden_layers ** -0.5 if config.rescale_prenorm_residual else 1
+    assert_uniform(layer.out_proj.weight, 1 / layer.out_proj.in_features ** 0.5 * scale)
+    assert_uniform(layer.dt_proj.weight, layer.dt_rank ** -0.5 * config.dt_scale)
+    dt = torch.nn.functional.softplus(layer.dt_proj.bias.detach())
+    assert ((dt >= config.dt_init_floor) & (dt <= config.dt_max * 1.001)).all()

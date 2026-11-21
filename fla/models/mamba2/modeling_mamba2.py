@@ -198,15 +198,18 @@ class Mamba2PreTrainedModel(FLAPreTrainedModel):
             module.dt_bias._no_reinit = True
             module.dt_bias._no_weight_decay = True
 
-        elif isinstance(module, (nn.Linear, nn.Conv1d)):
-            # Slightly different from the TF version which uses truncated_normal for initialization
-            # cf https://github.com/pytorch/pytorch/pull/5617
-            nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
+        elif isinstance(module, nn.Linear):
+            # mamba_ssm keeps the PyTorch default initialization of linear weights and zeros their biases
+            nn.init.kaiming_uniform_(module.weight, a=math.sqrt(5))
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
                 # guard against deprecated behavior
                 if hasattr(module.bias, "_no_reinit"):
                     raise ValueError("This is not supposed to happen")
+        elif isinstance(module, nn.Conv1d):
+            # and the PyTorch default initialization of the convolution unless `conv_init` is set
+            if not getattr(module.weight, '_no_reinit', False):
+                module.reset_parameters()
         elif isinstance(module, nn.Embedding):
             nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
         elif hasattr(module, 'reset_parameters'):
