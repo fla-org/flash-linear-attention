@@ -31,6 +31,8 @@ from fla.utils import assert_close, device
             (4, 1500, 8, 128, 0.1, 3, False, torch.float16),
             (2, 2048, 8, 128, 1, 3, False, torch.float16),
             (2, 2048, 8, 128, 1, 3, True, torch.float16),
+            (2, 65, 4, 64, 0.1, 4, False, torch.bfloat16),
+            (2, 33, 4, 128, 1, 2, True, torch.float16),
         ]
     ],
 )
@@ -100,6 +102,7 @@ def test_chunk(
         (2, 100, 2, [0, 63, 100, 500, 1000], torch.float16),
         (2, 128, 2, [0, 100, 300, 800, 1500, 2000], torch.float16),
         (2, 256, 3, [0, 100, 123, 300, 500, 800, 1000, 1500, 2048], torch.float16),
+        (2, 64, 4, [0, 1, 15, 31, 65, 65, 130], torch.bfloat16),
     ],
 )
 @pytest.mark.smoke
