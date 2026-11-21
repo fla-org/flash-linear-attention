@@ -27,6 +27,7 @@ from .kda import KimiDeltaAttention
 from .lightnet import LightNetAttention
 from .linear_attn import LinearAttention
 from .log_linear_mamba2 import LogLinearMamba2
+from .lolcats import LoLCATsAttention
 from .mamba import Mamba
 from .mamba2 import Mamba2
 from .mamba3 import Mamba3
@@ -73,6 +74,7 @@ __all__ = [
     'KimiDeltaAttention',
     'LightNetAttention',
     'LinearAttention',
+    'LoLCATsAttention',
     'LogLinearMamba2',
     'Mamba',
     'Mamba2',
