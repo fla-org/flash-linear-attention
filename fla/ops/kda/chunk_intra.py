@@ -17,7 +17,14 @@ from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.graph import get_static_buffer
 from fla.ops.utils.op import exp2, gather, unflatten_program_id
-from fla.utils import IS_GATHER_SUPPORTED, IS_NPU, IS_TF32_SUPPORTED, TRITON_ABOVE_3_6_0, autotune_cache_kwargs
+from fla.utils import (
+    IS_GATHER_SUPPORTED,
+    IS_NPU,
+    IS_NVIDIA_HOPPER,
+    IS_TF32_SUPPORTED,
+    TRITON_ABOVE_3_6_0,
+    autotune_cache_kwargs,
+)
 
 if IS_TF32_SUPPORTED:
     SOLVE_TRIL_DOT_PRECISION = tl.constexpr('tf32')
@@ -468,7 +475,8 @@ def chunk_kda_bwd_kernel_intra(
     dk2 += (bos * HV + i_hv) * K
     dg += (bos * HV + i_hv) * K
     dg2 += (bos * HV + i_hv) * K
-    db += (i_k * total_tokens + bos) * HV + i_hv
+    DB_GROUPS: tl.constexpr = max(1, BK // 32)
+    db += (i_k * DB_GROUPS * total_tokens + bos) * HV + i_hv
 
     o_i = tl.arange(0, BC)
     o_c = i_ti + o_i
@@ -561,7 +569,10 @@ def chunk_kda_bwd_kernel_intra(
             p_kj += H*K
             p_gkj += HV*K
 
-    b_db = tl.sum(b_dk2 * b_k, 1)
+    if BK > 32:
+        b_db = tl.sum(tl.reshape(b_dk2 * b_k, (BC, DB_GROUPS, 32)), 2)
+    else:
+        b_db = tl.sum(b_dk2 * b_k, 1)
     b_dk2 *= b_b[:, None]
 
     p_dq = dq + o_c[:, None] * (HV*K) + o_k[None, :]
@@ -571,7 +582,13 @@ def chunk_kda_bwd_kernel_intra(
     b_dg2 = b_q * b_dq2
     b_dq2 = b_dq2 + tl.load(p_dq, mask=m_ck, other=0.0)
     tl.store(p_dq2, b_dq2.to(p_dq2.dtype.element_ty), mask=m_ck)
-    tl.store(p_db, b_db.to(p_db.dtype.element_ty), mask=m_c)
+    if BK > 32:
+        o_db_group = tl.arange(0, DB_GROUPS).to(tl.int64)
+        p_db_groups = p_db[:, None] + o_db_group[None, :] * total_tokens * HV
+        m_db_group = i_k * DB_GROUPS + o_db_group < tl.cdiv(K, 32)
+        tl.store(p_db_groups, b_db.to(p_db.dtype.element_ty), mask=m_c[:, None] & m_db_group[None, :])
+    else:
+        tl.store(p_db, b_db.to(p_db.dtype.element_ty), mask=m_c)
 
     tl.debug_barrier()
     b_dkt = tl.zeros([BC, BK], dtype=tl.float32)
@@ -965,22 +982,26 @@ def chunk_kda_bwd_intra(
     BT = chunk_size
     BC = min(16, BT)
     BK = min(32, triton.next_power_of_2(K))
+    if safe_gate and IS_NVIDIA_HOPPER and q.dtype == k.dtype == torch.bfloat16 and H == HV and K == 128 and not use_graph:
+        BK = 64
 
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     NC = triton.cdiv(BT, BC)
     NK = triton.cdiv(K, BK)
+    # preserve the original beta-gradient reduction groups when widening K tiles
+    DB_NK = triton.cdiv(K, min(32, triton.next_power_of_2(K)))
 
     if use_graph:
         dq2 = get_static_buffer("intra_dq2", tuple(dq.shape), dq.dtype, dq.device)
         dk2 = get_static_buffer("intra_dk2", tuple(dk.shape), dk.dtype, dk.device)
-        db2 = get_static_buffer("intra_db2", (NK, *beta.shape), torch.float, beta.device)
+        db2 = get_static_buffer("intra_db2", (DB_NK, *beta.shape), torch.float, beta.device)
         dg2 = get_static_buffer("intra_dg2", tuple(dg.shape), torch.float, dg.device)
     else:
         dq2 = torch.empty_like(dq)
         dk2 = torch.empty_like(dk)
-        db2 = beta.new_empty(NK, *beta.shape, dtype=torch.float)
+        db2 = beta.new_empty(DB_NK, *beta.shape, dtype=torch.float)
         dg2 = torch.empty_like(dg, dtype=torch.float)
     grid = (NK * NC * NT, B * HV)
     chunk_kda_bwd_kernel_intra[grid](
