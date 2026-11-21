@@ -200,6 +200,7 @@ def fused_recurrent_gated_delta_rule_fwd(
     allow_neg_eigval: bool = False,
     state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
+    out: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
@@ -215,7 +216,11 @@ def fused_recurrent_gated_delta_rule_fwd(
         BV = min(8, triton.next_power_of_2(V))
     NV = triton.cdiv(V, BV)
 
-    o = torch.empty_like(v)
+    if out is None:
+        o = torch.empty_like(v)
+    else:
+        assert out.shape == v.shape
+        o = out
     if inplace_final_state:
         assert initial_state is not None, "inplace_final_state=True requires an initial_state"
         # Each program loads its slice of h0 before storing the same slice of ht, so they can alias.

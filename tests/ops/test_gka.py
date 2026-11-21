@@ -10,6 +10,7 @@ import torch
 import torch.nn.functional as F
 
 from fla.ops.gka import chunk_gka, fused_recurrent_gka, naive_recurrent_gka, naive_recurrent_gka_chebyshev
+from fla.ops.gka.fused_recurrent import fused_recurrent_gka_fwd
 from fla.utils import assert_close, device
 
 
@@ -523,3 +524,44 @@ def test_chunk_small_head_dim_backward_raises(K: int, V: int, dtype: torch.dtype
         o.float().sum().backward(retain_graph=True)
     with pytest.raises(RuntimeError, match='not supported for K='):
         h_kv.sum().backward()
+
+
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'K', 'V', 'cu_seqlens', 'dtype'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-K{}-V{}-cu_seqlens{}-{}".format(*test))
+        for test in [
+            (16, 1, 4, 64, 64, None, torch.bfloat16),
+            (2, 300, 4, 64, 64, None, torch.float),
+            (1, 400, 4, 64, 64, [0, 15, 250, 400], torch.bfloat16),
+        ]
+    ],
+)
+def test_fused_recurrent_inplace_out(
+    B: int,
+    T: int,
+    H: int,
+    K: int,
+    V: int,
+    cu_seqlens: list[int] | None,
+    dtype: torch.dtype,
+):
+    torch.manual_seed(42)
+    N = B if cu_seqlens is None else len(cu_seqlens) - 1
+    q, k, v, g, gk, alpha, initial_state = make_inputs(B, T, H, K, V, 'tied', True, True, dtype, N=N)
+    h_kk0, h_kv0 = initial_state
+    if cu_seqlens is not None:
+        cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.long, device=device)
+
+    kwargs = dict(
+        q=q, k=k, v=v, g=g, gk=gk, alpha=alpha, scale=K ** -0.5, ridge_ratio=0.02, num_iter=30,
+        cu_seqlens=cu_seqlens,
+    )
+    ref, ref_hkk, ref_hkv = fused_recurrent_gka_fwd(h_kk0=h_kk0, h_kv0=h_kv0, output_final_state=True, **kwargs)
+    out = torch.empty_like(ref)
+    tri, tri_hkk, tri_hkv = fused_recurrent_gka_fwd(h_kk0=h_kk0, h_kv0=h_kv0, output_final_state=True, out=out, **kwargs)
+
+    assert tri.data_ptr() == out.data_ptr()
+    assert torch.equal(ref, tri)
+    assert torch.equal(ref_hkk, tri_hkk)
+    assert torch.equal(ref_hkv, tri_hkv)

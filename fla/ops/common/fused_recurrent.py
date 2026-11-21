@@ -428,6 +428,7 @@ def fused_recurrent_fwd(
     reverse: bool = False,
     state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
+    out: torch.Tensor | None = None,
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
@@ -441,7 +442,12 @@ def fused_recurrent_fwd(
             ht = q.new_empty(N, H, K, V, dtype=torch.float32)
     else:
         ht = None
-    o = q.new_empty((NK, *v.shape) if NK > 1 else v.shape, dtype=torch.float32)
+    # no inplace_final_state: the autotuned kernel re-runs during tuning and would advance an aliased state repeatedly
+    if out is None:
+        o = q.new_empty((NK, *v.shape) if NK > 1 else v.shape, dtype=torch.float32)
+    else:
+        assert out.shape == v.shape
+        o = out if NK == 1 else q.new_empty((NK, *v.shape), dtype=torch.float32)
 
     grid = (NV * NK * N * H,)
     fused_recurrent_fwd_kernel[grid](
@@ -472,7 +478,7 @@ def fused_recurrent_fwd(
         STATE_V_FIRST=state_v_first,
     )
     if NK > 1:
-        o = o.sum(0)
+        o = torch.sum(o, 0, out=out) if out is not None else o.sum(0)
     return o, ht
 
 
