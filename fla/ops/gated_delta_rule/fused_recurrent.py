@@ -194,6 +194,7 @@ def fused_recurrent_gated_delta_rule_fwd(
     scale: float = None,
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
+    inplace_final_state: bool = False,
     use_qk_l2norm_in_kernel: bool = False,
     use_beta_sigmoid_in_kernel: bool = False,
     allow_neg_eigval: bool = False,
@@ -215,7 +216,11 @@ def fused_recurrent_gated_delta_rule_fwd(
     NV = triton.cdiv(V, BV)
 
     o = torch.empty_like(v)
-    if output_final_state:
+    if inplace_final_state:
+        assert initial_state is not None, "inplace_final_state=True requires an initial_state"
+        # Each program loads its slice of h0 before storing the same slice of ht, so they can alias.
+        final_state = initial_state
+    elif output_final_state:
         if state_v_first:
             final_state = q.new_empty(N, HV, V, K, dtype=torch.float32)
         else:
@@ -408,8 +413,8 @@ def fused_recurrent_gated_delta_rule(
         >>> g = F.logsigmoid(torch.rand(B, T, HV, device='cuda'))
         >>> beta = torch.rand(B, T, HV, device='cuda').sigmoid()
         >>> h0 = torch.randn(B, HV, K, V, device='cuda')
-        >>> o, ht = fused_gated_recurrent_delta_rule(
-            q, k, v, g, beta,
+        >>> o, ht = fused_recurrent_gated_delta_rule(
+            q=q, k=k, v=v, g=g, beta=beta,
             initial_state=h0,
             output_final_state=True
         )
@@ -417,8 +422,8 @@ def fused_recurrent_gated_delta_rule(
         >>> q, k, v, g, beta = map(lambda x: rearrange(x, 'b t ... -> 1 (b t) ...'), (q, k, v, g, beta))
         # for a batch with 4 sequences, `cu_seqlens` with 5 start/end positions are expected
         >>> cu_seqlens = q.new_tensor([0, 2048, 4096, 6144, 8192], dtype=torch.long)
-        >>> o, ht = fused_gated_recurrent_delta_rule(
-            q, k, v, g, beta,
+        >>> o, ht = fused_recurrent_gated_delta_rule(
+            q=q, k=k, v=v, g=g, beta=beta,
             initial_state=h0,
             output_final_state=True,
             cu_seqlens=cu_seqlens
