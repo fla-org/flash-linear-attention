@@ -252,6 +252,7 @@ def chunk_simple_gla(
     state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     cu_seqlens_cpu: torch.LongTensor | None = None,
+    output_dtype: torch.dtype | None = None,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
@@ -288,6 +289,8 @@ def chunk_simple_gla(
             consistent with the FlashAttention API.
         cu_seqlens_cpu (torch.LongTensor):
             CPU copy of `cu_seqlens` to avoid unnecessary device synchronization. Default: `None`.
+        output_dtype (torch.dtype, Optional):
+            Output dtype for the numerator before normalization. Default: `None`.
 
     Returns:
         o (torch.Tensor):
@@ -328,7 +331,6 @@ def chunk_simple_gla(
             "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
         )
     chunk_size = kwargs.pop('chunk_size', None)
-    output_dtype = kwargs.pop('output_dtype', None)
     if chunk_size is not None and chunk_size != 2 ** (chunk_size.bit_length() - 1):
         raise ValueError(f"`chunk_size` must be a power of 2, got {chunk_size}.")
     if cu_seqlens is not None:

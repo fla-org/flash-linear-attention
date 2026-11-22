@@ -367,6 +367,7 @@ def chunk_fwd_o_npu(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
+    output_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     B, T, H, K, V, HV = *q.shape, v.shape[-1], v.shape[2]
     BT = chunk_size
@@ -386,6 +387,7 @@ def chunk_fwd_o_npu(
             state_v_first=state_v_first,
             chunk_size=BT,
             chunk_indices=chunk_indices,
+            output_dtype=output_dtype,
         )
         return o[:, :T].contiguous()
 
@@ -408,7 +410,7 @@ def chunk_fwd_o_npu(
                 h = torch.nn.functional.pad(h, (0, v_pad - h.shape[-1], 0, k_pad - h.shape[-2]))
             K, V = k_pad, v_pad
 
-    o = torch.empty_like(v)
+    o = torch.empty(v.shape, dtype=output_dtype or v.dtype, device=v.device)
     if cu_seqlens is None:
         N, chunk_offsets = B, None
         NT = triton.cdiv(T, BT)

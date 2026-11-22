@@ -61,6 +61,8 @@ def fused_recurrent_simple_gla(
         cu_seqlens (torch.LongTensor, Optional):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API. Default: `None`.
+        output_dtype (torch.dtype, Optional):
+            Output dtype for the numerator before normalization. Default: `None`.
 
     Returns:
         o (torch.Tensor):

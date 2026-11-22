@@ -895,6 +895,7 @@ def test_retention_ascend_registration_import_order(run_python):
         backends.TritonAscendBackend.is_available = classmethod(lambda cls: True)
         for operation, name in [
             ('common.chunk_o', 'chunk_bwd_dv'),
+            ('common.chunk_o', 'chunk_fwd_o'),
             ('simple_gla.fused_chunk', 'fused_chunk_simple_gla'),
             ('simple_gla.parallel', 'parallel_simple_gla'),
             ('simple_gla.fused_recurrent', 'fused_recurrent_simple_gla'),

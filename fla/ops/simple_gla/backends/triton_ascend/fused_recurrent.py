@@ -426,6 +426,7 @@ def fused_recurrent_fwd(
     reverse: bool = False,
     state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
+    output_dtype: torch.dtype | None = None,
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
@@ -440,7 +441,7 @@ def fused_recurrent_fwd(
             ht = q.new_empty(N, H, K, V, dtype=torch.float32)
     else:
         ht = None
-    o = q.new_empty(NK, *v.shape, dtype=torch.float32)
+    o = q.new_empty(NK, *v.shape, dtype=output_dtype or torch.float32)
 
     grid = (NV * NK * N * H,)
     fwd_kwargs = dict(
@@ -602,6 +603,7 @@ class FusedRecurrentFunction(torch.autograd.Function):
         reverse: bool = False,
         state_v_first: bool = False,
         cu_seqlens: torch.LongTensor | None = None,
+        output_dtype: torch.dtype | None = None,
     ):
         o, ht = fused_recurrent_fwd(
             q=q,
@@ -617,19 +619,21 @@ class FusedRecurrentFunction(torch.autograd.Function):
             reverse=reverse,
             state_v_first=state_v_first,
             cu_seqlens=cu_seqlens,
+            output_dtype=output_dtype,
         )
         ctx.save_for_backward(q, k, v, g, g_gamma, gk, gv, initial_state, o)
         ctx.scale = scale
         ctx.reverse = reverse
         ctx.cu_seqlens = cu_seqlens
         ctx.state_v_first = state_v_first
-        return o.to(q.dtype), ht
+        return o.to(output_dtype or q.dtype), ht
 
     @staticmethod
     @input_guard
     @autocast_custom_bwd
     def backward(ctx, do, dht):
         q, k, v, g, g_gamma, gk, gv, initial_state, o = ctx.saved_tensors
+        do = do.to(q.dtype)
         dq, dk, dv, dg, dgk, dgv, dh0 = fused_recurrent_bwd(
             q=q,
             k=k,
@@ -647,7 +651,7 @@ class FusedRecurrentFunction(torch.autograd.Function):
             state_v_first=ctx.state_v_first,
             cu_seqlens=ctx.cu_seqlens,
         )
-        return dq.to(q.dtype), dk.to(k.dtype), dv.to(v.dtype), dg, None, dgk, dgv, None, dh0, None, None, None, None
+        return dq.to(q.dtype), dk.to(k.dtype), dv.to(v.dtype), dg, None, dgk, dgv, None, dh0, None, None, None, None, None
 
 
 def fused_recurrent(
@@ -664,6 +668,7 @@ def fused_recurrent(
     reverse: bool = False,
     state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
+    output_dtype: torch.dtype | None = None,
 ):
     if scale is None:
         scale = k.shape[-1] ** -0.5
@@ -681,6 +686,7 @@ def fused_recurrent(
         reverse,
         state_v_first,
         cu_seqlens,
+        output_dtype,
     )
 
 
@@ -697,6 +703,7 @@ def fused_recurrent_simple_gla_npu(
     reverse: bool = False,
     state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
+    output_dtype: torch.dtype | None = None,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Ascend realization of `fused_recurrent_simple_gla`."""
@@ -735,4 +742,5 @@ def fused_recurrent_simple_gla_npu(
         reverse=reverse,
         state_v_first=state_v_first,
         cu_seqlens=cu_seqlens,
+        output_dtype=output_dtype,
     )

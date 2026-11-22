@@ -32,6 +32,7 @@ def fused_chunk_simple_gla_npu(
     initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
+    output_dtype: torch.dtype | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     from fla.ops.simple_gla.chunk import chunk_simple_gla
 
@@ -47,4 +48,5 @@ def fused_chunk_simple_gla_npu(
         initial_state=initial_state,
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
+        output_dtype=output_dtype,
     )
