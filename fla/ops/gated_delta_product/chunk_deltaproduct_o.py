@@ -15,6 +15,8 @@ from fla.utils import (
     IS_NPU,
     IS_NVIDIA_BLACKWELL,
     IS_NVIDIA_HOPPER,
+    TRITON_ABOVE_3_4_0,
+    TRITON_ABOVE_3_7_1,
     TRITON_ABOVE_3_8_0,
     ascend_compile_kwargs,
     autotune_cache_kwargs,
@@ -518,6 +520,12 @@ def chunk_gated_delta_product_bwd_dqkwg(
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+    if g is not None and IS_NVIDIA_HOPPER and TRITON_ABOVE_3_4_0 and not TRITON_ABOVE_3_7_1:
+        raise RuntimeError(
+            "Triton >= 3.4.0 and < 3.7.1 on Hopper GPUs produces incorrect results for "
+            "gated chunk_gated_delta_product_bwd_dqkwg (see #640). Please upgrade Triton to >= 3.7.1.",
+        )
+
     B, T, H, K, V = *q.shape, v.shape[-1]
     T_dp = T * num_householder
     BT = chunk_size

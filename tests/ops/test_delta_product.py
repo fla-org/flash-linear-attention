@@ -178,18 +178,31 @@ def test_chunk_varlen(
         k_i = k[:, start*num_householder:end*num_householder, :, :]
         v_i = v[:, start*num_householder:end*num_householder, :, :]
         beta_i = beta[:, start*num_householder:end*num_householder, :]
+        h0_i = h0[i:i+1]
         o3_i, h3_i = naive_recurrent_gated_delta_product(
-            q_i, k_i, v_i, None, beta_i, scale=scale, cu_seqlens=None, output_final_state=True, num_householder=num_householder,
+            q_i,
+            k_i,
+            v_i,
+            None,
+            beta_i,
+            scale=scale,
+            cu_seqlens=None,
+            initial_state=h0_i.float(),
+            output_final_state=True,
+            num_householder=num_householder,
         )
         torch_ref[:, start:end, :, :] = o3_i
         torch_ref_ht[i, :, :, :] = h3_i.squeeze(0)
 
-    ((torch_ref * do).sum() + (torch_ref_ht * dht).sum()).backward(retain_graph=True)
+    ((torch_ref * do).sum() + (torch_ref_ht * dht).sum()).backward()
+    torch_ref_dq, torch_ref_dk, torch_ref_dv, torch_ref_dbeta, torch_ref_dh0 = (
+        q.grad, k.grad, v.grad, beta.grad, h0.grad,
+    )
 
-    assert_close('o', ref, tri, 0.005)
-    assert_close('ht', ref_ht, tri_ht, 0.005)
-    assert_close('dq', ref_dq, tri_dq, 0.007)
-    assert_close('dk', ref_dk, tri_dk, 0.008)
-    assert_close('dv', ref_dv, tri_dv, 0.007)
-    assert_close('db', ref_dbeta, tri_dbeta, 0.015)
-    assert_close('dh0', ref_dh0, tri_dh0, 0.007)
+    assert_close('o', torch_ref, tri, 0.005)
+    assert_close('ht', torch_ref_ht, tri_ht, 0.005)
+    assert_close('dq', torch_ref_dq, tri_dq, 0.007)
+    assert_close('dk', torch_ref_dk, tri_dk, 0.008)
+    assert_close('dv', torch_ref_dv, tri_dv, 0.007)
+    assert_close('db', torch_ref_dbeta, tri_dbeta, 0.015)
+    assert_close('dh0', torch_ref_dh0, tri_dh0, 0.007)

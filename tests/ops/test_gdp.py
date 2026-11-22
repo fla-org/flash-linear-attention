@@ -200,22 +200,35 @@ def test_chunk_varlen(
         v_i = v[:, start*num_householder:end*num_householder, :, :]
         g_i = g[:, start:end, :]
         beta_i = beta[:, start*num_householder:end*num_householder, :]
+        h0_i = h0[i:i+1]
         o3_i, h3_i = naive_recurrent_gated_delta_product(
-            q_i, k_i, v_i, g_i, beta_i, scale=scale, cu_seqlens=None, output_final_state=True, num_householder=num_householder,
+            q_i,
+            k_i,
+            v_i,
+            g_i.float(),
+            beta_i,
+            scale=scale,
+            cu_seqlens=None,
+            initial_state=h0_i.float(),
+            output_final_state=True,
+            num_householder=num_householder,
         )
         torch_ref[:, start:end, :, :] = o3_i
         torch_ref_ht[i, :, :, :] = h3_i.squeeze(0)
 
-    ((torch_ref * do).sum() + (torch_ref_ht * dht).sum()).backward(retain_graph=True)
+    ((torch_ref * do).sum() + (torch_ref_ht * dht).sum()).backward()
+    torch_ref_dq, torch_ref_dk, torch_ref_dv, torch_ref_dbeta, torch_ref_dg, torch_ref_dh0 = (
+        q.grad, k.grad, v.grad, beta.grad, g.grad, h0.grad,
+    )
 
-    assert_close('o', ref, tri, 0.005)
-    assert_close('ht', ref_ht, tri_ht, 0.005)
-    assert_close('dq', ref_dq, tri_dq, 0.007)
-    assert_close('dk', ref_dk, tri_dk, 0.008)
-    assert_close('dv', ref_dv, tri_dv, 0.007)
-    assert_close('db', ref_dbeta, tri_dbeta, 0.015)
-    assert_close('dg', ref_dg, tri_dg, 0.015)
-    assert_close('dh0', ref_dh0, tri_dh0, 0.007)
+    assert_close('o', torch_ref, tri, 0.005)
+    assert_close('ht', torch_ref_ht, tri_ht, 0.005)
+    assert_close('dq', torch_ref_dq, tri_dq, 0.007)
+    assert_close('dk', torch_ref_dk, tri_dk, 0.008)
+    assert_close('dv', torch_ref_dv, tri_dv, 0.007)
+    assert_close('db', torch_ref_dbeta, tri_dbeta, 0.015)
+    assert_close('dg', torch_ref_dg, tri_dg, 0.015)
+    assert_close('dh0', torch_ref_dh0, tri_dh0, 0.007)
 
 
 def test_naive_varlen():
@@ -265,6 +278,7 @@ def test_naive_varlen():
             (2, 65, 2, 64, 128, 3, False, True, False, 'both', torch.bfloat16),
             (2, 31, 2, 128, 128, 2, True, False, False, 'dht_only', torch.bfloat16),
             (2, 31, 2, 64, 128, 3, True, False, False, 'no_state', torch.bfloat16),
+            (2, 65, 2, 256, 128, 2, True, False, False, 'both', torch.bfloat16),
         ]
     ],
 )
@@ -281,6 +295,8 @@ def test_chunk_bwd_edge_cases(
     state_mode: str,
     dtype: torch.dtype,
 ):
+    if IS_INTEL_ALCHEMIST and max(K, V) > 128:
+        pytest.skip(reason='chunk_gated_delta_rule is not supported on alchemist for D>128')
     torch.manual_seed(42)
     q = torch.randn(B, T, H, K, dtype=dtype)
     k = torch.randn(B, T * num_householder, H, K, dtype=dtype)
