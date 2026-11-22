@@ -73,11 +73,7 @@ def l2norm_fwd_kernel(x, y, rstd, eps, T, T_OFFSET, D: tl.constexpr, BD: tl.cons
     b_var = tl.sum(b_x * b_x, 1) + eps
     b_rstd = 1 / tl.sqrt(b_var)
     if LOWP:
-        # bf16 F.normalize rounds the fp32 norm, then divides. Rounding the
-        # product instead disagrees by ~0.3% and the gated recurrence turns
-        # that into about 1% on dq.
-        b_n = tl.sqrt(b_var).to(y.dtype.element_ty).to(tl.float32)
-        b_y = b_x / b_n[:, None]
+        b_y = b_x / tl.sqrt(b_var)[:, None]
     else:
         b_y = b_x * b_rstd[:, None]
 
@@ -124,7 +120,11 @@ def _launch_l2norm_fwd_kernel(
     BT: int,
 ):
     NT = triton.cdiv(T, BT)
-    lowp = y.dtype != torch.float32
+    # the forward follows the fp32-accumulating reference (F.normalize(x.float())):
+    # torch_npu's bf16-input F.normalize rounds the norm to bf16 and differs by
+    # 1 bf16 ulp, so the LOWP norm-rounding branch must stay off here. The
+    # backward keeps its own dtype-driven LOWP VJP mimic below.
+    lowp = False
     for nt_off, nt_len in iter_axis_launch_chunks(axis_size=NT, other_grid_product=1, max_grid=ASCEND_MAX_GRID_DIM):
         l2norm_fwd_kernel[(nt_len,)](
             x=x, y=y, rstd=rstd, eps=eps, T=T, T_OFFSET=nt_off, D=D, BD=BD, BT=BT, LOWP=lowp,
