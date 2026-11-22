@@ -27,6 +27,7 @@ def chunk_simple_gla_fwd(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
+    output_dtype: torch.dtype | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     h, ht = chunk_fwd_h(
         k=k,
@@ -54,6 +55,7 @@ def chunk_simple_gla_fwd(
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
         state_v_first=state_v_first,
+        output_dtype=output_dtype,
     )
     return o, ht
 
@@ -155,6 +157,7 @@ class ChunkSimpleGLAFunction(torch.autograd.Function):
         cu_seqlens,
         cu_seqlens_cpu,
         chunk_size: int | None = None,
+        output_dtype: torch.dtype | None = None,
     ):
         if chunk_size is None:
             chunk_size = 64
@@ -192,13 +195,14 @@ class ChunkSimpleGLAFunction(torch.autograd.Function):
             chunk_size=chunk_size,
             chunk_indices=chunk_indices,
             state_v_first=state_v_first,
+            output_dtype=output_dtype,
         )
         ctx.save_for_backward(q, k, v, g, g_gamma, initial_state, chunk_indices)
         ctx.chunk_size = chunk_size
         ctx.scale = scale
         ctx.cu_seqlens = cu_seqlens
         ctx.state_v_first = state_v_first
-        return o.to(q.dtype), ht
+        return o.to(output_dtype or q.dtype), ht
 
     @staticmethod
     @input_guard
@@ -206,6 +210,7 @@ class ChunkSimpleGLAFunction(torch.autograd.Function):
     def backward(ctx, do, dht):
         chunk_size, scale, cu_seqlens = ctx.chunk_size, ctx.scale, ctx.cu_seqlens
         q, k, v, g, g_gamma, initial_state, chunk_indices = ctx.saved_tensors
+        do = do.to(q.dtype)
         dq, dk, dv, dg, dh0 = chunk_simple_gla_bwd(
             q=q,
             k=k,
@@ -231,7 +236,7 @@ class ChunkSimpleGLAFunction(torch.autograd.Function):
             ).to(g)
         else:
             dg = None
-        return dq.to(q), dk.to(k), dv.to(v), dg, None, None, dh0, None, None, None, None, None
+        return dq.to(q), dk.to(k), dv.to(v), dg, None, None, dh0, None, None, None, None, None, None
 
 
 @torch.compiler.disable
@@ -323,6 +328,7 @@ def chunk_simple_gla(
             "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
         )
     chunk_size = kwargs.pop('chunk_size', None)
+    output_dtype = kwargs.pop('output_dtype', None)
     if chunk_size is not None and chunk_size != 2 ** (chunk_size.bit_length() - 1):
         raise ValueError(f"`chunk_size` must be a power of 2, got {chunk_size}.")
     if cu_seqlens is not None:
@@ -351,5 +357,6 @@ def chunk_simple_gla(
         cu_seqlens,
         cu_seqlens_cpu,
         chunk_size,
+        output_dtype,
     )
     return o, final_state

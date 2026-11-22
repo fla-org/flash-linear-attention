@@ -355,6 +355,40 @@ def test_normalize_zinit_grad(fn, B: int, T: int, split: int, H: int, D: int):
     assert_close('dv', full_dv, split_dv, 0.005)
 
 
+@pytest.mark.parametrize(
+    'fn',
+    [
+        pytest.param(chunk_linear_attn, id='chunk'),
+        pytest.param(fused_chunk_linear_attn, id='fused_chunk'),
+        pytest.param(fused_recurrent_linear_attn, id='fused_recurrent'),
+    ],
+)
+def test_normalize_fp16_output_overflow(fn):
+    # fp16 numerator reaches 65536 at token 63 and overflows before division, while the normalized output is 16.
+    torch.manual_seed(42)
+    B, T, H, K, V = 1, 128, 1, 16, 16
+    q = torch.full((B, T, H, K), 4.0, dtype=torch.float16, device=device, requires_grad=True)
+    k = torch.full_like(q, 4.0, requires_grad=True)
+    v = torch.full((B, T, H, V), 16.0, dtype=torch.float16, device=device, requires_grad=True)
+    do = torch.randn_like(v)
+
+    o, _ = fn(q, k, v, normalize=True)
+
+    assert torch.isfinite(o).all(), f'{fn.__name__} produced non-finite output'
+    assert_close('o', torch.full_like(o, 16.0), o, 0.002)
+
+    (o * do).sum().backward()
+    tri_dq, q.grad = q.grad.clone(), None
+    tri_dk, k.grad = k.grad.clone(), None
+    tri_dv, v.grad = v.grad.clone(), None
+
+    ref, _ = naive_recurrent_linear_attn(q, k, v, normalize=True)
+    (ref * do).sum().backward()
+    assert_close('dq', q.grad, tri_dq, 0.005)
+    assert_close('dk', k.grad, tri_dk, 0.005)
+    assert_close('dv', v.grad, tri_dv, 0.005)
+
+
 @pytest.mark.smoke
 @pytest.mark.parametrize('dtype', [torch.float32, torch.bfloat16, torch.float16], ids=['fp32', 'bf16', 'fp16'])
 @pytest.mark.parametrize('packed', [False, True], ids=['padded', 'packed'])

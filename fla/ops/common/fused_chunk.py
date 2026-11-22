@@ -440,6 +440,7 @@ def fused_chunk_fwd(
     output_final_state: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
+    output_dtype: torch.dtype | None = None,
 ):
     B, T, H, K, V = *q.shape, v.shape[-1]
     BT = chunk_size
@@ -447,7 +448,10 @@ def fused_chunk_fwd(
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
     NK = triton.cdiv(K, BK)
 
-    o = v.new_empty(NK, *v.shape, dtype=torch.float) if NK > 1 else torch.empty_like(v)
+    if NK > 1:
+        o = v.new_empty(NK, *v.shape, dtype=torch.float)
+    else:
+        o = torch.empty(v.shape, dtype=output_dtype or v.dtype, device=v.device)
     ht = k.new_empty(N, H, K, V, dtype=torch.float) if output_final_state else None
     def grid(meta): return (triton.cdiv(V, meta['BV']) * NK * N * H,)
     fused_chunk_fwd_kernel[grid](
@@ -470,7 +474,7 @@ def fused_chunk_fwd(
         BK=BK,
     )
     if NK > 1:
-        o = o.sum(0).to(v)
+        o = o.sum(0).to(output_dtype or v)
     return o, ht
 
 
@@ -551,6 +555,7 @@ class FusedChunkFunction(torch.autograd.Function):
         initial_state,
         output_final_state,
         cu_seqlens,
+        output_dtype: torch.dtype | None = None,
     ):
         chunk_size = min(64, max(16, triton.next_power_of_2(q.shape[1])))
         # Pre-scale by RCP_LN2 so downstream kernels can use exp2 directly.
@@ -574,19 +579,21 @@ class FusedChunkFunction(torch.autograd.Function):
             output_final_state=output_final_state,
             cu_seqlens=cu_seqlens,
             chunk_size=chunk_size,
+            output_dtype=output_dtype,
         )
 
         ctx.save_for_backward(q, k, v, g, g_gamma, initial_state)
         ctx.chunk_size = chunk_size
         ctx.scale = scale
         ctx.cu_seqlens = cu_seqlens
-        return o.to(q.dtype), ht
+        return o.to(output_dtype or q.dtype), ht
 
     @staticmethod
     @input_guard
     @autocast_custom_bwd
     def backward(ctx, do, dht=None):
         q, k, v, g, g_gamma, initial_state = ctx.saved_tensors
+        do = do.to(q.dtype)
 
         dq, dk, dv, dg, dh0 = fused_chunk_bwd(
             q=q,
@@ -603,7 +610,7 @@ class FusedChunkFunction(torch.autograd.Function):
         )
         if g is not None:
             dg = dg.to(g)
-        return dq.to(q), dk.to(k), dv.to(v), dg, None, None, dh0, None, None
+        return dq.to(q), dk.to(k), dv.to(v), dg, None, None, dh0, None, None, None
 
 
 def fused_chunk(
@@ -616,6 +623,7 @@ def fused_chunk(
     initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
+    output_dtype: torch.dtype | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
@@ -665,5 +673,6 @@ def fused_chunk(
         initial_state,
         output_final_state,
         cu_seqlens,
+        output_dtype,
     )
     return o, final_state

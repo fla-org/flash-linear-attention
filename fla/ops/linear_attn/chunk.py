@@ -78,6 +78,7 @@ def chunk_linear_attn(
         initial_state=kv_init,
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
+        output_dtype=torch.float32 if normalize else None,
     )
     if normalize:
         o, z_state = normalize_with_z_state(o, q, k, scale, z_init, reverse=False, cu_seqlens=cu_seqlens)

@@ -19,7 +19,7 @@ class StatefulNormalizeFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, o, q, k, scale, z_init, reverse, cu_seqlens):
-        k_cum = chunk_global_cumsum(k, reverse=reverse, cu_seqlens=cu_seqlens, output_dtype=k.dtype)
+        k_cum = chunk_global_cumsum(k, reverse=reverse, cu_seqlens=cu_seqlens, output_dtype=torch.float32)
         if z_init is not None:
             if cu_seqlens is not None:
                 seq_lens = (cu_seqlens[1:] - cu_seqlens[:-1]).to(torch.long)
@@ -27,7 +27,7 @@ class StatefulNormalizeFunction(torch.autograd.Function):
             else:
                 z_init_b = z_init
             k_cum = k_cum + z_init_b
-        denom = (q * scale * k_cum).sum(-1, keepdim=True) + 1e-10
+        denom = (q.float() * scale * k_cum).sum(-1, keepdim=True) + 1e-10
         o_out = o / denom
         if cu_seqlens is not None:
             idx = (cu_seqlens[:-1] if reverse else cu_seqlens[1:] - 1).to(torch.long)
@@ -47,7 +47,8 @@ class StatefulNormalizeFunction(torch.autograd.Function):
         ctx.cu_seqlens = cu_seqlens
         ctx.has_z_init = z_init is not None
         ctx.k_dtype = k.dtype
-        return o_out, z_state_out
+        ctx.z_init_dtype = z_init.dtype if z_init is not None else None
+        return o_out.to(q.dtype), z_state_out.to(k.dtype)
 
     @staticmethod
     def backward(ctx, do, dz_state):
@@ -56,11 +57,11 @@ class StatefulNormalizeFunction(torch.autograd.Function):
         reverse = ctx.reverse
         cu_seqlens = ctx.cu_seqlens
 
-        d_o_in = do / denom
+        d_o_in = (do / denom).to(o.dtype)
         ddenom = -(do * o).sum(-1, keepdim=True) / (denom * denom)
 
-        dq = ddenom * scale * k_cum
-        dk_cum = ddenom * scale * q
+        dq = (ddenom * scale * k_cum).to(q.dtype)
+        dk_cum = ddenom * scale * q.float()
 
         if dz_state is not None:
             if cu_seqlens is not None:
@@ -93,6 +94,7 @@ class StatefulNormalizeFunction(torch.autograd.Function):
                     dz_init = dz_init + dz_state.masked_fill(nonempty, 0)
             else:
                 dz_init = dk_cum.sum(dim=1, keepdim=True)
+            dz_init = dz_init.to(ctx.z_init_dtype)
 
         dk = chunk_global_cumsum(
             dk_cum, reverse=not reverse, cu_seqlens=cu_seqlens, output_dtype=ctx.k_dtype,

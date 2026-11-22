@@ -26,6 +26,7 @@ def fused_recurrent_simple_gla(
     reverse: bool = False,
     state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
+    output_dtype: torch.dtype | None = None,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
@@ -129,5 +130,6 @@ def fused_recurrent_simple_gla(
         reverse=reverse,
         state_v_first=state_v_first,
         cu_seqlens=cu_seqlens,
+        output_dtype=output_dtype,
     )
     return o, final_state
