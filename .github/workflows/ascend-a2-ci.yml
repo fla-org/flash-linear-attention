@@ -191,7 +191,7 @@ jobs:
           assert IS_NPU, "Expected NPU backend (IS_NPU=True)"
           PY
 
-      - name: Run benchmark unit tests, modules, ops/utils, gdn, gdn2, kda, gla, attnres, solve_tril, delta, pgdn, momentum_delta, precond_kda, ttt, simple_gla, cache, gdp, kda_graph
+      - name: Run benchmark unit tests, modules, ops/utils, gdn, gdn2, kda, gla, attnres, solve_tril, delta, pgdn, momentum_delta, precond_kda, ttt, simple_gla, cache, gdp, abc, based, comba, delta_product, deltaformer, forgetting_attn, gated_oja_rule2, hgrn, lightning_attn, linear_attn, retention, rwkv6, triadic_gdn, kda_graph
         id: pytest
         if: github.event_name != 'schedule' || steps.triton-cache.outputs.cache-hit != 'true'
         shell: bash
@@ -240,6 +240,19 @@ jobs:
             tests/ops/test_simple_gla.py \
             tests/ops/test_cache.py \
             tests/ops/test_gdp.py \
+            tests/ops/test_abc.py \
+            tests/ops/test_based.py \
+            tests/ops/test_comba.py \
+            tests/ops/test_delta_product.py \
+            tests/ops/test_deltaformer.py \
+            tests/ops/test_forgetting_attn.py \
+            tests/ops/test_gated_oja_rule2.py \
+            tests/ops/test_hgrn.py \
+            tests/ops/test_lightning_attn.py \
+            tests/ops/test_linear_attn.py \
+            tests/ops/test_retention.py \
+            tests/ops/test_rwkv6.py \
+            tests/ops/test_triadic_gdn.py \
             tests/ops/test_kda_graph.py
 
       # Phases run in order. Each pytest in a phase sees a disjoint device set.

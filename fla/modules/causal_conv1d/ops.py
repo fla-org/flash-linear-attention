@@ -727,8 +727,10 @@ def causal_conv1d_bwd(
 ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
     BT = chunk_size
     shape = x.shape
+    dr = dy if residual is not None else None
     if x.shape[-1] != weight.shape[0]:
         x = rearrange(x, 'b t ... -> b t (...)')
+        dy = rearrange(dy, 'b t ... -> b t (...)')
     B, T, D = x.shape
     W = weight.shape[1] if weight is not None else None
 
@@ -757,7 +759,6 @@ def causal_conv1d_bwd(
     dx = torch.empty_like(x)
     dw = weight.new_empty(B*NT, *weight.shape, dtype=torch.float) if weight is not None else None
     db = bias.new_empty(B*NT, *bias.shape, dtype=torch.float) if bias is not None else None
-    dr = dy if residual is not None else None
 
     stride_dx_n, stride_dx_t, stride_dx_d = dx.stride()
 
