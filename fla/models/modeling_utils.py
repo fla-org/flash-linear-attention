@@ -40,6 +40,8 @@ def get_attention(config: PretrainedConfig, layer_idx: int) -> Attention | None:
         window_size=attn_spec['window_size'],
         rope_theta=attn_spec['rope_theta'],
         max_position_embeddings=config.max_position_embeddings,
+        rotary_dim=attn_spec.get('rotary_dim'),
+        o_bias=attn_spec.get('o_bias', False),
         layer_idx=layer_idx,
     )
 

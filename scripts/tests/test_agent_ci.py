@@ -84,10 +84,11 @@ class AgentCITest(unittest.TestCase):
         with self.assertRaises(agent_ci.AgentCIError):
             agent_ci.validate_platform(self.catalog, "ops", "amd-mi300")
 
-    def test_repository_catalog_limits_ascend_a5_to_utils(self):
+    def test_repository_catalog_supports_targeted_ascend_a5_suites(self):
         catalog = agent_ci.load_catalog(Path(__file__).parents[2] / ".github/agent-tests/catalog.json")
-        agent_ci.validate_platform(catalog, "utils", "ascend-a5")
-        for suite in ("ops", "modules", "scripts", "top-level", "op-utils", "benchmarks", "cp", "layers", "models"):
+        for suite in ("ops", "modules", "cp", "top-level", "op-utils", "utils", "benchmarks"):
+            agent_ci.validate_platform(catalog, suite, "ascend-a5")
+        for suite in ("scripts", "layers", "models"):
             with self.assertRaises(agent_ci.AgentCIError):
                 agent_ci.validate_platform(catalog, suite, "ascend-a5")
 
