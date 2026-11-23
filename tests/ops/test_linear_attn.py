@@ -62,6 +62,9 @@ def test_fused_recurrent(
     tri_dk, k.grad = k.grad.clone(), None
     tri_dv, v.grad = v.grad.clone(), None
     tri_dh0, h0.grad = h0.grad.clone(), None
+    assert tri_dq.dtype == dtype, f'dq dtype {tri_dq.dtype} != input dtype {dtype}'
+    assert tri_dk.dtype == dtype
+    assert tri_dv.dtype == dtype
 
     assert_close('o', ref, tri, 0.001)
     assert_close('ht', ref_ht, tri_ht, 0.001)
@@ -158,6 +161,9 @@ def test_chunk(
     tri_dk, k.grad = k.grad.clone(), None
     tri_dv, v.grad = v.grad.clone(), None
     tri_dh0, h0.grad = h0.grad.clone(), None
+    assert tri_dq.dtype == dtype, f'dq dtype {tri_dq.dtype} != input dtype {dtype}'
+    assert tri_dk.dtype == dtype
+    assert tri_dv.dtype == dtype
 
     assert_close('o', ref, tri, 0.001)
     assert_close('ht', ref_ht, tri_ht, 0.001)
@@ -222,6 +228,9 @@ def test_fused_chunk(
     tri_dk, k.grad = k.grad.clone(), None
     tri_dv, v.grad = v.grad.clone(), None
     tri_dh0, h0.grad = h0.grad.clone(), None
+    assert tri_dq.dtype == dtype, f'dq dtype {tri_dq.dtype} != input dtype {dtype}'
+    assert tri_dk.dtype == dtype
+    assert tri_dv.dtype == dtype
 
     assert_close('o', ref, tri, 0.001)
     assert_close('ht', ref_ht, tri_ht, 0.001)

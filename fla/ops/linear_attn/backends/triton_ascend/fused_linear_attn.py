@@ -1031,9 +1031,9 @@ def _fused_chunk_bwd(q, k, v, do, initial_state, dht, scale, cu_seqlens, chunk_s
         multibuffer=False,
         enable_auto_bind_sub_block=False,
     )
-    dq = dq.sum(0) if NV > 1 else dq
-    dk = dk.sum(0) if NV > 1 else dk
-    dv = dv.sum(0) if NK > 1 else dv
+    dq = (dq.sum(0) if NV > 1 else dq).to(q.dtype)
+    dk = (dk.sum(0) if NV > 1 else dk).to(k.dtype)
+    dv = (dv.sum(0) if NK > 1 else dv).to(v.dtype)
     return dq, dk, dv, dh0
 
 
@@ -1142,9 +1142,9 @@ def _fused_recurrent_bwd(q, k, v, do, initial_state, dht, scale, reverse, cu_seq
         multibuffer=False,
         num_warps=4,
     )
-    dq = dq.sum(0)
-    dk = dk.sum(0)
-    dv = dv.sum(0)
+    dq = dq.sum(0).to(q.dtype)
+    dk = dk.sum(0).to(k.dtype)
+    dv = dv.sum(0).to(v.dtype)
     return dq, dk, dv, dh0
 
 
