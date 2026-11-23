@@ -327,23 +327,26 @@ def _build_kda_bwd_kernel(
             m_upper = (_i > _j) & m_valid
             s_dA[_i, _j] = T.if_then_else(m_upper, s_dA[_i, _j] * s_beta[_j], 0.0)
 
-        # dA = dA @ A
-        s_dA_dtype = T.alloc_shared((_BT, _BT), _dtype)
+        # Include the rounded residual in each product to reduce the error from narrowing dA.
+        s_dA_hi = T.alloc_shared((_BT, _BT), _dtype)
+        s_dA_lo = T.alloc_shared((_BT, _BT), _dtype)
         for _i, _j in T.Parallel(_BT, _BT):
-            s_dA_dtype[_i, _j] = T.cast(s_dA[_i, _j], _dtype)
+            s_dA_hi[_i, _j] = T.cast(s_dA[_i, _j], _dtype)
+            s_dA_lo[_i, _j] = T.cast(s_dA[_i, _j] - T.cast(T.cast(s_dA[_i, _j], _dtype), T.float32), _dtype)
 
         b_dA2 = T.alloc_fragment((_BT, _BT), T.float32)
         T.clear(b_dA2)
-        T.gemm(s_dA_dtype, s_A, b_dA2)
+        T.gemm(s_dA_hi, s_A, b_dA2)
+        T.gemm(s_dA_lo, s_A, b_dA2)
 
-        # dA = A @ dA
-        # Reuse s_dA_dtype for the second cast
         for _i, _j in T.Parallel(_BT, _BT):
-            s_dA_dtype[_i, _j] = T.cast(b_dA2[_i, _j], _dtype)
+            s_dA_hi[_i, _j] = T.cast(b_dA2[_i, _j], _dtype)
+            s_dA_lo[_i, _j] = T.cast(b_dA2[_i, _j] - T.cast(T.cast(b_dA2[_i, _j], _dtype), T.float32), _dtype)
 
         b_dA3 = T.alloc_fragment((_BT, _BT), T.float32)
         T.clear(b_dA3)
-        T.gemm(s_A, s_dA_dtype, b_dA3)
+        T.gemm(s_A, s_dA_hi, b_dA3)
+        T.gemm(s_A, s_dA_lo, b_dA3)
 
         # Apply mask and negate, reuse s_dA buffer
         for _i, _j in T.Parallel(_BT, _BT):

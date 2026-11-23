@@ -2273,6 +2273,40 @@ def test_chunk_bwd_tilelang_verifier_rejects_graph(chunk_bwd_inputs):
     assert verdict == (False, 'TileLang backend does not support graph capture (use_graph=True); fall back to Triton')
 
 
+@pytest.mark.parametrize('backend', ['triton', 'tilelang'])
+def test_chunk_bwd_wy_dqkg_dA_precision(backend):
+    """Zero states isolate dv @ v^T. Compare the resulting dA adjoint with its fp64 reference."""
+    if backend == 'tilelang':
+        if not backends.TileLangBackend.is_available():
+            pytest.skip('TileLang is unavailable')
+        from fla.ops.kda.backends.tilelang.chunk_bwd_dqkg import chunk_kda_bwd_wy_dqkg_fused_tilelang as fn
+    else:
+        from fla.ops.kda.chunk_bwd import chunk_kda_bwd_wy_dqkg_fused
+        fn = inspect.unwrap(chunk_kda_bwd_wy_dqkg_fused)
+    torch.manual_seed(42)
+    B, T, H, D, BT = 1, 128, 2, 128, 64
+    NT = T // BT
+    inputs = dict(q=F.normalize(torch.randn(B, T, H, D), dim=-1), k=F.normalize(torch.randn(B, T, H, D), dim=-1))
+    inputs.update({name: torch.randn(B, T, H, D) for name in ('v', 'v_new', 'do', 'dv')})
+    inputs.update(h=torch.zeros(B, NT, H, D, D), dh=torch.zeros(B, NT, H, D, D))
+    L = torch.randn(B, NT, H, BT, BT, dtype=torch.float64).mul(0.15).tril(-1)
+    A = torch.linalg.inv(torch.eye(BT, dtype=torch.float64) + L).permute(0, 1, 3, 2, 4).reshape(B, T, H, BT)
+    inputs = {name: x.to(device, torch.bfloat16) for name, x in dict(inputs, A=A).items()}
+    g = (-0.05 * torch.rand(B, T, H, D)).view(B, NT, BT, H, D).cumsum(2).view(B, T, H, D).to(device)
+    beta = torch.rand(B, T, H, device=device)
+    dA = fn(**inputs, g=g, beta=beta, scale=D ** -0.5, chunk_size=BT)[-1]
+
+    def blocks(x):
+        return x.double().view(B, NT, BT, H, -1).transpose(2, 3)
+
+    mask = torch.ones(BT, BT, dtype=torch.bool, device=device).tril(-1)
+    M = blocks(inputs['dv']) @ blocks(inputs['v']).transpose(-1, -2) * blocks(beta[..., None]).transpose(-1, -2)
+    At = blocks(inputs['A']).transpose(-1, -2)
+    ref = (-(At @ (M * mask) @ At) * mask).transpose(2, 3).reshape(B, T, H, BT)
+    err = ((dA.double() - ref).norm() / ref.norm()).item()
+    assert err < 1e-4, f'dA relative L2 error {err:.2e}'
+
+
 def test_chunk_bwd_ascend_verifier(chunk_bwd_inputs):
     from fla.ops.kda.backends.triton_ascend.chunk_bwd import chunk_kda_bwd_wy_dqkg_fused_verifier
     from fla.ops.kda.chunk_bwd import chunk_kda_bwd_wy_dqkg_fused
