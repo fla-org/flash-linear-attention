@@ -364,6 +364,34 @@ def test_parallel(
     assert_close('dv', ref_dv, tri_dv, 0.005)
 
 
+def test_parallel_output_attentions_non_differentiable():
+    torch.manual_seed(0)
+    B, T, H, K, V = 1, 64, 2, 16, 16
+    q = torch.randn((B, T, H, K), dtype=torch.float32, device=device).requires_grad_()
+    k = torch.randn((B, T, H, K), dtype=torch.float32, device=device).requires_grad_()
+    v = torch.randn((B, T, H, V), dtype=torch.float32, device=device).requires_grad_()
+    do = torch.randn_like(v)
+    w = torch.randn((B, H, T, T), dtype=torch.float32, device=device)
+
+    ref, _ = fused_recurrent_retention(q, k, v)
+    ref.backward(do)
+    ref_dq, q.grad = q.grad.clone(), None
+    ref_dk, k.grad = k.grad.clone(), None
+    ref_dv, v.grad = v.grad.clone(), None
+
+    o, attn = parallel_retention(q, k, v, output_attentions=True)
+    assert not attn.requires_grad
+    assert attn.grad_fn is None
+    with pytest.raises(RuntimeError, match='does not require grad'):
+        (attn * w).sum().backward()
+
+    o.backward(do)
+    assert_close('o', ref, o, 0.005)
+    assert_close('dq', ref_dq, q.grad, 0.005)
+    assert_close('dk', ref_dk, k.grad, 0.005)
+    assert_close('dv', ref_dv, v.grad, 0.005)
+
+
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'K', 'expand_ratio', 'dtype'),
     [
