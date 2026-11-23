@@ -960,3 +960,22 @@ def test_fused_recurrent_inplace_out(
     assert tri.data_ptr() == out.data_ptr()
     assert torch.equal(ref, tri)
     assert torch.equal(ref_ht, tri_ht)
+
+
+def test_fused_recurrent_inplace_out_bf16_sum():
+    torch.manual_seed(42)
+    B, T, H, D = 2, 300, 4, 128
+    q = torch.randn(B, T, H, D, dtype=torch.bfloat16, device=device)
+    k = torch.randn(B, T, H, D, dtype=torch.bfloat16, device=device)
+    v = torch.randn(B, T, H, D, dtype=torch.bfloat16, device=device)
+    g = F.logsigmoid(torch.randn(B, T, H, dtype=torch.bfloat16, device=device))
+    h0 = torch.randn(B, H, D, D, dtype=torch.float32, device=device)
+
+    kwargs = dict(q=q, k=k, v=v, g=g, scale=D ** -0.5)
+    ref, ref_ht = fused_recurrent_fwd(initial_state=h0.clone(), output_final_state=True, **kwargs)
+    out = torch.empty_like(v)
+    tri, tri_ht = fused_recurrent_fwd(initial_state=h0.clone(), output_final_state=True, out=out, **kwargs)
+
+    assert tri.data_ptr() == out.data_ptr()
+    assert torch.equal(ref.to(torch.bfloat16), tri)
+    assert torch.equal(ref_ht, tri_ht)

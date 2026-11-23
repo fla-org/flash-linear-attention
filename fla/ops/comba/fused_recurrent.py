@@ -152,6 +152,7 @@ def fused_recurrent_comba_fwd(
         o = q.new_empty(NK, *v.shape)
     else:
         assert out.shape == v.shape
+        assert out.is_contiguous()
         o = out.unsqueeze(0)
     if inplace_final_state:
         assert initial_state is not None, "inplace_final_state=True requires an initial_state"

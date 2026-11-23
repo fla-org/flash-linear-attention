@@ -338,3 +338,5 @@ def test_fused_recurrent_inplace_out(
     if is_decode:
         assert tri_state[0].data_ptr() == state[0].data_ptr()
         assert tri_state[1].data_ptr() == state[1].data_ptr()
+        assert tri_state[2].data_ptr() == state[2].data_ptr()
+        assert torch.equal(state[2], ref_state[2])

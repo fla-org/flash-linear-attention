@@ -162,6 +162,7 @@ def fused_recurrent_rwkv7_fwd(
         o = torch.empty_like(v)
     else:
         assert out.shape == v.shape
+        assert out.is_contiguous()
         o = out
 
     def grid(meta): return (triton.cdiv(V, meta['BV']) * N * H,)

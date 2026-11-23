@@ -445,6 +445,7 @@ def fused_recurrent_fwd(
         o = q.new_empty(NK, *v.shape, dtype=torch.float32)
     else:
         assert out.shape == v.shape
+        assert out.is_contiguous()
         o = out.unsqueeze(0) if NK == 1 else q.new_empty(NK, *v.shape, dtype=torch.float32)
 
     grid = (NV * NK * N * H,)
@@ -488,7 +489,7 @@ def fused_recurrent_fwd(
     if out is not None and NK == 1:
         o = o.squeeze(0)
     elif NK > 1:
-        o = torch.sum(o, 0, out=out) if out is not None else o.sum(0)
+        o = out.copy_(o.sum(0)) if out is not None else o.sum(0)
     else:
         o = o.sum(0)
     return o, ht

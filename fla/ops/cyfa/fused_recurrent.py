@@ -711,6 +711,7 @@ def _fused_recurrent_cyfa_decode_fwd(
         out = torch.empty_like(v)
     else:
         assert out.shape == v.shape
+        assert out.is_contiguous()
 
     _fused_recurrent_cyfa_decode_k_kernel[(batch * n_heads * nk * nm,)](
         q,
@@ -762,6 +763,10 @@ def _fused_recurrent_cyfa_decode_fwd(
         num_warps=4,
         num_stages=2,
     )
+    if inplace_final_state and initial_lambda is not None and state_lambda is not initial_lambda:
+        # PDL keeps lambda in a fresh buffer; write it back so the caller's state tuple is fully updated
+        initial_lambda.copy_(state_lambda)
+        state_lambda = initial_lambda
     final_state = (state_k, state_v, state_lambda) if output_final_state or inplace_final_state else None
     return out, final_state
 
@@ -847,6 +852,7 @@ def _fused_recurrent_cyfa_fwd(
         out = torch.empty_like(v)
     else:
         assert out.shape == v.shape
+        assert out.is_contiguous()
     total_tokens = batch * seq_len
     lambda_trace = torch.empty(batch, seq_len, n_heads, device=q.device, dtype=torch.float32)
     decay_trace = torch.empty_like(lambda_trace)

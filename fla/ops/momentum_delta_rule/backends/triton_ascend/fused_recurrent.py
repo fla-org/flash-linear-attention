@@ -100,7 +100,7 @@ class FusedRecurrentMomentumDeltaRuleFunctionNPU(torch.autograd.Function):
         return dq, dk, dv, dp, dlog_alpha, dlog_mu, dbeta, deta, None, ds0, dm0, None, None, None, None
 
 
-def fused_recurrent_momentum_delta_rule_npu(q, k, v, log_alpha, log_mu, p=None, beta=None, eta=None, scale=None, initial_state=None, output_final_state=False, inplace_final_state=False, cu_seqlens=None, use_qk_l2norm_in_kernel=True, use_p_times_alpha=True, out=None):
+def fused_recurrent_momentum_delta_rule_npu(q, k, v, log_alpha, log_mu, p=None, beta=None, eta=None, scale=None, initial_state=None, output_final_state=False, cu_seqlens=None, use_qk_l2norm_in_kernel=True, use_p_times_alpha=True, inplace_final_state=False, out=None):
     """NPU entry for the community ``fused_recurrent_momentum_delta_rule`` (same contract)."""
     scale = k.shape[-1] ** -0.5 if scale is None else scale
     beta = torch.ones_like(q[..., 0]) if beta is None else beta

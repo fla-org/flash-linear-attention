@@ -251,6 +251,7 @@ def fused_recurrent_precond_gated_delta_rule_fwd(
         o = torch.empty_like(v)
     else:
         assert out.shape == v.shape
+        assert out.is_contiguous()
         o = out
     if inplace_final_state:
         assert initial_state is not None, "inplace_final_state=True requires an initial_state"
