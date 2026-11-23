@@ -152,6 +152,16 @@ def test_fused_recurrent(
             assert_close(f'{name}_ht', ref_ht, tri2_ht, 0.002)
 
 
+@pytest.mark.parametrize('beta_shape', [(1, 20, 2, 128), (1, 20, 3)])
+def test_chunk_rejects_non_headwise_beta(beta_shape):
+    q = torch.zeros(1, 20, 1, 128, dtype=torch.bfloat16, device=device)
+    v = torch.zeros(1, 20, 2, 128, dtype=q.dtype, device=device)
+    g = torch.zeros(1, 20, 2, device=device)
+    beta = torch.ones(beta_shape, device=device)
+    with pytest.raises(ValueError, match='beta must have shape'):
+        chunk_gated_delta_rule(q, q, v, g, beta)
+
+
 def test_fused_recurrent_default_beta_gva():
     """`beta=None` must default to ones over the HV value heads; sizing it from
     q ([B, T, H]) makes the kernel read out of bounds under GVA (HV > H)."""
