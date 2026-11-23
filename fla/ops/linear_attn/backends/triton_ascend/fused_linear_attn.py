@@ -74,7 +74,7 @@ def fused_chunk_fwd_kernel(
     i_v, i_k, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
 
-    total = B * T
+    total = B * tl.cast(T, tl.int64)
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(
             cu_seqlens + i_n + 1
@@ -226,7 +226,7 @@ def fused_chunk_bwd_kernel(
     i_v, i_k, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
 
-    total = B * T
+    total = B * tl.cast(T, tl.int64)
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(
             cu_seqlens + i_n + 1
@@ -530,14 +530,15 @@ def fused_recurrent_fwd_kernel(
     i_nh = pid // (NV * NK)
     i_n, i_h = i_nh // H, i_nh % H
 
-    total = B * T
+    total = B * tl.cast(T, tl.int64)
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(
             cu_seqlens + i_n + 1
         ).to(tl.int64)
         T = eos - bos
     else:
-        bos, eos = i_n * T, i_n * T + T
+        bos = tl.cast(i_n, tl.int64) * T
+        eos = bos + T
 
     o_k = i_k * BK + tl.arange(0, BK)
     o_v = i_v * BV + tl.arange(0, BV)

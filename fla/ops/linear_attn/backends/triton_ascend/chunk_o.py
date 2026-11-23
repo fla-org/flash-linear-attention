@@ -61,14 +61,15 @@ def chunk_fwd_kernel_o(
     T_max = T
 
     if IS_VARLEN:
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(
             cu_seqlens + i_n + 1
-        ).to(tl.int32)
-        T = eos - bos
+        ).to(tl.int64)
+        T = (eos - bos).to(tl.int32)
         NT = tl.cdiv(T, BT)
         boh = tl.load(chunk_offsets + i_n).to(tl.int64)
     else:
-        bos, eos = i_n * T, i_n * T + T
+        bos = tl.cast(i_n, tl.int64) * T
+        eos = bos + T
         NT = tl.cdiv(T, BT)
         boh = i_n * NT
 

@@ -51,7 +51,7 @@ def chunk_global_cumsum_scalar_kernel(
     i_nh = tl.program_id(0)
     i_n = i_nh // H
     i_h = i_nh % H
-    bos = i_n * T
+    bos = tl.cast(i_n, tl.int64) * T
     b_z = tl.where(tl.program_id(0) < 0, 1.0, 0.0).to(tl.float32)
 
     for i_c in tl.range(NT):
@@ -89,7 +89,7 @@ def chunk_global_cumsum_vector_kernel(
     i_s, i_nh = tl.program_id(0), tl.program_id(1)
     i_n = i_nh // H
     i_h = i_nh % H
-    bos = i_n * T
+    bos = tl.cast(i_n, tl.int64) * T
     b_z = zero_acc_1d(BS)
 
     for i_c in tl.range(NT):
