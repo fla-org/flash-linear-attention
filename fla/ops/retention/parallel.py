@@ -39,7 +39,7 @@ def parallel_retention(
         o (torch.Tensor):
             Outputs of shape `[B, T, H, V]`.
         attn (torch.Tensor):
-            Attention scores of shape `[B, H, T, T]` if `output_attentions=True` else `None`.
+            Non-differentiable attention scores of shape `[B, H, T, T]` if `output_attentions=True` else `None`.
     """
     if cu_seqlens is not None and q.shape[0] != 1:
         raise ValueError(
