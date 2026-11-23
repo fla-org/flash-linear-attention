@@ -130,7 +130,7 @@ def fused_recurrent_rwkv7_fwd_kernel(
         tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
 
 
-@input_guard
+@input_guard(no_guard_contiguous={'out'})
 def fused_recurrent_rwkv7_fwd(
     r: torch.Tensor,
     w: torch.Tensor,

@@ -509,3 +509,16 @@ def test_fused_recurrent_inplace_out(
     assert tri.data_ptr() == out.data_ptr()
     assert torch.equal(ref, tri)
     assert torch.equal(ref_ht, tri_ht)
+
+
+def test_fused_recurrent_out_non_contiguous():
+    torch.manual_seed(42)
+    B, T, H, D = 2, 1, 4, 64
+    q = torch.randn(B, T, H, D, dtype=torch.bfloat16, device=device)
+    k = torch.randn(B, T, H, D, dtype=torch.bfloat16, device=device)
+    v = torch.randn(B, T, H, D, dtype=torch.bfloat16, device=device)
+    gk = F.logsigmoid(torch.randn(B, T, H, D, dtype=torch.float32, device=device))
+    out = torch.empty(B, T, H, D, 2, dtype=torch.bfloat16, device=device)[..., 0]
+    assert not out.is_contiguous()
+    with pytest.raises(AssertionError):
+        fused_recurrent_gla(q=q, k=k, v=v, gk=gk, out=out)

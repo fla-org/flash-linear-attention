@@ -13,7 +13,7 @@ from fla.ops.simple_gla.fused_recurrent import fused_recurrent_simple_gla
 from fla.utils import input_guard
 
 
-@input_guard
+@input_guard(no_guard_contiguous={'out'})
 def fused_recurrent_retention(
     q: torch.Tensor,
     k: torch.Tensor,
