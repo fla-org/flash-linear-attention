@@ -98,6 +98,19 @@ def test_deprecate_kwarg_can_raise_when_both_names_are_set():
         fn(old_value=1, new_value=2)
 
 
+def test_checkpoint_passes_use_reentrant_explicitly():
+    @utils.checkpoint
+    def square(x):
+        return x * x
+
+    x = torch.randn(4, requires_grad=True)
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')
+        square(x).sum().backward()
+
+    utils.assert_close('grad', 2 * x.detach(), x.grad, 1e-6)
+
+
 def test_public_utils_are_reexported():
     for name in (
         'assert_close',

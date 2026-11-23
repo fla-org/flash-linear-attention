@@ -332,5 +332,5 @@ def deprecate_kwarg(
 def checkpoint(fn):
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
-        return torch.utils.checkpoint.checkpoint(fn, *args, **kwargs)
+        return torch.utils.checkpoint.checkpoint(fn, *args, use_reentrant=False, **kwargs)
     return wrapper
