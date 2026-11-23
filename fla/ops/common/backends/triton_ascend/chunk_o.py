@@ -475,10 +475,12 @@ def chunk_fwd_o_npu(
 
 def _launch_bwd_2d_kernel(kernel, *, nt: int, bh_total: int, kernel_kwargs: dict) -> None:
     max_nt = max_grid_axis_chunks(axis_size=nt, other_grid_product=bh_total, max_grid=ASCEND_MAX_GRID_DIM)
+    # Slice per window from the unsliced tensor; re-slicing the windowed copy
+    # empties every window after the first.
+    chunk_indices = kernel_kwargs.get('chunk_indices')
+    cu_seqlens = kernel_kwargs.get('cu_seqlens')
     for nt_off in range(0, nt, max_nt):
         nt_len = min(max_nt, nt - nt_off)
-        chunk_indices = kernel_kwargs.get('chunk_indices')
-        cu_seqlens = kernel_kwargs.get('cu_seqlens')
         if cu_seqlens is not None and chunk_indices is not None:
             kernel_kwargs['chunk_indices'] = chunk_indices[nt_off:nt_off + nt_len]
             kernel_kwargs['NT_OFFSET'] = 0
@@ -493,12 +495,14 @@ def _launch_bwd_2d_kernel(kernel, *, nt: int, bh_total: int, kernel_kwargs: dict
 
 def _launch_bwd_3d_kernel(kernel, *, nk: int, nt: int, bh_total: int, kernel_kwargs: dict) -> None:
     max_nt = max_grid_axis_chunks(axis_size=nt, other_grid_product=bh_total, max_grid=ASCEND_MAX_GRID_DIM)
+    # Slice per window from the unsliced tensor; re-slicing the windowed copy
+    # empties every window after the first.
+    chunk_indices = kernel_kwargs.get('chunk_indices')
+    cu_seqlens = kernel_kwargs.get('cu_seqlens')
     for k_idx in range(nk):
         kernel_kwargs['K_OFFSET'] = k_idx
         for nt_off in range(0, nt, max_nt):
             nt_len = min(max_nt, nt - nt_off)
-            chunk_indices = kernel_kwargs.get('chunk_indices')
-            cu_seqlens = kernel_kwargs.get('cu_seqlens')
             if cu_seqlens is not None and chunk_indices is not None:
                 kernel_kwargs['chunk_indices'] = chunk_indices[nt_off:nt_off + nt_len]
                 kernel_kwargs['NT_OFFSET'] = 0
