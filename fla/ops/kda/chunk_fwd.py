@@ -15,6 +15,7 @@ from fla.ops.kda.chunk_intra import chunk_kda_fwd_intra
 from fla.ops.kda.gate import kda_gate_chunk_cumsum
 from fla.ops.utils import chunk_local_cumsum
 from fla.ops.utils.constant import RCP_LN2
+from fla.utils import IS_NVIDIA
 
 
 def chunk_kda_fwd(
@@ -41,7 +42,11 @@ def chunk_kda_fwd(
     cp_context: FLACPContext | None = None,
     use_graph: bool = False,
     chunk_offsets: torch.LongTensor | None = None,
+    compact_h: bool = False,
 ):
+    assert not compact_h or cp_context is None or cp_context.layout == 'contiguous', (
+        "compact_h requires contiguous CP layout"
+    )
     # Apply gate activation
     g_org = None
     if use_gate_in_kernel:
@@ -84,6 +89,12 @@ def chunk_kda_fwd(
     )
 
     if cp_context is not None:
+        use_singleton_cp_state = (
+            IS_NVIDIA
+            and cp_context.group is not None
+            and cp_context.layout == 'contiguous'
+            and cu_seqlens is not None
+        )
         initial_state = chunk_gated_delta_rule_fwd_h_pre_process(
             k=kg,
             w=w,
@@ -95,8 +106,17 @@ def chunk_kda_fwd(
             chunk_size=chunk_size,
             state_v_first=state_v_first,
             use_graph=use_graph,
+            **({"use_singleton_state": True} if use_singleton_cp_state else {}),
         )
+    else:
+        use_singleton_cp_state = False
 
+    compact_kwargs = {}
+    if use_singleton_cp_state or compact_h:
+        compact_kwargs = {
+            'use_first_initial_state': use_singleton_cp_state,
+            'compact_h': compact_h,
+        }
     h, v_new, final_state = chunk_gated_delta_rule_fwd_h(
         k=kg,
         w=w,
@@ -110,6 +130,7 @@ def chunk_kda_fwd(
         chunk_offsets=chunk_offsets,
         chunk_size=chunk_size,
         state_v_first=state_v_first,
+        **compact_kwargs,
     )
 
     if cp_context is not None:
@@ -131,6 +152,7 @@ def chunk_kda_fwd(
         chunk_indices=chunk_indices,
         state_v_first=state_v_first,
         use_graph=use_graph,
+        **({'compact_h': True} if compact_h else {}),
     )
     if disable_recompute is False:
         # Delete to save memory

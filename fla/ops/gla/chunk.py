@@ -13,6 +13,7 @@ from fla.backends import dispatch
 from fla.ops.common.chunk_h import chunk_bwd_dh, chunk_fwd_h
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.cache import fla_cache_autotune
+from fla.ops.utils.chunk_state import compact_chunk_state_index
 from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.cumsum import chunk_local_cumsum
 from fla.ops.utils.op import exp2, unflatten_program_id
@@ -381,6 +382,9 @@ def chunk_gla_fwd_kernel_o(
     STATE_V_FIRST: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     USE_GRAPH: tl.constexpr = False,
+    COMPACT_H: tl.constexpr = False,
+    H_CHUNKS: tl.constexpr = 0,
+    HAS_INITIAL_STATE: tl.constexpr = False,
 ):
     i_v, i_t = unflatten_program_id(tl.cdiv(V, BV))
     i_bh = tl.program_id(1).to(tl.int64)
@@ -406,7 +410,9 @@ def chunk_gla_fwd_kernel_o(
     g += (bos * HV + i_hv) * K
     v += (bos * HV + i_hv) * V
     o += (bos * HV + i_hv) * V
-    h += (i_tg * HV + i_hv).to(tl.int64) * K * V
+    if COMPACT_H:
+        i_tg = compact_chunk_state_index(bos, i_t, i_n, H_CHUNKS, BT, HAS_INITIAL_STATE)
+    h += (tl.maximum(i_tg, 0) * HV + i_hv).to(tl.int64) * K * V
     A += (bos * HV + i_hv) * BT
 
     b_o = tl.zeros([BT, BV], dtype=tl.float32)
@@ -417,31 +423,32 @@ def chunk_gla_fwd_kernel_o(
     m_v = o_v < V
     m_tv = m_t[:, None] & m_v[None, :]
     m_A = m_t[:, None] & m_s
-    for i_k in range(tl.cdiv(K, BK)):
-        o_k = i_k * BK + tl.arange(0, BK)
-        m_k = o_k < K
-        m_qk = m_t[:, None] & m_k[None, :]
-        p_q = q + o_t[:, None] * (H*K) + o_k[None, :]
-        p_g = g + o_t[:, None] * (HV*K) + o_k[None, :]
-        if STATE_V_FIRST:
-            p_h = h + o_v[:, None] * K + o_k[None, :]
-            m_h = m_v[:, None] & m_k[None, :]
-        else:
-            p_h = h + o_k[:, None] * V + o_v[None, :]
-            m_h = m_k[:, None] & m_v[None, :]
-
-        # [BT, BK]
-        b_q = tl.load(p_q, mask=m_qk, other=0.0)
-        # [BT, BK]
-        b_g = tl.load(p_g, mask=m_qk, other=0.0).to(tl.float32)
-        # [BT, BK]
-        b_qg = (b_q * exp2(b_g)).to(b_q.dtype)
-        b_h = tl.load(p_h, mask=m_h, other=0.0)
-        if i_k >= 0:
+    if not COMPACT_H or i_tg >= 0:
+        for i_k in range(tl.cdiv(K, BK)):
+            o_k = i_k * BK + tl.arange(0, BK)
+            m_k = o_k < K
+            m_qk = m_t[:, None] & m_k[None, :]
+            p_q = q + o_t[:, None] * (H*K) + o_k[None, :]
+            p_g = g + o_t[:, None] * (HV*K) + o_k[None, :]
             if STATE_V_FIRST:
-                b_o = tl.dot(b_qg, tl.trans(b_h).to(b_qg.dtype), b_o)
+                p_h = h + o_v[:, None] * K + o_k[None, :]
+                m_h = m_v[:, None] & m_k[None, :]
             else:
-                b_o = tl.dot(b_qg, b_h.to(b_qg.dtype), b_o)
+                p_h = h + o_k[:, None] * V + o_v[None, :]
+                m_h = m_k[:, None] & m_v[None, :]
+
+            # [BT, BK]
+            b_q = tl.load(p_q, mask=m_qk, other=0.0)
+            # [BT, BK]
+            b_g = tl.load(p_g, mask=m_qk, other=0.0).to(tl.float32)
+            # [BT, BK]
+            b_qg = (b_q * exp2(b_g)).to(b_q.dtype)
+            b_h = tl.load(p_h, mask=m_h, other=0.0)
+            if i_k >= 0:
+                if STATE_V_FIRST:
+                    b_o = tl.dot(b_qg, tl.trans(b_h).to(b_qg.dtype), b_o)
+                else:
+                    b_o = tl.dot(b_qg, b_h.to(b_qg.dtype), b_o)
     b_o *= scale
     p_v = v + o_t[:, None] * (HV*V) + o_v[None, :]
     p_o = o + o_t[:, None] * (HV*V) + o_v[None, :]
@@ -998,6 +1005,7 @@ def chunk_gla_fwd_o_gk(
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
     use_graph: bool = False,
+    compact_h: bool = False,
 ):
     B, T, H, K, HV, V = *q.shape, v.shape[2], v.shape[-1]
     BT = chunk_size
@@ -1027,6 +1035,9 @@ def chunk_gla_fwd_o_gk(
         BT=BT,
         STATE_V_FIRST=state_v_first,
         USE_GRAPH=use_graph,
+        COMPACT_H=compact_h,
+        H_CHUNKS=T // BT if compact_h else 0,
+        HAS_INITIAL_STATE=compact_h and h.shape[1] > T // BT,
     )
     return o
 

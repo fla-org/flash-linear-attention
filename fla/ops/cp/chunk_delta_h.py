@@ -38,9 +38,12 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
     initial_state: torch.Tensor | None = None,
     context: FLACPContext | None = None,
     use_graph: bool = False,
+    use_singleton_state: bool = False,
 ) -> torch.Tensor | None:
     if context is None or context.group is None:
         return initial_state
+    if use_singleton_state:
+        assert context.layout == 'contiguous', "Singleton CP states require contiguous layout"
     assert initial_state is None, "When enable CP, the provided initial_state must be None."
     _check_cp_device(k.device)
     rank = dist.get_rank(group=context.group)
@@ -98,10 +101,11 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
         return initial_state
 
     hm = k.new_zeros(HV, K, V + K, dtype=torch.float32)
+    num_states = 1 if use_singleton_state else N
     if state_v_first:
-        initial_state = k.new_zeros(N, HV, V, K, dtype=torch.float32)
+        initial_state = k.new_zeros(num_states, HV, V, K, dtype=torch.float32)
     else:
-        initial_state = k.new_zeros(N, HV, K, V, dtype=torch.float32)
+        initial_state = k.new_zeros(num_states, HV, K, V, dtype=torch.float32)
     cu_seqlens_last = cu_seqlens[-2:]
     if use_graph:
         assert context.pre_num_ranks_dev is not None, "use_graph with CP requires context.pre_num_ranks_dev"
@@ -156,9 +160,12 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
     context: FLACPContext | None = None,
     chunk_size: int = 64,
     use_graph: bool = False,
+    use_singleton_state: bool = False,
 ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
     if context is None or context.group is None:
         return dht, initial_state
+    if use_singleton_state:
+        assert context.layout == 'contiguous', "Singleton CP states require contiguous layout"
     assert dht is None, "When enable CP, the provided dht must be None."
     _check_cp_device(k.device)
     rank = dist.get_rank(group=context.group)
@@ -218,10 +225,11 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
         return dht, None
 
     dhm = q.new_zeros(HV, K, V + K, dtype=torch.float32)
+    num_states = 1 if use_singleton_state else N
     if state_v_first:
-        dht = q.new_zeros(N, HV, V, K, dtype=torch.float32)
+        dht = q.new_zeros(num_states, HV, V, K, dtype=torch.float32)
     else:
-        dht = q.new_zeros(N, HV, K, V, dtype=torch.float32)
+        dht = q.new_zeros(num_states, HV, K, V, dtype=torch.float32)
 
     # every rank participates during graph replay because host-side flags are frozen at capture
     if use_graph or not context.is_first_rank:
@@ -245,12 +253,13 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
     # a zero-rank merge would only re-store the existing zeros
     if use_graph or not context.is_last_rank:
         h_seq_idx = None
-        h = dht[-1]
+        h = dht[0] if use_singleton_state else dht[-1]
         if use_graph:
             assert context.post_num_ranks_dev is not None, "use_graph with CP requires context.post_num_ranks_dev"
-            # skip zero-length tail padding when selecting the merge target during graph replay
-            h_seq_idx = (cu_seqlens[1:] > cu_seqlens[:-1]).sum() - 1
-            h = dht
+            if not use_singleton_state:
+                # skip zero-length tail padding when selecting the merge target during graph replay
+                h_seq_idx = (cu_seqlens[1:] > cu_seqlens[:-1]).sum() - 1
+                h = dht
 
         chunk_cp_merge(
             h=h,
