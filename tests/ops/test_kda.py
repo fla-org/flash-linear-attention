@@ -2217,6 +2217,34 @@ def test_flash_kda_dispatch(monkeypatch, route):
     assert calls == ['flash_kda' if route == 'accepted' else 'triton']
 
 
+@pytest.mark.parametrize('state_dtype', [
+    pytest.param(torch.bfloat16, id='bf16-state'),
+    pytest.param(torch.float32, id='fp32-control'),
+])
+def test_chunk_bwd_gate_state_product(state_dtype: torch.dtype):
+    from fla.ops.kda.chunk_bwd import chunk_kda_bwd_wy_dqkg_fused
+
+    B, T, H, D = 1, 64, 1, 64
+    zeros = torch.zeros(B, T, H, D, dtype=torch.bfloat16, device=device)
+    g = zeros.float()
+    A = torch.eye(T, dtype=zeros.dtype, device=device)[None, :, None, :]
+    h = torch.zeros(B, 1, H, D, D, dtype=state_dtype, device=device)
+    dh = torch.zeros_like(h)
+    # Key 0 exposes product rounding, and key 1 exposes rounding when the two exact products are added.
+    h[..., 0, 0] = dh[..., 0, 0] = 1 + 2**-7
+    h[..., 1, :2] = 1
+    dh[..., 1, 0] = 1
+    dh[..., 1, 1] = 2**-8
+
+    _, _, _, _, dg, _ = inspect.unwrap(chunk_kda_bwd_wy_dqkg_fused)(
+        q=zeros, k=zeros, v=zeros, v_new=zeros, g=g, beta=g.new_zeros((B, T, H)),
+        A=A, h=h, do=zeros, dh=dh, dv=zeros, scale=1.0, chunk_size=T,
+    )
+    expected = torch.zeros_like(g)
+    expected[:, -1] = (h.float() * dh.float()).sum(-1)[:, 0]
+    torch.testing.assert_close(dg, expected, rtol=0, atol=0)
+
+
 @pytest.fixture
 def chunk_bwd_inputs():
     x = SimpleNamespace(shape=(1, 64, 2, 64))
