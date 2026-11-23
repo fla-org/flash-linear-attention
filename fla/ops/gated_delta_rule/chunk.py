@@ -557,6 +557,8 @@ def chunk_gated_delta_rule(
             "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
         )
 
+    if torch.isinf(g).any():
+        raise ValueError("chunk_gated_delta_rule does not support infinite log gates")
     chunk_size = kwargs.pop('chunk_size', 64)
     if chunk_size not in (16, 32, 64):
         raise ValueError(f"`chunk_size` must be 16, 32, or 64 for Gated Delta Rule, got {chunk_size}.")
