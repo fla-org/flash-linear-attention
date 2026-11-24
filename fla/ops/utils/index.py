@@ -143,7 +143,11 @@ def prepare_position_ids(cu_seqlens: torch.LongTensor, cu_seqlens_cpu: torch.Lon
 
 @tensor_cache
 def prepare_sequence_ids(cu_seqlens: torch.LongTensor, cu_seqlens_cpu: torch.LongTensor | None = None) -> torch.LongTensor:
-    return prepare_position_ids(cu_seqlens, cu_seqlens_cpu).eq(0).cumsum(0) - 1
+    # search `cu_seqlens` instead of counting sequence starts, so that empty sequences still take up an id
+    position_ids = prepare_position_ids(cu_seqlens, cu_seqlens_cpu)
+    token_ids = torch.arange(position_ids.numel(), device=cu_seqlens.device, dtype=cu_seqlens.dtype)
+    # search the full `cu_seqlens`, not `cu_seqlens[1:]`: Inductor's searchsorted drops the offset of sliced boundaries
+    return torch.searchsorted(cu_seqlens, token_ids, right=True) - 1
 
 
 @tensor_cache
