@@ -25,14 +25,12 @@ from fla.ops.cp import build_cp_context
 from fla.ops.kda import chunk_kda
 from fla.ops.kda.gate import naive_kda_gate, naive_kda_lowerbound_gate
 from fla.ops.kda.naive import naive_recurrent_kda
-from fla.utils import IS_NPU, IS_TF32_SUPPORTED, assert_close, device, device_platform
+from fla.utils import IS_NPU, IS_TF32_SUPPORTED, assert_close, device, device_torch_lib
 from tests.cp.utils import gather_global, shard_tensor
 
 pytestmark = pytest.mark.skipif(not (IS_TF32_SUPPORTED or IS_NPU), reason="requires NVIDIA Ampere or newer, or Ascend")
 
-# One fp32 state [HV, K, V] is saved per token. A single graph for T=65536, D=128
-# is about 48 GiB and does not fit a 64 GiB device. Only NPU uses the segmented
-# reference; CUDA and shorter cases stay on the original one-shot path.
+# At T=65536, H=12, K=V=128, retaining one fp32 state per token costs 48 GiB.
 _NAIVE_SEGMENT_TOKENS = 4096
 _NAIVE_FULL_GRAPH_MAX = 16384
 
@@ -145,7 +143,7 @@ def _naive_recurrent_kda_segmented(q, k, v, g, beta, do, segment_len=_NAIVE_SEGM
         dg[:, start:end] = g_s.grad
         db[:, start:end] = b_s.grad
         dht = None if h0_in is None else h0_in.grad.detach()
-        torch.npu.empty_cache()
+        device_torch_lib.empty_cache()
     return torch.cat(pieces, dim=1), dq, dk, dv, dg, db
 
 
@@ -184,7 +182,7 @@ def _reference(q, k, v, g, beta, do, offsets, A_log, dt_bias, use_gate_in_kernel
             g_processed = g_seq.to(torch.float).requires_grad_(True)
             g_for_grad = g_processed
 
-        if device_platform == 'npu' and q_seq_norm.shape[1] > _NAIVE_FULL_GRAPH_MAX:
+        if q_seq_norm.shape[1] > _NAIVE_FULL_GRAPH_MAX:
             o_seq, dq_n, dk_n, dv_n, dg_n, db_n = _naive_recurrent_kda_segmented(
                 q=q_seq_norm,
                 k=k_seq_norm,
