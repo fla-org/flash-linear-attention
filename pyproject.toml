@@ -30,6 +30,19 @@ cuda = ["torch>=2.7.0", "triton>=3.3"]
 rocm = ["torch>=2.7.0"]
 xpu  = ["torch>=2.7.0"]
 npu  = ["torch==2.10.0", "torch_npu==2.10.0.post7", "torchvision==0.25.0", "triton-ascend==3.6.0"]
+# Select one AscendC extra that matches the target NPU.
+npu-ascendc-a2 = [
+    "flash-linear-attention-npu-a2 @ https://github.com/flashserve/flash-linear-attention-npu/releases/download/v26.10.0-feature/flash_linear_attention_npu_a2-26.10.0%2Bfeature-py3-none-manylinux_2_34_aarch64.whl#sha256=35f66b47afbbb3f24da08f86258c2f0229272ad22130576e69e8a2dc6db56279 ; sys_platform == 'linux' and platform_machine == 'aarch64'",
+    "flash-linear-attention-npu-a2 @ https://github.com/flashserve/flash-linear-attention-npu/releases/download/v26.10.0-feature/flash_linear_attention_npu_a2-26.10.0%2Bfeature-py3-none-manylinux_2_34_x86_64.whl#sha256=18f7bbe1a890f9ace7be94aa4f623c7b8482b368520d886af2b554416ff184e6 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+npu-ascendc-a3 = [
+    "flash-linear-attention-npu-a3 @ https://github.com/flashserve/flash-linear-attention-npu/releases/download/v26.10.0-feature/flash_linear_attention_npu_a3-26.10.0%2Bfeature-py3-none-manylinux_2_34_aarch64.whl#sha256=171bf937fd9645bccd723a174bf8fbf874ad6474aea220369f06c8deaafec46a ; sys_platform == 'linux' and platform_machine == 'aarch64'",
+    "flash-linear-attention-npu-a3 @ https://github.com/flashserve/flash-linear-attention-npu/releases/download/v26.10.0-feature/flash_linear_attention_npu_a3-26.10.0%2Bfeature-py3-none-manylinux_2_34_x86_64.whl#sha256=7dd126ba49a20d81952fed8ae36f2fbe7b22017779210fe6454eda63d0ba5f40 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+npu-ascendc-a5 = [
+    "flash-linear-attention-npu-a5 @ https://github.com/flashserve/flash-linear-attention-npu/releases/download/v26.10.0-feature/flash_linear_attention_npu_a5-26.10.0%2Bfeature-py3-none-manylinux_2_34_aarch64.whl#sha256=c2c252c20f92da2cf782fe16c9b590e6562bd08f2e0f71a48438fbca58e43b03 ; sys_platform == 'linux' and platform_machine == 'aarch64'",
+    "flash-linear-attention-npu-a5 @ https://github.com/flashserve/flash-linear-attention-npu/releases/download/v26.10.0-feature/flash_linear_attention_npu_a5-26.10.0%2Bfeature-py3-none-manylinux_2_34_x86_64.whl#sha256=dc79c28faa69902cc102beee92ed8cd67346cacb04222f221e57fdf296858545 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
 cpu  = ["torch>=2.7.0", "triton>=3.3"]
 tilelang = ["tilelang>=0.1.9"]
 conv1d = ["causal-conv1d>=1.7.0"]

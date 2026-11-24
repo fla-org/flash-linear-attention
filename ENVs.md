@@ -20,12 +20,20 @@ These switches control registered implementations. Unavailable backends and unsu
 | `FLA_TILELANG`                 | Backend-dependent | `0` / `1` | Enable TileLang implementations when installed. Default enablement depends on the operator and GPU. |
 | `FLA_FLASH_KDA`                | `1`               | `0` / `1` | Enable [FlashKDA](https://github.com/MoonshotAI/FlashKDA) for KDA inference when installed.         |
 | `FLA_GDN_ASCENDC`              | `0`               | `0` / `1` | Enable the installed `fla_npu` wheel for supported GDN calls on Ascend950.                          |
+| `FLA_KDA_ASCENDC`              | `0`               | `0` / `1` | Enable the installed `fla_npu` wheel for supported KDA calls on Ascend950.                          |
 
-`FLA_ASCENDC=1` also enables GDN AscendC. With the A5 wheel from
+`FLA_ASCENDC=1` also enables both backends. With the A5 wheel from
 [`v26.10.0-feature`](https://github.com/flashserve/flash-linear-attention-npu/releases/tag/v26.10.0-feature),
-the backend accepts BF16 Q/K/V with `K=V=128` and a value-to-key head ratio of 1 through 4.
+GDN accepts BF16 Q/K/V with `K=V=128` and a value-to-key head ratio of 1 through 4.
 It covers chunk size 64 for dense and packed inputs, chunk backward with a frozen decay gate
 and without initial or final state, and dense scalar-gated decoding up to 8 tokens per sequence.
+
+KDA accepts BF16 Q/K/V with matching heads, `K=V=128`, and chunk size 64. Backward
+requires raw safe gates and no initial or final state. Packed backward requires a frozen
+decay scale (`A_log`). Recompute requires a head count divisible by 8 and at most 256.
+
+Install the A5 wheel alongside the NPU Python stack with `pip install -e ".[npu,npu-ascendc-a5]"`.
+The `npu-ascendc-a2` and `npu-ascendc-a3` extras select the wheel for those devices.
 
 ### Gluon
 

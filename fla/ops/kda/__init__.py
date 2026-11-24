@@ -21,4 +21,4 @@ if TileLangBackend.is_available():
     from fla.ops.kda.backends import tilelang  # noqa: F401
 
 if TritonAscendBackend.is_available():
-    from fla.ops.kda.backends import triton_ascend  # noqa: F401
+    from fla.ops.kda.backends import ascendc, triton_ascend  # noqa: F401
