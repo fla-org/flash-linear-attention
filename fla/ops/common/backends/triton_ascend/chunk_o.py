@@ -1984,14 +1984,14 @@ def chunk_bwd_kernel_dv_npu(
         b_k = tl.load(p_k, mask=m_t[:, None] & m_k[None, :], other=0.0)
         # ascend tl.dot clobbers lhs; copy before the first dot on b_k.
         b_k_c = b_k + 0.0
-        b_A = tl.dot(b_k, b_q, b_A)
+        b_A = tl.dot(b_k, b_q, b_A, allow_tf32=False)
         if STATE_V_FIRST:
             p_dh = dh + o_v[:, None] * K + o_k[None, :]
             b_dh = tl.trans(tl.load(p_dh, mask=(o_v[:, None] < V) & m_k[None, :], other=0.0))
         else:
             p_dh = dh + o_k[:, None] * V + o_v[None, :]
             b_dh = tl.load(p_dh, mask=m_k[:, None] & (o_v[None, :] < V), other=0.0)
-        b_dv = tl.dot(b_k_c, b_dh.to(b_k_c.dtype), b_dv)
+        b_dv = tl.dot(b_k_c, b_dh.to(b_k_c.dtype), b_dv, allow_tf32=False)
 
     if USE_G:
         g += bos * HV + i_h
@@ -2012,7 +2012,7 @@ def chunk_bwd_kernel_dv_npu(
     p_do = do + row_base * (HV * V) + rows[:, None] * (HV * V) + o_v[None, :]
     p_dv = dv + row_base * (HV * V) + rows[:, None] * (HV * V) + o_v[None, :]
     b_do = tl.load(p_do, mask=m_t[:, None] & (o_v < V)[None, :], other=0.0)
-    b_dv = tl.dot(b_A.to(b_do.dtype), b_do, b_dv)
+    b_dv = tl.dot(b_A.to(b_do.dtype), b_do, b_dv, allow_tf32=False)
     tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), mask=m_t[:, None] & (o_v < V)[None, :])
 
 
