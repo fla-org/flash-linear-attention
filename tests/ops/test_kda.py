@@ -1482,6 +1482,217 @@ def test_chunk_varlen_prefill(
 
 
 @pytest.mark.parametrize(
+    ("H", "D", "cu_seqlens", "use_qk_l2norm_in_kernel", "dtype"),
+    [
+        pytest.param(
+            *test,
+            id=f"H{test[0]}-D{test[1]}-cu{test[2]}-l2norm{test[3]}-{test[4]}",
+        )
+        for test in [
+            (8, 128, [0, 256, 512], False, torch.bfloat16),
+            (8, 128, [0, 256, 512], True, torch.bfloat16),
+            (4, 128, [0, 17, 81, 212], True, torch.bfloat16),
+            (4, 128, None, True, torch.bfloat16),
+            (4, 128, [0, 256, 512], True, torch.float16),
+        ]
+    ],
+)
+def test_chunk_collinear_keys_l2norm(
+    H: int,
+    D: int,
+    cu_seqlens: list[int] | None,
+    use_qk_l2norm_in_kernel: bool,
+    dtype: torch.dtype,
+):
+    """Stress-test fused Q/K L2Norm and triangular solve under strongly collinear keys.
+
+    When keys are nearly collinear (cos_sim >= 0.995) with high beta (~0.98) and mild decay,
+    any inaccuracy in fused L2Norm or intra-chunk Akk solve amplifies exponentially into
+    out-of-range states or NaNs. Verifies finiteness and parity against FP32 naive_recurrent_kda.
+    """
+    torch.manual_seed(46)
+    is_varlen = cu_seqlens is not None
+    if is_varlen:
+        cu_seqlens_cpu = torch.LongTensor(cu_seqlens)
+        cu_seqlens_dev = cu_seqlens_cpu.to(device)
+        B, T = 1, int(cu_seqlens[-1])
+        N = len(cu_seqlens) - 1
+    else:
+        cu_seqlens_cpu = None
+        cu_seqlens_dev = None
+        B, T, N = 2, 256, 2
+
+    base_k = torch.randn(B, 1, H, D, dtype=torch.float32)
+    k = (base_k.expand(B, T, H, D) + 0.02 * torch.randn(B, T, H, D, dtype=torch.float32)).to(dtype)
+    q = (base_k.expand(B, T, H, D) + 0.05 * torch.randn(B, T, H, D, dtype=torch.float32)).to(dtype)
+    v = torch.randn(B, T, H, D, dtype=dtype)
+    g = torch.full((B, T, H, D), -3.0, dtype=dtype)
+    beta_raw = torch.full((B, T, H), 4.0, dtype=dtype)
+    A_log = torch.randn(H, dtype=torch.float32) * 0.2
+    dt_bias = torch.randn(H * D, dtype=torch.float32) * 0.3 - 1.5
+
+    q, k, v, g, beta_raw, A_log, dt_bias = map(
+        lambda x: x.to(device).requires_grad_(True),
+        (q, k, v, g, beta_raw, A_log, dt_bias),
+    )
+    do = torch.randn_like(v)
+
+    tri, _ = chunk_kda(
+        q=q.clone() if use_qk_l2norm_in_kernel else F.normalize(q.clone(), p=2, dim=-1),
+        k=k.clone() if use_qk_l2norm_in_kernel else F.normalize(k.clone(), p=2, dim=-1),
+        v=v.clone(),
+        g=g.clone(),
+        beta=beta_raw.clone(),
+        A_log=A_log.clone(),
+        dt_bias=dt_bias.clone(),
+        cu_seqlens=cu_seqlens_dev,
+        cu_seqlens_cpu=cu_seqlens_cpu,
+        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+        use_gate_in_kernel=True,
+        use_beta_sigmoid_in_kernel=True,
+        safe_gate=True,
+        lower_bound=-5.0,
+        disable_recompute=True,
+    )
+    (tri * do).sum().backward()
+    tri_grads = (q.grad, k.grad, v.grad, g.grad, beta_raw.grad, A_log.grad, dt_bias.grad)
+    q.grad = k.grad = v.grad = g.grad = beta_raw.grad = A_log.grad = dt_bias.grad = None
+
+    assert torch.isfinite(tri).all(), "chunk_kda output contains non-finite values under collinear keys"
+    for name, grad in zip(("dq", "dk", "dv", "dg", "db", "dA", "dbias"), tri_grads):
+        assert grad is not None and torch.isfinite(grad).all(), f"{name} contains non-finite values under collinear keys"
+
+    g_ref = naive_kda_lowerbound_gate(g.float(), A_log.float(), dt_bias.float(), lower_bound=-5.0)
+    beta_ref = beta_raw.float().sigmoid()
+    if is_varlen:
+        ref_chunks = []
+        for i in range(N):
+            s, e = cu_seqlens[i], cu_seqlens[i + 1]
+            ref_i, _ = naive_recurrent_kda(
+                q=F.normalize(q[:, s:e].float(), p=2, dim=-1),
+                k=F.normalize(k[:, s:e].float(), p=2, dim=-1),
+                v=v[:, s:e].float(),
+                g=g_ref[:, s:e],
+                beta=beta_ref[:, s:e],
+            )
+            ref_chunks.append(ref_i)
+        ref = torch.cat(ref_chunks, dim=1)
+    else:
+        ref, _ = naive_recurrent_kda(
+            q=F.normalize(q.float(), p=2, dim=-1),
+            k=F.normalize(k.float(), p=2, dim=-1),
+            v=v.float(),
+            g=g_ref,
+            beta=beta_ref,
+        )
+    (ref * do.float()).sum().backward()
+    ref_dq, ref_dk, ref_dv, ref_dg, ref_db = q.grad, k.grad, v.grad, g.grad, beta_raw.grad
+
+    # Under cos_sim >= 0.995 the (I + Akk) solve is higher-condition-number in BF16;
+    # enforce tight bounds on well-conditioned outputs (o, dv, db) and finite + bounded error on dq/dk.
+    assert_close("o", ref.to(dtype), tri, 0.025)
+    assert_close("dv", ref_dv.to(dtype), tri_grads[2], 0.025)
+    assert_close("db", ref_db.to(dtype), tri_grads[4], 0.05)
+    assert_close("dq", ref_dq.to(dtype), tri_grads[0], 0.12)
+    assert_close("dk", ref_dk.to(dtype), tri_grads[1], 0.12)
+    assert_close("dg", ref_dg.to(dtype), tri_grads[3], 0.50, warning=True)
+
+
+@pytest.mark.parametrize(
+    ("H", "D", "cu_seqlens", "disable_recompute", "dtype"),
+    [
+        pytest.param(
+            *test,
+            id=f"H{test[0]}-D{test[1]}-cu{test[2]}-no_recompute{test[3]}-{test[4]}",
+        )
+        for test in [
+            (8, 128, [0, 1, 14, 78, 256], True, torch.bfloat16),
+            (8, 128, [0, 1, 14, 78, 256], False, torch.bfloat16),
+            (16, 128, [0, 19, 147, 512], True, torch.bfloat16),
+        ]
+    ],
+)
+def test_chunk_varlen_fused_training_contract(
+    H: int,
+    D: int,
+    cu_seqlens: list[int],
+    disable_recompute: bool,
+    dtype: torch.dtype,
+):
+    """Cover packed varlen training with all fused switches active simultaneously:
+    use_qk_l2norm_in_kernel + use_gate_in_kernel + safe_gate (lower_bound=-5)
+    + use_beta_sigmoid_in_kernel + ragged short-tail chunks (L=1, 13, 19).
+    """
+    torch.manual_seed(42)
+    cu_seqlens_cpu = torch.LongTensor(cu_seqlens)
+    cu_seqlens_dev = cu_seqlens_cpu.to(device)
+    T = int(cu_seqlens[-1])
+    N = len(cu_seqlens) - 1
+
+    q = torch.randn((1, T, H, D), dtype=dtype) * 0.5
+    k = torch.randn((1, T, H, D), dtype=dtype) * 0.5
+    v = torch.randn((1, T, H, D), dtype=dtype) * 0.5
+    g = torch.randn((1, T, H, D), dtype=dtype) * 0.5
+    beta_raw = torch.randn((1, T, H), dtype=dtype) * 0.5
+    A_log = torch.randn(H, dtype=torch.float32) * 0.2
+    dt_bias = torch.randn(H * D, dtype=torch.float32) * 0.3 - 1.5
+
+    q, k, v, g, beta_raw, A_log, dt_bias = map(
+        lambda x: x.to(device).requires_grad_(True),
+        (q, k, v, g, beta_raw, A_log, dt_bias),
+    )
+    do = torch.randn_like(v)
+
+    tri, _ = chunk_kda(
+        q=q.clone(),
+        k=k.clone(),
+        v=v.clone(),
+        g=g.clone(),
+        beta=beta_raw.clone(),
+        A_log=A_log.clone(),
+        dt_bias=dt_bias.clone(),
+        cu_seqlens=cu_seqlens_dev,
+        cu_seqlens_cpu=cu_seqlens_cpu,
+        use_qk_l2norm_in_kernel=True,
+        use_gate_in_kernel=True,
+        use_beta_sigmoid_in_kernel=True,
+        safe_gate=True,
+        lower_bound=-5.0,
+        disable_recompute=disable_recompute,
+    )
+    (tri * do).sum().backward()
+    tri_dq, tri_dk, tri_dv, tri_dg, tri_db, tri_dA, tri_dbias = (
+        q.grad, k.grad, v.grad, g.grad, beta_raw.grad, A_log.grad, dt_bias.grad,
+    )
+    q.grad = k.grad = v.grad = g.grad = beta_raw.grad = A_log.grad = dt_bias.grad = None
+
+    g_ref = naive_kda_lowerbound_gate(g.float(), A_log.float(), dt_bias.float(), lower_bound=-5.0)
+    beta_ref = beta_raw.float().sigmoid()
+    ref_chunks = []
+    for i in range(N):
+        s, e = cu_seqlens[i], cu_seqlens[i + 1]
+        ref_i, _ = naive_recurrent_kda(
+            q=F.normalize(q[:, s:e].float(), p=2, dim=-1),
+            k=F.normalize(k[:, s:e].float(), p=2, dim=-1),
+            v=v[:, s:e].float(),
+            g=g_ref[:, s:e],
+            beta=beta_ref[:, s:e],
+        )
+        ref_chunks.append(ref_i)
+    ref = torch.cat(ref_chunks, dim=1)
+    (ref * do.float()).sum().backward()
+
+    assert_close("o", ref.to(dtype), tri, 0.008)
+    assert_close("dq", q.grad.to(dtype), tri_dq, 0.015)
+    assert_close("dk", k.grad.to(dtype), tri_dk, 0.015)
+    assert_close("dv", v.grad.to(dtype), tri_dv, 0.015)
+    assert_close("dg", g.grad.to(dtype), tri_dg, 0.025)
+    assert_close("db", beta_raw.grad.to(dtype), tri_db, 0.025)
+    assert_close("dA", A_log.grad, tri_dA, 0.02, warning=True)
+    assert_close("dbias", dt_bias.grad, tri_dbias, 0.02)
+
+
+@pytest.mark.parametrize(
     ("B", "T", "H", "D", "HAS_A_LOG", "HAS_BIAS", "LOWER_BOUND"),
     [
         pytest.param(*test, id="B{}-T{}-H{}-D{}-a_log{}-bias{}-lowerbound{}".format(*test))
