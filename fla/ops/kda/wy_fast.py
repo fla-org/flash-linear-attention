@@ -268,6 +268,175 @@ def prepare_wy_repr_bwd_kda_kernel(
     tl.store(p_db, b_db.to(p_db.dtype.element_ty), mask=m_t)
 
 
+@triton.heuristics({
+    'STORE_QG': lambda args: args['qg'] is not None,
+    'COMPUTE_AEFF': lambda args: args['A_eff'] is not None,
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
+})
+@fla_cache_autotune(
+    configs=[
+        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in [2, 4, 8]
+        for num_stages in [2, 3, 4]
+    ],
+    key=['H', 'HV', 'K', 'BT', 'BK', 'IS_VARLEN'],
+    **autotune_cache_kwargs,
+)
+@triton.jit(do_not_specialize=['T'])
+def prepare_dual_wy_fwd_kda_kernel(
+    q,
+    k,
+    qg,
+    kd,
+    t,
+    beta,
+    Aqk,
+    Akk,
+    A_eff,
+    gk,
+    cu_seqlens,
+    chunk_indices,
+    T,
+    H: tl.constexpr,
+    HV: tl.constexpr,
+    K: tl.constexpr,
+    BT: tl.constexpr,
+    BK: tl.constexpr,
+    STORE_QG: tl.constexpr,
+    COMPUTE_AEFF: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
+):
+    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
+    i_b, i_hv = i_bh // HV, i_bh % HV
+    i_h = i_hv // (HV // H)
+    if IS_VARLEN:
+        i_n = tl.load(chunk_indices + i_t * 2).to(tl.int32)
+        if USE_GRAPH and i_n < 0:
+            return
+        i_t = tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = eos - bos
+    else:
+        bos, eos = i_b * T, i_b * T + T
+
+    if i_t * BT >= T:
+        return
+
+    k += (bos * H + i_h) * K
+    kd += (bos * HV + i_hv) * K
+    t += (bos * HV + i_hv) * K
+    gk += (bos * HV + i_hv) * K
+    beta += bos * HV + i_hv
+    Akk += (bos * HV + i_hv) * BT
+    if STORE_QG:
+        q += (bos * H + i_h) * K
+        qg += (bos * HV + i_hv) * K
+    if COMPUTE_AEFF:
+        Aqk += (bos * HV + i_hv) * BT
+        A_eff += (bos * HV + i_hv) * BT
+
+    o_i = tl.arange(0, BT)
+    o_t = i_t * BT + o_i
+    m_t = o_t < T
+    m_A = m_t[:, None] & (o_i[None, :] < BT)
+    m_tril = (o_i[:, None] >= o_i[None, :]) & m_t[:, None]
+
+    p_b = beta + o_t * HV
+    b_b = tl.load(p_b, mask=m_t, other=0.0).to(tl.float32)
+
+    p_M = Akk + o_t[:, None] * (HV * BT) + o_i[None, :]
+    b_M = tl.where(m_tril, tl.load(p_M, mask=m_A, other=0.0), 0.0)
+
+    if COMPUTE_AEFF:
+        p_Aqk = Aqk + o_t[:, None] * (HV * BT) + o_i[None, :]
+        b_Aqk = tl.where(m_tril, tl.load(p_Aqk, mask=m_A, other=0.0), 0.0)
+        b_A_eff = tl.dot(b_Aqk, b_M.to(b_Aqk.dtype)) * b_b[None, :]
+        b_A_eff = tl.where(m_tril, b_A_eff, 0.0)
+        p_A_eff = A_eff + o_t[:, None] * (HV * BT) + o_i[None, :]
+        tl.store(p_A_eff, b_A_eff.to(p_A_eff.dtype.element_ty), mask=m_A)
+
+    b_MT = tl.trans(b_M)
+    last_idx = min(i_t * BT + BT, T) - 1
+
+    for i_k in range(tl.cdiv(K, BK)):
+        o_k = i_k * BK + tl.arange(0, BK)
+        m_k = o_k < K
+        m_tk = m_t[:, None] & m_k[None, :]
+
+        p_k = k + o_t[:, None] * (H * K) + o_k[None, :]
+        p_gk = gk + o_t[:, None] * (HV * K) + o_k[None, :]
+        b_k = tl.load(p_k, mask=m_tk, other=0.0)
+        b_gk = tl.load(p_gk, mask=m_tk, other=0.0).to(tl.float32)
+
+        b_gk_exp = exp2(b_gk)
+        b_kd = b_k * b_gk_exp
+        p_kd = kd + o_t[:, None] * (HV * K) + o_k[None, :]
+        tl.store(p_kd, b_kd.to(p_kd.dtype.element_ty), mask=m_tk)
+
+        if STORE_QG:
+            p_q = q + o_t[:, None] * (H * K) + o_k[None, :]
+            p_qg = qg + o_t[:, None] * (HV * K) + o_k[None, :]
+            b_q = tl.load(p_q, mask=m_tk, other=0.0)
+            b_qg = b_q * b_gk_exp
+            tl.store(p_qg, b_qg.to(p_qg.dtype.element_ty), mask=m_tk)
+
+        b_gn = tl.load(gk + last_idx * (HV * K) + o_k, mask=m_k, other=0.0).to(tl.float32)
+        b_kr = b_k * tl.where(m_t[:, None], exp2(b_gn[None, :] - b_gk), 0.0)
+        b_t = tl.dot(b_MT, b_kr.to(b_MT.dtype)) * b_b[:, None]
+        p_t = t + o_t[:, None] * (HV * K) + o_k[None, :]
+        tl.store(p_t, b_t.to(p_t.dtype.element_ty), mask=m_tk)
+
+
+def prepare_dual_wy_fwd(
+    k: torch.Tensor,
+    beta: torch.Tensor,
+    Akk: torch.Tensor,
+    gk: torch.Tensor,
+    Aqk: torch.Tensor | None = None,
+    q: torch.Tensor | None = None,
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
+    use_graph: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+    B, T, H, K = k.shape
+    HV = gk.shape[2]
+    BT = Akk.shape[-1]
+    BK = min(max(triton.next_power_of_2(K), 16), 64)
+
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
+
+    kd = torch.empty(B, T, HV, K, device=k.device, dtype=k.dtype)
+    t = torch.empty(B, T, HV, K, device=k.device, dtype=k.dtype)
+    qg = torch.empty(B, T, HV, K, device=k.device, dtype=k.dtype) if q is not None else None
+    A_eff = torch.empty_like(Aqk) if Aqk is not None else None
+
+    prepare_dual_wy_fwd_kda_kernel[(NT, B * HV)](
+        q=q,
+        k=k,
+        qg=qg,
+        kd=kd,
+        t=t,
+        beta=beta,
+        Aqk=Aqk,
+        Akk=Akk,
+        A_eff=A_eff,
+        gk=gk,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        T=T,
+        H=H,
+        HV=HV,
+        K=K,
+        BT=BT,
+        BK=BK,
+        USE_GRAPH=use_graph,
+    )
+    return kd, t, qg, A_eff
+
+
 @dispatch
 def recompute_w_u_fwd(
     k: torch.Tensor,

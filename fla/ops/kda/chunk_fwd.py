@@ -7,14 +7,26 @@
 
 import torch
 
+from fla import backends
+from fla.backends import TileLangBackend
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_fwd_h
 from fla.ops.cp import FLACPContext
 from fla.ops.cp.chunk_delta_h import chunk_gated_delta_rule_fwd_h_pre_process, compress_h0
 from fla.ops.gla.chunk import chunk_gla_fwd_o_gk
-from fla.ops.kda.chunk_intra import chunk_kda_fwd_intra
+from fla.ops.kda.chunk_intra import chunk_kda_fwd_intra, chunk_kda_fwd_intra_dual
 from fla.ops.kda.gate import kda_gate_chunk_cumsum
 from fla.ops.utils import chunk_local_cumsum
 from fla.ops.utils.constant import RCP_LN2
+from fla.utils import IS_NPU
+
+
+def should_use_dual_wy(use_graph: bool = False, is_gva: bool = False) -> bool:
+    """Use right-absorbed Dual-WY on Triton GPU; preserve Primal-WY for Ascend and TileLang backends."""
+    if IS_NPU:
+        return False
+    if backends._DISPATCH_DISABLED:
+        return True
+    return use_graph or is_gva or not (TileLangBackend.is_available() and TileLangBackend().is_enabled())
 
 
 def chunk_kda_fwd(
@@ -41,6 +53,8 @@ def chunk_kda_fwd(
     cp_context: FLACPContext | None = None,
     use_graph: bool = False,
     chunk_offsets: torch.LongTensor | None = None,
+    use_dual_wy: bool = False,
+    needs_grad: bool = True,
 ):
     # Apply gate activation
     g_org = None
@@ -67,27 +81,51 @@ def chunk_kda_fwd(
             use_graph=use_graph,
         )
 
-    # qg = None if disable_recompute is False
-    w, u, qg, kg, Aqk, Akk = chunk_kda_fwd_intra(
-        q=q,
-        k=k,
-        v=v,
-        gk=g,
-        beta=beta,
-        scale=scale,
-        cu_seqlens=cu_seqlens,
-        chunk_size=chunk_size,
-        chunk_indices=chunk_indices,
-        safe_gate=safe_gate,
-        disable_recompute=disable_recompute,
-        use_graph=use_graph,
-    )
+    if use_dual_wy:
+        # Right-absorbed Dual-WY keeps V out of intra prep:
+        # w = K_d, kg = T = diag(beta) M^T K_r, A_eff = (Aqk M) diag(beta), and recurrence runs directly on u = v.
+        w, kg, qg, Aqk, Akk, A_eff = chunk_kda_fwd_intra_dual(
+            q=q,
+            k=k,
+            gk=g,
+            beta=beta,
+            scale=scale,
+            cu_seqlens=cu_seqlens,
+            chunk_size=chunk_size,
+            chunk_indices=chunk_indices,
+            safe_gate=safe_gate,
+            disable_recompute=disable_recompute,
+            use_graph=use_graph,
+        )
+        if not needs_grad:
+            Aqk, Akk = None, None
+        u_rec = v
+        A_out = A_eff
+        u = A_eff if disable_recompute else None
+    else:
+        # qg = None if disable_recompute is False
+        w, u, qg, kg, Aqk, Akk = chunk_kda_fwd_intra(
+            q=q,
+            k=k,
+            v=v,
+            gk=g,
+            beta=beta,
+            scale=scale,
+            cu_seqlens=cu_seqlens,
+            chunk_size=chunk_size,
+            chunk_indices=chunk_indices,
+            safe_gate=safe_gate,
+            disable_recompute=disable_recompute,
+            use_graph=use_graph,
+        )
+        u_rec = u
+        A_out = Aqk
 
     if cp_context is not None:
         initial_state = chunk_gated_delta_rule_fwd_h_pre_process(
             k=kg,
             w=w,
-            u=u,
+            u=u_rec,
             gk=g,
             cu_seqlens=cu_seqlens,
             initial_state=initial_state,
@@ -100,7 +138,7 @@ def chunk_kda_fwd(
     h, v_new, final_state = chunk_gated_delta_rule_fwd_h(
         k=kg,
         w=w,
-        u=u,
+        u=u_rec,
         gk=g,
         initial_state=initial_state,
         output_final_state=output_final_state,
@@ -123,7 +161,7 @@ def chunk_kda_fwd(
         q=q,
         v=v_new,
         g=g,
-        A=Aqk,
+        A=A_out,
         h=h,
         scale=scale,
         cu_seqlens=cu_seqlens,

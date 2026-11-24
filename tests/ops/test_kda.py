@@ -2254,3 +2254,129 @@ def test_chunk_bwd_ascend_verifier(chunk_bwd_inputs):
     expected = (False, 'KDA Ascend bwd requires chunk_size % 16 == 0, got 17')
     assert chunk_kda_bwd_wy_dqkg_fused_verifier(**arguments.arguments) == expected
     assert chunk_kda_bwd_wy_dqkg_fused_verifier(*arguments.args, **arguments.kwargs) == expected
+
+
+def test_chunk_dual_wy_dispatch(monkeypatch):
+    from fla.ops.kda import chunk_fwd
+
+    monkeypatch.setattr(chunk_fwd, 'IS_NPU', False)
+    monkeypatch.setattr(backends, '_DISPATCH_DISABLED', False)
+    monkeypatch.setattr(backends.TileLangBackend, 'is_available', classmethod(lambda cls: False))
+    assert chunk_fwd.should_use_dual_wy() is True
+
+    monkeypatch.setattr(backends.TileLangBackend, 'is_available', classmethod(lambda cls: True))
+    monkeypatch.setenv('FLA_TILELANG', '1')
+    assert chunk_fwd.should_use_dual_wy(use_graph=False, is_gva=False) is False
+    assert chunk_fwd.should_use_dual_wy(use_graph=True, is_gva=False) is True
+    assert chunk_fwd.should_use_dual_wy(use_graph=False, is_gva=True) is True
+
+    monkeypatch.setenv('FLA_TILELANG', '0')
+    assert chunk_fwd.should_use_dual_wy() is True
+
+    monkeypatch.setenv('FLA_TILELANG', '1')
+    monkeypatch.setattr(backends, '_DISPATCH_DISABLED', True)
+    assert chunk_fwd.should_use_dual_wy() is True
+
+    monkeypatch.setattr(chunk_fwd, 'IS_NPU', True)
+    assert chunk_fwd.should_use_dual_wy() is False
+
+
+@pytest.mark.parametrize(
+    ("B", "T", "H", "HV", "K", "V", "state_v_first", "disable_recompute", "chunk_size", "cu_seqlens", "dtype"),
+    [
+        pytest.param(
+            *test,
+            id="B{}-T{}-H{}-HV{}-K{}-V{}-vf{}-norec{}-BT{}-cu{}-{}".format(*test),
+        )
+        for test in [
+            (2, 160, 2, 2, 64, 128, False, False, 64, None, torch.bfloat16),
+            (2, 160, 2, 4, 128, 256, True, True, 64, None, torch.bfloat16),
+            (2, 160, 2, 4, 128, 64, False, False, 32, None, torch.float16),
+            (1, 160, 2, 4, 32, 96, True, False, 64, [0, 37, 100, 160], torch.bfloat16),
+        ]
+    ],
+)
+def test_chunk_dual_wy_non_square(
+    B: int,
+    T: int,
+    H: int,
+    HV: int,
+    K: int,
+    V: int,
+    state_v_first: bool,
+    disable_recompute: bool,
+    chunk_size: int,
+    cu_seqlens: list[int] | None,
+    dtype: torch.dtype,
+):
+    """Verify Dual-WY outputs, states, and gradients when K != V across layouts, BT, GVA, and varlen."""
+    torch.manual_seed(42)
+    N = len(cu_seqlens) - 1 if cu_seqlens is not None else B
+    q = F.normalize(torch.randn(B, T, H, K, dtype=torch.float32), p=2, dim=-1).to(dtype)
+    k = F.normalize(torch.randn(B, T, H, K, dtype=torch.float32), p=2, dim=-1).to(dtype)
+    v = torch.randn(B, T, HV, V, dtype=dtype)
+    g = F.logsigmoid(torch.randn(B, T, HV, K, dtype=torch.float32))
+    beta = torch.randn(B, T, HV, dtype=dtype).sigmoid()
+    h0_kv = torch.randn(N, HV, K, V, dtype=torch.float32)
+    h0 = h0_kv.transpose(-1, -2).contiguous() if state_v_first else h0_kv.clone()
+
+    q, k, v, g, beta, h0_kv, h0 = (x.to(device).requires_grad_(True) for x in (q, k, v, g, beta, h0_kv, h0))
+    do = torch.randn_like(v)
+    dht_kv = torch.randn_like(h0_kv)
+    dht = dht_kv.transpose(-1, -2).contiguous() if state_v_first else dht_kv.clone()
+    cu_t = torch.tensor(cu_seqlens, dtype=torch.long, device=device) if cu_seqlens is not None else None
+
+    if cu_seqlens is None:
+        ref, ref_ht = naive_recurrent_kda(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            initial_state=h0_kv,
+            output_final_state=True,
+        )
+    else:
+        refs, ref_hts = [], []
+        for i, (bos, eos) in enumerate(zip(cu_seqlens[:-1], cu_seqlens[1:])):
+            o_i, ht_i = naive_recurrent_kda(
+                q=q[:, bos:eos],
+                k=k[:, bos:eos],
+                v=v[:, bos:eos],
+                g=g[:, bos:eos],
+                beta=beta[:, bos:eos],
+                initial_state=h0_kv[i:i + 1],
+                output_final_state=True,
+            )
+            refs.append(o_i)
+            ref_hts.append(ht_i)
+        ref, ref_ht = torch.cat(refs, dim=1), torch.cat(ref_hts, dim=0)
+
+    ref_grads = torch.autograd.grad((ref * do).sum() + (ref_ht * dht_kv).sum(), (q, k, v, g, beta, h0_kv))
+
+    tri, tri_ht = chunk_kda(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        beta=beta,
+        initial_state=h0,
+        output_final_state=True,
+        state_v_first=state_v_first,
+        disable_recompute=disable_recompute,
+        chunk_size=chunk_size,
+        cu_seqlens=cu_t,
+    )
+    tri_grads = torch.autograd.grad((tri * do).sum() + (tri_ht * dht).sum(), (q, k, v, g, beta, h0))
+
+    tri_ht_kv = tri_ht.transpose(-1, -2) if state_v_first else tri_ht
+    tri_dh0_kv = tri_grads[5].transpose(-1, -2) if state_v_first else tri_grads[5]
+
+    assert_close("o", ref, tri, 0.005)
+    assert_close("ht", ref_ht, tri_ht_kv, 0.005)
+    assert_close("dq", ref_grads[0], tri_grads[0], 0.008)
+    assert_close("dk", ref_grads[1], tri_grads[1], 0.008)
+    assert_close("dv", ref_grads[2], tri_grads[2], 0.008)
+    assert_close("dg", ref_grads[3], tri_grads[3], 0.02)
+    assert_close("db", ref_grads[4], tri_grads[4], 0.02)
+    assert_close("dh0", ref_grads[5], tri_dh0_kv, 0.008)

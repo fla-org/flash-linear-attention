@@ -15,16 +15,22 @@ from fla.ops.cp import FLACPContext
 from fla.ops.cp.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu_pre_process, expand_h0
 from fla.ops.kda.chunk_intra import chunk_kda_bwd_intra
 from fla.ops.kda.gate import kda_gate_bwd, kda_gate_chunk_cumsum
-from fla.ops.kda.wy_fast import recompute_w_u_fwd
+from fla.ops.kda.wy_fast import prepare_dual_wy_fwd, recompute_w_u_fwd
 from fla.ops.utils import chunk_local_cumsum, prepare_chunk_indices
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.graph import get_static_buffer
 from fla.ops.utils.op import exp2
-from fla.utils import IS_NVIDIA_HOPPER, IS_NVIDIA_SM100, autotune_cache_kwargs, check_shared_mem
+from fla.utils import (
+    IS_NVIDIA_HOPPER,
+    IS_NVIDIA_SM100,
+    autotune_cache_kwargs,
+    check_shared_mem,
+)
 
 BK_LIST = [32, 64] if check_shared_mem() else [16, 32]
 BV_LIST = [64, 128] if check_shared_mem('ampere') else [16, 32]
+DUAL_BV_LIST = [32, 64, 128] if check_shared_mem('ampere') else [16, 32]
 NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8]
 
 
@@ -379,6 +385,484 @@ def chunk_kda_bwd_dAv(
     return dA, dv
 
 
+@triton.heuristics({
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
+})
+@fla_cache_autotune(
+    configs=[
+        triton.Config({'BV': BV}, num_warps=num_warps, num_stages=num_stages)
+        for BV in BV_LIST
+        for num_warps in [2, 4]
+        for num_stages in [2, 3, 4]
+    ],
+    key=['HV', 'V', 'BT'],
+    **autotune_cache_kwargs,
+)
+@triton.jit(do_not_specialize=['T'])
+def chunk_kda_bwd_kernel_dAv_dual(
+    v,
+    A_eff,
+    Aqk,
+    Akk,
+    beta,
+    do,
+    dv,
+    dAqk,
+    wm_a,
+    cu_seqlens,
+    chunk_indices,
+    scale,
+    T,
+    HV: tl.constexpr,
+    V: tl.constexpr,
+    BT: tl.constexpr,
+    BV: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
+):
+    """Compute intra dY and absorb dA_eff into dAqk and WM_A = Aqk^T @ dA_eff in registers."""
+    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
+    i_b, i_hv = i_bh // HV, i_bh % HV
+    if IS_VARLEN:
+        i_n = tl.load(chunk_indices + i_t * 2).to(tl.int32)
+        if USE_GRAPH and i_n < 0:
+            return
+        i_t = tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = eos - bos
+    else:
+        bos, eos = i_b * T, i_b * T + T
+
+    if i_t * BT >= T:
+        return
+
+    v += (bos * HV + i_hv) * V
+    do += (bos * HV + i_hv) * V
+    dv += (bos * HV + i_hv) * V
+    A_eff += (bos * HV + i_hv) * BT
+    Aqk += (bos * HV + i_hv) * BT
+    Akk += (bos * HV + i_hv) * BT
+    beta += bos * HV + i_hv
+    dAqk += (bos * HV + i_hv) * BT
+    wm_a += (bos * HV + i_hv) * BT
+
+    o_i = tl.arange(0, BT)
+    o_t = i_t * BT + o_i
+    m_t = o_t < T
+    m_A = m_t[:, None] & (o_i[None, :] < BT)
+    m_tril = (o_i[:, None] >= o_i[None, :]) & m_t[:, None]
+
+    b_Aeff = tl.where(m_tril, tl.load(A_eff + o_t[:, None] * (HV * BT) + o_i[None, :], mask=m_A, other=0.0), 0.0)
+    b_Aeff_T = tl.trans(b_Aeff).to(do.dtype.element_ty)
+
+    b_dA = tl.zeros([BT, BT], dtype=tl.float32)
+    for i_v in range(tl.cdiv(V, BV)):
+        o_v = i_v * BV + tl.arange(0, BV)
+        m_v = o_v < V
+        m_tv = m_t[:, None] & m_v[None, :]
+        b_v = tl.load(v + o_t[:, None] * (HV * V) + o_v[None, :], mask=m_tv, other=0.0)
+        b_do = tl.load(do + o_t[:, None] * (HV * V) + o_v[None, :], mask=m_tv, other=0.0)
+        b_dA = tl.dot(b_do, tl.trans(b_v), b_dA)
+        b_dv = tl.dot(b_Aeff_T, b_do)
+        tl.store(dv + o_t[:, None] * (HV * V) + o_v[None, :], b_dv.to(dv.dtype.element_ty), mask=m_tv)
+
+    b_dA = tl.where(m_tril, b_dA, 0.0)
+    b_beta = tl.load(beta + o_t * HV, mask=m_t, other=0.0).to(tl.float32)
+    b_M = tl.where(m_tril, tl.load(Akk + o_t[:, None] * (HV * BT) + o_i[None, :], mask=m_A, other=0.0), 0.0)
+    b_Aqk = tl.where(m_tril, tl.load(Aqk + o_t[:, None] * (HV * BT) + o_i[None, :], mask=m_A, other=0.0), 0.0)
+
+    b_dAqk = tl.dot((b_dA * b_beta[None, :]).to(b_M.dtype), tl.trans(b_M)) * scale
+    b_dAqk = tl.where(m_tril, b_dAqk, 0.0)
+    b_wm_a = tl.dot(tl.trans(b_Aqk), b_dA.to(b_Aqk.dtype))
+    b_wm_a = tl.where(m_tril, b_wm_a, 0.0)
+
+    tl.store(dAqk + o_t[:, None] * (HV * BT) + o_i[None, :], b_dAqk.to(dAqk.dtype.element_ty), mask=m_A)
+    tl.store(wm_a + o_t[:, None] * (HV * BT) + o_i[None, :], b_wm_a.to(wm_a.dtype.element_ty), mask=m_A)
+
+
+@triton.heuristics({
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
+})
+@fla_cache_autotune(
+    configs=[
+        triton.Config({'BV': BV}, num_warps=num_warps, num_stages=num_stages)
+        for BV in DUAL_BV_LIST
+        for num_warps in [2, 4]
+        for num_stages in [2, 3, 4]
+    ],
+    key=['BT', 'HV', 'STATE_V_FIRST', 'K', 'V', 'BK'],
+    **autotune_cache_kwargs,
+)
+@triton.jit(do_not_specialize=['B', 'T', 'NT_GRID'])
+def chunk_kda_bwd_kernel_dual_wy_dqkg(
+    q,
+    k,
+    v_new,
+    g,
+    beta,
+    Akk,
+    h,
+    do,
+    dh,
+    dv,
+    dq,
+    dk,
+    dg,
+    wm,
+    cu_seqlens,
+    chunk_indices,
+    scale,
+    B,
+    T,
+    NT_GRID,
+    H: tl.constexpr,
+    HV: tl.constexpr,
+    K: tl.constexpr,
+    V: tl.constexpr,
+    BT: tl.constexpr,
+    BK: tl.constexpr,
+    BV: tl.constexpr,
+    NK: tl.constexpr,
+    STATE_V_FIRST: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
+):
+    i_tk, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
+    i_t, i_k = i_tk // NK, i_tk % NK
+    i_b, i_hv = i_bh // HV, i_bh % HV
+    i_h = i_hv // (HV // H)
+
+    total_tokens = B.to(tl.int64) * T.to(tl.int64)
+    if IS_VARLEN:
+        i_tg = i_t
+        i_n = tl.load(chunk_indices + i_t * 2).to(tl.int32)
+        if USE_GRAPH and i_n < 0:
+            return
+        i_t = tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = (eos - bos).to(tl.int32)
+    else:
+        i_tg = i_b * NT_GRID + i_t
+        bos, eos = i_b * T, i_b * T + T
+
+    if i_t * BT >= T:
+        return
+
+    o_i = tl.arange(0, BT)
+    o_t = i_t * BT + o_i
+    m_t = o_t < T
+    last_idx = (min(T, i_t * BT + BT) - 1).to(tl.int64)
+    m_last = o_t == last_idx
+    m_A = m_t[:, None] & (o_i[None, :] < BT)
+    m_tril = (o_i[:, None] >= o_i[None, :]) & m_t[:, None]
+
+    o_k = i_k * BK + tl.arange(0, BK)
+    m_k = o_k < K
+    m_tk = m_t[:, None] & m_k[None, :]
+
+    v_new += (bos * HV + i_hv) * V
+    do += (bos * HV + i_hv) * V
+    dv += (bos * HV + i_hv) * V
+    h += (i_tg * HV + i_hv) * K * V
+    dh += (i_tg * HV + i_hv) * K * V
+
+    b_dQd = tl.zeros([BT, BK], dtype=tl.float32)
+    b_dT = tl.zeros([BT, BK], dtype=tl.float32)
+    b_dKd = tl.zeros([BT, BK], dtype=tl.float32)
+    b_dgk = tl.zeros([BK], dtype=tl.float32)
+
+    for i_v in range(tl.cdiv(V, BV)):
+        o_v = i_v * BV + tl.arange(0, BV)
+        m_v = o_v < V
+        m_tv = m_t[:, None] & m_v[None, :]
+        b_v_new = tl.load(v_new + o_t[:, None] * (HV * V) + o_v[None, :], mask=m_tv, other=0.0)
+        b_do = tl.load(do + o_t[:, None] * (HV * V) + o_v[None, :], mask=m_tv, other=0.0)
+        b_dv = tl.load(dv + o_t[:, None] * (HV * V) + o_v[None, :], mask=m_tv, other=0.0)
+        if STATE_V_FIRST:
+            m_h = m_v[:, None] & m_k[None, :]
+            b_h = tl.load(h + o_v[:, None] * K + o_k[None, :], mask=m_h, other=0.0)
+            b_dh = tl.load(dh + o_v[:, None] * K + o_k[None, :], mask=m_h, other=0.0)
+            b_dgk += tl.sum(b_h * b_dh, axis=0)
+            b_dQd = tl.dot(b_do, b_h.to(b_do.dtype), b_dQd)
+            b_dT = tl.dot(b_v_new, b_dh.to(b_v_new.dtype), b_dT)
+            b_dKd = tl.dot(b_dv.to(b_v_new.dtype), b_h.to(b_v_new.dtype), b_dKd)
+        else:
+            m_h = m_k[:, None] & m_v[None, :]
+            b_h = tl.load(h + o_k[:, None] * V + o_v[None, :], mask=m_h, other=0.0)
+            b_dh = tl.load(dh + o_k[:, None] * V + o_v[None, :], mask=m_h, other=0.0)
+            b_dgk += tl.sum(b_h * b_dh, axis=1)
+            b_h_t = tl.trans(b_h)
+            b_dh_t = tl.trans(b_dh)
+            b_dQd = tl.dot(b_do, b_h_t.to(b_do.dtype), b_dQd)
+            b_dT = tl.dot(b_v_new, b_dh_t.to(b_v_new.dtype), b_dT)
+            b_dKd = tl.dot(b_dv.to(b_v_new.dtype), b_h_t.to(b_v_new.dtype), b_dKd)
+
+    q += (bos * H + i_h) * K
+    k += (bos * H + i_h) * K
+    g += (bos * HV + i_hv) * K
+    beta += bos * HV + i_hv
+    Akk += (bos * HV + i_hv) * BT
+    dq += (bos * HV + i_hv) * K
+    dk += (bos * HV + i_hv) * K
+    dg += (bos * HV + i_hv) * K
+
+    b_g = tl.load(g + o_t[:, None] * (HV * K) + o_k[None, :], mask=m_tk, other=0.0).to(tl.float32)
+    b_gk_exp = exp2(b_g)
+    b_dq = b_dQd * b_gk_exp * scale
+    tl.store(dq + o_t[:, None] * (HV * K) + o_k[None, :], b_dq.to(dq.dtype.element_ty), mask=m_tk)
+
+    b_dk_d = -b_dKd * b_gk_exp
+    b_beta = tl.load(beta + o_t * HV, mask=m_t, other=0.0).to(tl.float32)
+    b_M = tl.where(m_tril, tl.load(Akk + o_t[:, None] * (HV * BT) + o_i[None, :], mask=m_A, other=0.0), 0.0)
+
+    b_gn = tl.load(g + last_idx * (HV * K) + o_k, mask=m_k, other=0.0).to(tl.float32)
+    b_gkn_exp = tl.where(m_t[:, None], exp2(b_gn[None, :] - b_g), 0.0)
+
+    b_dKr = tl.dot(b_M, (b_dT * b_beta[:, None]).to(b_M.dtype))
+    b_dk_r = b_dKr * b_gkn_exp
+    b_dk = b_dk_r + b_dk_d
+
+    b_k = tl.load(k + o_t[:, None] * (H * K) + o_k[None, :], mask=m_tk, other=0.0)
+    b_q = tl.load(q + o_t[:, None] * (H * K) + o_k[None, :], mask=m_tk, other=0.0)
+
+    b_dgk = b_dgk * exp2(b_gn) + tl.sum(b_k * b_dk_r, axis=0)
+    b_dg = b_q * b_dq + b_k * b_dk_d - b_k * b_dk_r + m_last[:, None] * b_dgk
+
+    tl.store(dk + o_t[:, None] * (HV * K) + o_k[None, :], b_dk.to(dk.dtype.element_ty), mask=m_tk)
+    tl.store(dg + o_t[:, None] * (HV * K) + o_k[None, :], b_dg.to(dg.dtype.element_ty), mask=m_tk)
+
+    b_kr = (b_k * b_gkn_exp).to(b_M.dtype)
+    b_WM = tl.dot(b_kr, tl.trans(b_dT.to(b_M.dtype)))
+    b_WM = tl.where(m_tril, b_WM, 0.0)
+
+    wm += ((i_k * total_tokens + bos) * HV + i_hv) * BT
+    tl.store(wm + o_t[:, None] * (HV * BT) + o_i[None, :], b_WM.to(wm.dtype.element_ty), mask=m_A)
+
+
+@triton.heuristics({
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
+})
+@fla_cache_autotune(
+    configs=[
+        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in [2, 4]
+        for num_stages in [2, 3, 4]
+    ],
+    key=['BT', 'HV', 'NK'],
+    **autotune_cache_kwargs,
+)
+@triton.jit(do_not_specialize=['B', 'T'])
+def chunk_kda_bwd_kernel_dual_wy_dA(
+    beta,
+    Akk,
+    wm_a,
+    wm,
+    db,
+    dAkk,
+    cu_seqlens,
+    chunk_indices,
+    B,
+    T,
+    HV: tl.constexpr,
+    BT: tl.constexpr,
+    NK: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
+):
+    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
+    i_b, i_hv = i_bh // HV, i_bh % HV
+
+    total_tokens = B.to(tl.int64) * T.to(tl.int64)
+    if IS_VARLEN:
+        i_n = tl.load(chunk_indices + i_t * 2).to(tl.int32)
+        if USE_GRAPH and i_n < 0:
+            return
+        i_t = tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = (eos - bos).to(tl.int32)
+    else:
+        bos, eos = i_b * T, i_b * T + T
+
+    if i_t * BT >= T:
+        return
+
+    o_i = tl.arange(0, BT)
+    o_t = i_t * BT + o_i
+    m_t = o_t < T
+    m_A = m_t[:, None] & (o_i[None, :] < BT)
+    m_tril = (o_i[:, None] >= o_i[None, :]) & m_t[:, None]
+
+    beta += bos * HV + i_hv
+    Akk += (bos * HV + i_hv) * BT
+    wm_a += (bos * HV + i_hv) * BT
+    wm += (bos * HV + i_hv) * BT
+    db += bos * HV + i_hv
+    dAkk += (bos * HV + i_hv) * BT
+
+    b_beta = tl.load(beta + o_t * HV, mask=m_t, other=0.0).to(tl.float32)
+    b_M = tl.where(m_tril, tl.load(Akk + o_t[:, None] * (HV * BT) + o_i[None, :], mask=m_A, other=0.0), 0.0)
+    b_WM = tl.load(wm_a + o_t[:, None] * (HV * BT) + o_i[None, :], mask=m_A, other=0.0).to(tl.float32)
+
+    stride_wm = total_tokens * HV * BT
+    for i_k in range(NK):
+        b_WM += tl.load(wm + i_k * stride_wm + o_t[:, None] * (HV * BT) + o_i[None, :], mask=m_A, other=0.0).to(tl.float32)
+
+    b_db = tl.sum(b_M.to(tl.float32) * b_WM, axis=0)
+
+    m_strict_tril = (o_i[:, None] > o_i[None, :]) & m_t[:, None]
+    b_dM = tl.where(m_strict_tril, b_WM * b_beta[None, :], 0.0)
+    b_MT = tl.trans(b_M)
+    b_dL = tl.dot(b_dM.to(b_M.dtype), b_MT)
+    b_dL = tl.dot(b_MT, b_dL.to(b_M.dtype))
+    b_dL = tl.where(m_strict_tril, -b_dL, 0.0)
+
+    tl.store(dAkk + o_t[:, None] * (HV * BT) + o_i[None, :], b_dL.to(dAkk.dtype.element_ty), mask=m_A)
+    tl.store(db + o_t * HV, b_db.to(db.dtype.element_ty), mask=m_t)
+
+
+def chunk_kda_bwd_dAv_dual(
+    v: torch.Tensor,
+    do: torch.Tensor,
+    A_eff: torch.Tensor,
+    Aqk: torch.Tensor,
+    Akk: torch.Tensor,
+    beta: torch.Tensor,
+    scale: float,
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_size: int = 64,
+    chunk_indices: torch.LongTensor | None = None,
+    use_graph: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    B, T, HV, V = do.shape
+    BT = chunk_size
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
+
+    if use_graph:
+        dAqk = get_static_buffer("dAv_dA", (B, T, HV, BT), torch.float, v.device)
+        dv = get_static_buffer("dAv_dv", tuple(do.shape), do.dtype, do.device)
+        wm_a = get_static_buffer("dAv_wma", (B, T, HV, BT), torch.float, v.device)
+    else:
+        dAqk = v.new_empty(B, T, HV, BT, dtype=torch.float)
+        dv = torch.empty_like(do)
+        wm_a = v.new_empty(B, T, HV, BT, dtype=torch.float)
+
+    chunk_kda_bwd_kernel_dAv_dual[(NT, B * HV)](
+        v=v,
+        A_eff=A_eff,
+        Aqk=Aqk,
+        Akk=Akk,
+        beta=beta,
+        do=do,
+        dv=dv,
+        dAqk=dAqk,
+        wm_a=wm_a,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        scale=scale,
+        T=T,
+        HV=HV,
+        V=V,
+        BT=BT,
+        USE_GRAPH=use_graph,
+    )
+    return dAqk, dv, wm_a
+
+
+def chunk_kda_bwd_dual_wy_dqkg(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v_new: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    Akk: torch.Tensor,
+    wm_a: torch.Tensor,
+    h: torch.Tensor,
+    do: torch.Tensor,
+    dh: torch.Tensor,
+    dv: torch.Tensor,
+    scale: float | None = None,
+    state_v_first: bool = False,
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_size: int = 64,
+    chunk_indices: torch.LongTensor | None = None,
+    use_graph: bool = False,
+):
+    B, T, H, K, HV, V = *k.shape, v_new.shape[2], v_new.shape[-1]
+    BT = chunk_size
+    BK = min(max(triton.next_power_of_2(K), 16), 64 if check_shared_mem() else 32)
+    NK = triton.cdiv(K, BK)
+
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
+
+    if use_graph:
+        dq = get_static_buffer("wy_dq", (B, T, HV, K), torch.float, q.device)
+        dk = get_static_buffer("wy_dk", (B, T, HV, K), torch.float, q.device)
+        dg = get_static_buffer("wy_dg", tuple(g.shape), torch.float, g.device)
+        db = get_static_buffer("wy_db", tuple(beta.shape), torch.float, beta.device)
+        dAkk = get_static_buffer("wy_dA", tuple(Akk.shape), torch.float, Akk.device)
+        wm = get_static_buffer("wy_wm", (NK, B, T, HV, BT), torch.float, q.device)
+    else:
+        dq = g.new_empty(B, T, HV, K, dtype=torch.float)
+        dk = g.new_empty(B, T, HV, K, dtype=torch.float)
+        dg = torch.empty_like(g, dtype=torch.float)
+        db = torch.empty_like(beta, dtype=torch.float)
+        dAkk = torch.empty_like(Akk, dtype=torch.float)
+        wm = g.new_empty(NK, B, T, HV, BT, dtype=torch.float)
+
+    chunk_kda_bwd_kernel_dual_wy_dqkg[(NK * NT, B * HV)](
+        q=q,
+        k=k,
+        v_new=v_new,
+        g=g,
+        beta=beta,
+        Akk=Akk,
+        h=h,
+        do=do,
+        dh=dh,
+        dv=dv,
+        dq=dq,
+        dk=dk,
+        dg=dg,
+        wm=wm,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        scale=scale,
+        B=B,
+        T=T,
+        NT_GRID=NT,
+        H=H,
+        HV=HV,
+        K=K,
+        V=V,
+        BT=BT,
+        BK=BK,
+        NK=NK,
+        STATE_V_FIRST=state_v_first,
+        USE_GRAPH=use_graph,
+    )
+    chunk_kda_bwd_kernel_dual_wy_dA[(NT, B * HV)](
+        beta=beta,
+        Akk=Akk,
+        wm_a=wm_a,
+        wm=wm,
+        db=db,
+        dAkk=dAkk,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        B=B,
+        T=T,
+        HV=HV,
+        BT=BT,
+        NK=NK,
+        USE_GRAPH=use_graph,
+    )
+    return dq, dk, db, dg, dAkk
+
+
 @dispatch
 def chunk_kda_bwd_wy_dqkg_fused(
     q: torch.Tensor,
@@ -484,6 +968,7 @@ def chunk_kda_bwd(
     cp_context: FLACPContext | None = None,
     use_graph: bool = False,
     chunk_offsets: torch.LongTensor | None = None,
+    use_dual_wy: bool = False,
     **kwargs,
 ):
     H, HV = q.shape[2], v.shape[2]
@@ -502,17 +987,32 @@ def chunk_kda_bwd(
                 lower_bound=lower_bound,
                 use_graph=use_graph,
             )
-        w, u, qg, kg = recompute_w_u_fwd(
-            q=q,
-            k=k,
-            v=v,
-            beta=beta,
-            A=Akk,
-            gk=g,
-            cu_seqlens=cu_seqlens,
-            chunk_indices=chunk_indices,
-            use_graph=use_graph,
-        )
+        if use_dual_wy:
+            w, kg, qg, A_eff = prepare_dual_wy_fwd(
+                q=q,
+                k=k,
+                beta=beta,
+                Akk=Akk,
+                gk=g,
+                Aqk=Aqk,
+                cu_seqlens=cu_seqlens,
+                chunk_indices=chunk_indices,
+                use_graph=use_graph,
+            )
+            u_rec = v
+        else:
+            w, u, qg, kg = recompute_w_u_fwd(
+                q=q,
+                k=k,
+                v=v,
+                beta=beta,
+                A=Akk,
+                gk=g,
+                cu_seqlens=cu_seqlens,
+                chunk_indices=chunk_indices,
+                use_graph=use_graph,
+            )
+            u_rec = u
         if cp_context is not None:
             # Restore the full initial_state tensor from the compressed version.
             # Only the first sequence's state is non-zero as it's the only one that could be cross-rank.
@@ -520,7 +1020,7 @@ def chunk_kda_bwd(
         h, v_new, _ = chunk_gated_delta_rule_fwd_h(
             k=kg,
             w=w,
-            u=u,
+            u=u_rec,
             gk=g,
             initial_state=initial_state,
             output_final_state=False,
@@ -532,25 +1032,42 @@ def chunk_kda_bwd(
         )
     else:
         w, u, qg, kg, v_new, h = kwargs["w"], kwargs["u"], kwargs["qg"], kwargs["kg"], kwargs["v_new"], kwargs["h"]
+        if use_dual_wy:
+            A_eff = u
         if cp_context is not None:
             # Restore the full initial_state tensor from the compressed version.
             # Only the first sequence's state is non-zero as it's the only one that could be cross-rank.
             initial_state = expand_h0(initial_state, context=cp_context)
 
-    # dAqk = do @ v.T
-    # dv = A @ do
-    dAqk, dv = chunk_kda_bwd_dAv(
-        q=q,
-        k=k,
-        v=v_new,
-        do=do,
-        A=Aqk,
-        scale=scale,
-        cu_seqlens=cu_seqlens,
-        chunk_size=chunk_size,
-        chunk_indices=chunk_indices,
-        use_graph=use_graph,
-    )
+    if use_dual_wy:
+        dAqk, dv, wm_a = chunk_kda_bwd_dAv_dual(
+            v=v_new,
+            do=do,
+            A_eff=A_eff,
+            Aqk=Aqk,
+            Akk=Akk,
+            beta=beta,
+            scale=scale,
+            cu_seqlens=cu_seqlens,
+            chunk_size=chunk_size,
+            chunk_indices=chunk_indices,
+            use_graph=use_graph,
+        )
+    else:
+        # dAqk = do @ v.T
+        # dv = A @ do
+        dAqk, dv = chunk_kda_bwd_dAv(
+            q=q,
+            k=k,
+            v=v_new,
+            do=do,
+            A=Aqk,
+            scale=scale,
+            cu_seqlens=cu_seqlens,
+            chunk_size=chunk_size,
+            chunk_indices=chunk_indices,
+            use_graph=use_graph,
+        )
 
     if cp_context is not None:
         # initial_state is None in the CP mode
@@ -589,26 +1106,48 @@ def chunk_kda_bwd(
         state_v_first=state_v_first,
     )
 
-    dq, dk, dv, db, dg, dAkk = chunk_kda_bwd_wy_dqkg_fused(
-        q=q,
-        k=k,
-        v=v,
-        v_new=v_new,
-        g=g,
-        beta=beta,
-        A=Akk,
-        h=h,
-        do=do,
-        dh=dh,
-        dv=dv,
-        scale=scale,
-        cu_seqlens=cu_seqlens,
-        chunk_size=chunk_size,
-        chunk_indices=chunk_indices,
-        chunk_offsets=chunk_offsets,
-        state_v_first=state_v_first,
-        use_graph=use_graph,
-    )
+    if use_dual_wy:
+        # In Dual-WY, dv from bwd_dhu is already the final gradient w.r.t. v.
+        dq, dk, db, dg, dAkk = chunk_kda_bwd_dual_wy_dqkg(
+            q=q,
+            k=k,
+            v_new=v_new,
+            g=g,
+            beta=beta,
+            Akk=Akk,
+            wm_a=wm_a,
+            h=h,
+            do=do,
+            dh=dh,
+            dv=dv,
+            scale=scale,
+            cu_seqlens=cu_seqlens,
+            chunk_size=chunk_size,
+            chunk_indices=chunk_indices,
+            state_v_first=state_v_first,
+            use_graph=use_graph,
+        )
+    else:
+        dq, dk, dv, db, dg, dAkk = chunk_kda_bwd_wy_dqkg_fused(
+            q=q,
+            k=k,
+            v=v,
+            v_new=v_new,
+            g=g,
+            beta=beta,
+            A=Akk,
+            h=h,
+            do=do,
+            dh=dh,
+            dv=dv,
+            scale=scale,
+            cu_seqlens=cu_seqlens,
+            chunk_size=chunk_size,
+            chunk_indices=chunk_indices,
+            chunk_offsets=chunk_offsets,
+            state_v_first=state_v_first,
+            use_graph=use_graph,
+        )
 
     dq, dk, db, dg = chunk_kda_bwd_intra(
         q=q,
