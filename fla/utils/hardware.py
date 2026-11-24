@@ -22,6 +22,10 @@ from fla.utils.env import check_pytorch_version
 
 logger = logging.getLogger(__name__)
 
+_NPU_ARCH_SERIES = {
+    'ascend950': ('ascend950', 'ascend910_95'),
+}
+
 
 def _cpu_device_warning():
     warnings.warn(('Triton is not supported on current platform, roll back to CPU.'), stacklevel=2)
@@ -87,6 +91,15 @@ def get_npu_target_arch(device_index: int = 0) -> str:
     except Exception:
         logger.debug('Failed to get NPU target architecture.', exc_info=True)
         return ''
+
+
+def get_npu_arch_series(arch: str) -> str:
+    """Return the canonical NPU architecture series, or an empty string if unknown."""
+    arch = arch.lower()
+    for series, prefixes in _NPU_ARCH_SERIES.items():
+        if arch.startswith(prefixes):
+            return series
+    return ''
 
 
 def map_triton_backend_to_torch_device() -> str:

@@ -14,7 +14,6 @@ import torch
 import triton
 import triton.language as tl
 from einops import rearrange
-from triton.backends.ascend.utils import is_compile_on_910_95
 
 from fla.backends import TritonAscendBackend, register
 from fla.modules.causal_conv1d.ops import (
@@ -26,7 +25,7 @@ from fla.modules.causal_conv1d.ops import (
 )
 from fla.ops.utils import prepare_chunk_indices
 from fla.utils import get_multiprocessor_count, input_guard
-from fla.utils.hardware import get_npu_target_arch
+from fla.utils.hardware import get_npu_arch_series, get_npu_target_arch
 
 # triton-ascend exposes extract_slice/insert_slice via cann.extension on some versions.
 try:
@@ -46,13 +45,14 @@ class _Conv1dTileConfig(NamedTuple):
 
 
 _DEFAULT_TILE_CONFIG = _Conv1dTileConfig()
-_ASCEND_950_TILE_CONFIG = _Conv1dTileConfig(fp32_fwd_bd=128, dx_tile_budget=8192)
+_TILE_CONFIG_BY_SERIES = {
+    'ascend950': _Conv1dTileConfig(fp32_fwd_bd=128, dx_tile_budget=8192),
+}
 
 
 def _get_conv1d_tile_config(device_index: int) -> _Conv1dTileConfig:
-    if is_compile_on_910_95(get_npu_target_arch(device_index)):
-        return _ASCEND_950_TILE_CONFIG
-    return _DEFAULT_TILE_CONFIG
+    series = get_npu_arch_series(get_npu_target_arch(device_index))
+    return _TILE_CONFIG_BY_SERIES.get(series, _DEFAULT_TILE_CONFIG)
 
 
 def _select_coregrid_bd(D: int, preferred: int) -> int | None:
