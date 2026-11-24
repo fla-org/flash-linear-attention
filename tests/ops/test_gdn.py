@@ -40,6 +40,198 @@ def _unwrap_autotuner(fn):
     return fn
 
 
+@pytest.fixture
+def gdn_ascendc_calls(monkeypatch):
+    if not IS_NPU or 'Ascend950' not in torch.npu.get_device_name():
+        pytest.skip('GDN AscendC requires Ascend950')
+    if os.environ.get('FLA_DISABLE_BACKEND_DISPATCH') == '1':
+        pytest.skip('requires backend dispatch')
+    pytest.importorskip('fla_npu')
+    from fla_npu.ops import ascendc
+
+    monkeypatch.setenv('FLA_GDN_ASCENDC', '1')
+    monkeypatch.setenv('FLA_ASCENDC', '0')
+    calls = []
+
+    def record(name, implementation):
+        def tracked(*args, **kwargs):
+            calls.append(name)
+            return implementation(*args, **kwargs)
+        return tracked
+
+    for name in ('chunk_gated_delta_rule_fwd', 'chunk_gated_delta_rule_bwd', 'recurrent_gated_delta_rule'):
+        monkeypatch.setattr(ascendc, name, record(name, getattr(ascendc, name)))
+    return calls
+
+
+@pytest.mark.parametrize('offsets', [None, (0, 11, 67)], ids=['dense', 'packed'])
+def test_gdn_ascendc_training(gdn_ascendc_calls, offsets):
+    torch.manual_seed(42)
+    batch = 2 if offsets is None else 1
+    q = torch.randn(batch, 67, 2, 128, dtype=torch.bfloat16)
+    k = torch.randn_like(q)
+    v = torch.randn(batch, 67, 4, 128, dtype=torch.bfloat16)
+    g = torch.randn(batch, 67, 4, dtype=torch.bfloat16)
+    beta = torch.randn_like(g)
+    a_log = torch.rand(4)
+    dt_bias = torch.rand(4)
+    do = torch.rand_like(v)
+    inputs = (q, k, v, g, beta, a_log, dt_bias)
+    cu = torch.tensor(offsets, dtype=torch.long) if offsets else None
+    grad_indices = (0, 1, 2, 4)
+    npu = [x.to(device).requires_grad_(i in grad_indices) for i, x in enumerate(inputs)]
+    out, state = chunk_gated_delta_rule(
+        *npu[:5], A_log=npu[5], dt_bias=npu[6], use_gate_in_kernel=True,
+        use_beta_sigmoid_in_kernel=True, use_qk_l2norm_in_kernel=True,
+        cu_seqlens=cu.to(device) if cu is not None else None, cu_seqlens_cpu=cu,
+    )
+    out.backward(do.to(device))
+    assert state is None
+    assert out.dtype == q.dtype
+    assert gdn_ascendc_calls == ['chunk_gated_delta_rule_fwd', 'chunk_gated_delta_rule_bwd']
+
+    ref = [x.float().requires_grad_(i in grad_indices) for i, x in enumerate(inputs)]
+    q, k, v, g, beta, a_log, dt_bias = ref
+    q, k = ((x * (x.square().sum(-1, keepdim=True) + 1e-6).rsqrt()).bfloat16().float() for x in (q, k))
+    q, k = (x.repeat_interleave(2, dim=2) for x in (q, k))
+    g = naive_gdn_gate(g, a_log, dt_bias)
+    beta = beta.sigmoid()
+    bounds = offsets or (0, v.shape[1])
+    expected = torch.cat([
+        naive_recurrent_gated_delta_rule(q[:, a:b], k[:, a:b], v[:, a:b], beta[:, a:b], g[:, a:b])[0]
+        for a, b in zip(bounds, bounds[1:])
+    ], dim=1)
+    expected.backward(do.float())
+    assert_close('o', expected, out.float().cpu(), 0.005)
+    for name, i, tolerance in zip(
+        ('dq', 'dk', 'dv', 'dbeta'), grad_indices, (0.008, 0.008, 0.008, 0.02),
+    ):
+        assert_close(name, ref[i].grad, npu[i].grad.float().cpu(), tolerance)
+
+
+@pytest.mark.parametrize(
+    ('packed', 'state_v_first', 'decode_tokens'), [(False, False, 1), (True, True, 8)],
+    ids=['dense-k-first', 'packed-v-first'],
+)
+@torch.no_grad()
+def test_gdn_ascendc_prefill_and_decode(gdn_ascendc_calls, packed, state_v_first, decode_tokens):
+    torch.manual_seed(42)
+    prefill_tokens = 67
+    tokens = prefill_tokens + decode_tokens
+    q = torch.randn(2, tokens, 2, 128, dtype=torch.bfloat16)
+    k = torch.randn_like(q)
+    v = torch.randn_like(q)
+    g = torch.randn(2, tokens, 2, dtype=torch.bfloat16)
+    beta = torch.randn_like(g)
+    a_log = torch.rand(2)
+    dt_bias = torch.rand(2)
+    h0 = torch.randn(2, 2, 128, 128) * 0.01
+    initial_state = (h0.transpose(-1, -2) if state_v_first else h0).to(device)
+    saved = initial_state.clone()
+
+    options = dict(
+        output_final_state=True, state_v_first=state_v_first, use_qk_l2norm_in_kernel=True,
+        use_beta_sigmoid_in_kernel=True, use_gate_in_kernel=True,
+        A_log=a_log.to(device), dt_bias=dt_bias.to(device),
+    )
+    inputs = [x[:, :prefill_tokens].to(device) for x in (q, k, v, g, beta)]
+    offsets = None
+    if packed:
+        inputs = [x.flatten(0, 1).unsqueeze(0) for x in inputs]
+        offsets = torch.tensor([0, prefill_tokens, 2 * prefill_tokens], dtype=torch.long, device=device)
+    prefill, state = chunk_gated_delta_rule(
+        *inputs, initial_state=initial_state, cu_seqlens=offsets, **options,
+    )
+    assert torch.equal(saved, initial_state)
+    saved = state.clone()
+    q_decode, k_decode, v_decode, g_decode, beta_decode = (x[:, prefill_tokens:].to(device) for x in (q, k, v, g, beta))
+    decode, final_state = fused_recurrent_gated_delta_rule(
+        q_decode, k_decode, v_decode, g=g_decode, beta=beta_decode, initial_state=state, **options,
+    )
+    assert torch.equal(saved, state)
+    assert final_state.dtype == torch.float32
+    assert gdn_ascendc_calls == ['chunk_gated_delta_rule_fwd', 'recurrent_gated_delta_rule']
+    q, k = ((x.float() * (x.float().square().sum(-1, keepdim=True) + 1e-6).rsqrt()) for x in (q, k))
+    expected, expected_state = naive_recurrent_gated_delta_rule(
+        q, k, v, beta.float().sigmoid(), naive_gdn_gate(g, a_log, dt_bias),
+        initial_state=h0, output_final_state=True,
+    )
+    assert_close('prefill o', expected[:, :prefill_tokens], prefill.reshape(2, prefill_tokens, 2, 128).float().cpu(), 0.005)
+    assert_close('decode o', expected[:, prefill_tokens:], decode.float().cpu(), 0.005)
+    if state_v_first:
+        expected_state = expected_state.transpose(-1, -2)
+    assert_close('final state', expected_state, final_state.cpu(), 0.005)
+
+
+@pytest.mark.parametrize('with_initial_state', [False, True])
+@torch.no_grad()
+def test_gdn_ascendc_empty_sequence_state(gdn_ascendc_calls, with_initial_state):
+    q = torch.randn(1, 5, 2, 128, dtype=torch.bfloat16, device=device)
+    g = torch.full_like(q[..., 0], -0.6)
+    beta = torch.full_like(g, 0.4)
+    h0 = torch.randn(3, 2, 128, 128, dtype=torch.float32, device=device)
+    cu = torch.tensor([0, 0, 5, 5], dtype=torch.long, device=device)
+    out, state = chunk_gated_delta_rule(
+        q, q, q, g, beta, cu_seqlens=cu, use_qk_l2norm_in_kernel=True,
+        initial_state=h0 if with_initial_state else None, output_final_state=True,
+    )
+    expected = h0[[0, 2]] if with_initial_state else torch.zeros_like(h0[[0, 2]])
+    assert torch.equal(state[[0, 2]], expected)
+    assert torch.isfinite(out).all()
+    assert gdn_ascendc_calls == ['chunk_gated_delta_rule_fwd']
+
+
+def test_gdn_ascendc_rejects_long_decode(gdn_ascendc_calls):
+    from fla.ops.gated_delta_rule.backends.ascendc import AscendCGDNBackend
+
+    q = torch.zeros(1, 9, 2, 128, dtype=torch.bfloat16, device=device)
+    g = torch.zeros_like(q[..., 0])
+    accepted, _ = AscendCGDNBackend().fused_recurrent_gated_delta_rule_fwd_verifier(
+        q, q, q, g=g, beta=g, scale=1.0,
+    )
+    assert not accepted
+
+
+@pytest.mark.parametrize('inplace', [False, True])
+def test_gdn_ascendc_recurrent_inplace_dispatch(gdn_ascendc_calls, inplace):
+    q = torch.zeros(1, 1, 2, 128, dtype=torch.bfloat16, device=device)
+    q[..., 0] = 1
+    v = torch.ones_like(q)
+    g = torch.zeros_like(q[..., 0])
+    h0 = torch.zeros(1, 2, 128, 128, device=device)
+    out, state = fused_recurrent_gated_delta_rule_fwd(
+        q, q, v, g, None, None, torch.ones_like(g), None, None, 1.0, h0, True, inplace,
+    )
+    assert torch.equal(out, v)
+    assert (state.data_ptr() == h0.data_ptr()) == inplace
+    assert torch.equal(state[..., 0, :], v[:, 0])
+    assert gdn_ascendc_calls == ([] if inplace else ['recurrent_gated_delta_rule'])
+
+
+@pytest.mark.parametrize('case', ['chunk-size', 'disabled', 'unavailable', 'gate-grad', 'state-grad'])
+def test_gdn_ascendc_fallback(gdn_ascendc_calls, monkeypatch, case):
+    if case == 'disabled':
+        monkeypatch.setenv('FLA_GDN_ASCENDC', '0')
+    if case == 'unavailable':
+        from fla.ops.gated_delta_rule.backends.ascendc import AscendCGDNBackend
+
+        monkeypatch.setattr(AscendCGDNBackend, 'is_available', lambda self: False)
+    # Replace the original Triton call below its dispatcher to check the public route.
+    from fla.ops.gated_delta_rule.chunk import ChunkGatedDeltaRuleFunction
+
+    fallback = object()
+    monkeypatch.setattr(ChunkGatedDeltaRuleFunction, 'apply', lambda *args: fallback)
+    q = torch.zeros(1, 7, 2, 128, device=device, dtype=torch.bfloat16)
+    g = torch.zeros_like(q[..., 0], dtype=torch.float32).requires_grad_(case == 'gate-grad')
+    beta = torch.ones_like(g).requires_grad_(case == 'state-grad')
+    result = chunk_gated_delta_rule(
+        q, q, q, g, beta, chunk_size=16 if case == 'chunk-size' else 64,
+        output_final_state=case == 'state-grad',
+    )
+    assert result is fallback
+    assert not gdn_ascendc_calls
+
+
 def test_chunk_gated_delta_rule_fwd_h_blackwell_triton_guard():
     if not IS_NVIDIA_BLACKWELL:
         pytest.skip(reason='Blackwell guard is only active on Blackwell GPUs')
