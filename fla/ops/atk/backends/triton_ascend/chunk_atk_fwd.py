@@ -16,6 +16,8 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.backends import TritonAscendBackend, register
+from fla.ops.atk.chunk_atk_fwd import chunk_atk_fwd, recompute_atk_fwd
 from fla.ops.utils import prepare_chunk_indices
 from fla.utils.ascend_ub_manager import ASCEND_LAUNCH_BLOCK_BUDGET
 
@@ -169,8 +171,10 @@ def _forward_chunk_summary_npu(
         k_val = tl.load(k_ptr, mask=mask_T[:, None] * mask_D[None, :], other=0.0).to(tl.float32)
 
         k_sq = k_val * k_val
-        U = beta_val[:, None] * k_sq
-        a_val = tl.sum(decays[:, None] * U, 0)
+        weights = beta_val * decays
+        weights_tile = tl.broadcast_to(weights[:, None], (CHUNK_LEN, 16))
+        a_acc = tl.dot(tl.trans(k_sq), weights_tile, allow_tf32=False)
+        a_val = tl.sum(a_acc, axis=1) * (1.0 / 16.0)
 
         a_ptr = a + b * a_stride_b + h * a_stride_h + chunk_id * a_stride_c + D_range * a_stride_d
         tl.store(a_ptr, a_val, mask=mask_D)
@@ -318,6 +322,9 @@ def _atk_fwd_stages_npu(
     B, T, H, D = k.shape
     CHUNK_LEN = _NPU_CHUNK_LEN
     BK = D if os.environ.get('ATK_NO_KTILE') else 32
+    # Output has no CHUNK_LEN x BK history buffer, so it can use a wider tile.
+    BK_out = D if os.environ.get('ATK_NO_KTILE') else min(256, triton.next_power_of_2(D))
+    summary_bk = max(16, min(256, triton.next_power_of_2(D)))
     is_varlen = cu_seqlens is not None
 
     if is_varlen:
@@ -362,7 +369,7 @@ def _atk_fwd_stages_npu(
         log_g.stride(0), log_g.stride(1), log_g.stride(2),
         a.stride(0), a.stride(1), a.stride(2), a.stride(3),
         sa.stride(0), sa.stride(1), sa.stride(2),
-        BK,
+        summary_bk,
     )
     out_args = (
         k, beta, log_g, ac, initial_A_state, k_precond,
@@ -374,7 +381,7 @@ def _atk_fwd_stages_npu(
         log_g.stride(0), log_g.stride(1), log_g.stride(2),
         ac.stride(0), ac.stride(1), ac.stride(2), ac.stride(3),
         k_precond.stride(0), k_precond.stride(1), k_precond.stride(2), k_precond.stride(3),
-        BK,
+        BK_out,
     )
 
     if is_varlen:
@@ -404,6 +411,8 @@ def _atk_fwd_stages_npu(
     else:
         _launch_chunk_grid(_forward_chunk_out_npu, B, H, math.ceil(T / CHUNK_LEN), out_args)
 
+    # The final state stays in the scan's FP32, as the fused recurrent kernel
+    # keeps it, so a cached prefill hands decode the state it accumulated.
     at = None
     if output_final_state:
         if is_varlen:
@@ -412,13 +421,24 @@ def _atk_fwd_stages_npu(
                 ac[i, last_chunk_indices[i]] if last_chunk_indices[i] >= 0 else
                 (initial_A_state[i] if initial_A_state is not None else k.new_zeros(H, D))
                 for i in range(N)
-            ], dim=0).to(k.dtype)
+            ], dim=0).float()
         else:
-            at = ac[:, -1, :, :].contiguous().to(k.dtype)
+            at = ac[:, -1, :, :].contiguous()
 
     return k_precond.to(k.dtype), ac, a, sa, at
 
 
+def atk_verifier(*args, **kwargs) -> tuple[bool, str | None]:
+    from fla.utils import IS_NPU
+    k = args[0] if args else kwargs.get('k')
+    if not IS_NPU:
+        return False, "not running on NPU"
+    if k is None or getattr(k, 'device', None) is None or k.device.type != "npu":
+        return False, "input device is not NPU"
+    return True, None
+
+
+@register(chunk_atk_fwd, backend=TritonAscendBackend, verifier=atk_verifier)
 def chunk_atk_fwd_npu(
     k: torch.Tensor,
     beta: torch.Tensor,
@@ -439,6 +459,7 @@ def chunk_atk_fwd_npu(
     return k_precond, at
 
 
+@register(recompute_atk_fwd, backend=TritonAscendBackend, verifier=atk_verifier)
 def recompute_atk_fwd_npu(
     k: torch.Tensor,
     beta: torch.Tensor,

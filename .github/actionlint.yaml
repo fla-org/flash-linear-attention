@@ -3,3 +3,4 @@ self-hosted-runner:
     - nvidia-h100-1
     - linux-aarch64-a2-4
     - linux-aarch64-a2-8
+    - linux-aarch64-a5-8

@@ -14,7 +14,7 @@ from transformers.models.llama.modeling_llama import LlamaRMSNorm
 
 from fla.modules import GroupNorm, GroupNormLinear, LayerNorm, LayerNormLinear, RMSNorm, RMSNormLinear
 from fla.modules.fused_bitlinear import activation_quant, layer_norm_linear_quant, weight_quant
-from fla.modules.layernorm import GroupNormRef
+from fla.modules.layernorm import GroupNormRef, rms_norm_ref
 from fla.utils import assert_close, device
 
 
@@ -90,28 +90,69 @@ def test_groupnorm(B: int, T: int, D: int, G: int, is_rms_norm: bool):
     assert_close('db', ref_db, tri_db, 1e-3)
 
 
-@pytest.mark.parametrize("B", [2])
-@pytest.mark.parametrize("H", [2])
-@pytest.mark.parametrize("T", [512])
-@pytest.mark.parametrize("D", [50, 64, 128, 256])
-def test_rmsnorm(B: int, H: int, T: int, D: int):
-    x = torch.randn(B, H, T, D).to(device).requires_grad_(True)
-    ref = LlamaRMSNorm(D, eps=0).to(device)
-    tri = RMSNorm(D, eps=0).to(device)
-    nn.init.normal_(ref.weight)
-    tri.weight.data.copy_(ref.weight.data)
+@pytest.mark.parametrize(
+    ('T', 'D', 'zero_centered_weight', 'prenorm', 'dtype'),
+    [
+        pytest.param(*test, id="T{}-D{}-zero_centered_weight{}-prenorm{}-{}".format(*test))
+        for test in [
+            (512, 50, False, False, torch.float32),
+            (512, 64, False, False, torch.float32),
+            (512, 128, False, False, torch.float32),
+            (512, 256, False, False, torch.float32),
+            (300, 50, True, True, torch.float32),
+            (512, 128, True, False, torch.bfloat16),
+            (7, 1024, True, True, torch.bfloat16),
+        ]
+    ],
+)
+def test_rmsnorm(T: int, D: int, zero_centered_weight: bool, prenorm: bool, dtype: torch.dtype):
+    torch.manual_seed(42)
+    eps = 1e-6 if zero_centered_weight else 0.
+    # cover the public constructor's positional device and dtype arguments.
+    tri = RMSNorm(D, True, False, eps, device, dtype, zero_centered_weight=zero_centered_weight)
+    torch.testing.assert_close(tri.weight, torch.full_like(tri.weight, 0. if zero_centered_weight else 1.))
+    nn.init.normal_(tri.weight, std=0.1 if zero_centered_weight else 1.)
+    ref_weight = tri.weight.detach().clone().requires_grad_(True)
+    x = torch.randn(2, 2, T, D, device=device, dtype=dtype).requires_grad_(True)
+    residual = torch.randn_like(x).requires_grad_(True) if prenorm else None
+    dy = torch.randn_like(x)
+    dresidual = torch.randn_like(x) if prenorm else None
 
-    ref_y = ref(x)
-    tri_y = tri(x)
-    ref_dx = torch.autograd.grad(ref(x).sum(), x)[0]
-    tri_dx = torch.autograd.grad(tri(x).sum(), x)[0]
+    ref_y, ref_residual = rms_norm_ref(
+        x=x,
+        weight=1. + ref_weight.float() if zero_centered_weight else ref_weight,
+        bias=None,
+        residual=residual,
+        eps=eps,
+        prenorm=True,
+        upcast=True,
+    )
+    ref_residual = ref_residual.to(dtype)
+    if prenorm:
+        torch.autograd.backward((ref_y, ref_residual), (dy, dresidual))
+    else:
+        ref_y.backward(dy)
+    ref_dx, ref_dw = x.grad, ref_weight.grad
+    ref_dresidual = residual.grad if prenorm else None
+    x.grad = None
+    if prenorm:
+        residual.grad = None
+        tri_y, tri_residual = tri(x=x, residual=residual, prenorm=True)
+        torch.autograd.backward((tri_y, tri_residual), (dy, dresidual))
+    else:
+        tri_y = tri(x)
+        tri_y.backward(dy)
+    tri_dx, tri_dw = x.grad, tri.weight.grad
+    tri_dresidual = residual.grad if prenorm else None
 
-    ref_dw = torch.autograd.grad(ref(x).sum(), ref.weight)[0]
-    tri_dw = torch.autograd.grad(tri(x).sum(), tri.weight)[0]
-
-    assert_close(' y', ref_y, tri_y, 1e-3)
-    assert_close('dx', ref_dx, tri_dx, 1e-3)
-    assert_close('dw', ref_dw, tri_dw, 1e-3)
+    tol = 1e-3 if dtype == torch.float32 else 5e-3
+    assert_close(' y', ref_y, tri_y, tol)
+    assert_close('dx', ref_dx, tri_dx, tol)
+    assert_close('dw', ref_dw, tri_dw, tol)
+    if prenorm:
+        assert_close('residual', ref_residual, tri_residual, tol)
+        assert_close('dresidual', ref_dresidual, tri_dresidual, tol)
+    assert tri_dw.dtype == dtype
 
 
 @pytest.mark.parametrize("N", [1, 16, 128])

@@ -214,7 +214,7 @@ def ascend_compile_kwargs(*, blacklist_auto_blockify: bool = False, workspace_mu
     """Return NPU Triton launch kwargs that disable auto-multi-buffer.
 
     Empty on non-NPU devices. When ``blacklist_auto_blockify`` is set, also
-    disable AutoBlockify if the installed compiler exposes that option.
+    disable AutoBlockify if the installed compiler accepts that override.
     """
     if not IS_NPU:
         return {}
@@ -227,7 +227,8 @@ def ascend_compile_kwargs(*, blacklist_auto_blockify: bool = False, workspace_mu
     # BiShengIR 2.0 pipelines CV workspaces 4 slots deep by default, overflowing the 192KB UB.
     if 'set_workspace_multibuffer' in fields:
         kwargs['set_workspace_multibuffer'] = workspace_multibuffer
-    if blacklist_auto_blockify and 'has_auto_blockify_blacklist_op' in fields:
+    blacklist_field = fields.get('has_auto_blockify_blacklist_op')
+    if blacklist_auto_blockify and blacklist_field is not None and blacklist_field.init:
         kwargs['has_auto_blockify_blacklist_op'] = True
     return kwargs
 

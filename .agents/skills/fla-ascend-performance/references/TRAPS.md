@@ -4,23 +4,33 @@ Read the relevant section before changing DMA, launch indexing, or reused matrix
 
 ## DMA paths and optional pointers
 
-A runtime branch between block-pointer DMA and masked loads can keep both paths live in UB. Larger tiles may then overflow even when measured UB bandwidth is low. Where the workload permits, split bulk and tail launches with a constexpr mode so each compilation removes the unused path. Include convolution halos when deciding whether a bulk load fits inside the packed allocation.
+A runtime branch between an in-bounds bulk load and a masked tail load can keep both paths live in UB. Larger tiles may then overflow even when measured UB bandwidth is low. Where the workload permits, split bulk and tail launches with a constexpr mode so each compilation removes the unused path. Include convolution halos when deciding whether a bulk load fits inside the packed allocation.
 
 An optional pointer needs a compile-time guard before any runtime condition. `if USE_INITIAL_STATE or runtime_condition:` can still compile pointer arithmetic in the other branch when the pointer is `None`; nest the constexpr condition separately.
 
 ## Address arithmetic
 
-Cast indices to `tl.int64` before multiplying by strides or dimensions. Casting the product cannot repair overflow. On Ascend, specialized arguments and folded program IDs may be constexpr values without a `.to()` method; `tl.cast` works for both runtime and constexpr integers.
+Cast **scalar** indices to `tl.int64` before multiplying by strides or dimensions. Casting the product cannot repair overflow. On Ascend, specialized arguments and folded program IDs may be constexpr values without a `.to()` method; `tl.cast` works for both runtime and constexpr integers.
 
 ```python
 token_offset = tl.cast(i_t, tl.int64) * BT
 batch_offset = tl.cast(i_b, tl.int64) * T
 bos = tl.load(cu_seqlens + i_n).to(tl.int64)
+rows = tl.cast(i_t, tl.int64) * BT + tl.arange(0, BT)
 ```
 
 Load packed sequence offsets as int64 even when the input `cu_seqlens` uses int32. A small token index can overflow after multiplication by head count and feature size.
 
-`make_block_ptr` metadata has a separate constraint: its `offsets` and `block_shape` must remain int32. Keep large flattened base-address calculations in int64, then supply valid local block offsets. The Ascend backend is exempt from the mainline ban on block pointers.
+Do **not** cast every subscript to int64. A few scalar promotions per program are cheap; widening every `tl.arange` lane to int64 adds vector 64-bit work on hot load/store paths and can hurt performance without improving correctness.
+
+| Role | Policy |
+| ---- | ------ |
+| Program IDs, batch/sequence indices, loaded `bos`/`eos` | Promote to int64 **before** any multiply by `T`, strides, or head×feature sizes. |
+| Global memory block offsets | Form as `int64_base + tl.arange(0, BLOCK)`; promote the base (or the multiply), not the arange. |
+| UB tile coordinates (K/V slabs, small fixed tiles) | Keep int32 when the range is bounded by the tile and no large stride product is involved. |
+| Local sequence length inside a tile | Narrow to int32 when the value is provably in range; see [packed variable lengths](cases.md#chunk_bwdpy--packed-variable-lengths). |
+
+`tl.make_block_ptr` and `tl.advance` are deprecated on triton-ascend. Follow the [Triton kernel rule](../../../../CONTRIBUTING.md#triton-kernels): address tiles with `offset + tl.arange` and plain `tl.load` / `tl.store`. Global pointer offsets must not rely on int32 overflow in the **base** arithmetic; block lanes may stay narrow until they combine with that base.
 
 ## Grid and task loops
 

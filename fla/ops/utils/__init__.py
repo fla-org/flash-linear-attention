@@ -32,6 +32,7 @@ from fla.ops.utils.logsumexp import logsumexp_fwd
 from fla.ops.utils.matmul import addmm, matmul
 from fla.ops.utils.pack import pack_sequence, unpack_sequence
 from fla.ops.utils.pooling import mean_pooling
+from fla.ops.utils.rounding import fp32_to_bf16_sr
 from fla.ops.utils.sinkhorn import sinkhorn
 from fla.ops.utils.softmax import softmax_bwd, softmax_fwd
 from fla.ops.utils.softplus import softplus
@@ -45,6 +46,7 @@ __all__ = [
     "chunk_local_cumsum",
     "chunk_local_cumsum_scalar",
     "chunk_local_cumsum_vector",
+    "fp32_to_bf16_sr",
     "get_max_num_splits",
     "logsumexp_fwd",
     "matmul",

@@ -174,7 +174,7 @@ def chunk_fwd_kernel_h(
         for num_warps in [1, 2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
-    key=['BT', 'USE_G', 'USE_GK', 'USE_GV', 'STATE_V_FIRST', 'K', 'V'],
+    key=['HQ', 'H', 'K', 'V', 'BT', 'USE_G', 'USE_GK', 'USE_GV', 'IS_VARLEN', 'STATE_V_FIRST'],
     **autotune_cache_kwargs,
 )
 # keep scale=1 dynamic to avoid a Hopper masked-load shared-memory miscompile.
@@ -307,7 +307,7 @@ def chunk_bwd_kernel_dh(
             tl.store(p_dh0, b_dh.to(p_dh0.dtype.element_ty), mask=(o_k[:, None] < K) & (o_v[None, :] < V))
 
 
-@dispatch('common')
+@dispatch
 def chunk_fwd_h(
     k: torch.Tensor,
     v: torch.Tensor,
@@ -366,7 +366,7 @@ def chunk_fwd_h(
     return h, ht
 
 
-@dispatch('common')
+@dispatch
 def chunk_bwd_dh(
     q: torch.Tensor,
     k: torch.Tensor,
