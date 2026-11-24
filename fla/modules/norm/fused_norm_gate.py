@@ -29,7 +29,7 @@ from fla.utils import autotune_cache_kwargs, get_multiprocessor_count, input_gua
 )
 @triton.autotune(
     configs=[triton.Config({"BT": BT}, num_warps=num_warps) for BT in [16, 32, 64] for num_warps in [4, 8, 16]],
-    key=["D", "NB", "IS_RMS_NORM", "STORE_RESIDUAL_OUT", "HAS_RESIDUAL", "HAS_WEIGHT"],
+    key=["D", "IS_RMS_NORM", "STORE_RESIDUAL_OUT", "HAS_RESIDUAL", "HAS_WEIGHT"],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -48,7 +48,6 @@ def layer_norm_gated_fwd_kernel(
     D: tl.constexpr,
     BT: tl.constexpr,
     BD: tl.constexpr,
-    NB: tl.constexpr,
     ACTIVATION: tl.constexpr,
     IS_RMS_NORM: tl.constexpr,
     STORE_RESIDUAL_OUT: tl.constexpr,
@@ -196,8 +195,8 @@ def layer_norm_gated_fwd_kernel_row(
     }
 )
 @triton.autotune(
-    configs=[triton.Config({"BT": BT}, num_warps=num_warps) for BT in [16, 32, 64] for num_warps in [4, 8, 16]],
-    key=["D", "NB", "IS_RMS_NORM", "HAS_DRESIDUAL", "HAS_WEIGHT"],
+    configs=[triton.Config({"BT": BT}, num_warps=num_warps) for BT in [16, 32, 64] for num_warps in [8, 16]],
+    key=["D", "IS_RMS_NORM", "HAS_DRESIDUAL", "HAS_WEIGHT"],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -221,7 +220,6 @@ def layer_norm_gated_bwd_kernel(
     D: tl.constexpr,
     BT: tl.constexpr,
     BD: tl.constexpr,
-    NB: tl.constexpr,
     ACTIVATION: tl.constexpr,
     IS_RMS_NORM: tl.constexpr,
     STORE_DRESIDUAL: tl.constexpr,
@@ -480,9 +478,6 @@ def layer_norm_gated_fwd(
     if D > BD:
         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
     if D <= 512:
-        # bucket token counts to limit autotuning across sequence lengths.
-        NB = triton.cdiv(T, 2048 * 32)
-
         def grid(meta):
             return (triton.cdiv(T, meta["BT"]),)
 
@@ -500,7 +495,6 @@ def layer_norm_gated_fwd(
             T=T,
             D=D,
             BD=BD,
-            NB=NB,
             ACTIVATION=activation,
             IS_RMS_NORM=is_rms_norm,
         )
@@ -569,9 +563,6 @@ def layer_norm_gated_bwd(
     grid = (NS,)
 
     if D <= 512:
-        # bucket token counts to limit autotuning across sequence lengths.
-        NB = triton.cdiv(T, 2048 * 32)
-
         layer_norm_gated_bwd_kernel[grid](
             x=x,
             g=g,
@@ -591,7 +582,6 @@ def layer_norm_gated_bwd(
             BS=BS,
             D=D,
             BD=BD,
-            NB=NB,
             ACTIVATION=activation,
             IS_RMS_NORM=is_rms_norm,
             STORE_DRESIDUAL=dresidual_in is not None,

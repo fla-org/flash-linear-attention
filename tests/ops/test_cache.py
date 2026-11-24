@@ -11,6 +11,9 @@ import triton
 import triton.language as tl
 
 from fla.modules.causal_conv1d.ops import causal_conv1d_bwd_kernel, causal_conv1d_fwd_kernel
+from fla.modules.norm.fused_norm_gate import layer_norm_gated_bwd_kernel, layer_norm_gated_fwd_kernel
+from fla.modules.norm.l2norm import l2norm_bwd_kernel, l2norm_fwd_kernel
+from fla.modules.norm.layernorm import layer_norm_bwd_kernel, layer_norm_fwd_kernel
 from fla.modules.token_shift import token_shift_bwd_kernel_long, token_shift_fwd_kernel_long
 from fla.ops.gla.chunk import chunk_gla_bwd_kernel_inter
 from fla.ops.utils.cache import AutotuneKey, fla_cache_autotune
@@ -71,12 +74,29 @@ def test_fla_cache_autotune_handles_none_restore_value():
     causal_conv1d_bwd_kernel,
     token_shift_fwd_kernel_long,
     token_shift_bwd_kernel_long,
-], ids=["causal_conv1d_fwd", "causal_conv1d_bwd", "token_shift_fwd_long", "token_shift_bwd_long"])
+    layer_norm_gated_fwd_kernel,
+    layer_norm_gated_bwd_kernel,
+    layer_norm_fwd_kernel,
+    layer_norm_bwd_kernel,
+    l2norm_fwd_kernel,
+    l2norm_bwd_kernel,
+], ids=[
+    "causal_conv1d_fwd",
+    "causal_conv1d_bwd",
+    "token_shift_fwd_long",
+    "token_shift_bwd_long",
+    "layer_norm_gated_fwd",
+    "layer_norm_gated_bwd",
+    "layer_norm_fwd",
+    "layer_norm_bwd",
+    "l2norm_fwd",
+    "l2norm_bwd",
+])
 def test_kernels_do_not_take_unused_nb(kernel):
-    """NB (a 1024-token bucket of the input size) is never read inside these kernel bodies, so none of them may take it:
+    """NB (a token-count bucket of the input size) is never read inside these kernel bodies, so none of them may take it:
     in the autotune key it forces a re-tune on every new bucket, and as a constexpr it still compiles a new kernel for each one.
     """
-    autotuner = kernel.fn
+    autotuner = kernel.fn if isinstance(kernel, triton.runtime.Heuristics) else kernel
     assert 'NB' not in autotuner.keys
     assert 'NB' not in autotuner.arg_names
 
