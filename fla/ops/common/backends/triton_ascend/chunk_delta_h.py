@@ -422,7 +422,7 @@ def _select_fwd_h_tiles(
     ``STATE_V_FIRST`` keeps BK=64 because ``tl.trans(b_h)`` copies inflate live UB.
     At most four K-slabs (kernel unroll); BK starts at 64.
     ``masked`` is the blockdim64 path (unaligned T or varlen), whose compiler UB
-    exceeds the analytical peak; oneslab keeps the soft over-admit.
+    exceeds the analytical peak; only the aligned oneslab keeps the soft over-admit.
     """
     if state_v_first:
         return 64, _get_bv(K=K, V=V)
@@ -1064,7 +1064,9 @@ def _dense_chunk_store(base, row_base, lanes, cols, values, T, STRIDE: tl.conste
 def _dense_single_slab_tail(K, V, state_v_first, g, cu_seqlens):
     if cu_seqlens is not None or state_v_first or g is not None:
         return False
-    BK, BV = _select_fwd_h_tiles(K, V, False)
+    # the ragged launch keeps clamped/masked DMA buffers the aligned oneslab packs away,
+    # so its tiles are admitted against the masked UB budget (BK=256/BV=128 does not compile).
+    BK, BV = _select_fwd_h_tiles(K, V, False, masked=True)
     return K == BK and V % BV == 0
 
 
@@ -1282,7 +1284,7 @@ def chunk_gated_delta_rule_fwd_h_npu(
     # blockdim64 keeps T/K/V masks (and inline exp2 when T % BT != 0).
     masked = time_axis_needs_mask(T, BT, cu_seqlens, cu_seqlens_cpu)
     dense_tail = T % BT != 0 and _dense_single_slab_tail(K, V, state_v_first, g, cu_seqlens)
-    BK, BV = _select_fwd_h_tiles(K, V, state_v_first, masked=masked and not dense_tail)
+    BK, BV = _select_fwd_h_tiles(K, V, state_v_first, masked=masked)
     # Partial K/V tiles take the masked DMA path. That path keeps a second image
     # of the state plus the w/v operands: BK=128/BV=128 asks for 230528 B against
     # 192 KiB. Zero-pad onto the tile already chosen so the unmasked kernel runs
