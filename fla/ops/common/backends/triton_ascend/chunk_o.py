@@ -2004,15 +2004,16 @@ def chunk_bwd_kernel_dv_npu(
         b_g_last = b_gamma * min(BT, T - row_base)
 
     m_A = (rows[:, None] <= rows[None, :]) & (m_t[:, None] & m_t)
-    if USE_G or USE_G_GAMMA:
-        b_A = tl.where(m_A, b_A * exp2(b_g[None, :] - b_g[:, None]) * scale, 0).to(do.dtype.element_ty)
-        b_dv *= tl.where(m_t, exp2(-b_g + b_g_last), 0)[:, None]
-    else:
-        b_A = tl.where(m_A, b_A * scale, 0).to(do.dtype.element_ty)
     p_do = do + row_base * (HV * V) + rows[:, None] * (HV * V) + o_v[None, :]
     p_dv = dv + row_base * (HV * V) + rows[:, None] * (HV * V) + o_v[None, :]
     b_do = tl.load(p_do, mask=m_t[:, None] & (o_v < V)[None, :], other=0.0)
-    b_dv = tl.dot(b_A.to(b_do.dtype), b_do, b_dv)
+    if USE_G or USE_G_GAMMA:
+        b_A = tl.where(m_A, b_A * exp2(b_g[None, :] - b_g[:, None]) * scale, 0).to(do.dtype.element_ty)
+        # add after tl.dot: a decayed accumulator fed into fp32 tl.dot miscompiles in BiShengHIR
+        b_dv = tl.dot(b_A.to(b_do.dtype), b_do) + b_dv * tl.where(m_t, exp2(-b_g + b_g_last), 0)[:, None]
+    else:
+        b_A = tl.where(m_A, b_A * scale, 0).to(do.dtype.element_ty)
+        b_dv = tl.dot(b_A.to(b_do.dtype), b_do, b_dv)
     tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), mask=m_t[:, None] & (o_v < V)[None, :])
 
 
