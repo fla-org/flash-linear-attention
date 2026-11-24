@@ -58,3 +58,25 @@ def test_based(
         assert_close(f'{fn.__name__} dq', ref_dq, tri_dq, 0.005)
         assert_close(f'{fn.__name__} dk', ref_dk, tri_dk, 0.005)
         assert_close(f'{fn.__name__} dv', ref_dv, tri_dv, 0.005)
+
+
+@pytest.mark.smoke
+def test_based_fp16_normalization_overflow():
+    # Issue #1763: In float16, Based attention numerators and denominators can exceed
+    # 65504 for long sequences (e.g. 128 tokens with large activation magnitude),
+    # causing inf / inf = nan if cast to fp16 before normalization division.
+    shape = (1, 128, 1, 16)
+    for fn in (parallel_based, fused_chunk_based):
+        for dtype in (torch.float16, torch.bfloat16, torch.float32):
+            q = torch.full(shape, 3.0, dtype=dtype, device=device, requires_grad=True)
+            k = torch.full_like(q, 3.0, requires_grad=True)
+            v = torch.ones_like(q, requires_grad=True)
+            out = fn(q, k, v, use_norm=True)
+            assert out.dtype == dtype, f"{fn.__name__} {dtype} output dtype mismatch: got {out.dtype}"
+            assert torch.isfinite(out).all(), f"{fn.__name__} {dtype} produced non-finite output"
+            assert torch.allclose(out, torch.ones_like(out), atol=0.01, rtol=0.01), f"{fn.__name__} {dtype} output not ~1"
+            loss = out.sum()
+            loss.backward()
+            assert torch.isfinite(q.grad).all(), f"{fn.__name__} {dtype} q.grad non-finite"
+            assert torch.isfinite(k.grad).all(), f"{fn.__name__} {dtype} k.grad non-finite"
+            assert torch.isfinite(v.grad).all(), f"{fn.__name__} {dtype} v.grad non-finite"

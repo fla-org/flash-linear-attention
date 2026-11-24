@@ -373,7 +373,7 @@ class ParallelBasedFunction(torch.autograd.Function):
         )
         ctx.save_for_backward(q, k, v)
         ctx.scale = scale
-        return o.sum(0).to(q.dtype), z.sum(0).to(q.dtype)
+        return o.sum(0), z.sum(0)
 
     @staticmethod
     @input_guard

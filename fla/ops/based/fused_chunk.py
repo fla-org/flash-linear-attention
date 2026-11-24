@@ -339,7 +339,7 @@ class FusedChunkBasedFunction(torch.autograd.Function):
         z = z.sum(0)
         ctx.save_for_backward(q, k, v)
         ctx.scale = scale
-        return o.to(q.dtype), z.to(z.dtype)
+        return o, z
 
     @staticmethod
     @input_guard
