@@ -1,0 +1,226 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
+from __future__ import annotations
+
+import math
+from typing import TYPE_CHECKING
+
+import torch
+import torch.nn as nn
+from transformers.modeling_layers import GradientCheckpointingLayer
+from transformers.utils import logging
+
+from fla.layers.gka import GatedKalmaNet
+from fla.models.generation_utils import FLAUnsupportedCacheGenerationMixin
+from fla.models.gka.configuration_gka import GKAConfig
+from fla.models.modeling_utils import FLAForCausalLM, FLAModel, FLAPreTrainedModel, get_attention
+from fla.modules import GatedMLP as GKAMLP
+from fla.modules import RMSNorm
+from fla.ops.attnres import fused_attnres
+
+if TYPE_CHECKING:
+    from transformers.processing_utils import Unpack
+
+    from fla.models.cache_utils import Cache
+
+logger = logging.get_logger(__name__)
+
+
+class GKABlock(GradientCheckpointingLayer):
+
+    def __init__(self, config: GKAConfig, layer_idx: int):
+        super().__init__()
+
+        self.config = config
+        self.layer_idx = layer_idx
+
+        self.attn_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
+        self.attn = get_attention(config=config, layer_idx=layer_idx)
+        if self.attn is None:
+            self.attn = GatedKalmaNet(
+                hidden_size=config.hidden_size,
+                expand_v=config.expand_v,
+                head_dim=config.head_dim,
+                num_heads=config.num_heads,
+                num_v_heads=config.num_v_heads,
+                num_kv_heads=config.num_kv_heads,
+                mode=config.attn_mode,
+                use_beta_gate=config.use_beta_gate,
+                use_alpha_connection=config.use_alpha_connection,
+                use_v_conv=config.use_v_conv,
+                use_forgetting_gate=config.use_forgetting_gate,
+                use_forgetting_gate_kk=config.use_forgetting_gate_kk,
+                gla_rescale=config.gla_rescale,
+                ridge_ratio=config.ridge_ratio,
+                num_iter=config.num_iter,
+                use_gate=config.use_gate,
+                conv_size=config.conv_size,
+                layer_idx=layer_idx,
+                norm_eps=config.norm_eps,
+            )
+        self.mlp_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
+        self.mlp = GKAMLP(
+            hidden_size=config.hidden_size,
+            hidden_ratio=config.hidden_ratio,
+            intermediate_size=config.intermediate_size,
+            hidden_act=config.hidden_act,
+            fuse_swiglu=config.fuse_swiglu,
+        )
+
+        self.use_attnres = config.attnres_block_size is not None
+        if self.use_attnres:
+            self.attn_res_proj = nn.Linear(in_features=config.hidden_size, out_features=1, bias=False)
+            self.attn_res_norm = nn.RMSNorm(normalized_shape=config.hidden_size, eps=config.norm_eps)
+            self.mlp_res_proj = nn.Linear(in_features=config.hidden_size, out_features=1, bias=False)
+            self.mlp_res_norm = nn.RMSNorm(normalized_shape=config.hidden_size, eps=config.norm_eps)
+            block_size = config.attnres_block_size
+            self.attnres_is_attn_boundary = (2 * layer_idx) % block_size == 0
+            self.attnres_is_mlp_boundary = (2 * layer_idx + 1) % block_size == 0
+            self.attn_res_proj._is_attnres_proj = True
+            self.mlp_res_proj._is_attnres_proj = True
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+        past_key_values: Cache | list[torch.FloatTensor] | None = None,
+        use_cache: bool | None = False,
+        output_attentions: bool | None = False,
+        attnres_states: list[torch.Tensor] | None = None,
+        **kwargs: Unpack[dict],
+    ) -> tuple[torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None]:
+        if self.use_attnres:
+            prefix_sum = hidden_states
+            if attnres_states is None:
+                # L=1 single-source: attnres is trivially identity (p=1, mix=v[0]);
+                # apply the prenorm directly, matching the L>1 kernel path which
+                # folds it via `output_rms_weight`. Mirrors Megatron-LM's bypass
+                # at the first layer (where `block_residual` is empty).
+                hidden_states = self.attn_norm(prefix_sum)
+                attnres_states = [prefix_sum]
+                prefix_sum = None
+            else:
+                residuals = [*attnres_states, prefix_sum]
+                if self.attnres_is_attn_boundary:
+                    attnres_states = residuals
+                    prefix_sum = None
+                hidden_states = fused_attnres(
+                    query=self.attn_res_proj.weight,
+                    residuals=residuals,
+                    rms_weight=self.attn_res_norm.weight,
+                    output_rms_weight=self.attn_norm.weight,
+                    rms_eps=self.attn_res_norm.eps,
+                )
+        else:
+            residual = hidden_states
+            hidden_states = self.attn_norm(hidden_states)
+        hidden_states, attentions, past_key_values = self.attn(
+            hidden_states=hidden_states,
+            attention_mask=attention_mask,
+            past_key_values=past_key_values,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            **kwargs,
+        )
+
+        if self.use_attnres:
+            prefix_sum = hidden_states if prefix_sum is None else prefix_sum + hidden_states
+            residuals = [*attnres_states, prefix_sum]
+            if self.attnres_is_mlp_boundary:
+                attnres_states = residuals
+                prefix_sum = None
+            hidden_states = fused_attnres(
+                query=self.mlp_res_proj.weight,
+                residuals=residuals,
+                rms_weight=self.mlp_res_norm.weight,
+                output_rms_weight=self.mlp_norm.weight,
+                rms_eps=self.mlp_res_norm.eps,
+            )
+        elif self.config.fuse_norm:
+            hidden_states, residual = self.mlp_norm(hidden_states, residual, True)
+        else:
+            hidden_states = residual + hidden_states
+            residual = hidden_states
+            hidden_states = self.mlp_norm(hidden_states)
+        hidden_states = self.mlp(hidden_states, **kwargs)
+
+        if self.use_attnres:
+            hidden_states = hidden_states if prefix_sum is None else prefix_sum + hidden_states
+        else:
+            hidden_states = residual + hidden_states
+
+        outputs = (hidden_states, attentions, past_key_values, attnres_states)
+
+        return outputs
+
+
+class GKAPreTrainedModel(FLAPreTrainedModel):
+
+    config_class = GKAConfig
+    base_model_prefix = 'model'
+    supports_gradient_checkpointing = True
+    _no_split_modules = ['GKABlock']
+    _supports_cache_class = True
+
+    def _init_weights(self, module: nn.Module, prenorm_residual_strategy: str | None = None, num_residuals_per_layer: int = 2):
+        super()._init_weights(module, prenorm_residual_strategy, num_residuals_per_layer)
+        # A_log and dt_bias exist only with the forgetting gate
+        if (
+            isinstance(module, GatedKalmaNet)
+            and getattr(module, 'A_log', None) is not None
+            and next(module.parameters()).device.type != 'meta'
+        ):
+            with torch.no_grad():
+                if not getattr(module.A_log, '_is_hf_initialized', False):
+                    module.A_log.copy_(nn.init.uniform_(module.A_log, a=0, b=16).log())
+                module.A_log._no_weight_decay = True
+                if not getattr(module.dt_bias, '_is_hf_initialized', False):
+                    dt = torch.exp(
+                        nn.init.uniform_(module.dt_bias) * (math.log(0.1) - math.log(0.001)) + math.log(0.001),
+                    ).clamp(min=1e-4)
+                    # Inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
+                    inv_dt = dt + torch.log(-torch.expm1(-dt))
+                    module.dt_bias.copy_(inv_dt)
+                module.dt_bias._no_weight_decay = True
+
+
+class GKAModel(GKAPreTrainedModel, FLAModel):
+
+    def __init__(self, config: GKAConfig):
+        super().__init__(config)
+        self.padding_idx = config.pad_token_id
+        self.vocab_size = config.vocab_size
+
+        self.embeddings = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
+        self.layers = nn.ModuleList([GKABlock(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
+        self.norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
+
+        self.use_attnres = config.attnres_block_size is not None
+        if self.use_attnres:
+            self.res_proj = nn.Linear(in_features=config.hidden_size, out_features=1, bias=False)
+            self.res_norm = nn.RMSNorm(normalized_shape=config.hidden_size, eps=config.norm_eps)
+            self.res_proj._is_attnres_proj = True
+
+        self.gradient_checkpointing = False
+
+        self.post_init()
+
+
+class GKAForCausalLM(GKAPreTrainedModel, FLAForCausalLM, FLAUnsupportedCacheGenerationMixin):
+
+    _tied_weights_keys = {"lm_head.weight": "model.embeddings.weight"}
+
+    def __init__(self, config):
+        super().__init__(config)
+        self.model = GKAModel(config)
+        self.vocab_size = config.vocab_size
+        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        self.criterion = None
+
+        # Initialize weights and apply final processing
+        self.post_init()

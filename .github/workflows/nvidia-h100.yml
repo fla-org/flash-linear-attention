@@ -1,9 +1,7 @@
 name: nvidia-h100-ci
 
-# Full pipeline tier. Runs on maintainer PR pushes (maintainers cannot approve
-# their own PRs), on PR approval (external PRs), nightly on main, and manually.
-# Every push still gets the fast smoke tier from nvidia-h100-smoke.yml.
-# Once this pipeline has gone green for a PR, later approvals only need smoke.
+# Manual full pipeline tier. Focused tests use agent-h100-tests.yml;
+# automatic PR, review, and nightly triggers are intentionally disabled.
 
 concurrency:
   group: full-ci-${{ github.event.pull_request.number || github.ref }}
@@ -18,14 +16,6 @@ permissions:
   checks: read
 
 on:
-  pull_request:
-    branches: [ '*' ]
-    types: [opened, synchronize, reopened, closed]
-  pull_request_review:
-    types: [submitted]
-  schedule:
-    # Nightly full pipeline on main (03:00 +08:00).
-    - cron: '0 19 * * *'
   workflow_dispatch:
 
 jobs:
@@ -63,7 +53,7 @@ jobs:
             // Safe set: triton-ascend backend files (except __init__.py, which
             // GPU imports unconditionally), Ascend workflow definitions, and
             // fla-ascend-performance agent skill (NPU profiling/optimization docs).
-            const safePattern = /^fla\/(.+\/)?backends\/triton_ascend\/(?!.*__init__\.py$)|^\.github\/workflows\/ascend-|^\.agents\/skills\/fla-ascend-performance\//;
+            const safePattern = /^fla\/(.+\/)?backends\/triton_ascend(\/(?!.*__init__\.py$)|\.py$)|^\.github\/workflows\/ascend-|^\.agents\/skills\/fla-ascend-performance\//;
             const unsafe = files.filter(f => !safePattern.test(f.filename)).map(f => f.filename);
             if (unsafe.length > 0) {
               core.info('GPU-affecting files changed: ' + unsafe.join(', '));
@@ -161,7 +151,7 @@ jobs:
     if: >
       needs.changes.outputs.npu_only != 'true' &&
       needs.gate.outputs.run_full == 'true' &&
-      (github.event_name == 'pull_request' || github.event_name == 'pull_request_review')
+      (github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     timeout-minutes: 90
     outputs:
@@ -173,8 +163,8 @@ jobs:
         with:
           script: |
             const { owner, repo } = context.repo;
-            const ref = context.payload.pull_request.head.sha;
             const eventName = context.eventName;
+            const ref = (eventName === 'pull_request' || eventName === 'pull_request_review') ? context.payload.pull_request.head.sha : context.sha;
             let username, association;
             if (eventName === 'pull_request') {
               const pr = context.payload.pull_request;
@@ -183,6 +173,9 @@ jobs:
             } else if (eventName === 'pull_request_review') {
               username = context.payload.review.user.login;
               association = context.payload.review.author_association;
+            } else if (eventName === 'workflow_dispatch') {
+              core.setOutput('allowed', 'true');
+              return;
             } else {
               core.setOutput('allowed', 'false');
               return;
@@ -287,9 +280,9 @@ jobs:
   benchmark-h100:
     name: Benchmark H100 (PyTorch 2.12)
     needs: test-h100-pytorch-2-12
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     uses: ./.github/workflows/reusable-ci-benchmarks.yml
     with:
       runner: 'nvidia-h100-1'
       conda_env_name: 'pytorch_2_12'
-      base_ref: origin/${{ github.event.pull_request.base.ref }}
+      base_ref: origin/${{ github.event.pull_request.base.ref || 'main' }}

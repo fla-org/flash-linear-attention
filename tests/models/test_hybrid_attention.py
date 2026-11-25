@@ -24,7 +24,9 @@ from fla.models import (
     DeltaNetConfig,
     GatedDeltaNetConfig,
     GatedDeltaProductConfig,
+    GKAConfig,
     GLAConfig,
+    GSA2Config,
     GSAConfig,
     HGRN2Config,
     HGRNConfig,
@@ -54,8 +56,10 @@ CONFIG_CLASSES = (
     DeltaFormerConfig,
     GatedDeltaNetConfig,
     GatedDeltaProductConfig,
+    GKAConfig,
     GLAConfig,
     GSAConfig,
+    GSA2Config,
     HGRNConfig,
     HGRN2Config,
     KDAConfig,
@@ -203,6 +207,18 @@ def test_parse_invalid_num_kv_heads(value):
 def test_parse_invalid_qkv_bias(value):
     with pytest.raises(ValueError, match=rf"qkv_bias.*{value!r}"):
         parse_attention_config({'layers': [0], 'num_heads': 2, 'qkv_bias': value}, num_hidden_layers=1)
+
+
+@pytest.mark.parametrize('value', [0, -1, True, 1.5, '64'])
+def test_parse_invalid_rotary_dim(value):
+    with pytest.raises(ValueError, match=rf"rotary_dim.*{value!r}"):
+        parse_attention_config({'layers': [0], 'num_heads': 2, 'rotary_dim': value}, num_hidden_layers=1)
+
+
+@pytest.mark.parametrize('value', [0, 1, None, 'false'])
+def test_parse_invalid_o_bias(value):
+    with pytest.raises(ValueError, match=rf"o_bias.*{value!r}"):
+        parse_attention_config({'layers': [0], 'num_heads': 2, 'o_bias': value}, num_hidden_layers=1)
 
 
 @pytest.mark.parametrize('value', [0, -1, True, 1.5])

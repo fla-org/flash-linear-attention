@@ -17,7 +17,10 @@ from fla.ops.cp import build_cp_context
 from fla.utils import assert_close, device
 from tests.cp.utils import gather_global, shard_tensor
 
-pytestmark = pytest.mark.skipif(device != "cuda", reason="requires CUDA or ROCm GPUs")
+pytestmark = pytest.mark.skipif(
+    device not in ("cuda", "npu"),
+    reason="requires CUDA, ROCm, or Ascend devices",
+)
 
 
 def _run_token_shift(

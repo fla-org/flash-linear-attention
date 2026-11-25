@@ -251,7 +251,7 @@ def fused_recurrent_gdn2_fwd_kernel(
             tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
 
 
-@dispatch('gdn2')
+@dispatch
 def fused_recurrent_gdn2_fwd(
     q: torch.Tensor,
     k: torch.Tensor,

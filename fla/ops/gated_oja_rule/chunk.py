@@ -329,6 +329,13 @@ def chunk_gated_oja_rule(
     chunk_size = kwargs.pop('chunk_size', 64)
     if chunk_size not in (16, 32, 64):
         raise ValueError(f"`chunk_size` must be 16, 32, or 64, got {chunk_size}.")
+    # the chunk kernels index every input with the q/k head count, so more value heads than q/k heads
+    # would be read with the wrong strides; `fused_recurrent_gated_oja_rule` supports GVA (HV > H)
+    if v.shape[2] != q.shape[2]:
+        raise ValueError(
+            f"chunk_gated_oja_rule does not support GVA: got H={q.shape[2]} q/k heads but HV={v.shape[2]} v heads. "
+            "Use `fused_recurrent_gated_oja_rule` for HV > H.",
+        )
 
     if cu_seqlens is not None:
         if q.shape[0] != 1:

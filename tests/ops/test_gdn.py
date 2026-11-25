@@ -6,6 +6,7 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import importlib.util
+import inspect
 import os
 
 import pytest
@@ -13,7 +14,10 @@ import torch
 import torch.nn.functional as F
 from einops import repeat
 
+from fla import backends
+from fla.ops.common.chunk_o import chunk_bwd_dqkwg
 from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
+from fla.ops.gated_delta_rule.fused_recurrent import fused_recurrent_gated_delta_rule_fwd
 from fla.ops.gated_delta_rule.gate import fused_gdn_gate, naive_gdn_gate
 from fla.ops.gated_delta_rule.naive import naive_recurrent_gated_delta_rule
 from fla.ops.gated_delta_rule.wy_fast import prepare_wy_repr_bwd, recompute_w_u_fwd
@@ -79,6 +83,8 @@ def test_chunk_bwd_dv_local_blackwell_triton_guard():
             (4, 2048, 4, 4, 64, 0.1, 1, torch.float),
             (2, 1024, 4, 4, 128, 1, 0.1, torch.float16),
             (2, 1024, 4, 8, 128, 1, 10, torch.float16),
+            # single-token decode with grouped value heads
+            (16, 1, 4, 12, 128, 1, 1, torch.float16),
         ]
     ],
 )
@@ -144,6 +150,36 @@ def test_fused_recurrent(
             )
             assert_close(name, ref, tri2, 0.002)
             assert_close(f'{name}_ht', ref_ht, tri2_ht, 0.002)
+
+
+@pytest.mark.parametrize('beta_shape', [(1, 20, 2, 128), (1, 20, 3)])
+def test_chunk_rejects_non_headwise_beta(beta_shape):
+    q = torch.zeros(1, 20, 1, 128, dtype=torch.bfloat16, device=device)
+    v = torch.zeros(1, 20, 2, 128, dtype=q.dtype, device=device)
+    g = torch.zeros(1, 20, 2, device=device)
+    beta = torch.ones(beta_shape, device=device)
+    with pytest.raises(ValueError, match='beta must have shape'):
+        chunk_gated_delta_rule(q, q, v, g, beta)
+
+
+def test_fused_recurrent_default_beta_gva():
+    """`beta=None` must default to ones over the HV value heads; sizing it from
+    q ([B, T, H]) makes the kernel read out of bounds under GVA (HV > H)."""
+    torch.manual_seed(42)
+    B, T, H, HV, D = 2, 64, 2, 4, 64
+    q = torch.randn(B, T, H, D, dtype=torch.float32, device=device)
+    k = F.normalize(torch.randn(B, T, H, D, dtype=torch.float32, device=device), p=2, dim=-1)
+    v = torch.randn(B, T, HV, D, dtype=torch.float32, device=device)
+    g = F.logsigmoid(torch.randn(B, T, HV, dtype=torch.float32, device=device))
+
+    o_default, ht_default = fused_recurrent_gated_delta_rule(
+        q=q, k=k, v=v, g=g, beta=None, output_final_state=True,
+    )
+    o_ones, ht_ones = fused_recurrent_gated_delta_rule(
+        q=q, k=k, v=v, g=g, beta=torch.ones(B, T, HV, dtype=torch.float32, device=device), output_final_state=True,
+    )
+    assert torch.equal(o_default, o_ones)
+    assert torch.equal(ht_default, ht_ones)
 
 
 @pytest.mark.parametrize(
@@ -556,6 +592,49 @@ def test_fused_recurrent_state_v_first(
         fused_recurrent_gated_delta_rule(q=q, k=k, v=v, g=g, beta=beta, transpose_state_layout=True)
     with pytest.raises(ValueError):
         fused_recurrent_gated_delta_rule(q=q, k=k, v=v, g=g, beta=beta, state_v_first=True, transpose_state_layout=True)
+
+
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'HV', 'D', 'cu_seqlens', 'state_v_first', 'dtype'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-HV{}-D{}-cu_seqlens{}-state_v_first{}-{}".format(*test))
+        for test in [
+            (16, 1, 4, 4, 128, None, False, torch.bfloat16),
+            (2, 300, 2, 8, 64, None, False, torch.float),
+            (2, 300, 2, 4, 100, None, True, torch.float),
+            (1, 400, 4, 4, 64, [0, 15, 250, 400], False, torch.bfloat16),
+        ]
+    ],
+)
+def test_fused_recurrent_inplace_final_state(
+    B: int,
+    T: int,
+    H: int,
+    HV: int,
+    D: int,
+    cu_seqlens: list[int] | None,
+    state_v_first: bool,
+    dtype: torch.dtype,
+):
+    torch.manual_seed(42)
+    q = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    k = F.normalize(torch.randn(B, T, H, D, dtype=torch.float32, device=device), p=2, dim=-1).to(dtype)
+    v = torch.randn(B, T, HV, D, dtype=dtype, device=device)
+    beta = torch.rand(B, T, HV, dtype=dtype, device=device).sigmoid()
+    g = F.logsigmoid(torch.rand(B, T, HV, dtype=torch.float32, device=device))
+    if cu_seqlens is not None:
+        cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
+    N = B if cu_seqlens is None else len(cu_seqlens) - 1
+    h0 = torch.randn(N, HV, D, D, dtype=torch.float32, device=device)
+
+    kwargs = dict(q=q, k=k, v=v, g=g, beta=beta, scale=D ** -0.5, state_v_first=state_v_first, cu_seqlens=cu_seqlens)
+    ref, ref_ht = fused_recurrent_gated_delta_rule_fwd(initial_state=h0.clone(), output_final_state=True, **kwargs)
+    state = h0.clone()
+    tri, tri_ht = fused_recurrent_gated_delta_rule_fwd(initial_state=state, inplace_final_state=True, **kwargs)
+
+    assert tri_ht.data_ptr() == state.data_ptr()
+    assert torch.equal(ref, tri)
+    assert torch.equal(ref_ht, state)
 
 
 @pytest.mark.parametrize(
@@ -1642,6 +1721,9 @@ def test_flash_qla_verifier_rejects(monkeypatch):
     passed, reason = be.chunk_gated_delta_rule_verifier(**ok_kwargs, cp_context=object())
     assert not passed and "context parallel" in reason
 
+    passed, reason = be.chunk_gated_delta_rule_verifier(**ok_kwargs, return_intermediate_states=True)
+    assert not passed and "return_intermediate_states" in reason
+
     passed, reason = be.chunk_gated_delta_rule_verifier(**ok_kwargs)
     assert passed and reason is None
 
@@ -1772,3 +1854,19 @@ def test_flash_qla_chunk_forward_only(B, T, H, HV, D, dtype, monkeypatch):
     assert torch.isfinite(tri_o).all() and torch.isfinite(tri_ht).all()
     assert_close("  o", ref_o, tri_o, _FLASH_QLA_RTOL)
     assert_close(" ht", ref_ht, tri_ht.to(ref_ht.dtype), _FLASH_QLA_RTOL)
+
+
+@pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
+def test_chunk_bwd_tilelang_backend():
+    from fla.utils import IS_NVIDIA_HOPPER, TRITON_ABOVE_3_4_0
+
+    if not backends.TileLangBackend.is_available():
+        pytest.skip('TileLang is unavailable')
+    from fla.ops.common.backends.tilelang import chunk_bwd_dqkwg_tilelang
+
+    candidate = backends._function_registries[inspect.unwrap(chunk_bwd_dqkwg)]._backends['tilelang']
+    assert candidate.implementation is chunk_bwd_dqkwg_tilelang
+    assert candidate.default_enable is (IS_NVIDIA_HOPPER and TRITON_ABOVE_3_4_0)
+    expected = [(p.name, p.kind, p.default) for p in inspect.signature(chunk_bwd_dqkwg).parameters.values()]
+    actual = [(p.name, p.kind, p.default) for p in inspect.signature(chunk_bwd_dqkwg_tilelang).parameters.values()]
+    assert actual == expected

@@ -22,7 +22,7 @@ from fla.ops.kda.gate import naive_kda_lowerbound_gate
 from fla.utils import IS_NPU, IS_TF32_SUPPORTED, assert_close, device
 from tests.cp.utils import gather_global, shard_tensor
 
-pytestmark = pytest.mark.skipif(not (IS_TF32_SUPPORTED or IS_NPU), reason="requires NVIDIA Ampere or newer, or Ascend")
+pytestmark = pytest.mark.skipif(IS_NPU or not IS_TF32_SUPPORTED, reason="requires NVIDIA Ampere or newer")
 
 
 def _make_inputs(rank, T, H, D, dtype):
