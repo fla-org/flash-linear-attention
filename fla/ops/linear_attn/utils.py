@@ -46,6 +46,7 @@ class StatefulNormalizeFunction(torch.autograd.Function):
         ctx.reverse = reverse
         ctx.cu_seqlens = cu_seqlens
         ctx.has_z_init = z_init is not None
+        ctx.z_init_dtype = z_init.dtype if z_init is not None else None
         ctx.k_dtype = k.dtype
         ctx.q_dtype = q.dtype
         ctx.o_dtype = o.dtype
@@ -95,6 +96,8 @@ class StatefulNormalizeFunction(torch.autograd.Function):
                     dz_init = dz_init + dz_state.masked_fill(nonempty, 0)
             else:
                 dz_init = dk_cum.sum(dim=1, keepdim=True)
+            if ctx.z_init_dtype is not None:
+                dz_init = dz_init.to(ctx.z_init_dtype)
 
         dk = chunk_global_cumsum(
             dk_cum, reverse=not reverse, cu_seqlens=cu_seqlens, output_dtype=ctx.k_dtype,

@@ -364,10 +364,11 @@ def test_normalize_zinit_grad(fn, B: int, T: int, split: int, H: int, D: int):
     ],
 )
 def test_normalize_fp16_grad_normalizer_overflow(fn):
-    # In float16, when running denominator exceeds 256, denom*denom overflows 65504 to inf.
-    # Evaluating denominator products in float32 preserves exact gradient contributions.
+    # in float16, when running denominator exceeds 256, denom*denom overflows 65504 to inf.
+    # evaluating denominator products in float32 preserves exact gradient contributions.
+    # compute the float64 reference oracle on CPU for portability across hardware backends (e.g. Ascend).
     shape = (1, 128, 1, 16)
-    qr = torch.ones(shape, dtype=torch.float64, device=device, requires_grad=True)
+    qr = torch.ones(shape, dtype=torch.float64, device='cpu', requires_grad=True)
     kr = torch.ones_like(qr, requires_grad=True)
     vr = torch.ones_like(qr)
     scores = torch.einsum("bthk,bshk->bhts", qr * 0.25, kr).tril()
@@ -380,8 +381,8 @@ def test_normalize_fp16_grad_normalizer_overflow(fn):
     out, _ = fn(q, k, v, normalize=True)
     dq, dk = torch.autograd.grad(out[:, -1].sum(), (q, k))
 
-    assert_close('dq', ref_dq.to(torch.float16), dq, 0.005)
-    assert_close('dk', ref_dk.to(torch.float16), dk, 0.005)
+    assert_close('dq', ref_dq.to(torch.float16).to(device), dq, 0.005)
+    assert_close('dk', ref_dk.to(torch.float16).to(device), dk, 0.005)
 
 
 @pytest.mark.smoke
