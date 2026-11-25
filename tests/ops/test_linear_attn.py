@@ -15,6 +15,27 @@ from fla.ops.linear_attn.naive import naive_chunk_linear_attn, naive_recurrent_l
 from fla.utils import assert_close, device
 
 
+@pytest.mark.parametrize('dtype, boundary', [(torch.bfloat16, 256), (torch.float16, 2048)])
+@pytest.mark.parametrize('fp32_initial_state', [False, True])
+def test_normalized_decode_preserves_key_sum(dtype, boundary, fp32_initial_state):
+    q = torch.ones((1, 1, 1, 64), device=device, dtype=dtype)
+    state = None
+    if fp32_initial_state:
+        state = (
+            torch.zeros((1, 1, 64, 64), device=device, dtype=torch.float32),
+            torch.zeros_like(q, dtype=torch.float32),
+        )
+    with torch.no_grad():
+        for _ in range(boundary + 8):
+            output, state = fused_recurrent_linear_attn(
+                q, q, q, initial_state=state, output_final_state=True, normalize=True,
+            )
+    assert output.dtype == dtype
+    torch.testing.assert_close(output, torch.ones_like(output), rtol=0, atol=0)
+    torch.testing.assert_close(state[1], torch.full_like(state[1], boundary + 8), rtol=0, atol=0)
+    assert state[1].dtype == torch.float32
+
+
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'D', 'scale', 'dtype'),
     [

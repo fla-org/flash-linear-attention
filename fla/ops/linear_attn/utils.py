@@ -19,7 +19,7 @@ class StatefulNormalizeFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, o, q, k, scale, z_init, reverse, cu_seqlens):
-        k_cum = chunk_global_cumsum(k, reverse=reverse, cu_seqlens=cu_seqlens, output_dtype=k.dtype)
+        k_cum = chunk_global_cumsum(k, reverse=reverse, cu_seqlens=cu_seqlens, output_dtype=torch.float32)
         if z_init is not None:
             if cu_seqlens is not None:
                 seq_lens = (cu_seqlens[1:] - cu_seqlens[:-1]).to(torch.long)
@@ -27,8 +27,8 @@ class StatefulNormalizeFunction(torch.autograd.Function):
             else:
                 z_init_b = z_init
             k_cum = k_cum + z_init_b
-        denom = (q * scale * k_cum).sum(-1, keepdim=True) + 1e-10
-        o_out = o / denom
+        denom = (q.float() * scale * k_cum).sum(-1, keepdim=True) + 1e-10
+        o_out = (o.float() / denom).to(o.dtype)
         if cu_seqlens is not None:
             idx = (cu_seqlens[:-1] if reverse else cu_seqlens[1:] - 1).to(torch.long)
             nonempty = (cu_seqlens[1:] > cu_seqlens[:-1])[:, None, None, None]
