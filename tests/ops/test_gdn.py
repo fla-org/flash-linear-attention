@@ -1870,3 +1870,46 @@ def test_chunk_bwd_tilelang_backend():
     expected = [(p.name, p.kind, p.default) for p in inspect.signature(chunk_bwd_dqkwg).parameters.values()]
     actual = [(p.name, p.kind, p.default) for p in inspect.signature(chunk_bwd_dqkwg_tilelang).parameters.values()]
     assert actual == expected
+
+
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'HV', 'D', 'cu_seqlens', 'dtype'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-HV{}-D{}-cu_seqlens{}-{}".format(*test))
+        for test in [
+            (16, 1, 4, 4, 128, None, torch.bfloat16),
+            (2, 300, 2, 8, 64, None, torch.float),
+            (1, 400, 4, 4, 64, [0, 15, 250, 400], torch.bfloat16),
+        ]
+    ],
+)
+def test_fused_recurrent_inplace_out(
+    B: int,
+    T: int,
+    H: int,
+    HV: int,
+    D: int,
+    cu_seqlens: list[int] | None,
+    dtype: torch.dtype,
+):
+    torch.manual_seed(42)
+    q = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    k = F.normalize(torch.randn(B, T, H, D, dtype=torch.float32, device=device), p=2, dim=-1).to(dtype)
+    v = torch.randn(B, T, HV, D, dtype=dtype, device=device)
+    beta = torch.rand(B, T, HV, dtype=dtype, device=device).sigmoid()
+    g = F.logsigmoid(torch.rand(B, T, HV, dtype=torch.float32, device=device))
+    if cu_seqlens is not None:
+        cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
+    N = B if cu_seqlens is None else len(cu_seqlens) - 1
+    h0 = torch.randn(N, HV, D, D, dtype=torch.float32, device=device)
+
+    kwargs = dict(q=q, k=k, v=v, g=g, beta=beta, scale=D ** -0.5, cu_seqlens=cu_seqlens)
+    ref, ref_ht = fused_recurrent_gated_delta_rule_fwd(initial_state=h0.clone(), output_final_state=True, **kwargs)
+    state = h0.clone()
+    out = torch.empty_like(v)
+    tri, tri_ht = fused_recurrent_gated_delta_rule_fwd(initial_state=state, inplace_final_state=True, out=out, **kwargs)
+
+    assert tri.data_ptr() == out.data_ptr()
+    assert tri_ht.data_ptr() == state.data_ptr()
+    assert torch.equal(ref, tri)
+    assert torch.equal(ref_ht, state)

@@ -10,6 +10,7 @@ import torch
 import torch.nn.functional as F
 
 from fla.ops.delta_rule import chunk_delta_rule, fused_recurrent_delta_rule
+from fla.ops.delta_rule.fused_recurrent import fused_recurrent_delta_rule_fwd
 from fla.utils import assert_close, device, device_platform
 
 
@@ -229,3 +230,45 @@ def test_chunk_varlen(
     assert_close('dv', ref_dv, tri_dv, 0.008)
     assert_close('db', ref_dbeta, tri_dbeta, 0.008)
     assert_close('dh0', ref_dh0, tri_dh0, 0.008)
+
+
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'D', 'cu_seqlens', 'dtype'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-cu_seqlens{}-{}".format(*test))
+        for test in [
+            (16, 1, 4, 128, None, torch.bfloat16),
+            (2, 300, 4, 64, None, torch.float),
+            (1, 400, 4, 64, [0, 15, 250, 400], torch.bfloat16),
+        ]
+    ],
+)
+def test_fused_recurrent_inplace_out(
+    B: int,
+    T: int,
+    H: int,
+    D: int,
+    cu_seqlens: list[int] | None,
+    dtype: torch.dtype,
+):
+    torch.manual_seed(42)
+    q = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    k = F.normalize(torch.randn(B, T, H, D, dtype=torch.float32, device=device), p=2, dim=-1).to(dtype)
+    v = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    beta = torch.rand(B, T, H, dtype=dtype, device=device).sigmoid()
+    if cu_seqlens is not None:
+        cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
+    N = B if cu_seqlens is None else len(cu_seqlens) - 1
+    h0 = torch.randn(N, H, D, D, dtype=torch.float32, device=device)
+
+    kwargs = dict(q=q, k=k, v=v, beta=beta, scale=D ** -0.5, cu_seqlens=cu_seqlens)
+    ref, ref_u, ref_ht = fused_recurrent_delta_rule_fwd(initial_state=h0.clone(), output_final_state=True, **kwargs)
+    state = h0.clone()
+    out = torch.empty_like(v)
+    tri, tri_u, tri_ht = fused_recurrent_delta_rule_fwd(initial_state=state, inplace_final_state=True, out=out, **kwargs)
+
+    assert tri.data_ptr() == out.data_ptr()
+    assert tri_ht.data_ptr() == state.data_ptr()
+    assert torch.equal(ref, tri)
+    assert torch.equal(ref_u, tri_u)
+    assert torch.equal(ref_ht, state)

@@ -10,8 +10,10 @@ import warnings
 import torch
 
 from fla.ops.simple_gla.fused_recurrent import fused_recurrent_simple_gla
+from fla.utils import input_guard
 
 
+@input_guard(no_guard_contiguous={'out'})
 def fused_recurrent_retention(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -22,6 +24,7 @@ def fused_recurrent_retention(
     reverse: bool = False,
     state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
+    out: torch.Tensor | None = None,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if 'transpose_state_layout' in kwargs:
@@ -57,5 +60,6 @@ def fused_recurrent_retention(
         reverse=reverse,
         cu_seqlens=cu_seqlens,
         state_v_first=state_v_first,
+        out=out,
     )
     return o, final_state

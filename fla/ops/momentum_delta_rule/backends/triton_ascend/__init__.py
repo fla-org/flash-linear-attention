@@ -80,6 +80,8 @@ class TritonAscendMomentumDeltaRuleBackend(BaseBackend):
         cu_seqlens: torch.LongTensor | None = None,
         use_qk_l2norm_in_kernel: bool = True,
         use_p_times_alpha: bool = True,
+        inplace_final_state: bool = False,
+        out: torch.Tensor | None = None,
     ) -> tuple[bool, str | None]:
         if q.device.type != "npu":
             return False, "fused_recurrent_momentum_delta_rule NPU override requires NPU tensors"

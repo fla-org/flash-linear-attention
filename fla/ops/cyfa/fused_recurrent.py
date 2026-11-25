@@ -658,6 +658,8 @@ def _fused_recurrent_cyfa_decode_fwd(
     k_norm_eps: float,
     initial_state: CyFAState | None,
     output_final_state: bool,
+    inplace_final_state: bool = False,
+    out: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, CyFAState | None]:
     batch, _, n_heads, d_k = q.shape
     d_v = v.shape[-1]
@@ -676,8 +678,10 @@ def _fused_recurrent_cyfa_decode_fwd(
         initial_k, initial_v, initial_lambda = None, None, None
     else:
         initial_k, initial_v, initial_lambda = state
+    if inplace_final_state:
+        assert initial_state is not None, "inplace_final_state=True requires an initial_state"
     state_k = state_v = state_lambda = None
-    if output_final_state:
+    if output_final_state or inplace_final_state:
         if initial_k is None:
             state_k = torch.empty(batch, n_heads, d_k, num_slots, device=q.device, dtype=torch.float32)
             state_v = torch.empty(batch, n_heads, num_slots, d_v, device=q.device, dtype=torch.float32)
@@ -703,7 +707,11 @@ def _fused_recurrent_cyfa_decode_fwd(
     lambda_value = None
     if not use_pdl:
         lambda_value = torch.empty(batch, n_heads, device=q.device, dtype=torch.float32)
-    out = torch.empty_like(v)
+    if out is None:
+        out = torch.empty_like(v)
+    else:
+        assert out.shape == v.shape
+        assert out.is_contiguous()
 
     _fused_recurrent_cyfa_decode_k_kernel[(batch * n_heads * nk * nm,)](
         q,
@@ -755,7 +763,11 @@ def _fused_recurrent_cyfa_decode_fwd(
         num_warps=4,
         num_stages=2,
     )
-    final_state = (state_k, state_v, state_lambda) if output_final_state else None
+    if inplace_final_state and initial_lambda is not None and state_lambda is not initial_lambda:
+        # PDL keeps lambda in a fresh buffer; write it back so the caller's state tuple is fully updated
+        initial_lambda.copy_(state_lambda)
+        state_lambda = initial_lambda
+    final_state = (state_k, state_v, state_lambda) if output_final_state or inplace_final_state else None
     return out, final_state
 
 
@@ -775,7 +787,9 @@ def _fused_recurrent_cyfa_fwd(
     k_norm_eps: float,
     initial_state: CyFAState | None,
     output_final_state: bool,
-    cu_seqlens: torch.Tensor | None,
+    inplace_final_state: bool = False,
+    cu_seqlens: torch.Tensor | None = None,
+    out: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, CyFAState | None]:
     batch, seq_len, n_heads, d_k = q.shape
     d_v = v.shape[-1]
@@ -796,7 +810,12 @@ def _fused_recurrent_cyfa_fwd(
             k_norm_eps=k_norm_eps,
             initial_state=initial_state,
             output_final_state=output_final_state,
+            inplace_final_state=inplace_final_state,
+            out=out,
         )
+    # the k/v kernels are autotuned and re-run during tuning, so an aliased state would advance repeatedly
+    if inplace_final_state:
+        raise ValueError("`inplace_final_state=True` is only supported for single-token decode without `cu_seqlens`.")
     if cu_seqlens is None:
         n_seq = batch
     else:
@@ -829,7 +848,11 @@ def _fused_recurrent_cyfa_fwd(
         state_k = torch.empty(n_seq, n_heads, d_k, num_slots, device=q.device, dtype=torch.float32)
         state_v = torch.empty(n_seq, n_heads, num_slots, d_v, device=q.device, dtype=torch.float32)
         state_lambda = torch.empty(n_seq, n_heads, device=q.device, dtype=torch.float32)
-    out = torch.empty_like(v)
+    if out is None:
+        out = torch.empty_like(v)
+    else:
+        assert out.shape == v.shape
+        assert out.is_contiguous()
     total_tokens = batch * seq_len
     lambda_trace = torch.empty(batch, seq_len, n_heads, device=q.device, dtype=torch.float32)
     decay_trace = torch.empty_like(lambda_trace)

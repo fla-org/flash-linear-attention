@@ -130,8 +130,10 @@ def fused_recurrent_comba_fwd(
     scale: float,
     initial_state: torch.Tensor,
     output_final_state: bool,
+    inplace_final_state: bool = False,
     use_qk_l2norm_in_kernel: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
+    out: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
@@ -146,8 +148,16 @@ def fused_recurrent_comba_fwd(
     num_stages = 3
     num_warps = 1
 
-    o = q.new_empty(NK, *v.shape)
-    if output_final_state:
+    if out is None:
+        o = q.new_empty(NK, *v.shape)
+    else:
+        assert out.shape == v.shape
+        assert out.is_contiguous()
+        o = out.unsqueeze(0)
+    if inplace_final_state:
+        assert initial_state is not None, "inplace_final_state=True requires an initial_state"
+        final_state = initial_state
+    elif output_final_state:
         final_state = q.new_empty(N, HV, K, V, dtype=torch.float32)
     else:
         final_state = None

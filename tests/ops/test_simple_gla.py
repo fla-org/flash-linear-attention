@@ -13,6 +13,7 @@ import torch
 import torch.nn.functional as F
 
 from fla import utils
+from fla.ops.common.fused_recurrent import fused_recurrent_fwd
 from fla.ops.simple_gla.backends.triton_ascend.utils import simple_gla_verifier
 from fla.ops.simple_gla.chunk import chunk_simple_gla
 from fla.ops.simple_gla.fused_chunk import fused_chunk_simple_gla
@@ -920,3 +921,61 @@ def test_retention_ascend_registration_import_order(run_python):
         """,
         FLA_DISABLE_BACKEND_DISPATCH='0',
     )
+
+
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'D', 'cu_seqlens', 'dtype'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-cu_seqlens{}-{}".format(*test))
+        for test in [
+            (2, 1, 4, 64, None, torch.bfloat16),
+            (2, 300, 4, 128, None, torch.float),
+            (1, 400, 4, 64, [0, 15, 250, 400], torch.bfloat16),
+        ]
+    ],
+)
+def test_fused_recurrent_inplace_out(
+    B: int,
+    T: int,
+    H: int,
+    D: int,
+    cu_seqlens: list[int] | None,
+    dtype: torch.dtype,
+):
+    torch.manual_seed(42)
+    q = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    k = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    v = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    g = F.logsigmoid(torch.randn(B, T, H, dtype=dtype, device=device))
+    if cu_seqlens is not None:
+        cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
+    N = B if cu_seqlens is None else len(cu_seqlens) - 1
+    h0 = torch.randn(N, H, D, D, dtype=torch.float32, device=device)
+
+    kwargs = dict(q=q, k=k, v=v, g=g, scale=D ** -0.5, cu_seqlens=cu_seqlens)
+    ref, ref_ht = fused_recurrent_fwd(initial_state=h0.clone(), output_final_state=True, **kwargs)
+    out = torch.empty_like(v, dtype=torch.float32)
+    tri, tri_ht = fused_recurrent_fwd(initial_state=h0.clone(), output_final_state=True, out=out, **kwargs)
+
+    assert tri.data_ptr() == out.data_ptr()
+    assert torch.equal(ref, tri)
+    assert torch.equal(ref_ht, tri_ht)
+
+
+def test_fused_recurrent_inplace_out_bf16_sum():
+    torch.manual_seed(42)
+    B, T, H, D = 2, 300, 4, 128
+    q = torch.randn(B, T, H, D, dtype=torch.bfloat16, device=device)
+    k = torch.randn(B, T, H, D, dtype=torch.bfloat16, device=device)
+    v = torch.randn(B, T, H, D, dtype=torch.bfloat16, device=device)
+    g = F.logsigmoid(torch.randn(B, T, H, dtype=torch.bfloat16, device=device))
+    h0 = torch.randn(B, H, D, D, dtype=torch.float32, device=device)
+
+    kwargs = dict(q=q, k=k, v=v, g=g, scale=D ** -0.5)
+    ref, ref_ht = fused_recurrent_fwd(initial_state=h0.clone(), output_final_state=True, **kwargs)
+    out = torch.empty_like(v)
+    tri, tri_ht = fused_recurrent_fwd(initial_state=h0.clone(), output_final_state=True, out=out, **kwargs)
+
+    assert tri.data_ptr() == out.data_ptr()
+    assert torch.equal(ref.to(torch.bfloat16), tri)
+    assert torch.equal(ref_ht, tri_ht)

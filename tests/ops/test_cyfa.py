@@ -11,7 +11,10 @@ import triton
 
 from fla.ops.cyfa import chunk_cyfa, fused_recurrent_cyfa
 from fla.ops.cyfa.chunk import _prune_table_grad_configs
+from fla.ops.cyfa.fused_recurrent import _fused_recurrent_cyfa_fwd
 from fla.ops.cyfa.naive import naive_recurrent_cyfa
+from fla.ops.cyfa.qk_norm import qk_rmsnorm_fwd
+from fla.ops.cyfa.utils import build_readout_table
 from fla.utils import IS_NVIDIA, IS_NVIDIA_HOPPER, IS_NVIDIA_SM100, assert_close, device
 
 pytestmark = pytest.mark.skipif(not IS_NVIDIA, reason='CyFA kernels currently require NVIDIA GPUs')
@@ -266,3 +269,74 @@ def test_fused_recurrent_requires_grad(state_only):
         inputs = {name: x.detach() if isinstance(x, torch.Tensor) else x for name, x in inputs.items()}
     with pytest.raises(NotImplementedError, match='inference-only'):
         fused_recurrent_cyfa(**inputs)
+
+
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'K', 'V', 'M', 'cu_seqlens', 'dtype'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-K{}-V{}-M{}-cu_seqlens{}-{}".format(*test))
+        for test in [
+            (2, 1, 2, 64, 64, 128, None, torch.float32),
+            (2, 300, 2, 64, 64, 128, None, torch.bfloat16),
+            (1, 400, 2, 64, 64, 128, [0, 15, 250, 400], torch.float32),
+        ]
+    ],
+)
+@torch.no_grad()
+def test_fused_recurrent_inplace_out(
+    B: int,
+    T: int,
+    H: int,
+    K: int,
+    V: int,
+    M: int,
+    cu_seqlens: list[int] | None,
+    dtype: torch.dtype,
+):
+    torch.manual_seed(42)
+    q = torch.randn(B, T, H, K, device=device, dtype=dtype)
+    k = torch.randn(B, T, H, K, device=device, dtype=dtype)
+    v = torch.randn(B, T, H, V, device=device, dtype=dtype)
+    g = -0.1 * torch.rand(B, T, H, device=device)
+    delta = torch.randn(B, T, H, device=device).sigmoid()
+    beta = torch.randn(B, T, H, device=device).sigmoid()
+    readout = torch.eye(M - 1, device=device).expand(H, -1, -1).clone()
+    readout = readout + 0.05 * torch.randn(H, M - 1, M - 1, device=device)
+    q_norm_weight = 1 + 0.1 * torch.randn(K, device=device)
+    k_norm_weight = 1 + 0.1 * torch.randn(K, device=device)
+    if cu_seqlens is not None:
+        cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
+    N = B if cu_seqlens is None else len(cu_seqlens) - 1
+    h0 = (
+        0.1 * torch.randn(N, H, K, M, device=device),
+        0.1 * torch.randn(N, H, M, V, device=device),
+        17 + torch.rand(N, H, device=device),
+    )
+    is_decode = T == 1 and cu_seqlens is None
+    if is_decode:
+        q, k, q_rstd = q.contiguous(), k.contiguous(), None
+    else:
+        q, k, q_rstd, _ = qk_rmsnorm_fwd(q, k, q_norm_weight, k_norm_weight, 1e-6, 1e-6, store_q=False, store_rstd=True)
+    readout_table = build_readout_table(readout).to(q.dtype)
+
+    kwargs = dict(
+        q=q, q_norm_weight=q_norm_weight, q_rstd=q_rstd, k=k, k_norm_weight=k_norm_weight,
+        v=v, delta=delta, beta=beta, g=g, readout_table=readout_table,
+        scale=K ** -0.5, q_norm_eps=1e-6, k_norm_eps=1e-6, cu_seqlens=cu_seqlens,
+    )
+    ref, ref_state = _fused_recurrent_cyfa_fwd(initial_state=tuple(s.clone() for s in h0), output_final_state=True, **kwargs)
+    state = tuple(s.clone() for s in h0)
+    out = torch.empty_like(v)
+    tri, tri_state = _fused_recurrent_cyfa_fwd(
+        initial_state=state, output_final_state=True, inplace_final_state=is_decode, out=out, **kwargs,
+    )
+
+    assert tri.data_ptr() == out.data_ptr()
+    assert torch.equal(ref, tri)
+    for expected, result in zip(ref_state, tri_state, strict=True):
+        assert torch.equal(expected, result)
+    if is_decode:
+        assert tri_state[0].data_ptr() == state[0].data_ptr()
+        assert tri_state[1].data_ptr() == state[1].data_ptr()
+        assert tri_state[2].data_ptr() == state[2].data_ptr()
+        assert torch.equal(state[2], ref_state[2])

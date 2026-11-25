@@ -8,8 +8,10 @@
 import torch
 
 from fla.ops.simple_gla.fused_recurrent import fused_recurrent_simple_gla
+from fla.utils import input_guard
 
 
+@input_guard(no_guard_contiguous={'out'})
 def fused_recurrent_lightning_attn(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -21,6 +23,7 @@ def fused_recurrent_lightning_attn(
     output_final_state: bool = False,
     reverse: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
+    out: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
@@ -78,4 +81,5 @@ def fused_recurrent_lightning_attn(
         output_final_state=output_final_state,
         reverse=reverse,
         cu_seqlens=cu_seqlens,
+        out=out,
     )

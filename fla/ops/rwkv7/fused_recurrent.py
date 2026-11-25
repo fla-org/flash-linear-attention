@@ -130,7 +130,7 @@ def fused_recurrent_rwkv7_fwd_kernel(
         tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
 
 
-@input_guard
+@input_guard(no_guard_contiguous={'out'})
 def fused_recurrent_rwkv7_fwd(
     r: torch.Tensor,
     w: torch.Tensor,
@@ -143,6 +143,7 @@ def fused_recurrent_rwkv7_fwd(
     output_final_state: bool = False,
     reverse: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
+    out: torch.Tensor | None = None,
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
@@ -156,7 +157,13 @@ def fused_recurrent_rwkv7_fwd(
         ht = None
     else:
         ht = r.new_empty(N, H, K, V, dtype=torch.float32)
-    o = torch.empty_like(v)
+    # no inplace_final_state: the autotuned kernel re-runs during tuning and would advance an aliased state repeatedly
+    if out is None:
+        o = torch.empty_like(v)
+    else:
+        assert out.shape == v.shape
+        assert out.is_contiguous()
+        o = out
 
     def grid(meta): return (triton.cdiv(V, meta['BV']) * N * H,)
     fused_recurrent_rwkv7_fwd_kernel[grid](
