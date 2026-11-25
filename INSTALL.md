@@ -27,6 +27,10 @@ CUDA can use a single command since `triton` lives on PyPI:
 pip install flash-linear-attention[cuda]
 ```
 
+> [!NOTE]
+> Blackwell (sm_100) requires `triton>=3.7.1`. Older versions down to the
+> previous `>=3.3` floor can hit illegal memory accesses in GDN2 kernels.
+
 For ROCm / XPU / CPU, do it in two steps so `torch` (and the matching `triton`
 flavor that `torch` pulls transitively) come from the PyTorch wheel index
 instead of letting the resolver mix and match (pip docs are explicit that
