@@ -51,6 +51,32 @@ def test_grouplinear(shape, out_features, groups, bias, strided, dtype):
         assert_close(name, ref_grad, out_grad, 0.005)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason='requires CUDA autocast')
+@pytest.mark.parametrize('dtype', [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize('bias', [True, False])
+def test_grouplinear_autocast(dtype, bias):
+    if dtype == torch.bfloat16 and not torch.cuda.is_bf16_supported():
+        pytest.skip('requires BF16 support')
+    torch.manual_seed(42)
+    layer = GroupLinear(12, 8, groups=4, bias=bias).cuda()
+    if bias:
+        torch.nn.init.normal_(layer.bias)
+    x = torch.randn(2, 3, 12, device='cuda', requires_grad=True)
+    weight = torch.block_diag(*layer.weight.chunk(layer.groups))
+    with torch.autocast('cuda', dtype=dtype):
+        ref = F.linear(x, weight, layer.bias)
+        out = layer(x)
+    assert out.dtype == ref.dtype == dtype
+    assert_close('y', ref, out, 0.005)
+    dy = torch.randn_like(ref)
+    params = (x, *layer.parameters())
+    ref_grads = torch.autograd.grad(ref, params, dy)
+    out_grads = torch.autograd.grad(out, params, dy)
+    for param, expected, actual in zip(params, ref_grads, out_grads, strict=True):
+        assert actual.dtype == expected.dtype == param.dtype
+        assert_close('grad', expected, actual, 0.005)
+
+
 @pytest.mark.parametrize(
     ('in_features', 'out_features', 'groups', 'match'),
     [(8, 8, 0, 'positive'), (7, 8, 2, 'in_features'), (8, 7, 2, 'out_features')],
