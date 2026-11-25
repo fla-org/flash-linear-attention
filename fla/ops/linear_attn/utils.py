@@ -19,16 +19,16 @@ class StatefulNormalizeFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, o, q, k, scale, z_init, reverse, cu_seqlens):
-        k_cum = chunk_global_cumsum(k, reverse=reverse, cu_seqlens=cu_seqlens, output_dtype=k.dtype)
+        k_cum = chunk_global_cumsum(k, reverse=reverse, cu_seqlens=cu_seqlens, output_dtype=torch.float32)
         if z_init is not None:
             if cu_seqlens is not None:
                 seq_lens = (cu_seqlens[1:] - cu_seqlens[:-1]).to(torch.long)
                 z_init_b = z_init.squeeze(1).repeat_interleave(seq_lens, dim=0).unsqueeze(0)
             else:
                 z_init_b = z_init
-            k_cum = k_cum + z_init_b
-        denom = (q * scale * k_cum).sum(-1, keepdim=True) + 1e-10
-        o_out = o / denom
+            k_cum = k_cum + z_init_b.to(torch.float32)
+        denom = (q.float() * scale * k_cum).sum(-1, keepdim=True) + 1e-10
+        o_out = (o.float() / denom).to(o.dtype)
         if cu_seqlens is not None:
             idx = (cu_seqlens[:-1] if reverse else cu_seqlens[1:] - 1).to(torch.long)
             nonempty = (cu_seqlens[1:] > cu_seqlens[:-1])[:, None, None, None]
@@ -47,6 +47,8 @@ class StatefulNormalizeFunction(torch.autograd.Function):
         ctx.cu_seqlens = cu_seqlens
         ctx.has_z_init = z_init is not None
         ctx.k_dtype = k.dtype
+        ctx.q_dtype = q.dtype
+        ctx.o_dtype = o.dtype
         return o_out, z_state_out
 
     @staticmethod
@@ -56,11 +58,11 @@ class StatefulNormalizeFunction(torch.autograd.Function):
         reverse = ctx.reverse
         cu_seqlens = ctx.cu_seqlens
 
-        d_o_in = do / denom
-        ddenom = -(do * o).sum(-1, keepdim=True) / (denom * denom)
+        d_o_in = (do.float() / denom).to(ctx.o_dtype)
+        ddenom = -(do.float() * o.float()).sum(-1, keepdim=True) / (denom * denom)
 
-        dq = ddenom * scale * k_cum
-        dk_cum = ddenom * scale * q
+        dq = (ddenom * scale * k_cum).to(ctx.q_dtype)
+        dk_cum = ddenom * scale * q.float()
 
         if dz_state is not None:
             if cu_seqlens is not None:
