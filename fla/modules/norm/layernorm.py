@@ -41,7 +41,7 @@ except (ImportError, AttributeError):
         for BT in [32, 64, 128]
         for num_warps in [2, 4, 8]
     ],
-    key=['D', 'NB', 'HAS_RESIDUAL', 'STORE_RESIDUAL_OUT', 'IS_RMS_NORM'],
+    key=['D', 'HAS_RESIDUAL', 'STORE_RESIDUAL_OUT', 'IS_RMS_NORM'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -60,7 +60,6 @@ def layer_norm_fwd_kernel(
     D: tl.constexpr,
     BT: tl.constexpr,
     BD: tl.constexpr,
-    NB: tl.constexpr,
     IS_RMS_NORM: tl.constexpr,
     HAS_RESIDUAL: tl.constexpr,
     STORE_RESIDUAL_OUT: tl.constexpr,
@@ -186,7 +185,7 @@ def layer_norm_fwd_kernel_row(
         for BT in [32, 64]
         for num_warps in [2, 4, 8]
     ],
-    key=['D', 'NB', 'HAS_DRESIDUAL', 'STORE_DRESIDUAL', 'IS_RMS_NORM'],
+    key=['D', 'HAS_DRESIDUAL', 'STORE_DRESIDUAL', 'IS_RMS_NORM'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -209,7 +208,6 @@ def layer_norm_bwd_kernel(
     BS: tl.constexpr,
     BT: tl.constexpr,
     BD: tl.constexpr,
-    NB: tl.constexpr,
     GS: tl.constexpr,
     IS_RMS_NORM: tl.constexpr,
     HAS_DRESIDUAL: tl.constexpr,
@@ -421,8 +419,6 @@ def layer_norm_fwd(
         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
     # use the row kernel at D == 512 to fit Intel scratch-space limits.
     if D <= 512 and not (D == 512 and IS_INTEL):
-        NB = triton.next_power_of_2(triton.cdiv(T, 2048))
-
         def grid(meta):
             return (triton.cdiv(T, meta['BT']),)
 
@@ -440,7 +436,6 @@ def layer_norm_fwd(
             G=G,
             D=D,
             BD=BD,
-            NB=NB,
             IS_RMS_NORM=is_rms_norm,
             HAS_RESIDUAL=residual is not None,
             STORE_RESIDUAL_OUT=res_out is not None,
@@ -514,7 +509,6 @@ def layer_norm_bwd(
 
     # use the row kernel at D == 512 to fit Intel scratch-space limits.
     if D <= 512 and not (D == 512 and IS_INTEL):
-        NB = triton.next_power_of_2(triton.cdiv(T, 2048))
         layer_norm_bwd_kernel[grid](
             x=x,
             w=weight,
@@ -533,7 +527,6 @@ def layer_norm_bwd(
             D=D,
             BS=BS,
             BD=BD,
-            NB=NB,
             GS=GS,
             IS_RMS_NORM=is_rms_norm,
             HAS_DRESIDUAL=dres is not None,
