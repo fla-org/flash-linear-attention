@@ -10,7 +10,52 @@ import torch
 import torch.nn.functional as F
 
 from fla.ops.delta_rule import chunk_delta_rule, fused_recurrent_delta_rule
+from fla.ops.delta_rule.naive import delta_rule_recurrence
 from fla.utils import assert_close, device, device_platform
+
+
+@pytest.mark.parametrize(('V', 'cu_seqlens'), [(64, None), (45, [0, 3, 10, 17]), (32, None)])
+def test_fused_recurrent_vector_beta(V, cu_seqlens):
+    torch.manual_seed(42)
+    B, T, H, K = 2 if cu_seqlens is None else 1, 17, 2, 16
+    N = B if cu_seqlens is None else len(cu_seqlens) - 1
+    q, k = [F.normalize(torch.randn(B, T, H, K, device=device, dtype=torch.float16), dim=-1) for _ in range(2)]
+    v = torch.randn(B, T, H, V, device=device, dtype=torch.float16)
+    beta = torch.randn_like(v).sigmoid()
+    h0 = torch.randn(N, H, K, V, device=device, dtype=torch.float32)
+    inputs = tuple(x.requires_grad_() for x in (q, k, v, beta, h0))
+    do, dht = torch.randn_like(v), torch.randn_like(h0)
+    if V > 32:
+        # isolate the value tiles missed by the old beta-gradient store.
+        do[..., :32] = 0
+        dht[..., :32] = 0
+
+    boundaries = [0, T] if cu_seqlens is None else cu_seqlens
+    ref, ref_ht = [], []
+    for i, (start, end) in enumerate(zip(boundaries[:-1], boundaries[1:])):
+        o, ht = delta_rule_recurrence(
+            q=q[:, start:end].transpose(1, 2),
+            k=k[:, start:end].transpose(1, 2),
+            v=v[:, start:end].transpose(1, 2),
+            beta=beta[:, start:end].transpose(1, 2),
+            initial_state=h0 if cu_seqlens is None else h0[i:i+1],
+        )
+        ref.append(o.transpose(1, 2))
+        ref_ht.append(ht)
+    ref, ref_ht = torch.cat(ref, dim=1), torch.cat(ref_ht, dim=0)
+    tri, tri_ht = fused_recurrent_delta_rule(
+        q=q, k=k, v=v, beta=beta, initial_state=h0, output_final_state=True,
+        cu_seqlens=None if cu_seqlens is None else torch.tensor(cu_seqlens, device=device, dtype=torch.int32),
+    )
+    ref_grads = torch.autograd.grad((ref, ref_ht), inputs, (do, dht))
+    tri_grads = torch.autograd.grad((tri, tri_ht), inputs, (do, dht))
+    for name, expected, actual, tolerance in zip(
+        ('o', 'ht', 'dq', 'dk', 'dv', 'db', 'dh0'),
+        (ref, ref_ht, *ref_grads), (tri, tri_ht, *tri_grads),
+        (0.006, 0.006, 0.008, 0.008, 0.008, 0.008, 0.008),
+    ):
+        assert torch.isfinite(actual).all(), name
+        assert_close(name, expected, actual, tolerance)
 
 
 @pytest.mark.parametrize(
