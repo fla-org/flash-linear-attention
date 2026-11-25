@@ -1,0 +1,16 @@
+{
+  "measurement": "Explicit FLA-package PTX entry versus pinned FlashQLA official forward",
+  "complete": true,
+  "cases": 171,
+  "passed": 171,
+  "faster_cases": 171,
+  "geomean_speedup": 1.8476344538261578,
+  "min_speedup": 1.393951407639562,
+  "max_speedup": 2.6446029870780605,
+  "max_output_relative_l2": 0.003907251778151067,
+  "max_state_relative_l2": 0.003164815783740085,
+  "max_sample_spread_percent": 0.6516358927561925,
+  "baseline_revision": "a14dbf3474514e1674526431e960325f72081e9f",
+  "fla_base_revision": "c55dc553edf44701bf703715ed052d811f8a6376",
+  "timing_backend": "cupti_concurrent_gpu_activity_span"
+}
