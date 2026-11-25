@@ -128,14 +128,20 @@ def test_fused_recurrent_varlen(
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'D', 'dtype'),
+    ('B', 'T', 'D', 'dtype', 'gate_scale', 'use_initial_state'),
     [
-        pytest.param(*test, id="B{}-T{}-D{}-{}".format(*test))
+        pytest.param(*test, id="B{}-T{}-D{}-{}-gate{}-h0{}".format(*test))
         for test in [
-            (1, 63, 500, torch.float16),
-            (2, 500, 1000, torch.float16),
-            (2, 1000, 1024, torch.float16),
-            (4, 2048, 2048, torch.float16),
+            (1, 63, 500, torch.float16, None, True),
+            (2, 500, 1000, torch.float16, None, True),
+            (2, 1000, 1024, torch.float16, None, True),
+            (4, 2048, 2048, torch.float16, None, True),
+            (4, 9216, 256, torch.float, 0.01, False),
+            (4, 9216, 256, torch.float, 0.001, False),
+            (2, 513, 65, torch.float, 0.001, True),
+            (2, 257, 31, torch.float, 0.01, True),
+            (2, 1025, 65, torch.bfloat16, 0.01, True),
+            (2, 513, 65, torch.float16, 0.001, True),
         ]
     ],
 )
@@ -145,27 +151,53 @@ def test_chunk(
     T: int,
     D: int,
     dtype: torch.dtype,
+    gate_scale: float | None,
+    use_initial_state: bool,
 ):
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
 
     x = torch.randn((B, T, D), dtype=dtype, device=device)
     g = torch.randn((B, T, D), dtype=dtype, device=device)
-    x, g = (1 - g.sigmoid()) * x, F.logsigmoid(g)
+    if gate_scale is None:
+        x, g = (1 - g.sigmoid()) * x, F.logsigmoid(g)
+    else:
+        x, g = 0.05 * x, -gate_scale * torch.rand_like(g)
     x, g = (i.detach().clone().to(dtype).requires_grad_() for i in (x, g))
 
     do = torch.randn_like(x)
-    h0 = torch.randn_like(x[:, 0])
-    ref, _ = fused_recurrent_hgrn(x, g, h0, output_final_state=True)
-    ref.backward(do)
+    h0 = torch.randn_like(x[:, 0]).requires_grad_() if use_initial_state else None
+    dht = torch.randn_like(x[:, 0])
+    ref, ref_ht = fused_recurrent_hgrn(x, g, h0, output_final_state=True)
+    ((ref * do).sum() + (ref_ht * dht).sum()).backward()
     ref_dx, x.grad = x.grad.clone(), None
     ref_dg, g.grad = g.grad.clone(), None
+    if h0 is not None:
+        ref_dh0, h0.grad = h0.grad.clone(), None
 
-    tri, _ = chunk_hgrn(x, g, h0, output_final_state=True)
-    tri.backward(do)
+    tri, tri_ht = chunk_hgrn(x, g, h0, output_final_state=True)
+    ((tri * do).sum() + (tri_ht * dht).sum()).backward()
     tri_dx, x.grad = x.grad.clone(), None
     tri_dg, g.grad = g.grad.clone(), None
+    if h0 is not None:
+        tri_dh0, h0.grad = h0.grad.clone(), None
 
     assert_close('o', ref, tri, 0.005)
+    assert_close('ht', ref_ht, tri_ht, 0.005)
     assert_close('dx', ref_dx, tri_dx, 0.005)
     assert_close('dg', ref_dg, tri_dg, 0.005)
+    if h0 is not None:
+        assert_close('dh0', ref_dh0, tri_dh0, 0.005)
+
+    if gate_scale is not None:
+        for _ in range(2):
+            repeated, repeated_ht = chunk_hgrn(x, g, h0, output_final_state=True)
+            ((repeated * do).sum() + (repeated_ht * dht).sum()).backward()
+            for actual, expected in [(repeated, tri), (repeated_ht, tri_ht), (x.grad, tri_dx), (g.grad, tri_dg)]:
+                assert torch.isfinite(actual).all()
+                assert torch.equal(actual, expected)
+            x.grad, g.grad = None, None
+            if h0 is not None:
+                assert torch.isfinite(h0.grad).all()
+                assert torch.equal(h0.grad, tri_dh0)
+                h0.grad = None

@@ -145,3 +145,27 @@ jobs:
             benchmark_meta.json
           if-no-files-found: ignore
           retention-days: 30
+
+      - name: Clean job-local test caches
+        if: always()
+        shell: bash
+        run: |
+          rm -rf .pytest_cache
+          find . -maxdepth 3 -type d -name .pytest_cache -prune -exec rm -rf {} + 2>/dev/null || true
+
+      - name: Prune benchmark git objects when large
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+            exit 0
+          fi
+          if ! git -c gc.autoDetach=false gc --auto; then
+            echo "::warning::git gc --auto failed; skipping forced gc"
+            exit 0
+          fi
+          size_kb=$(git count-objects -v | awk '/^size-pack:/ {print $2}')
+          if [ "${size_kb:-0}" -gt 1048576 ]; then
+            echo "git size-pack ${size_kb}KiB exceeds 1GiB; running git gc --prune=now"
+            git -c gc.autoDetach=false gc --prune=now || echo "::warning::git gc --prune=now failed"
+          fi

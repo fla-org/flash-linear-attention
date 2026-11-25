@@ -169,6 +169,14 @@ jobs:
               body,
             });
 
+      - name: Clean job-local test caches
+        if: always()
+        shell: bash
+        run: |
+          rm -rf .pytest_cache
+          find . -maxdepth 3 -type d -name .pytest_cache -prune -exec rm -rf {} + 2>/dev/null || true
+          rm -f /tmp/fla-dispatch-coverage.log
+
   test-models:
     runs-on: ${{ inputs.runner }}
     needs: test-ops
@@ -214,3 +222,10 @@ jobs:
         run: |
           echo "::error::No dependent tests were selected for this run"
           exit 1
+
+      - name: Clean job-local test caches
+        if: always()
+        shell: bash
+        run: |
+          rm -rf .pytest_cache
+          find . -maxdepth 3 -type d -name .pytest_cache -prune -exec rm -rf {} + 2>/dev/null || true

@@ -38,8 +38,8 @@ from fla.utils import IS_NVIDIA_HOPPER, assert_close, device
 @pytest.mark.parametrize("inplace", [True, False])
 @pytest.mark.parametrize("xprevdim", [2, 3])
 @pytest.mark.skipif(
-    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
-    reason="Skipping test because TEST_CHUNK_VARLEN is enabled",
+    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "1",
+    reason="Skipping test because SKIP_TEST_CHUNK_VARLEN is set",
 )
 def test_channel_mixing_gradients(B, T, n_embd, dim_ffn, dtype, inplace, xprevdim):
     torch.manual_seed(42)
@@ -132,8 +132,8 @@ def test_channel_mixing_no_out_of_bounds_writes():
 @pytest.mark.parametrize('scale', [None, 1])
 @pytest.mark.parametrize('dtype', [torch.float32])
 @pytest.mark.skipif(
-    os.getenv('SKIP_TEST_CHUNK_VARLEN') == '0',
-    reason='Skipping test because TEST_CHUNK_VARLEN is enabled',
+    os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
+    reason='Skipping test because SKIP_TEST_CHUNK_VARLEN is set',
 )
 def test_fused_mul_recurrent_fwd(
     B: int,
@@ -230,8 +230,8 @@ def test_chunk_wrapper_chunk_size(chunk_size: int):
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("use_g", [True, False])
 @pytest.mark.skipif(
-    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
-    reason="Skipping test because TEST_CHUNK_VARLEN is enabled",
+    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "1",
+    reason="Skipping test because SKIP_TEST_CHUNK_VARLEN is set",
 )
 def test_fused_rwkv7_addcmul(
     B: int,

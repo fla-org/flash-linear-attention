@@ -209,6 +209,18 @@ def test_parse_invalid_qkv_bias(value):
         parse_attention_config({'layers': [0], 'num_heads': 2, 'qkv_bias': value}, num_hidden_layers=1)
 
 
+@pytest.mark.parametrize('value', [0, -1, True, 1.5, '64'])
+def test_parse_invalid_rotary_dim(value):
+    with pytest.raises(ValueError, match=rf"rotary_dim.*{value!r}"):
+        parse_attention_config({'layers': [0], 'num_heads': 2, 'rotary_dim': value}, num_hidden_layers=1)
+
+
+@pytest.mark.parametrize('value', [0, 1, None, 'false'])
+def test_parse_invalid_o_bias(value):
+    with pytest.raises(ValueError, match=rf"o_bias.*{value!r}"):
+        parse_attention_config({'layers': [0], 'num_heads': 2, 'o_bias': value}, num_hidden_layers=1)
+
+
 @pytest.mark.parametrize('value', [0, -1, True, 1.5])
 def test_parse_invalid_window_size(value):
     with pytest.raises(ValueError, match=rf"window_size.*{value!r}"):
