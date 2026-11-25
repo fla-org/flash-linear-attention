@@ -38,7 +38,11 @@ def ref_prepare_position_ids(cu_seqlens):
 
 
 def ref_prepare_sequence_ids(cu_seqlens):
-    return ref_prepare_position_ids(cu_seqlens).eq(0).cumsum(0) - 1
+    lens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+    return torch.cat([
+        torch.full((n,), i, dtype=cu_seqlens.dtype, device=cu_seqlens.device)
+        for i, n in enumerate(lens)
+    ])
 
 
 def ref_prepare_token_indices(cu_seqlens):
@@ -176,6 +180,16 @@ def test_edge_cases():
         ref = ref_prepare_chunk_indices(cu_seqlens, chunk_size)
         opt = prepare_chunk_indices(cu_seqlens, chunk_size)
         torch.testing.assert_close(ref.long(), opt.long())
+
+
+@pytest.mark.parametrize("seqlens", [[0, 4], [2, 0, 2], [0, 0, 4], [3, 0, 2, 4], [0, 0, 0, 4]])
+def test_sequence_ids_with_empty_sequences(seqlens):
+    cu_seqlens = make_cu_seqlens(seqlens)
+    expected = ref_prepare_sequence_ids(cu_seqlens)
+    torch.testing.assert_close(prepare_sequence_ids(cu_seqlens).long(), expected.long())
+    torch.testing.assert_close(prepare_sequence_ids(cu_seqlens, cu_seqlens.cpu()).long(), expected.long())
+    expected_indices = torch.stack([expected, ref_prepare_position_ids(cu_seqlens)], 1)
+    torch.testing.assert_close(prepare_token_indices(cu_seqlens).long(), expected_indices.long())
 
 
 @skip_npu_compile
