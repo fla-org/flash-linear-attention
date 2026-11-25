@@ -56,7 +56,7 @@ jobs:
     runs-on: linux-aarch64-a2-8
     timeout-minutes: 180
     container:
-      image: ascendai/cann:9.1.0-910b-ubuntu22.04-py3.12
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-910b-ubuntu22.04-py3.12
       options: >-
         --shm-size 16g
       env:
