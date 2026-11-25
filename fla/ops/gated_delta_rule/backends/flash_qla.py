@@ -83,6 +83,8 @@ class FlashQLABackend(BaseBackend):
         # tl::pack_float16x4 on cutlass::half_t, which fails to compile under nvcc.
         if IS_NVIDIA_SM120 and q.dtype == torch.float16:
             return False, "FlashQLA's SM120 forward kernel does not compile for float16"
+        if beta.shape != v.shape[:3]:
+            return False, "FlashQLA requires a headwise beta of shape [B, T, HV]"
         if q.shape[-1] != 128:
             return False, f"FlashQLA requires K=128, got {q.shape[-1]}"
         if v.shape[-1] != 128:
