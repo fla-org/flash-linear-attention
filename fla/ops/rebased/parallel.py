@@ -420,7 +420,7 @@ class ParallelBasedFunction(torch.autograd.Function):
         )
         ctx.save_for_backward(q, k, v)
         ctx.scale = scale
-        return o.sum(0).to(q.dtype), z.sum(0).to(q.dtype)
+        return o.sum(0), z.sum(0)
 
     @staticmethod
     @input_guard
@@ -488,7 +488,7 @@ def parallel_rebased(
     q, k, v = map(lambda x: x.transpose(1, 2), (q, k, v))
     o, z = ParallelBasedFunction.apply(q, k, v, scale)
     if return_both:
-        return o, z
+        return o.to(q.dtype), z.to(q.dtype)
     if use_normalize:
         o = o / (z[..., None] + eps)
     o = o.transpose(1, 2)
