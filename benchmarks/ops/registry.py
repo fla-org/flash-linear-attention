@@ -841,7 +841,26 @@ register_op(OpConfig(
     category='flash_attn',
 ))
 
-# attnres aggregates over an L axis of stacked residual sources.
+
+# --- Parallax (parameterized local linear attention) ---
+
+
+register_op(OpConfig(
+    name='parallel_parallax',
+    import_path='fla.ops.parallax',
+    inputs={
+        'q': TensorSpec(shape_BTHD),
+        'r': TensorSpec(shape_BTHD),
+        'k': TensorSpec(shape_BTHD),
+        'v': TensorSpec(shape_BTHD),
+    },
+    output_is_tuple=False,
+    category='parallax',
+))
+
+# --- layer-axis residual aggregation (AttnRes, mHC, ...) ---
+# These ops attend / aggregate over an `L` axis of stacked residual sources.
+# Inputs and shape sweeps are shared so future ops (mHC etc.) can reuse them.
 
 _layer_default_shapes = {
     'L8_B1_T8K_D2K':   {'L': 8,  'B': 1, 'T': 8192,  'H': 1, 'D': 2048},
