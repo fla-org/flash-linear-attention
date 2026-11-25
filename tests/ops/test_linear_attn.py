@@ -355,6 +355,36 @@ def test_normalize_zinit_grad(fn, B: int, T: int, split: int, H: int, D: int):
     assert_close('dv', full_dv, split_dv, 0.005)
 
 
+@pytest.mark.parametrize(
+    'fn',
+    [
+        pytest.param(chunk_linear_attn, id='chunk'),
+        pytest.param(fused_chunk_linear_attn, id='fused_chunk'),
+        pytest.param(fused_recurrent_linear_attn, id='fused_recurrent'),
+    ],
+)
+def test_normalize_fp16_grad_normalizer_overflow(fn):
+    # in float16, when running denominator exceeds 256, denom*denom overflows 65504 to inf.
+    # evaluating denominator products in float32 preserves exact gradient contributions.
+    # compute the float64 reference oracle on CPU for portability across hardware backends (e.g. Ascend).
+    shape = (1, 128, 1, 16)
+    qr = torch.ones(shape, dtype=torch.float64, device='cpu', requires_grad=True)
+    kr = torch.ones_like(qr, requires_grad=True)
+    vr = torch.ones_like(qr)
+    scores = torch.einsum("bthk,bshk->bhts", qr * 0.25, kr).tril()
+    ref = (scores @ vr.transpose(1, 2)) / (scores.sum(-1, keepdim=True) + 1e-10)
+    ref_dq, ref_dk = torch.autograd.grad(ref[:, :, -1].sum(), (qr, kr))
+
+    q = torch.ones(shape, dtype=torch.float16, device=device, requires_grad=True)
+    k = torch.ones_like(q, requires_grad=True)
+    v = torch.ones_like(q)
+    out, _ = fn(q, k, v, normalize=True)
+    dq, dk = torch.autograd.grad(out[:, -1].sum(), (q, k))
+
+    assert_close('dq', ref_dq.to(torch.float16).to(device), dq, 0.005)
+    assert_close('dk', ref_dk.to(torch.float16).to(device), dk, 0.005)
+
+
 @pytest.mark.smoke
 @pytest.mark.parametrize('dtype', [torch.float32, torch.bfloat16, torch.float16], ids=['fp32', 'bf16', 'fp16'])
 @pytest.mark.parametrize('packed', [False, True], ids=['padded', 'packed'])
