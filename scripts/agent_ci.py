@@ -78,7 +78,7 @@ def validate_dispatch(catalog: dict, suite_name: str, dispatch: str) -> list[str
     if dispatch not in allowed:
         raise AgentCIError(f"Dispatch mode {dispatch} is not allowed for {suite_name}")
     if dispatch == "both":
-        return ["off", "on"]
+        return ["on", "off"]
     return [dispatch]
 
 
@@ -100,6 +100,7 @@ def require_evidence(result: dict) -> None:
 
 def run_targets(catalog: dict, repo: Path, platform: str, suite: str, targets: list[str], dispatch: str, results: Path) -> dict:
     records = []
+    failures = []
     pytest_args = []
     if platform in {"ascend-a2", "ascend-a5"} and suite != "cp":
         pytest_args = ["-n", "8", "--dist", "load"]
@@ -118,14 +119,18 @@ def run_targets(catalog: dict, repo: Path, platform: str, suite: str, targets: l
                 check=False,
             )
             if not junit.is_file():
-                raise AgentCIError(f"Pytest did not produce JUnit XML for {target} ({mode})")
+                failures.append(f"Pytest did not produce JUnit XML for {target} ({mode})")
+                continue
             result = read_junit(junit)
             result.update({"target": target, "dispatch": mode, "exit_code": completed.returncode})
             records.append(result)
-            require_evidence(result)
+            try:
+                require_evidence(result)
+            except AgentCIError as error:
+                failures.append(f"{target} ({mode}): {error}")
             if completed.returncode != 0:
-                raise AgentCIError(f"Pytest failed for {target} ({mode}); see JUnit XML")
-    return {"test_count": len(records), "results": records}
+                failures.append(f"Pytest failed for {target} ({mode}); see JUnit XML")
+    return {"test_count": len(records), "results": records, "failures": failures}
 
 
 def main() -> int:
@@ -167,14 +172,13 @@ def main() -> int:
         "suite": args.suite,
         "dispatch": args.dispatch,
     }
-    try:
-        summary = run_targets(catalog, repo, args.platform, args.suite, targets, args.dispatch, args.results)
-        metadata.update({"status": "passed", **summary})
-    except AgentCIError as error:
-        metadata.update({"status": "invalid_or_failed", "error": str(error)})
-        args.metadata.write_text(json.dumps(metadata, indent=2) + "\n")
-        raise
+    summary = run_targets(catalog, repo, args.platform, args.suite, targets, args.dispatch, args.results)
+    metadata.update({"status": "invalid_or_failed" if summary["failures"] else "passed", **summary})
+    if summary["failures"]:
+        metadata["error"] = "; ".join(summary["failures"])
     args.metadata.write_text(json.dumps(metadata, indent=2) + "\n")
+    if summary["failures"]:
+        raise AgentCIError(metadata["error"])
     print(json.dumps(metadata))
     return 0
 
