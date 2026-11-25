@@ -43,6 +43,9 @@ Repository = "https://github.com/fla-org/flash-linear-attention"
 [build-system]
 requires = ["setuptools>=64", "wheel"]
 
+[tool.setuptools.package-data]
+"fla.ops.gated_delta_rule.backends.qla_cute" = ["*.json", "*.md"]
+
 [tool.setuptools.dynamic]
 version = {attr = "fla.__version__"}
 

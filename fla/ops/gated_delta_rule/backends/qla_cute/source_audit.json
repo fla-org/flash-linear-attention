@@ -1,0 +1,20 @@
+{
+  "passed": true,
+  "equivalent_modules": [
+    "kernel.py",
+    "gdn.py",
+    "gdn_prep.py",
+    "gdn_recur.py",
+    "gdn_tc.py"
+  ],
+  "method": "AST comparison excluding docstrings, import namespaces, constant-disabled launch skipping, and an equivalent host comparison direction.",
+  "gpu_arithmetic_unchanged": true,
+  "identifier_and_path_scan": "passed",
+  "public_source_sha256": {
+    "kernel.py": "c21bc7a4bf1bdae9a58675d379004343e064e357d98438b3e27bd353abcb21ee",
+    "gdn.py": "30e52c22e10978cff0946d37365afcbe17323170f6ba9113fff4398098397729",
+    "gdn_prep.py": "626cbcae3733a83e77dfafdee8590b18e6faea8d5bdada3a2a1834a15889c6cf",
+    "gdn_recur.py": "22c865ff3682f5b13cecf201165e6baa997ed4524a7869027ffd581de664e0c0",
+    "gdn_tc.py": "5921a5e0de10eeb4748c202d49c34878f9cdd44622d2a306013a14a1f093d565"
+  }
+}

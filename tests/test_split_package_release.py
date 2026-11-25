@@ -116,6 +116,9 @@ def test_split_wheels_match_release_contract(tmp_path: Path) -> None:
     assert "fla/ops/__init__.py" in core_names
     assert "fla/modules/__init__.py" in core_names
     assert "fla/backends.py" in core_names
+    cute_root = ROOT / "fla/ops/gated_delta_rule/backends/qla_cute"
+    cute_assets = {path.relative_to(ROOT).as_posix() for path in cute_root.rglob("*") if path.suffix in {".json", ".md"}}
+    assert cute_assets <= core_names
     expected_sources = {path.relative_to(ROOT).as_posix() for path in (ROOT / "fla/modules").rglob("*.py")}
     assert expected_sources <= core_names
     assert "fla/utils/__init__.py" in core_names
