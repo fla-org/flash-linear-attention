@@ -66,7 +66,41 @@ class AgentCITest(unittest.TestCase):
         self.assertEqual(targets, ["tests/utils"])
 
     def test_both_dispatch_modes(self):
-        self.assertEqual(agent_ci.validate_dispatch(self.catalog, "ops", "both"), ["off", "on"])
+        self.assertEqual(agent_ci.validate_dispatch(self.catalog, "ops", "both"), ["on", "off"])
+
+    def test_failing_leg_does_not_skip_remaining_targets_or_modes(self):
+        from unittest import mock
+
+        def fake_pytest(command, cwd, env, check):
+            target = command[-1]
+            junit = Path(next(arg.split("=", 1)[1] for arg in command if arg.startswith("--junitxml=")))
+            failing = target.endswith("test_bad") and env.get("FLA_DISABLE_BACKEND_DISPATCH") == "1"
+            failures = 1 if failing else 0
+            junit.write_text(f'<testsuite tests="2" skipped="0" failures="{failures}" errors="0"/>')
+            return mock.Mock(returncode=1 if failing else 0)
+
+        results = self.repo / "junit"
+        results.mkdir()
+        with mock.patch.object(agent_ci.subprocess, "run", side_effect=fake_pytest) as run:
+            summary = agent_ci.run_targets(
+                self.catalog,
+                self.repo,
+                "ascend-a2",
+                "ops",
+                ["tests/ops/test_ok.py::test_bad", "tests/ops/test_ok.py::test_ok"],
+                "both",
+                results,
+            )
+
+        modes = [call.kwargs["env"].get("FLA_DISABLE_BACKEND_DISPATCH") for call in run.call_args_list]
+        self.assertEqual(modes, [None, None, "1", "1"])
+        self.assertEqual(summary["test_count"], 4)
+        self.assertEqual(len(summary["failures"]), 1)
+        self.assertIn("tests/ops/test_ok.py::test_bad (off)", summary["failures"][0])
+        self.assertTrue((results / "on-0.xml").is_file())
+        self.assertTrue((results / "on-1.xml").is_file())
+        self.assertTrue((results / "off-0.xml").is_file())
+        self.assertTrue((results / "off-1.xml").is_file())
 
     def test_top_level_suite_rejects_nested_tests(self):
         catalog = {"suites": {"top-level": {"root": "tests",
