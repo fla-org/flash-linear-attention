@@ -87,7 +87,7 @@ jobs:
       cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
     container:
-      image: ascendai/cann:9.1.0-910b-ubuntu22.04-py3.12
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-910b-ubuntu22.04-py3.12
       options: >-
         --shm-size 16g
       env:
@@ -207,7 +207,7 @@ jobs:
             --custom-shapes "$PRECOND_KDA_SHAPES" --json benchmark_chunk_precond_kda.json
           echo "Benchmark chunk_precond_kda prewarm: elapsed=$((SECONDS - precond_started))s"
 
-      - name: Benchmark chunk_gdn, fused_recurrent_gdn2, chunk_gdn2, chunk_kda, KDA graph, fused_attnres, conv1d, chunk_precond_gdn, parallel_wall_attn, fused_recurrent_oja, chunk_precond_kda, and chunk_ttt
+      - name: Benchmark chunk_gdn, fused_recurrent_gdn2, chunk_gdn2, chunk_kda, KDA graph, fused_attnres, conv1d, chunk_momentum_delta, chunk_precond_gdn, parallel_wall_attn, fused_recurrent_oja, chunk_precond_kda, chunk_ttt, and parallel_parallax
         id: benchmark
         if: github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
         shell: bash
@@ -291,6 +291,10 @@ jobs:
           pid_conv1d=$!
           status=0
           wait "$pid_conv1d" || status=1
+          run_benchmark chunk_momentum_delta 3 python -m benchmarks.ops.run \
+            --op chunk_momentum_delta --base '' --json benchmark_chunk_momentum_delta.json &
+          pid_momentum=$!
+          wait "$pid_momentum" || status=1
           (
             set -e
             ASCEND_RT_VISIBLE_DEVICES=3 python -m benchmarks.ops.run \
@@ -303,6 +307,9 @@ jobs:
               --op chunk_ttt --base '' --json benchmark_chunk_ttt.json \
               --custom-shapes '{"B8_T1024_H8_D64": {"B": 8, "T": 1024, "H": 8, "D": 64}, "B4_T4096_H32_D64": {"B": 4, "T": 4096, "H": 32, "D": 64}, "B8_T2048_H16_D64": {"B": 8, "T": 2048, "H": 16, "D": 64}, "B1_T16384_H16_D64": {"B": 1, "T": 16384, "H": 16, "D": 64}}' \
               > chunk_ttt.log 2>&1
+            ASCEND_RT_VISIBLE_DEVICES=3 python -m benchmarks.ops.run \
+              --op parallel_parallax --base '' --json benchmark_parallel_parallax.json \
+              > parallel_parallax.log 2>&1
           ) &
           pid_precond_gdn=$!
 
@@ -339,6 +346,8 @@ jobs:
           cat chunk_kda_graph.log
           echo "========== conv1d =========="
           cat conv1d.log
+          echo "========== chunk_momentum_delta =========="
+          cat chunk_momentum_delta.log
           echo "========== chunk_precond_gdn =========="
           cat chunk_precond_gdn.log
           echo "========== chunk_precond_kda =========="
@@ -347,6 +356,8 @@ jobs:
           cat parallel_wall_attn.log
           echo "========== chunk_ttt =========="
           cat chunk_ttt.log
+          echo "========== parallel_parallax =========="
+          cat parallel_parallax.log
           exit "$status"
 
       - name: Validate chunk_kda benchmark results
@@ -485,6 +496,8 @@ jobs:
             benchmark_kda_graph.json
             benchmark_parallel_wall_attn.json
             benchmark_chunk_ttt.json
+            benchmark_chunk_momentum_delta.json
+            benchmark_parallel_parallax.json
             conv_benchmark/
           if-no-files-found: ignore
           retention-days: 10

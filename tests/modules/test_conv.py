@@ -1363,3 +1363,47 @@ def test_conv_backend_dispatch(
     y, _ = causal_conv1d(x=x, weight=weight, activation='silu')
     y.sum().backward()
     assert not conv_backend_calls
+
+
+@pytest.mark.parametrize('has_residual', [False, True])
+@pytest.mark.parametrize('has_initial_state', [False, True])
+def test_conv_4d_backward(has_residual: bool, has_initial_state: bool):
+    torch.manual_seed(42)
+    B, T, H, K, W = 2, 64, 4, 32, 4
+    D = H * K
+    dtype = torch.float32
+
+    x = torch.randn(B, T, H, K, device=device, dtype=dtype, requires_grad=True)
+    weight = torch.randn(D, W, device=device, dtype=dtype, requires_grad=True)
+    bias = torch.randn(D, device=device, dtype=dtype, requires_grad=True)
+    residual = torch.randn(B, T, H, K, device=device, dtype=dtype, requires_grad=True) if has_residual else None
+    initial_state = torch.randn(B, D, W, device=device, dtype=dtype, requires_grad=True) if has_initial_state else None
+    dy = torch.randn(B, T, H, K, device=device, dtype=dtype)
+
+    x_3d = x.detach().reshape(B, T, D).requires_grad_(True)
+    w_ref = weight.detach().clone().requires_grad_(True)
+    b_ref = bias.detach().clone().requires_grad_(True)
+    r_3d = residual.detach().reshape(B, T, D).requires_grad_(True) if has_residual else None
+    h0_ref = initial_state.detach().clone().requires_grad_(True) if has_initial_state else None
+
+    y_3d, _ = causal_conv1d(
+        x=x_3d, weight=w_ref, bias=b_ref, residual=r_3d, initial_state=h0_ref, activation="swish", backend="triton"
+    )
+    y_3d.backward(dy.reshape(B, T, D))
+
+    y_4d, _ = causal_conv1d(
+        x=x, weight=weight, bias=bias, residual=residual, initial_state=initial_state, activation="swish", backend="triton"
+    )
+    y_4d.backward(dy)
+
+    assert y_4d.shape == (B, T, H, K)
+    assert x.grad.shape == (B, T, H, K)
+    assert_close("y", y_3d.view(B, T, H, K), y_4d, 1e-5)
+    assert_close("dx", x_3d.grad.view(B, T, H, K), x.grad, 1e-5)
+    assert_close("dw", w_ref.grad, weight.grad, 1e-5)
+    assert_close("db", b_ref.grad, bias.grad, 1e-5)
+    if has_residual:
+        assert residual.grad.shape == (B, T, H, K)
+        assert_close("dr", r_3d.grad.view(B, T, H, K), residual.grad, 1e-5)
+    if has_initial_state:
+        assert_close("dh0", h0_ref.grad, initial_state.grad, 1e-5)

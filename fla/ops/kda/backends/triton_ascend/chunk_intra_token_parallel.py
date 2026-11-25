@@ -16,16 +16,38 @@ import triton.language as tl
 from fla.backends import TritonAscendBackend, register
 from fla.ops.common.backends.triton_ascend.chunk_delta_h import mload, mstore
 from fla.ops.kda.chunk_intra_token_parallel import chunk_kda_fwd_intra_token_parallel
+from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.op import exp2
-from fla.utils import input_guard
+from fla.utils import autotune_cache_kwargs, input_guard
 from fla.utils.ascend_ub_manager import (
     ASCEND_MAX_GRID_DIM,
+    compute_row_tile_block_size,
+    get_ub_manager,
     max_grid_axis_chunks,
 )
 
 HEAD_BLOCK_SIZE = 4
-NUM_WARPS = 2
-_BH = 4
+HEAD_TILES = (4, 8, 16, 32)
+COLUMN_TILES = (1, 2, 4, 8, 16)
+
+
+def prune_head_tiles(configs, nargs, **kwargs):
+    args = {**nargs, **kwargs}
+    # each column adds a full set of FP32 query, key, gate, and temporary rows.
+    limits = {}
+    for bj in COLUMN_TILES:
+        limits[bj] = compute_row_tile_block_size(
+            row_dim=max(HEAD_TILES),
+            fixed_dim=triton.next_power_of_2(args['K']),
+            memory_multiplier=8.0 * bj,
+            safety_margin=0.75,
+            fallback=1,
+            min_block=1,
+            max_block=max(HEAD_TILES),
+        )
+    return [config for config in configs
+            if config.kwargs.get('BH') in HEAD_TILES and config.kwargs.get('BJ') in COLUMN_TILES
+            and config.kwargs['BH'] <= limits[config.kwargs['BJ']]]
 
 
 def launch_token_parallel_kernel(
@@ -35,22 +57,30 @@ def launch_token_parallel_kernel(
     hv_total: int,
     kernel_kwargs: dict,
 ) -> None:
-    hg_total = triton.cdiv(hv_total, HEAD_BLOCK_SIZE)
+    hg_total = triton.cdiv(hv_total, min(HEAD_TILES))
     max_tg = max_grid_axis_chunks(tg_total, hg_total, max_grid=ASCEND_MAX_GRID_DIM)
     for tg_off in range(0, tg_total, max_tg):
         tg_len = min(max_tg, tg_total - tg_off)
         kernel_kwargs['TG_OFFSET'] = tg_off
         max_hg = max_grid_axis_chunks(hg_total, tg_len, max_grid=ASCEND_MAX_GRID_DIM)
-        for hg_off in range(0, hg_total, max_hg):
-            hg_len = min(max_hg, hg_total - hg_off)
-            kernel_kwargs['HG_OFFSET'] = hg_off
-            kernel[(tg_len, hg_len)](num_warps=NUM_WARPS, **kernel_kwargs)
+        head_step = max(max(HEAD_TILES), max_hg * min(HEAD_TILES) // max(HEAD_TILES) * max(HEAD_TILES))
+        for head_off in range(0, hv_total, head_step):
+            head_len = min(head_step, hv_total - head_off)
+            kernel_kwargs['HEAD_OFFSET'] = head_off
+            kernel_kwargs['TG_LEN'] = tg_len
+            kernel_kwargs['HEAD_LEN'] = head_len
+            kernel[lambda meta: (tg_len, triton.cdiv(head_len, meta['BH']))](**kernel_kwargs)
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
+    'MASK_DMA': lambda args: not (
+        args['HV'] % args['BH'] == 0 and triton.next_power_of_2(args['K']) == args['K']
+        and (args.get('BJ', 1) == 1 or (
+            not args['IS_VARLEN'] and args['T'] % args['BJ'] == 0 and args['BC'] % args['BJ'] == 0
+        ))
+    ),
 })
-@triton.jit(do_not_specialize=['T', 'N'])
+@triton.jit(do_not_specialize=['T', 'N', 'TG_LEN', 'HEAD_LEN', 'UB_CAPACITY'])
 def chunk_kda_fwd_kernel_intra_token_parallel_npu(
     q,
     k,
@@ -62,6 +92,9 @@ def chunk_kda_fwd_kernel_intra_token_parallel_npu(
     cu_seqlens,
     N,
     T,
+    TG_LEN,
+    HEAD_LEN,
+    UB_CAPACITY,
     H: tl.constexpr,
     HV: tl.constexpr,
     K: tl.constexpr,
@@ -69,12 +102,13 @@ def chunk_kda_fwd_kernel_intra_token_parallel_npu(
     BC: tl.constexpr,
     BH: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    MASK_DMA: tl.constexpr,
     TG_OFFSET: tl.constexpr,
-    HG_OFFSET: tl.constexpr,
+    HEAD_OFFSET: tl.constexpr,
+    MASK_DMA: tl.constexpr,
+    BJ: tl.constexpr = 1,
 ):
     i_tg = tl.program_id(0) + TG_OFFSET
-    i_hg = tl.program_id(1) + HG_OFFSET
+    i_hg = tl.program_id(1)
 
     if IS_VARLEN:
         # graph replay can leave unused token slots in the fixed grid;
@@ -100,8 +134,8 @@ def chunk_kda_fwd_kernel_intra_token_parallel_npu(
     else:
         bos = tl.cast(i_tg // T, tl.int64) * T
         i_t = i_tg % T
-    i_t = tl.cast(i_t, tl.int64)
 
+    i_t = tl.cast(i_t, tl.int64)
     if i_t >= T:
         return
 
@@ -120,7 +154,8 @@ def chunk_kda_fwd_kernel_intra_token_parallel_npu(
     beta += bos * HV
 
     BK: tl.constexpr = triton.next_power_of_2(K)
-    o_hv = i_hg * BH + tl.arange(0, BH)
+    head_base = tl.cast(HEAD_OFFSET, tl.int64) + tl.cast(i_hg, tl.int64) * BH
+    o_hv = head_base + tl.arange(0, BH)
     o_h = o_hv // G
     o_k = tl.arange(0, BK)
     m_hv = o_hv < HV
@@ -130,29 +165,50 @@ def chunk_kda_fwd_kernel_intra_token_parallel_npu(
     p_qk = o_h[:, None] * K + o_k[None, :]
     b_q = mload(q + i_t * H * K + p_qk, m_hk, MASK_DMA).to(tl.float32)
     b_k = mload(k + i_t * H * K + p_qk, m_hk, MASK_DMA).to(tl.float32)
+    p_g = o_hv[:, None] * K + o_k[None, :]
+    b_g = mload(g + i_t * HV * K + p_g, m_hk, MASK_DMA).to(tl.float32)
+    b_k *= mload(beta + i_t * HV + o_hv, m_hv, MASK_DMA).to(tl.float32)[:, None]
 
-    o_h_2 = i_hg * BH + tl.arange(0, BH)
-    m_h_2 = (o_h_2 >= 0) & (o_h_2 < HV)
-    o_i = tl.arange(0, BK)
-    m_i = (o_i >= 0) & (o_i < K)
-    m_p_g = m_h_2[:, None] & m_i[None, :]
-    p_g = g + i_t * HV * K + o_h_2[:, None] * K + o_i[None, :]
-    p_beta = beta + i_t * HV + o_h_2
-    b_g = mload(p_g, m_p_g, MASK_DMA).to(tl.float32)
-    b_k = b_k * mload(p_beta, m_h_2, MASK_DMA).to(tl.float32)[:, None]
+    if BJ == 1:
+        for j in range(i_ts, min(i_t + 1, min(T, i_ts + BC))):
+            j64 = tl.cast(j, tl.int64)
+            b_kj = mload(k + j64 * H * K + p_qk, m_hk, MASK_DMA).to(tl.float32)
+            b_gj = mload(g + j64 * HV * K + p_g, m_hk, MASK_DMA).to(tl.float32)
+            b_kgj = tl.where(m_k[None, :], b_kj * exp2(b_g - b_gj), 0.0)
+            b_Aqk = tl.sum(b_q * b_kgj, axis=1) * scale
+            b_Akk = tl.sum(b_k * b_kgj, axis=1) * tl.where(j < i_t, 1.0, 0.0)
+            mstore(Aqk + i_t * HV * BT + o_hv * BT + j % BT,
+                   b_Aqk.to(Aqk.dtype.element_ty), m_hv, MASK_DMA)
+            mstore(Akk + i_t * HV * BC + o_hv * BC + j - i_ts,
+                   b_Akk.to(Akk.dtype.element_ty), m_hv, MASK_DMA)
+    else:
+        o_j = tl.arange(0, BJ)
+        for j in range(i_ts, min(i_t + 1, min(T, i_ts + BC)), BJ):
+            j64 = tl.cast(j, tl.int64)
+            rows = j64 + o_j
+            m_jhk = (rows[:, None, None] < T) & m_hk[None, :, :]
+            p_kj = ((k + j64 * H * K) + o_j[:, None, None] * (H * K)
+                    + o_h[None, :, None] * K + o_k[None, None, :])
+            p_gj = ((g + j64 * HV * K) + o_j[:, None, None] * (HV * K)
+                    + o_hv[None, :, None] * K + o_k[None, None, :])
+            b_kj = mload(p_kj, m_jhk, MASK_DMA).to(tl.float32)
+            b_gj = mload(p_gj, m_jhk, MASK_DMA).to(tl.float32)
+            b_kgj = tl.where(m_k[None, None, :], b_kj * exp2(b_g[None, :, :] - b_gj), 0.0)
+            b_Aqk = tl.sum(b_q[None, :, :] * b_kgj, axis=2) * scale
+            b_Akk = tl.sum(b_k[None, :, :] * b_kgj, axis=2) * tl.where(rows[:, None] < i_t, 1., 0.)
+            p_aq = Aqk + i_t * HV * BT + o_hv[:, None] * BT + j % BT + o_j[None, :]
+            p_ak = Akk + i_t * HV * BC + o_hv[:, None] * BC + j - i_ts + o_j[None, :]
+            m_out = m_hv[:, None] & (rows[None, :] <= i_t)
+            tl.store(p_aq, tl.trans(b_Aqk).to(Aqk.dtype.element_ty), mask=m_out)
+            tl.store(p_ak, tl.trans(b_Akk).to(Akk.dtype.element_ty), mask=m_out)
 
-    for j in range(i_ts, min(i_t + 1, min(T, i_ts + BC))):
-        j64 = tl.cast(j, tl.int64)
-        b_kj = mload(k + j64 * H * K + p_qk, m_hk, MASK_DMA).to(tl.float32)
-        p_gj = g + j64 * HV * K + o_h_2[:, None] * K + o_i[None, :]
-        b_gj = mload(p_gj, m_p_g, MASK_DMA).to(tl.float32)
 
-        b_kgj = tl.where(m_k[None, :], b_kj * exp2(b_g - b_gj), 0.0)
-        b_Aqk = tl.sum(b_q * b_kgj, axis=1) * scale
-        b_Akk = tl.sum(b_k * b_kgj, axis=1) * tl.where(j < i_t, 1.0, 0.0)
-
-        mstore(Aqk + i_t * HV * BT + o_hv * BT + j % BT, b_Aqk.to(Aqk.dtype.element_ty), m_hv, MASK_DMA)
-        mstore(Akk + i_t * HV * BC + o_hv * BC + j - i_ts, b_Akk.to(Akk.dtype.element_ty), m_hv, MASK_DMA)
+_autotuned_token_parallel = fla_cache_autotune(
+    configs=[triton.Config({'BH': bh, 'BJ': bj}) for bh in HEAD_TILES for bj in COLUMN_TILES],
+    key=['T', 'N', 'TG_LEN', 'HEAD_LEN', 'UB_CAPACITY', 'H', 'HV', 'K', 'BT', 'BC', 'IS_VARLEN'],
+    prune_configs_by={'early_config_prune': prune_head_tiles},
+    **autotune_cache_kwargs,
+)(chunk_kda_fwd_kernel_intra_token_parallel_npu)
 
 
 def chunk_kda_fwd_intra_token_parallel_verifier(
@@ -205,30 +261,20 @@ def chunk_kda_fwd_intra_token_parallel_npu(
     BT = chunk_size
     BC = sub_chunk_size
 
+    # autotuning benchmarks cannot run during graph capture.
+    kernel = chunk_kda_fwd_kernel_intra_token_parallel_npu if use_graph else _autotuned_token_parallel
+    ub_capacity = 0 if use_graph else get_ub_manager().ub_capacity_bits
+    kernel_kwargs = dict(
+        q=q, k=k, g=gk, beta=beta, Aqk=Aqk, Akk=Akk, scale=scale,
+        cu_seqlens=cu_seqlens, N=N, T=T, H=H, HV=HV, K=K, BT=BT, BC=BC,
+        UB_CAPACITY=ub_capacity, IS_VARLEN=cu_seqlens is not None,
+    )
+    if use_graph:
+        kernel_kwargs['BH'] = HEAD_BLOCK_SIZE
     launch_token_parallel_kernel(
-        chunk_kda_fwd_kernel_intra_token_parallel_npu,
+        kernel,
         tg_total=B * T,
         hv_total=HV,
-        kernel_kwargs=dict(
-            q=q,
-            k=k,
-            g=gk,
-            beta=beta,
-            Aqk=Aqk,
-            Akk=Akk,
-            scale=scale,
-            cu_seqlens=cu_seqlens,
-            N=N,
-            T=T,
-            H=H,
-            HV=HV,
-            K=K,
-            BT=BT,
-            BC=BC,
-            BH=HEAD_BLOCK_SIZE,
-            MASK_DMA=not (HV % _BH == 0 and triton.next_power_of_2(K) == K),
-            TG_OFFSET=0,
-            HG_OFFSET=0,
-        ),
+        kernel_kwargs=kernel_kwargs,
     )
     return Aqk, Akk
