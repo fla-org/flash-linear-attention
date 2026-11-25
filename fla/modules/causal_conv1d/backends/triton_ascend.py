@@ -50,8 +50,8 @@ _TILE_CONFIG_BY_SERIES = {
 }
 
 
-def _get_conv1d_tile_config(device_index: int) -> _Conv1dTileConfig:
-    series = get_npu_arch_series(get_npu_target_arch(device_index))
+def _get_conv1d_tile_config() -> _Conv1dTileConfig:
+    series = get_npu_arch_series(get_npu_target_arch())
     return _TILE_CONFIG_BY_SERIES.get(series, _DEFAULT_TILE_CONFIG)
 
 
@@ -941,7 +941,7 @@ def causal_conv1d_bwd_dx_kernel(
 
 
 def _launch_bwd_dx_core(dy, weight, dht, cu_seqlens, cu_seqlens_cpu, B, T, D, W, BT, BD=None) -> torch.Tensor:
-    tile_budget = _get_conv1d_tile_config(dy.device.index).dx_tile_budget
+    tile_budget = _get_conv1d_tile_config().dx_tile_budget
     # dht needs smaller tiles because its extra branch overflows Ascend UB at the forward tile size.
     if BD is None:
         if dht is not None:
@@ -1617,15 +1617,12 @@ def _launch_fwd_coregrid(
     """
     B, T, D = x.shape
     W = weight.shape[1]
-    weight_wd = weight.transpose(0, 1).contiguous()
-    NUM_CORES = get_multiprocessor_count(x.device.index)
-    tile_config = _get_conv1d_tile_config(x.device.index)
-    preferred_bd = 256
-    if x.dtype == torch.float32:
-        preferred_bd = tile_config.fp32_fwd_bd
+    preferred_bd = _get_conv1d_tile_config().fp32_fwd_bd if x.dtype == torch.float32 else 256
     BD = _select_coregrid_bd(D=D, preferred=preferred_bd)
     if BD is None:
         raise RuntimeError(f'coregrid fwd: no aligned BD for D={D}')
+    weight_wd = weight.transpose(0, 1).contiguous()
+    NUM_CORES = get_multiprocessor_count(x.device.index)
     BT = min(32, triton.next_power_of_2(triton.cdiv(max(16, B * T), NUM_CORES)))
     NUM_BLKS_D = triton.cdiv(D, BD)
     if cu_seqlens is not None:

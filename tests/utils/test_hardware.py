@@ -5,32 +5,74 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import Mock
+
+import pytest
 
 from fla.utils import hardware
 
 
-def test_get_npu_target_arch_retries_per_device(monkeypatch, request):
-    device_context = MagicMock(side_effect=nullcontext)
-    get_target = MagicMock()
-    monkeypatch.setattr(hardware.torch, 'npu', SimpleNamespace(device=device_context), raising=False)
+@pytest.fixture
+def npu_target_query(monkeypatch):
+    query = Mock()
     monkeypatch.setattr(hardware.triton.runtime, 'driver', SimpleNamespace(
-        active=SimpleNamespace(get_current_target=get_target)))
+        active=SimpleNamespace(get_current_target=query),
+    ))
     hardware._get_npu_target_arch.cache_clear()
-    request.addfinalizer(hardware._get_npu_target_arch.cache_clear)
-    get_target.side_effect = [
-        RuntimeError('target temporarily unavailable'),
-        SimpleNamespace(backend='npu', arch='Ascend910_9391'),
-        SimpleNamespace(backend='npu', arch='Ascend950DT'),
-        SimpleNamespace(backend='cuda', arch=90),
+    yield query
+    hardware._get_npu_target_arch.cache_clear()
+
+
+def test_get_npu_target_arch_retries_and_caches(npu_target_query, monkeypatch):
+    query = npu_target_query
+    current_device = Mock(return_value=0)
+    monkeypatch.setattr(hardware.torch, 'npu', SimpleNamespace(current_device=current_device), raising=False)
+    query.side_effect = [
+        SystemError('target temporarily unavailable'),
+        SimpleNamespace(backend='npu', arch='Ascend950DT_9582'),
     ]
-    assert hardware.get_npu_target_arch(0) == ''
-    assert hardware.get_npu_target_arch(1) == 'Ascend910_9391'
-    assert hardware.get_npu_target_arch(0) == 'Ascend950DT'
-    assert hardware.get_npu_target_arch(2) == ''
-    assert hardware.get_npu_target_arch(1) == 'Ascend910_9391'
-    assert hardware.get_npu_target_arch(0) == 'Ascend950DT'
-    assert [call.args[0] for call in device_context.call_args_list] == [0, 1, 0, 2]
-    assert get_target.call_count == 4
+
+    assert hardware.get_npu_target_arch() == 'Ascend950DT_9582'
+    current_device.return_value = 1
+    assert hardware.get_npu_target_arch() == 'Ascend950DT_9582'
+    assert query.call_count == 2
+
+
+@pytest.mark.parametrize(
+    ('retry_result', 'retry_message'),
+    [
+        pytest.param(SystemError('retry failed'), 'retry failed', id='exception'),
+        pytest.param(
+            SimpleNamespace(backend='npu', arch=''),
+            'Triton did not report an NPU target architecture.',
+            id='invalid-target',
+        ),
+    ],
+)
+def test_get_npu_target_arch_preserves_query_error(npu_target_query, retry_result, retry_message):
+    query = npu_target_query
+    first_error = OSError('target lookup failed')
+    query.side_effect = [
+        first_error,
+        retry_result,
+        SimpleNamespace(backend='npu', arch='Ascend910_9391'),
+    ]
+
+    with pytest.raises(OSError, match='target lookup failed') as exc_info:
+        hardware.get_npu_target_arch()
+    assert exc_info.value is first_error
+    assert str(exc_info.value.__cause__) == retry_message
+    assert query.call_count == 2
+    assert hardware.get_npu_target_arch() == 'Ascend910_9391'
+    assert query.call_count == 3
+
+
+@pytest.mark.parametrize(('backend', 'arch'), [('cuda', 90), ('npu', '')])
+def test_get_npu_target_arch_rejects_invalid_target(npu_target_query, backend, arch):
+    query = npu_target_query
+    query.return_value = SimpleNamespace(backend=backend, arch=arch)
+
+    with pytest.raises(RuntimeError, match='did not report an NPU target architecture'):
+        hardware.get_npu_target_arch()
+    assert query.call_count == 2

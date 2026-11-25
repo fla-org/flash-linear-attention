@@ -78,19 +78,25 @@ def get_device_arch() -> str:
 
 
 @cache
-def _get_npu_target_arch(device_index: int) -> str:
-    with torch.npu.device(device_index):
-        target = triton.runtime.driver.active.get_current_target()
-    return str(target.arch) if target.backend == 'npu' else ''
+def _get_npu_target_arch() -> str:
+    target = triton.runtime.driver.active.get_current_target()
+    if target.backend != 'npu' or not target.arch:
+        raise RuntimeError('Triton did not report an NPU target architecture.')
+    return str(target.arch)
 
 
-def get_npu_target_arch(device_index: int = 0) -> str:
-    """Return the device's raw Triton NPU target architecture, or empty when unavailable."""
+def get_npu_target_arch() -> str:
+    """Return the process-wide Triton NPU compile target, retrying once on failure.
+
+    All NPUs visible to this process are assumed to belong to the same SoC series.
+    """
     try:
-        return _get_npu_target_arch(device_index)
-    except Exception:
-        logger.debug('Failed to get NPU target architecture.', exc_info=True)
-        return ''
+        return _get_npu_target_arch()
+    except Exception as first_error:
+        try:
+            return _get_npu_target_arch()
+        except Exception as retry_error:
+            raise first_error from retry_error
 
 
 def get_npu_arch_series(arch: str) -> str:
