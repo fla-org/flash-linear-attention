@@ -15,10 +15,11 @@ from fla.backends import dispatch
 from fla.modules.norm.l2norm import l2norm_bwd, l2norm_fwd
 from fla.ops.common.gate import fused_beta_sigmoid, fused_beta_sigmoid_bwd
 from fla.ops.cp import FLACPContext
+from fla.ops.cp.chunk_delta_h import prepare_cp_graph_context
 from fla.ops.kda.chunk_bwd import chunk_kda_bwd
 from fla.ops.kda.chunk_fwd import chunk_kda_fwd
 from fla.ops.utils.index import prepare_chunk_indices, prepare_chunk_indices_static
-from fla.utils import IS_NPU, autocast_custom_bwd, autocast_custom_fwd, input_guard
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
 class ChunkKDAFunction(torch.autograd.Function):
@@ -84,6 +85,9 @@ class ChunkKDAFunction(torch.autograd.Function):
                     chunk_size=chunk_size,
                     cu_seqlens_cpu=cu_seqlens_cpu,
                 )
+
+        if use_graph and cp_context is not None:
+            cp_context = prepare_cp_graph_context(cu_seqlens, cp_context)
 
         g_input = g
 
@@ -209,6 +213,23 @@ class ChunkKDAFunction(torch.autograd.Function):
                 None, None)
 
 
+@dispatch
+def _prepare_kda_graph_cpu_seqlens(
+    q: torch.Tensor,
+    cu_seqlens: torch.Tensor | None,
+    cu_seqlens_cpu: torch.Tensor | None,
+    cp_context: FLACPContext | None,
+) -> torch.Tensor | None:
+    """Validate graph support and select the CPU sequence-length hint."""
+    if q.device.type == 'npu':
+        if cp_context is not None:
+            raise NotImplementedError("Ascend KDA CP graph mode requires Triton Ascend backend dispatch.")
+        if cu_seqlens is None:
+            raise NotImplementedError("Ascend KDA graph mode currently requires flattened variable-length inputs.")
+        return None
+    return cu_seqlens_cpu
+
+
 @torch.compiler.disable
 @dispatch
 def chunk_kda(
@@ -308,7 +329,8 @@ def chunk_kda(
             consistent with the FlashAttention API. Default: `None`.
         cu_seqlens_cpu (torch.LongTensor, Optional):
             Cumulative sequence lengths of shape ``[N+1]`` used for variable-length training,
-            consistent with the FlashAttention API. Default: `None`.
+            consistent with the FlashAttention API. Ignored in Ascend graph mode because device boundaries may change
+            between replays. Default: `None`.
         cp_context (FLACPContext, Optional):
             Context parallel context for distributed training across multiple devices.
             When provided, ``initial_state`` and ``output_final_state`` are not supported,
@@ -322,18 +344,26 @@ def chunk_kda(
               so output/gradient rows not covered by real tokens are left undefined.
             - Shape ``initial_state`` and the incoming ``dht`` gradient (when used) as ``[max_num_seqs, ...]``.
             - Warm up the captured step eagerly so kernel autotuning runs outside the graph;
-              with ``cp_context``, this also includes NCCL communicator setup.
+              with ``cp_context``, this also includes NCCL or HCCL communicator setup.
 
             With ``cp_context``, the cross-rank state all-gathers are recorded into the graph. This additionally requires:
 
-            - A graph-capturable (non-blocking) NCCL communicator;
+            - A graph-capturable communicator (non-blocking NCCL on CUDA, or HCCL on Ascend);
               all ranks must capture and replay the same collectives in the same order.
             - A persistent padded ``cp_context.cu_seqlens`` buffer, refreshed in place before each replay.
-            - Persistent int32 device scalars ``cp_context.pre_num_ranks_dev`` and ``post_num_ranks_dev``,
+              Reserve at least one sequence slot for contiguous layouts and two for zigzag layouts.
+            - Persistent int32 device tensors ``cp_context.pre_num_ranks_dev`` and ``post_num_ranks_dev``,
               refreshed in place before each replay.
+              Contiguous layouts use one value; zigzag layouts use shape ``[2]`` in front/back order.
+            - On Ascend, zigzag inputs pack equally sized front/back parts before unused token padding,
+              and local ``cu_seqlens`` must retain the boundary between these parts.
+              The sequence capacity must account for both local parts.
 
-            Ascend currently requires flattened variable-length inputs and does not support context parallelism in graph mode.
-            ``disable_recompute=True`` is not supported. Default: ``False``.
+            CUDA context-parallel graphs support contiguous layouts only.
+            Ascend requires flattened variable-length inputs and supports contiguous and zigzag context-parallel graphs.
+            Ascend CP graphs require backend dispatch and keep the process group, local token capacity, and sequence capacity fixed.
+            For Ascend CP graphed callables, synchronize forward/backward warmup and release its autograd graphs,
+            then capture with ``torch.npu.make_graphed_callables(..., num_warmup_iters=0)``. Default: ``False``.
         max_num_seqs (int, Optional):
             Static upper bound of the sequence count used together with ``use_graph``.
             Uses ``cu_seqlens.shape[0] - 1`` when omitted. Default: ``None``.
@@ -442,19 +472,23 @@ def chunk_kda(
         )
         state_v_first = kwargs.pop('transpose_state_layout')
 
-    if use_graph and IS_NPU:
-        if cp_context is not None:
-            raise NotImplementedError("Ascend KDA graph mode does not currently support context parallelism.")
-        if cu_seqlens is None:
-            raise NotImplementedError("Ascend KDA graph mode currently requires flattened variable-length inputs.")
+    if cp_context is not None and cp_context.cu_seqlens_cpu is not None:
+        cu_seqlens_cpu = cp_context.cu_seqlens_cpu
+    if use_graph:
+        cu_seqlens_cpu = _prepare_kda_graph_cpu_seqlens(q, cu_seqlens, cu_seqlens_cpu, cp_context)
 
     if cp_context is not None:
         assert initial_state is None, "Initial state is not supported for CP"
         assert output_final_state is False, "Output final state is not supported for CP"
         assert cp_context.cu_seqlens is not None, "cu_seqlens is required for CP"
         cu_seqlens = cp_context.cu_seqlens
-        if cp_context.cu_seqlens_cpu is not None:
-            cu_seqlens_cpu = cp_context.cu_seqlens_cpu
+        if use_graph:
+            min_slots = 2 if cp_context.layout == 'zigzag' else 1
+            if cu_seqlens.ndim != 1 or cu_seqlens.numel() <= min_slots:
+                raise ValueError(
+                    f"KDA CP graph mode requires one-dimensional cu_seqlens with at least "
+                    f"{min_slots} sequence slot(s) for the {cp_context.layout} layout."
+                )
 
     if cu_seqlens is not None:
         if q.shape[0] != 1:

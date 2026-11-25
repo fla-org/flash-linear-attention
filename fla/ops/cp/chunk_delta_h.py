@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from copy import copy
 from typing import TYPE_CHECKING
 
 import torch
@@ -21,6 +22,34 @@ from fla.ops.cp.context import _check_cp_device
 
 if TYPE_CHECKING:
     from fla.ops.cp.context import FLACPContext
+
+
+@dispatch('cp')
+def _graph_metadata(cu_seqlens: torch.Tensor, context: FLACPContext | None = None, layout: str = 'contiguous'):
+    if context is not None:
+        layout = context.layout
+    if layout == 'zigzag':
+        raise NotImplementedError('zigzag CP graph replay is currently supported only on Ascend NPU.')
+    metadata = getattr(context, '_cp_graph_metadata', None)
+    if metadata is not None:
+        return metadata
+    # empty rows keep their sequence slots, so counting nonempty rows cannot locate the boundaries.
+    num_seqs = cu_seqlens.numel() - 1
+    rows = torch.arange(num_seqs, device=cu_seqlens.device, dtype=torch.int64)
+    active = cu_seqlens[1:] > cu_seqlens[:-1]
+    first = torch.where(active, rows, num_seqs).amin().reshape(1)
+    first = torch.where(first < num_seqs, first, 0)
+    last = torch.where(active, rows, -1).amax().reshape(1)
+    first_window = cu_seqlens.index_select(0, torch.cat((first, first + 1)))
+    last_window = cu_seqlens.index_select(0, torch.cat((last.clamp_min(0), last.clamp_min(0) + 1)))
+    return first, last, (first_window,), (last_window,)
+
+
+def prepare_cp_graph_context(cu_seqlens: torch.Tensor, context: FLACPContext) -> FLACPContext:
+    # each autograd invocation owns its metadata and shares the caller's persistent input buffers.
+    context = copy(context)
+    context._cp_graph_metadata = _graph_metadata(cu_seqlens, layout=context.layout)
+    return context
 
 
 @dispatch('cp')
@@ -105,9 +134,8 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
     cu_seqlens_last = cu_seqlens[-2:]
     if use_graph:
         assert context.pre_num_ranks_dev is not None, "use_graph with CP requires context.pre_num_ranks_dev"
-        # skip zero-length tail padding when selecting the last sequence during graph replay
-        i_last = (cu_seqlens[1:] > cu_seqlens[:-1]).sum() - 1
-        cu_seqlens_last = cu_seqlens.index_select(0, torch.stack((i_last, i_last + 1)))
+        first, _, _, last_windows = _graph_metadata(cu_seqlens, context)
+        cu_seqlens_last = last_windows[0]
     # every rank participates during graph replay because host-side flags are frozen at capture
     if use_graph or not context.is_last_rank:
         chunk_cp_fwd_h(
@@ -126,13 +154,13 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
     # a zero-rank merge would only re-store the existing zeros
     if use_graph or not context.is_first_rank:
         chunk_cp_merge(
-            h=initial_state[0],
+            h=initial_state if use_graph else initial_state[0],
             ag_hm=ag_hm,
             num_ranks=context.pre_num_ranks_dev if use_graph else context.pre_num_ranks,
             rank=rank,
             state_v_first=state_v_first,
             forward=True,
-            h_seq_idx=None,
+            h_seq_idx=first if use_graph else None,
             use_graph=use_graph,
         )
     return initial_state
@@ -223,6 +251,11 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
     else:
         dht = q.new_zeros(N, HV, K, V, dtype=torch.float32)
 
+    cu_seqlens_first = cu_seqlens[:2]
+    if use_graph:
+        assert context.post_num_ranks_dev is not None, "use_graph with CP requires context.post_num_ranks_dev"
+        _, last, first_windows, _ = _graph_metadata(cu_seqlens, context)
+        cu_seqlens_first = first_windows[0]
     # every rank participates during graph replay because host-side flags are frozen at capture
     if use_graph or not context.is_first_rank:
         chunk_cp_bwd_dh(
@@ -236,7 +269,7 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
             gk=gk,
             bg=bg,
             scale=scale,
-            cu_seqlens=cu_seqlens[:2],
+            cu_seqlens=cu_seqlens_first,
             chunk_size=chunk_size,
         )
 
@@ -247,9 +280,7 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
         h_seq_idx = None
         h = dht[-1]
         if use_graph:
-            assert context.post_num_ranks_dev is not None, "use_graph with CP requires context.post_num_ranks_dev"
-            # skip zero-length tail padding when selecting the merge target during graph replay
-            h_seq_idx = (cu_seqlens[1:] > cu_seqlens[:-1]).sum() - 1
+            h_seq_idx = last
             h = dht
 
         chunk_cp_merge(
@@ -269,6 +300,10 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
 def compress_h0(h0: torch.Tensor | None, context: FLACPContext) -> torch.Tensor | None:
     if h0 is None or len(context.cu_seqlens) == 2:
         return h0
+    metadata = getattr(context, '_cp_graph_metadata', None)
+    if metadata is not None:
+        first, _, _, _ = metadata
+        return h0.index_select(0, first)
     if context.layout == 'zigzag':
         if len(context.cu_seqlens) == 3:
             # both parts can carry a cross-rank state
@@ -283,6 +318,11 @@ def expand_h0(h0: torch.Tensor | None, context: FLACPContext) -> torch.Tensor | 
     if h0 is None or len(context.cu_seqlens) == 2:
         return h0
     B = len(context.cu_seqlens) - 1
+    metadata = getattr(context, '_cp_graph_metadata', None)
+    if metadata is not None:
+        first, _, _, _ = metadata
+        expanded = h0.new_zeros(B, *h0.shape[1:])
+        return expanded.index_copy_(0, first, h0)
     if context.layout == 'zigzag':
         if B == 2:
             return h0

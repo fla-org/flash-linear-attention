@@ -6,6 +6,7 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 from fla.ops.kda.backends.triton_ascend import (  # noqa: F401
+    chunk,
     chunk_bwd,
     chunk_intra,
     chunk_intra_token_parallel,
