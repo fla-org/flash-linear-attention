@@ -133,7 +133,7 @@ def test_gated_norm_bucket_compilation(monkeypatch, D: int, activation: str, is_
 
     for name, autotuner in autotuners.items():
         monkeypatch.setattr(autotuner, 'cache', {})
-        monkeypatch.setattr(autotuner, 'cache_results', False)
+        monkeypatch.setattr(autotuner, 'cache_results', False, raising=False)
         record_launch(name, autotuner.fn)
 
     norm = FusedRMSNormGated(D, activation=activation) if is_rms_norm else FusedLayerNormGated(
