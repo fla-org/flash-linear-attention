@@ -51,19 +51,29 @@ def test_grouplinear(shape, out_features, groups, bias, strided, dtype):
         assert_close(name, ref_grad, out_grad, 0.005)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason='requires CUDA autocast')
-@pytest.mark.parametrize('dtype', [torch.bfloat16, torch.float16])
-@pytest.mark.parametrize('bias', [True, False])
-def test_grouplinear_autocast(dtype, bias):
-    if dtype == torch.bfloat16 and not torch.cuda.is_bf16_supported():
-        pytest.skip('requires BF16 support')
+@pytest.mark.parametrize(
+    ('test_device', 'dtype', 'bias'),
+    [
+        pytest.param('cpu', torch.bfloat16, True, id='cpu-bf16-biased'),
+        pytest.param('cuda', torch.bfloat16, True, id='cuda-bf16-biased'),
+        pytest.param('cuda', torch.float16, True, id='cuda-fp16-biased'),
+        pytest.param('cuda', torch.bfloat16, False, id='cuda-bf16-unbiased'),
+        pytest.param('cuda', torch.float16, False, id='cuda-fp16-unbiased'),
+    ],
+)
+def test_grouplinear_autocast(test_device, dtype, bias):
+    if test_device == 'cuda':
+        if not torch.cuda.is_available():
+            pytest.skip('requires CUDA')
+        if dtype == torch.bfloat16 and not torch.cuda.is_bf16_supported():
+            pytest.skip('requires CUDA BF16 support')
     torch.manual_seed(42)
-    layer = GroupLinear(12, 8, groups=4, bias=bias).cuda()
+    layer = GroupLinear(12, 8, groups=4, bias=bias).to(test_device)
     if bias:
         torch.nn.init.normal_(layer.bias)
-    x = torch.randn(2, 3, 12, device='cuda', requires_grad=True)
+    x = torch.randn(2, 3, 12, device=test_device, requires_grad=True)
     weight = torch.block_diag(*layer.weight.chunk(layer.groups))
-    with torch.autocast('cuda', dtype=dtype):
+    with torch.autocast(test_device, dtype=dtype):
         ref = F.linear(x, weight, layer.bias)
         out = layer(x)
     assert out.dtype == ref.dtype == dtype
