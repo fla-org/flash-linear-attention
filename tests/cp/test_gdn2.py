@@ -82,8 +82,8 @@ def _reference(q, k, v, g, b, w, do, offsets, A_log, dt_bias):
         w_seq = w[:, start:end].clone().detach().requires_grad_(True)
         do_seq = do[:, start:end].clone()
 
-        q_seq_norm = F.normalize(q_seq, p=2, dim=-1)
-        k_seq_norm = F.normalize(k_seq, p=2, dim=-1)
+        q_seq_norm = F.normalize(q_seq.float(), p=2, dim=-1).to(q_seq.dtype)
+        k_seq_norm = F.normalize(k_seq.float(), p=2, dim=-1).to(k_seq.dtype)
         g_processed = naive_kda_lowerbound_gate(
             g=g_seq.to(torch.float),
             A_log=A_log[:H].contiguous(),
@@ -195,9 +195,6 @@ def _run_chunk(
     dw_cp_global = gather_global(w_local.grad, world_size=world_size)
 
     if rank == 0:
-        # per-dim gating and L2 normalization of k ~ N(-50, 10) amplify bf16 state-communication error;
-        # baseline ratios reach ~0.9-1.6%, above the strict 8e-3 threshold.
-        # db also includes a cross-rank reduction (~2.3% error) and remains a warning-only diagnostic.
         assert_close("Output", ref_out, o_cp_global, ratio=8e-3, warning=False)
         assert_close("dq", ref_dq, dq_cp_global, ratio=8e-3, warning=False)
         assert_close("dk", ref_dk, dk_cp_global, ratio=8e-3, warning=False)
