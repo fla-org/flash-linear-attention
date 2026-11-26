@@ -1006,8 +1006,9 @@ def chunk_gla_fwd_o_gk(
         chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
-    # Please ensure zeros, since vllm will use padding v
-    o = torch.zeros_like(v)
+    # varlen calls keep zeros: vllm pads v, and the graph path skips padding chunks;
+    # otherwise the kernel writes every element of o
+    o = torch.zeros_like(v) if cu_seqlens is not None else torch.empty_like(v)
     def grid(meta): return (triton.cdiv(V, meta['BV']) * NT, B * HV)
     chunk_gla_fwd_kernel_o[grid](
         q=q,
@@ -1238,6 +1239,7 @@ def chunk_gla_fwd(
         chunk_size=chunk_size,
         states_in_fp32=False,
         state_v_first=state_v_first,
+        chunk_indices=chunk_indices,
     )
 
     # the intra A is kept in fp32
@@ -1304,6 +1306,7 @@ def chunk_gla_bwd(
             chunk_size=chunk_size,
             states_in_fp32=True,
             state_v_first=state_v_first,
+            chunk_indices=chunk_indices,
         )
     dh, dh0 = chunk_bwd_dh(
         q=q,
@@ -1320,6 +1323,7 @@ def chunk_gla_bwd(
         chunk_size=chunk_size,
         states_in_fp32=True,
         state_v_first=state_v_first,
+        chunk_indices=chunk_indices,
     )
 
     dv = chunk_gla_bwd_dv(

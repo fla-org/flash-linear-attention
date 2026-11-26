@@ -332,6 +332,7 @@ def chunk_fwd_h_npu(
     chunk_size: int = 64,
     split_size: int | None = None,
     states_in_fp32: bool = False,
+    chunk_indices: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = chunk_size
@@ -441,6 +442,7 @@ def chunk_bwd_dh_npu(
     chunk_size: int = 64,
     split_size: int | None = None,
     states_in_fp32: bool = False,
+    chunk_indices: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     HQ = q.shape[2]
