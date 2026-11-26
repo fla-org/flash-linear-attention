@@ -52,6 +52,42 @@ def test_grouplinear(shape, out_features, groups, bias, strided, dtype):
 
 
 @pytest.mark.parametrize(
+    ('test_device', 'dtype', 'bias'),
+    [
+        pytest.param('cpu', torch.bfloat16, True, id='cpu-bf16-biased'),
+        pytest.param('cuda', torch.bfloat16, True, id='cuda-bf16-biased'),
+        pytest.param('cuda', torch.float16, True, id='cuda-fp16-biased'),
+        pytest.param('cuda', torch.bfloat16, False, id='cuda-bf16-unbiased'),
+        pytest.param('cuda', torch.float16, False, id='cuda-fp16-unbiased'),
+    ],
+)
+def test_grouplinear_autocast(test_device, dtype, bias):
+    if test_device == 'cuda':
+        if not torch.cuda.is_available():
+            pytest.skip('requires CUDA')
+        if dtype == torch.bfloat16 and not torch.cuda.is_bf16_supported():
+            pytest.skip('requires CUDA BF16 support')
+    torch.manual_seed(42)
+    layer = GroupLinear(12, 8, groups=4, bias=bias).to(test_device)
+    if bias:
+        torch.nn.init.normal_(layer.bias)
+    x = torch.randn(2, 3, 12, device=test_device, requires_grad=True)
+    weight = torch.block_diag(*layer.weight.chunk(layer.groups))
+    with torch.autocast(test_device, dtype=dtype):
+        ref = F.linear(x, weight, layer.bias)
+        out = layer(x)
+    assert out.dtype == ref.dtype == dtype
+    assert_close('y', ref, out, 0.005)
+    dy = torch.randn_like(ref)
+    params = (x, *layer.parameters())
+    ref_grads = torch.autograd.grad(ref, params, dy)
+    out_grads = torch.autograd.grad(out, params, dy)
+    for param, expected, actual in zip(params, ref_grads, out_grads, strict=True):
+        assert actual.dtype == expected.dtype == param.dtype
+        assert_close('grad', expected, actual, 0.005)
+
+
+@pytest.mark.parametrize(
     ('in_features', 'out_features', 'groups', 'match'),
     [(8, 8, 0, 'positive'), (7, 8, 2, 'in_features'), (8, 7, 2, 'out_features')],
     ids=['zero-groups', 'input-not-divisible', 'output-not-divisible'],
