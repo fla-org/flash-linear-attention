@@ -22,7 +22,7 @@ from collections import Counter
 from functools import partial
 from pathlib import Path
 
-BASE = '399504c60f865e8fb76c949eeb869cab9d3a676d'
+BASE = '6511ea3ecf7c3b390b15391e670d5bdcb657d914'
 MODULE = 'fla.modules.norm.fused_norm_gate'
 SOURCE = 'fla/modules/norm/fused_norm_gate.py'
 D = 64
@@ -87,7 +87,7 @@ def compare(torch, actual, expected):
         err = value.detach().float() - ref.float()
         abs_max = err.abs().max().item()
         rel_rms = (err.square().mean().sqrt() / (ref.float().square().mean().sqrt() + 1e-8)).item()
-        ratio = 0.005 if DTYPE == 'bfloat16' else 0.001
+        ratio = 0.001
         if not (abs_max <= 1e-6 or rel_rms < ratio):
             raise AssertionError(f'{name}: max absolute error {abs_max}, relative RMS {rel_rms}, limit {ratio}')
         raw = value.detach().contiguous().view(torch.uint8).cpu().numpy()

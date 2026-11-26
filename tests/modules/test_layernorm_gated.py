@@ -143,7 +143,6 @@ def test_gated_norm_bucket_compilation(monkeypatch, D: int, activation: str, is_
     if norm.bias is not None:
         nn.init.normal_(norm.bias)
     act_fn = F.silu if activation == 'silu' else F.sigmoid
-    tolerance = 5e-3 if dtype == torch.bfloat16 else 1e-3
 
     for T in (65535, 65537, 131073):
         x = torch.randn(T, D, device=device, dtype=dtype, requires_grad=True)
@@ -152,16 +151,18 @@ def test_gated_norm_bucket_compilation(monkeypatch, D: int, activation: str, is_
         inputs = [t for t in (x, g, norm.weight, norm.bias) if t is not None]
         tri_y = norm(x, g)
         tri_grads = torch.autograd.grad(tri_y, inputs, do)
+        ref_inputs = [t.detach().float().requires_grad_() for t in inputs]
+        ref_x, ref_g, ref_weight = ref_inputs[:3]
 
         if is_rms_norm:
-            ref_y = x.float() * torch.rsqrt(x.float().square().mean(-1, keepdim=True) + norm.eps) * norm.weight.float()
+            ref_y = ref_x * torch.rsqrt(ref_x.square().mean(-1, keepdim=True) + norm.eps) * ref_weight
         else:
-            ref_y = F.layer_norm(x.float(), (D,), norm.weight.float(), norm.bias.float(), norm.eps)
-        ref_y = (ref_y * act_fn(g.float())).to(dtype)
-        ref_grads = torch.autograd.grad(ref_y, inputs, do)
-        assert_close('y', ref_y, tri_y, tolerance)
+            ref_y = F.layer_norm(ref_x, (D,), ref_weight, ref_inputs[3], norm.eps)
+        ref_y = ref_y * act_fn(ref_g)
+        ref_grads = torch.autograd.grad(ref_y, ref_inputs, do.float())
+        assert_close('y', ref_y.to(dtype), tri_y, 1e-3)
         for name, ref_grad, tri_grad in zip(('dx', 'dg', 'dw', 'db'), ref_grads, tri_grads):
-            assert_close(name, ref_grad, tri_grad, tolerance)
+            assert_close(name, ref_grad.to(dtype), tri_grad, 1e-3)
 
     for name, autotuner in autotuners.items():
         bucket_index = autotuner.keys.index('NB')
