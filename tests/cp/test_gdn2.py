@@ -8,12 +8,14 @@
 """Compare CP GDN-2 outputs and gradients with per-sequence recurrent references."""
 
 import math
+from datetime import timedelta
 
 import pytest
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 import triton
+from torch.distributed.distributed_c10d import _get_default_store
 
 from fla.ops.cp import build_cp_context
 from fla.ops.gdn2 import chunk_gdn2
@@ -117,6 +119,17 @@ def _reference(q, k, v, g, b, w, do, offsets, A_log, dt_bias):
     return tuple(torch.cat(parts, dim=1) for parts in zip(*results))
 
 
+def _wait_for_reference(rank: int) -> None:
+    """Wait for rank 0's reference without starting an HCCL collective."""
+    store = _get_default_store()
+    store.set_timeout(timedelta(hours=2))
+    key = "gdn2_cp_reference_done"
+    if rank == 0:
+        store.set(key, "1")
+    else:
+        store.get(key)
+
+
 def _run_chunk(
     rank: int,
     world_size: int,
@@ -155,6 +168,8 @@ def _run_chunk(
             dt_bias=dt_bias_global,
         )
 
+    if IS_NPU:
+        _wait_for_reference(rank=rank)
     dist.barrier()
 
     context = build_cp_context(cu_seqlens_global, group=dist.group.WORLD)
