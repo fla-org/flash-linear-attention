@@ -17,7 +17,8 @@ from fla.modules import (
     FusedRMSNormSwishGateLinear,
 )
 from fla.modules.layernorm_gated import layernorm_fn
-from fla.utils import IS_NVIDIA_BLACKWELL, assert_close, device
+from fla.modules.norm import fused_norm_gate
+from fla.utils import IS_NPU, IS_NVIDIA_BLACKWELL, assert_close, device
 
 
 @pytest.mark.parametrize(
@@ -102,6 +103,73 @@ def test_rmsnorm_gated(B: int, H: int, T: int, D: int, activation: str):
     assert_close('dx', ref_dx, tri_dx, 1e-3)
     assert_close('dg', ref_dg, tri_dg, 1e-3)
     assert_close('dw', ref_dw, tri_dw, 1e-3)
+
+
+@pytest.mark.skipif(IS_NPU, reason="Ascend uses separate gated norm kernels")
+@pytest.mark.parametrize(
+    ('D', 'activation', 'is_rms_norm', 'dtype'),
+    [
+        pytest.param(50, "sigmoid", False, torch.float32, id="layer-D50-sigmoid-fp32"),
+        pytest.param(128, "silu", True, torch.bfloat16, id="rms-D128-silu-bf16"),
+    ],
+)
+def test_gated_norm_bucket_compilation(monkeypatch, D: int, activation: str, is_rms_norm: bool, dtype: torch.dtype):
+    """Row buckets tune independently but share compiled kernels for the same launch configuration."""
+    torch.manual_seed(42)
+    launches = {}
+    autotuners = {
+        'fwd': fused_norm_gate.layer_norm_gated_fwd_kernel.fn,
+        'bwd': fused_norm_gate.layer_norm_gated_bwd_kernel.fn,
+    }
+
+    def record_launch(name, kernel):
+        run = kernel.run
+
+        def recorded_run(*args, **kwargs):
+            launches[name] = (args, kwargs)
+            return run(*args, **kwargs)
+
+        monkeypatch.setattr(kernel, 'run', recorded_run)
+
+    for name, autotuner in autotuners.items():
+        monkeypatch.setattr(autotuner, 'cache', {})
+        monkeypatch.setattr(autotuner, 'cache_results', False)
+        record_launch(name, autotuner.fn)
+
+    norm = FusedRMSNormGated(D, activation=activation) if is_rms_norm else FusedLayerNormGated(
+        D, bias=True, activation=activation)
+    norm = norm.to(device, dtype=dtype)
+    nn.init.normal_(norm.weight)
+    if norm.bias is not None:
+        nn.init.normal_(norm.bias)
+    act_fn = F.silu if activation == 'silu' else F.sigmoid
+    tolerance = 5e-3 if dtype == torch.bfloat16 else 1e-3
+
+    for T in (65535, 65537, 131073):
+        x = torch.randn(T, D, device=device, dtype=dtype, requires_grad=True)
+        g = torch.randn_like(x, requires_grad=True)
+        do = torch.randn_like(x)
+        inputs = [t for t in (x, g, norm.weight, norm.bias) if t is not None]
+        tri_y = norm(x, g)
+        tri_grads = torch.autograd.grad(tri_y, inputs, do)
+
+        if is_rms_norm:
+            ref_y = x.float() * torch.rsqrt(x.float().square().mean(-1, keepdim=True) + norm.eps) * norm.weight.float()
+        else:
+            ref_y = F.layer_norm(x.float(), (D,), norm.weight.float(), norm.bias.float(), norm.eps)
+        ref_y = (ref_y * act_fn(g.float())).to(dtype)
+        ref_grads = torch.autograd.grad(ref_y, inputs, do)
+        assert_close('y', ref_y, tri_y, tolerance)
+        for name, ref_grad, tri_grad in zip(('dx', 'dg', 'dw', 'db'), ref_grads, tri_grads):
+            assert_close(name, ref_grad, tri_grad, tolerance)
+
+    for name, autotuner in autotuners.items():
+        bucket_index = autotuner.keys.index('NB')
+        assert sorted(key[bucket_index] for key in autotuner.cache) == [1, 2, 3]
+        args, kwargs = launches[name]
+        kwargs = {key: value for key, value in kwargs.items() if key != 'warmup'}
+        hashes = {autotuner.fn.warmup(*args, **{**kwargs, 'NB': bucket}).hash for bucket in (1, 2, 3)}
+        assert len(hashes) == 1
 
 
 @pytest.mark.parametrize(
