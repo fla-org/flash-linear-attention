@@ -20,6 +20,7 @@ import triton
 from fla import backends
 from fla.ops.gdn2 import chunk_gdn2, fused_recurrent_gdn2, naive_recurrent_gdn2
 from fla.ops.gdn2.fused_recurrent import fused_recurrent_gdn2_fwd
+from fla.ops.gdn2.naive import naive_recurrent_gdn2_checkpointed
 from fla.ops.gdn2.wy_fast import recompute_w_u_fwd_gdn2
 from fla.ops.kda.gate import naive_kda_gate, naive_kda_lowerbound_gate
 from fla.utils import IS_AMD, IS_NPU, IS_NVIDIA, assert_close, device, device_platform, testing
@@ -62,6 +63,41 @@ def _rand_inputs(B, T, H, HV, K, V, dtype, *, gate_in_kernel=False):
     else:
         g = torch.empty(B, T, HV, K, device=device, dtype=torch.float32).uniform_(-5.0, -0.1).to(dtype)
     return q, k, v, g, b, w, A_log, dt_bias
+
+
+@pytest.mark.parametrize(
+    ("T", "K", "V", "dtype", "has_initial_state", "output_final_state", "scale"),
+    [
+        pytest.param(65, 16, 24, torch.bfloat16, False, False, None, id="partial-segment"),
+        pytest.param(64, 16, 32, torch.float32, True, True, 0.3, id="aligned-state-gradients"),
+        pytest.param(8, 32, 16, torch.bfloat16, True, True, None, id="short-sequence"),
+    ],
+)
+def test_naive_recurrent_checkpointed(T, K, V, dtype, has_initial_state, output_final_state, scale):
+    q, k, v, g, b, w, _, _ = _rand_inputs(2, T, 2, 2, K, V, dtype)
+    q = F.normalize(q.float(), p=2, dim=-1).to(dtype).requires_grad_()
+    k = F.normalize(k.float(), p=2, dim=-1).to(dtype).requires_grad_()
+    inputs = (q, k, *(x.requires_grad_() for x in (v, g, b, w)))
+    h0 = torch.randn(2, 2, K, V, device=device, requires_grad=True) if has_initial_state else None
+    kwargs = dict(scale=scale, initial_state=h0, output_final_state=output_final_state)
+    ref, ref_ht = naive_recurrent_gdn2(*inputs, **kwargs)
+    tri, tri_ht = naive_recurrent_gdn2_checkpointed(*inputs, **kwargs, chunk_size=32)
+    assert_close('o', ref, tri, 0.0, err_atol=0.0)
+
+    do = torch.randn_like(ref)
+    ref_loss, tri_loss = (ref * do).sum(), (tri * do).sum()
+    if output_final_state:
+        assert_close('ht', ref_ht, tri_ht, 0.0, err_atol=0.0)
+        dht = torch.randn_like(ref_ht)
+        ref_loss = ref_loss + (ref_ht * dht).sum()
+        tri_loss = tri_loss + (tri_ht * dht).sum()
+    else:
+        assert ref_ht is None and tri_ht is None
+    grad_inputs = (*inputs, h0) if has_initial_state else inputs
+    ref_grads = torch.autograd.grad(ref_loss, grad_inputs)
+    tri_grads = torch.autograd.grad(tri_loss, grad_inputs)
+    for name, ref_grad, tri_grad in zip(('dq', 'dk', 'dv', 'dg', 'db', 'dw', 'dh0'), ref_grads, tri_grads):
+        assert_close(name, ref_grad, tri_grad, 0.0, err_atol=0.0)
 
 
 @pytest.mark.skipif(not (IS_NVIDIA or IS_AMD or IS_NPU), reason="CUDA/ROCm or Ascend NPU required")

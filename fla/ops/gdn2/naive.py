@@ -18,6 +18,7 @@
 
 import torch
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 
 def naive_recurrent_gdn2(
@@ -81,6 +82,48 @@ def naive_recurrent_gdn2(
     if not output_final_state:
         h = None
     return o, h
+
+
+def naive_recurrent_gdn2_checkpointed(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    b: torch.Tensor,
+    w: torch.Tensor,
+    scale: float | None = None,
+    initial_state: torch.Tensor | None = None,
+    output_final_state: bool = False,
+    chunk_size: int = 1024,
+):
+    """Checkpoint the token recurrence to bound reference backward memory.
+
+    Each segment calls `naive_recurrent_gdn2` and carries its FP32 state
+    without detaching it, preserving gradients across segment boundaries.
+    """
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+    if q.shape[1] <= chunk_size:
+        return naive_recurrent_gdn2(q, k, v, g, b, w, scale, initial_state, output_final_state)
+
+    outputs, state = [], initial_state
+    for start in range(0, q.shape[1], chunk_size):
+        end = start + chunk_size
+        o, state = checkpoint(
+            naive_recurrent_gdn2,
+            q[:, start:end],
+            k[:, start:end],
+            v[:, start:end],
+            g[:, start:end],
+            b[:, start:end],
+            w[:, start:end],
+            scale=scale,
+            initial_state=state,
+            output_final_state=True,
+            use_reentrant=False,
+        )
+        outputs.append(o)
+    return torch.cat(outputs, dim=1), state if output_final_state else None
 
 
 def naive_chunk_gdn2(
