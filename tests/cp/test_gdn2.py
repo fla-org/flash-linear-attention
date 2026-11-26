@@ -8,21 +8,23 @@
 """Compare CP GDN-2 outputs and gradients with per-sequence recurrent references."""
 
 import math
+from datetime import timedelta
 
 import pytest
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 import triton
+from torch.distributed.distributed_c10d import _get_default_store
 
 from fla.ops.cp import build_cp_context
 from fla.ops.gdn2 import chunk_gdn2
-from fla.ops.gdn2.naive import naive_recurrent_gdn2
+from fla.ops.gdn2.naive import naive_recurrent_gdn2, naive_recurrent_gdn2_checkpointed
 from fla.ops.kda.gate import naive_kda_lowerbound_gate
 from fla.utils import IS_NPU, IS_TF32_SUPPORTED, assert_close, device
 from tests.cp.utils import gather_global, shard_tensor
 
-pytestmark = pytest.mark.skipif(IS_NPU or not IS_TF32_SUPPORTED, reason="requires NVIDIA Ampere or newer")
+pytestmark = pytest.mark.skipif(not (IS_TF32_SUPPORTED or IS_NPU), reason="requires NVIDIA Ampere or newer, or Ascend")
 
 
 def _make_inputs(rank, T, H, D, dtype):
@@ -82,8 +84,12 @@ def _reference(q, k, v, g, b, w, do, offsets, A_log, dt_bias):
         w_seq = w[:, start:end].clone().detach().requires_grad_(True)
         do_seq = do[:, start:end].clone()
 
-        q_seq_norm = F.normalize(q_seq, p=2, dim=-1)
-        k_seq_norm = F.normalize(k_seq, p=2, dim=-1)
+        if IS_NPU:
+            q_seq_norm = F.normalize(q_seq.float(), p=2, dim=-1).to(q_seq.dtype)
+            k_seq_norm = F.normalize(k_seq.float(), p=2, dim=-1).to(k_seq.dtype)
+        else:
+            q_seq_norm = F.normalize(q_seq, p=2, dim=-1)
+            k_seq_norm = F.normalize(k_seq, p=2, dim=-1)
         g_processed = naive_kda_lowerbound_gate(
             g=g_seq.to(torch.float),
             A_log=A_log[:H].contiguous(),
@@ -91,15 +97,14 @@ def _reference(q, k, v, g, b, w, do, offsets, A_log, dt_bias):
             lower_bound=-5.0,
         )
 
-        o_seq, _ = naive_recurrent_gdn2(
+        reference = naive_recurrent_gdn2_checkpointed if IS_NPU else naive_recurrent_gdn2
+        o_seq, _ = reference(
             q=q_seq_norm,
             k=k_seq_norm,
             v=v_seq,
             g=g_processed,
             b=b_seq,
             w=w_seq,
-            initial_state=None,
-            output_final_state=False,
         )
         (o_seq * do_seq).sum().backward()
         results.append((
@@ -112,6 +117,17 @@ def _reference(q, k, v, g, b, w, do, offsets, A_log, dt_bias):
             w_seq.grad.detach(),
         ))
     return tuple(torch.cat(parts, dim=1) for parts in zip(*results))
+
+
+def _wait_for_reference(rank: int) -> None:
+    """Wait for rank 0's reference without starting an HCCL collective."""
+    store = _get_default_store()
+    store.set_timeout(timedelta(hours=2))
+    key = "gdn2_cp_reference_done"
+    if rank == 0:
+        store.set(key, "1")
+    else:
+        store.get(key)
 
 
 def _run_chunk(
@@ -152,6 +168,8 @@ def _run_chunk(
             dt_bias=dt_bias_global,
         )
 
+    if IS_NPU:
+        _wait_for_reference(rank=rank)
     dist.barrier()
 
     context = build_cp_context(cu_seqlens_global, group=dist.group.WORLD)
@@ -195,9 +213,8 @@ def _run_chunk(
     dw_cp_global = gather_global(w_local.grad, world_size=world_size)
 
     if rank == 0:
-        # per-dim gating and L2 normalization of k ~ N(-50, 10) amplify bf16 state-communication error;
-        # baseline ratios reach ~0.9-1.6%, above the strict 8e-3 threshold.
-        # db also includes a cross-rank reduction (~2.3% error) and remains a warning-only diagnostic.
+        # correlated BF16 inputs stress normalization and chunk-intermediate precision.
+        # db retains its warning-only diagnostic for existing baseline gradient error.
         assert_close("Output", ref_out, o_cp_global, ratio=8e-3, warning=False)
         assert_close("dq", ref_dq, dq_cp_global, ratio=8e-3, warning=False)
         assert_close("dk", ref_dk, dk_cp_global, ratio=8e-3, warning=False)

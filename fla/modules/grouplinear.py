@@ -82,5 +82,6 @@ class GroupLinear(nn.Module):
         weight = self.weight.view(self.groups, self.out_features // self.groups, self.in_features // self.groups)
         y = torch.einsum('...gi,goi->...go', x, weight).flatten(-2)
         if self.bias is not None:
-            y = y + self.bias
+            bias = self.bias.to(y.dtype) if torch.is_autocast_enabled(y.device.type) else self.bias
+            y = y + bias
         return y
