@@ -557,8 +557,6 @@ def chunk_gated_delta_rule(
             "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
         )
 
-    if torch.isinf(g).any():
-        raise ValueError("chunk_gated_delta_rule does not support infinite log gates")
     chunk_size = kwargs.pop('chunk_size', 64)
     if chunk_size not in (16, 32, 64):
         raise ValueError(f"`chunk_size` must be 16, 32, or 64 for Gated Delta Rule, got {chunk_size}.")
@@ -583,6 +581,10 @@ def chunk_gated_delta_rule(
                 f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}.",
             )
     use_gate_in_kernel = kwargs.get('use_gate_in_kernel', False)
+    # Raw -inf maps to a finite zero log gate under softplus.
+    invalid_gate = torch.isposinf(g) if use_gate_in_kernel else torch.isinf(g)
+    if invalid_gate.any():
+        raise ValueError("chunk_gated_delta_rule does not support infinite log gates")
     A_log = kwargs.get('A_log')
     dt_bias = kwargs.get('dt_bias')
     if use_gate_in_kernel:
