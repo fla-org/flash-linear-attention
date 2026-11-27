@@ -68,7 +68,7 @@ class KimiDeltaAttention(nn.Module):
             Whether to use bias in the short convolution, only used when `use_short_conv` is `True`. Default: `False`.
         safe_gate (bool, Optional):
             Whether the kernel can assume the gate values (in log space) are in ``[lower_bound, 0)``
-            and use M=16 TensorCore acceleration. Requires ``lower_bound`` to be set.
+            and use TensorCore acceleration. Requires ``lower_bound`` to be set.
             See :func:`chunk_kda` for details. Default: ``False``.
         lower_bound (float, Optional):
             Lower bound for the forget gate in log space. Clamps the gate output to ``[lower_bound, 0)``.
