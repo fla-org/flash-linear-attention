@@ -407,6 +407,8 @@ def _atk_fwd_stages(
         num_warps=4
     )
 
+    # The final state stays in the scan's FP32, as the fused recurrent kernel
+    # keeps it, so a cached prefill hands decode the state it accumulated.
     at = None
     if output_final_state:
         if is_varlen:
@@ -416,9 +418,9 @@ def _atk_fwd_stages(
             at = ac[torch.arange(N, device=ac.device), last_chunk_indices.clamp(min=0)]
             # an empty sequence has no chunk of its own and keeps the state it came in with
             empty = (last_chunk_indices < 0)[:, None, None]
-            at = torch.where(empty, 0.0 if initial_A_state is None else initial_A_state, at).to(k.dtype)
+            at = torch.where(empty, 0.0 if initial_A_state is None else initial_A_state, at).float()
         else:
-            at = ac[:, -1, :, :].contiguous().to(k.dtype)
+            at = ac[:, -1, :, :].contiguous()
 
     return k_precond.to(k.dtype), ac, a, sa, at
 

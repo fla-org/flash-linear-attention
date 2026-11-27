@@ -11,10 +11,12 @@ from importlib.machinery import ModuleSpec
 from types import ModuleType
 
 from fla.modules.causal_conv1d import ShortConvolution
+from fla.modules.dynamic_conv import DynamicShortConvolution
 from fla.modules.fused_bitlinear import BitLinear, FusedBitLinear
 from fla.modules.fused_cross_entropy import FusedCrossEntropyLoss
 from fla.modules.fused_kl_div import FusedKLDivLoss
 from fla.modules.fused_linear_cross_entropy import FusedLinearCrossEntropyLoss
+from fla.modules.grouplinear import GroupLinear
 from fla.modules.long_conv import ImplicitLongConvolution, LongConvolution
 from fla.modules.mlp import GatedMLP
 from fla.modules.norm import (
@@ -32,6 +34,7 @@ from fla.modules.norm import (
     RMSNorm,
     RMSNormLinear,
 )
+from fla.modules.residuals import AttentionResidual, StandardResidual
 from fla.modules.rotary import RotaryEmbedding
 from fla.modules.token_shift import TokenShift
 
@@ -106,7 +109,9 @@ for _name, _aliases in _SYMBOL_ALIASES.items():
         setattr(_module, _old, getattr(_source, _symbol))
 
 __all__ = [
+    'AttentionResidual',
     'BitLinear',
+    'DynamicShortConvolution',
     'FusedBitLinear',
     'FusedCrossEntropyLoss',
     'FusedKLDivLoss',
@@ -118,6 +123,7 @@ __all__ = [
     'FusedRMSNormSwishGate',
     'FusedRMSNormSwishGateLinear',
     'GatedMLP',
+    'GroupLinear',
     'GroupNorm',
     'GroupNormLinear',
     'ImplicitLongConvolution',
@@ -129,5 +135,6 @@ __all__ = [
     'RMSNormLinear',
     'RotaryEmbedding',
     'ShortConvolution',
+    'StandardResidual',
     'TokenShift',
 ]

@@ -52,6 +52,7 @@ class FastCausalConv1dFn(torch.autograd.Function):
         assert output_final_state is False, "output_final_state must be False for FastCausalConv1dFn"
         assert initial_states is None, "initial_states must be None for FastCausalConv1dFn"
         assert residual is None, "residual must be None for FastCausalConv1dFn"
+        assert x.ndim == 3, f"FastCausalConv1dFn only supports [B, T, D] inputs, got {tuple(x.shape)}"
 
         bias = bias.contiguous() if bias is not None else None
         if cu_seqlens is not None and seq_idx is None:

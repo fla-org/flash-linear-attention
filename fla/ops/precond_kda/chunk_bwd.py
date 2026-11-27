@@ -9,6 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.backends import dispatch
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp2
 from fla.utils import IS_NVIDIA_HOPPER, autotune_cache_kwargs, check_shared_mem
@@ -106,6 +107,7 @@ def chunk_precond_kda_bwd_kernel_dAv(
     tl.store(p_dA, b_dA.to(dA.dtype.element_ty), mask=m_t[:, None] & (o_A[None, :] < BT))
 
 
+@dispatch('precond_kda')
 def chunk_precond_kda_bwd_dAv(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -374,6 +376,7 @@ def chunk_precond_kda_bwd_kernel_wy_dqkg(
     tl.store(db + o_t*H, b_db.to(db.dtype.element_ty), mask=m_t)
 
 
+@dispatch('precond_kda')
 def chunk_precond_kda_bwd_wy_dqkg(
     q: torch.Tensor,
     k: torch.Tensor,

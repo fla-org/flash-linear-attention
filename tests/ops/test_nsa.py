@@ -955,6 +955,8 @@ def test_parallel_varlen_decode(
 @pytest.mark.parametrize(
     ('T', 'cu_seqlens', 'H', 'HQ', 'K', 'V', 'block_size', 'dtype'),
     [
+        pytest.param(128, None, 1, 16, 64, 256, 32, torch.float16, id='dense-T128-G16-K64-V256-fp16'),
+        pytest.param(160, [0, 63, 160], 1, 16, 64, 256, 32, torch.float16, id='varlen-63-97-G16-K64-V256-fp16'),
         pytest.param(8192, None, 4, 64, 32, 32, 64, torch.bfloat16, id='dense-T8K-G16-K32-V32-bf16'),
         pytest.param(16384, None, 4, 64, 32, 32, 64, torch.bfloat16, id='dense-T16K-G16-K32-V32-bf16'),
         pytest.param(32768, None, 4, 64, 32, 32, 64, torch.bfloat16, id='dense-T32K-G16-K32-V32-bf16'),

@@ -55,6 +55,8 @@ def check_environments():
 
     triton_version = package_version.parse(triton.__version__)
     required_triton_version = package_version.parse("3.3.0")
+    recommended_triton_version = package_version.parse("3.9.0")
+    blackwell_min_triton_version = package_version.parse("3.7.1")
 
     if triton_version < required_triton_version:
         logger.warning(
@@ -62,6 +64,27 @@ def check_environments():
             "Errors may occur and these issues will not be fixed. "
             "Please consider upgrading Triton.",
         )
+    elif triton_version < recommended_triton_version:
+        try:
+            target = triton.runtime.driver.active.get_current_target()
+            backend = target.backend
+            arch = str(target.arch).split(':')[0]
+        except Exception:
+            backend, arch = '', ''
+        major = int(''.join(ch for ch in arch if ch.isdigit()) or 0) // 10
+        if backend == 'cuda' and major in (9, 10, 12):
+            arch_name = 'Hopper' if major == 9 else 'Blackwell'
+            if major in (10, 12) and triton_version < blackwell_min_triton_version:
+                logger.warning(
+                    f"Detected NVIDIA {arch_name} (sm{arch}) with Triton {triton_version}. "
+                    "Blackwell requires Triton >= 3.7.1 (3.9.0 recommended); older versions can hit "
+                    "CUDA illegal memory accesses in kernels such as GDN2. Please upgrade Triton.",
+                )
+            else:
+                logger.warning(
+                    f"Detected NVIDIA {arch_name} (sm{arch}) with Triton {triton_version}. "
+                    "Triton 3.9.0 or newer is recommended for Hopper and Blackwell. Please consider upgrading Triton.",
+                )
 
     # Check Python version
     py_version = package_version.parse(f"{sys.version_info.major}.{sys.version_info.minor}")
@@ -103,6 +126,7 @@ def supports_transformers_next_sequence_length() -> bool:
 
 
 TRITON_ABOVE_3_4_0 = package_version.parse(triton.__version__) >= package_version.parse("3.4.0")
+TRITON_ABOVE_3_5_0 = package_version.parse(triton.__version__) >= package_version.parse("3.5.0")
 TRITON_ABOVE_3_5_1 = package_version.parse(triton.__version__) >= package_version.parse("3.5.1")
 TRITON_ABOVE_3_6_0 = package_version.parse(triton.__version__) >= package_version.parse("3.6.0")
 TRITON_ABOVE_3_7_1 = package_version.parse(triton.__version__) >= package_version.parse("3.7.1")

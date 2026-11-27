@@ -109,6 +109,8 @@ def chunk_hgrn_fwd_kernel_o(
     mask = o_d < D
 
     for i_t in range(1, tl.cdiv(T, BT)):
+        # The carry row was stored by other warps in the previous iteration.
+        tl.debug_barrier()
         o_t = (i_t * BT).to(tl.int64) + tl.arange(0, BT)
         m_g = (o_t[:, None] < T) & mask[None, :]
         p_gc = gc + i_b * s_b + o_t[:, None] * s_t + o_d[None, :] * s_d
@@ -199,6 +201,8 @@ def chunk_hgrn_bwd_kernel_o(
     mask = o_d < D
 
     for i_t in range(tl.cdiv(T, BT) - 1, -1, -1):
+        # The carry row was stored by other warps in the previous iteration.
+        tl.debug_barrier()
         o_t = (i_t * BT).to(tl.int64) + tl.arange(0, BT)
         o_to = (i_t * BT - 1).to(tl.int64) + tl.arange(0, BT)
         m_g = (o_t[:, None] < T) & mask[None, :]
@@ -261,6 +265,10 @@ class ChunkHGRNFunction(torch.autograd.Function):
         B, T, D = do.shape
         BT, BD = 128, min(64, triton.next_power_of_2(D))
         num_warps = 8 if BD == 64 else 4
+        if dht is not None:
+            # the final state is o[:, -1], so its gradient flows in through the last output
+            do = do.to(torch.float, copy=True)
+            do[:, -1] += dht
 
         gc = torch.empty_like(g, dtype=torch.float)
         dx = torch.empty_like(o, dtype=torch.float)
@@ -278,10 +286,12 @@ class ChunkHGRNFunction(torch.autograd.Function):
             BD=BD,
             num_warps=num_warps,
         )
+        dh0 = None
         if initial_state is not None:
             dg[:, 0] = (initial_state * dx[:, 0] * g[:, 0].float().exp()).to(dg.dtype)
+            dh0 = (dx[:, 0] * g[:, 0].float().exp()).to(initial_state.dtype)
 
-        return dx.to(o.dtype), dg, None, None
+        return dx.to(o.dtype), dg, dh0, None
 
 
 @torch.compiler.disable
