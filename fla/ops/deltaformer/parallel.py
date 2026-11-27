@@ -136,7 +136,7 @@ def _config_deltaformer():
 
 
 @triton.autotune(configs=_config_deltaformer(), key=['T_BUCKET', 'D'], **autotune_cache_kwargs)
-@triton.jit
+@triton.jit(do_not_specialize=['T', 'T_BUCKET'])
 def parallel_deltaformer_fwd_kernel(
     q_ptr,
     k_ptr,
@@ -232,7 +232,7 @@ def parallel_deltaformer_fwd_kernel(
 
 
 @triton.autotune(configs=_config_deltaformer(), key=['T_BUCKET', 'D'], **autotune_cache_kwargs)
-@triton.jit
+@triton.jit(do_not_specialize=['T', 'T_BUCKET'])
 def parallel_deltaformer_bwd_kernel_u(
     o_ptr,
     q_ptr,
@@ -283,7 +283,7 @@ def parallel_deltaformer_bwd_kernel_u(
 
 
 @triton.autotune(configs=_config_deltaformer(), key=['T_BUCKET', 'D'], **autotune_cache_kwargs)
-@triton.jit
+@triton.jit(do_not_specialize=['T', 'T_BUCKET'])
 def parallel_deltaformer_bwd_kernel_row_sum(
     row_dot_ptr,
     q_ptr,
@@ -340,7 +340,7 @@ def parallel_deltaformer_bwd_kernel_row_sum(
                           for BC in [64, 32]
                           for ns in [4, 3]
                           for nw in [4]], key=['T_BUCKET', 'D'], **autotune_cache_kwargs)
-@triton.jit
+@triton.jit(do_not_specialize=['T', 'T_BUCKET'])
 def parallel_deltaformer_bwd_kernel_qk(
     grad_q_ptr,
     grad_k_ptr,
