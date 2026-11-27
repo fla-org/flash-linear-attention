@@ -15,7 +15,7 @@ from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.op import exp2
 from fla.utils import autotune_cache_kwargs, check_shared_mem
 
-B_LIST = [64, 128] if check_shared_mem('ampere') else [64]
+BKV_LIST = [64, 128] if check_shared_mem('ampere') else [64]
 
 
 def _prune_recompute_w_u_configs(configs, nargs, **kwargs):
@@ -37,8 +37,8 @@ def _prune_recompute_w_u_configs(configs, nargs, **kwargs):
 @fla_cache_autotune(
     configs=[
         triton.Config({'BK': BK, 'BV': BV}, num_warps=num_warps, num_stages=num_stages)
-        for BK in B_LIST
-        for BV in B_LIST
+        for BK in BKV_LIST
+        for BV in BKV_LIST
         for num_warps in [2, 4, 8]
         for num_stages in [2, 3]
         if num_warps >= 4 or (BK == 64 and BV == 64)
