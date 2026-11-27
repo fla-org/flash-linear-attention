@@ -123,21 +123,10 @@ def test_deltaformer_attn_padding_mask(with_beta: bool):
         assert_close(name, ref_grad, actual_grad, 0.008)
         assert torch.count_nonzero(actual_grad[~mask]) == 0
 
-
-@pytest.mark.parametrize('with_beta', [False, True])
-@requires_flash_attn
-def test_deltaformer_attn_fully_masked(with_beta: bool):
-    torch.manual_seed(42)
-    B, T, H, D = 2, 32, 2, 64
-    q, k, v = [torch.randn((B, T, H, D), dtype=torch.float16, device=device).requires_grad_() for _ in range(3)]
-    beta = torch.rand((B, T, H), dtype=q.dtype, device=device).requires_grad_() if with_beta else None
-    inputs = (q, k, v) + ((beta,) if beta is not None else ())
-    mask = torch.zeros((B, T), dtype=torch.bool, device=device)
-
-    actual = deltaformer_attn(q, k, v, beta, attention_mask=mask)
+    actual = deltaformer_attn(q, k, v, beta, attention_mask=torch.zeros_like(mask))
     assert actual.shape == q.shape
     assert torch.count_nonzero(actual) == 0
-    actual.backward(torch.randn_like(actual))
+    actual.backward(do)
     for tensor in inputs:
         assert tensor.grad is not None
         assert torch.count_nonzero(tensor.grad) == 0
