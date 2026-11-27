@@ -204,7 +204,9 @@ class ChunkKDAFunction(torch.autograd.Function):
         if ctx.use_beta_sigmoid_in_kernel:
             db = fused_beta_sigmoid_bwd(x=beta_raw, dy=db, scale=2.0 if ctx.allow_neg_eigval else 1.0)
 
-        return (dq.to(q), dk.to(k), dv.to(v), dg.to(g_input), db.to(beta_raw), dA, dbias, None, dh0,
+        # graph scratch buffers may be reused before autograd accumulates these gradients.
+        return (dq.to(q, copy=ctx.use_graph), dk.to(k, copy=ctx.use_graph), dv.to(v, copy=ctx.use_graph),
+                dg.to(g_input), db.to(beta_raw), dA, dbias, None, dh0,
                 None, None, None, None, None, None, None, None, None, None, None, None, None, None,
                 None, None)
 
