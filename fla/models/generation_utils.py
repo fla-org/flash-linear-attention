@@ -39,11 +39,12 @@ class FLAGenerationMixin(GenerationMixin):
         is_first_iteration: bool = False,
         **kwargs,
     ):
+        past_key_values = kwargs.pop("cache", past_key_values)
         if cache_position is not None and next_sequence_length is None:
             next_sequence_length = len(cache_position)
         if logits_to_keep is not None:
             kwargs["logits_to_keep"] = logits_to_keep
-        return super().prepare_inputs_for_generation(
+        model_inputs = super().prepare_inputs_for_generation(
             input_ids=input_ids,
             next_sequence_length=next_sequence_length,
             past_key_values=past_key_values,
@@ -53,6 +54,9 @@ class FLAGenerationMixin(GenerationMixin):
             use_cache=use_cache,
             **kwargs,
         )
+        if "cache" in model_inputs:
+            model_inputs["past_key_values"] = model_inputs.pop("cache")
+        return model_inputs
 
 
 class FLAUnsupportedCacheGenerationMixin(FLAGenerationMixin):
