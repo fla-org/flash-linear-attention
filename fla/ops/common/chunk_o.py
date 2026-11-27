@@ -270,7 +270,7 @@ def chunk_bwd_kernel_dqkwg(
         b_h = tl.load(p_h, mask=m_h, other=0.0)
         b_dh = tl.load(p_dh, mask=m_h, other=0.0)
         if USE_G:
-            b_dg_last += (tl.sum(b_h * b_dh))
+            b_dg_last += tl.sum(b_h.to(tl.float32) * b_dh.to(tl.float32))
         # [BT, BV] @ [BV, BT] -> [BT, BT]
         b_ds = tl.dot(b_do, tl.trans(b_v), b_ds)
         # [BT, BV] @ [BV, BK] -> [BT, BK]
