@@ -107,10 +107,7 @@ def test_deltaformer_attn_padding_mask(with_beta: bool):
     ref = torch.zeros_like(q)
     for i in range(B):
         if mask[i].any():
-            ref[i, mask[i]] = naive_deltaformer_attn(
-                q[i:i+1, mask[i]], k[i:i+1, mask[i]], v[i:i+1, mask[i]],
-                beta[i:i+1, mask[i]] if beta is not None else None,
-            ).squeeze(0)
+            ref[i, mask[i]] = naive_deltaformer_attn(*(tensor[i:i+1, mask[i]] for tensor in inputs)).squeeze(0)
     ref_grads = torch.autograd.grad(ref, inputs, do)
     actual = deltaformer_attn(q, k, v, beta, attention_mask=mask, C=64)
     actual_grads = torch.autograd.grad(actual, inputs, do)
@@ -126,10 +123,8 @@ def test_deltaformer_attn_padding_mask(with_beta: bool):
     actual = deltaformer_attn(q, k, v, beta, attention_mask=torch.zeros_like(mask))
     assert actual.shape == q.shape
     assert torch.count_nonzero(actual) == 0
-    actual.backward(do)
-    for tensor in inputs:
-        assert tensor.grad is not None
-        assert torch.count_nonzero(tensor.grad) == 0
+    for grad in torch.autograd.grad(actual, inputs, do):
+        assert torch.count_nonzero(grad) == 0
 
 
 def naive_deltaformer_u(q, k, v, beta):
