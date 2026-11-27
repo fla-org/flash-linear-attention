@@ -160,7 +160,6 @@ class MultiheadLatentAttention(nn.Module):
 
             if kwargs.get("cu_seqlens") is None and attention_mask is not None:
                 seqlen_offset = seqlen_offset + prepare_lens_from_mask(attention_mask) - attention_mask.shape[-1]
-                max_seqlen = q_len + max(seqlen_offset)
 
         if self.max_position_embeddings is not None:
             max_seqlen = max(max_seqlen, self.max_position_embeddings)
