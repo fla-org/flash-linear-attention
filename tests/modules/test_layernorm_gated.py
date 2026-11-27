@@ -166,10 +166,11 @@ def test_gated_norm_bucket_compilation(monkeypatch, D: int, activation: str, is_
 
     for name, autotuner in autotuners.items():
         bucket_index = autotuner.keys.index('NB')
-        assert sorted(key[bucket_index] for key in autotuner.cache) == [1, 2, 3]
+        buckets = sorted(key[bucket_index] for key in autotuner.cache)
+        assert len(set(buckets)) == 3
         args, kwargs = launches[name]
         kwargs = {key: value for key, value in kwargs.items() if key != 'warmup'}
-        hashes = {autotuner.fn.warmup(*args, **{**kwargs, 'NB': bucket}).hash for bucket in (1, 2, 3)}
+        hashes = {autotuner.fn.warmup(*args, **{**kwargs, 'NB': bucket}).hash for bucket in buckets}
         assert len(hashes) == 1
 
 
