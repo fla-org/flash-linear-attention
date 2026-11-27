@@ -412,13 +412,17 @@ def _atk_fwd_stages(
     at = None
     if output_final_state:
         if is_varlen:
-            # gather each sequence's last chunk in one indexing op: reading the indices into Python
-            # would synchronize the host once per sequence
-            last_chunk_indices = triton.cdiv(prepare_lens(cu_seqlens).long(), CHUNK_LEN) - 1
-            at = ac[torch.arange(N, device=ac.device), last_chunk_indices.clamp(min=0)]
-            # an empty sequence has no chunk of its own and keeps the state it came in with
-            empty = (last_chunk_indices < 0)[:, None, None]
-            at = torch.where(empty, 0.0 if initial_A_state is None else initial_A_state, at).float()
+            if max_chunks == 0:
+                # every sequence is empty, so there is no chunk to gather from
+                at = ac.new_zeros(N, H, D) if initial_A_state is None else initial_A_state.float().clone()
+            else:
+                # gather each sequence's last chunk in one indexing op: reading the indices into Python
+                # would synchronize the host once per sequence
+                last_chunk_indices = triton.cdiv(prepare_lens(cu_seqlens).long(), CHUNK_LEN) - 1
+                at = ac[torch.arange(N, device=ac.device), last_chunk_indices.clamp(min=0)]
+                # an empty sequence has no chunk of its own and keeps the state it came in with
+                empty = (last_chunk_indices < 0)[:, None, None]
+                at = torch.where(empty, 0.0 if initial_A_state is None else initial_A_state, at).float()
         else:
             at = ac[:, -1, :, :].contiguous()
 

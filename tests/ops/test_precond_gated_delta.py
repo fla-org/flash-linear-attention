@@ -937,6 +937,46 @@ def test_chunk_varlen_empty_A_state(with_initial_A_state: bool):
         assert_close(name, ref_grad, tri_grad, tolerance)
 
 
+@pytest.mark.parametrize('with_initial_A_state', [True, False], ids=['initial_A_state', 'no_initial_A_state'])
+def test_chunk_varlen_all_empty_A_state(with_initial_A_state: bool):
+    """A packing of only empty sequences has no chunk; each sequence keeps the state it came in with."""
+    torch.manual_seed(42)
+    H, D = 1, 16
+    cu_seqlens = [0, 0, 0]
+    N = len(cu_seqlens) - 1
+
+    q = torch.rand(1, 0, H, D, dtype=torch.float16, device=device)
+    k = torch.rand(1, 0, H, D, dtype=torch.float16, device=device)
+    v = torch.rand(1, 0, H, D, dtype=torch.float16, device=device)
+    g_atk = torch.rand(1, 0, H, dtype=torch.float32, device=device)
+    g = torch.rand(1, 0, H, dtype=torch.float32, device=device)
+    beta_atk = torch.rand(1, 0, H, dtype=torch.float32, device=device)
+    beta = torch.rand(1, 0, H, dtype=torch.float32, device=device)
+    h0 = torch.randn(N, H, D, D, dtype=torch.float32, device=device)
+    A0 = torch.rand(N, H, D, dtype=torch.float32, device=device) if with_initial_A_state else None
+
+    tri, tri_ht, tri_at = chunk_precond_gated_delta_rule(
+        q=q,
+        k=k,
+        v=v,
+        g_atk=g_atk,
+        g=g,
+        beta_atk=beta_atk,
+        beta=beta,
+        initial_state=h0,
+        initial_A_state=A0,
+        output_final_state=True,
+        cu_seqlens=torch.tensor(cu_seqlens, device=device),
+        x=1.5,
+        log_atk_scale=torch.rand(H, dtype=torch.float32, device=device) - 1.0,
+    )
+
+    assert tri.shape == v.shape
+    assert torch.equal(tri_ht, h0)
+    assert tri_at.dtype == torch.float32
+    assert torch.equal(tri_at, A0 if with_initial_A_state else torch.zeros(N, H, D, device=device))
+
+
 def test_fused_recurrent_default_beta_gva():
     """`beta=None` must default to ones over the HV value heads; sizing it from
     q ([B, T, H]) makes the kernel read out of bounds under GVA (HV > H)."""
