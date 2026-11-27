@@ -560,7 +560,8 @@ def _select_bwd_dhu_tiles(
 
 def _launch_core_grid(kernel, *, task_num: int, kernel_kwargs: dict, **compile_opts) -> None:
     num_core = min(get_npu_properties()["num_aicore"], max(1, task_num))
-    kernel[(num_core,)](task_num=task_num, num_core=num_core, **compile_opts, **kernel_kwargs)
+    launch_kwargs = {**compile_opts, **kernel_kwargs, **ascend_compile_kwargs(only='enable_dynamic_cv_pipeline')}
+    kernel[(num_core,)](task_num=task_num, num_core=num_core, **launch_kwargs)
 
 
 # enable_ubuf_saving packs BK=256/BV=128 into 192 KiB; unit_flag overlaps Cube/Fixpipe waits.

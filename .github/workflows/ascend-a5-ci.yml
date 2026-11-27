@@ -211,6 +211,9 @@ jobs:
             tests/modules/test_token_shift.py \
             tests/ops/test_backends.py \
             tests/ops/test_cache.py \
+            tests/ops/test_gdn.py \
+            tests/ops/test_gdn_kernels.py \
+            tests/ops/test_kda_graph.py \
             tests/ops/test_oja.py \
             tests/ops/test_parallax.py \
             tests/ops/test_solve_tril.py \
