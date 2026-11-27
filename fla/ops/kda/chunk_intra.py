@@ -973,9 +973,9 @@ def chunk_kda_bwd_intra(
     NK = triton.cdiv(K, BK)
 
     if use_graph:
-        dq2 = get_static_buffer("intra_dq2", tuple(dq.shape), dq.dtype, dq.device)
-        dk2 = get_static_buffer("intra_dk2", tuple(dk.shape), dk.dtype, dk.device)
-        db2 = get_static_buffer("intra_db2", (NK, *beta.shape), torch.float, beta.device)
+        dq2 = get_static_buffer("intra_dq2", tuple(dq.shape), dq.dtype, dq.device, zero=IS_NPU)
+        dk2 = get_static_buffer("intra_dk2", tuple(dk.shape), dk.dtype, dk.device, zero=IS_NPU)
+        db2 = get_static_buffer("intra_db2", (NK, *beta.shape), torch.float, beta.device, zero=IS_NPU)
         dg2 = get_static_buffer("intra_dg2", tuple(dg.shape), torch.float, dg.device)
     else:
         dq2 = torch.empty_like(dq)

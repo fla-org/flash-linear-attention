@@ -96,6 +96,29 @@ def test_chunk_invalid_chunk_size():
         chunk_kda(q, k, v, g, beta, chunk_size=16)
 
 
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32], ids=["bf16", "fp32"])
+def test_chunk_graph_grad_accumulation(dtype):
+    torch.manual_seed(42)
+    q = torch.zeros((1, 1, 1, 32), device=device, dtype=dtype)
+    q[..., 0] = 1
+    q.requires_grad_()
+    k = q.detach().clone().requires_grad_()
+    v = torch.ones_like(q, requires_grad=True)
+    g = torch.full_like(q, -0.1, dtype=torch.float32)
+    beta = torch.ones((1, 1, 1), device=device, dtype=torch.float32)
+    cu_seqlens = torch.tensor([0, 1], device=device, dtype=torch.int32)
+
+    outputs = [
+        chunk_kda(q=q, k=k, v=v, g=g, beta=beta, scale=scale, cu_seqlens=cu_seqlens, use_graph=True)[0]
+        for scale in (2.0, 3.0)
+    ]
+    sum(o.float().sum() for o in outputs).backward()
+
+    assert_close("dq", q.detach() * 160, q.grad, 0)
+    assert_close("dk", k.detach() * 160, k.grad, 0)
+    assert_close("dv", torch.full_like(v, 5), v.grad, 0)
+
+
 @pytest.mark.parametrize(
     ("B", "T", "H", "HV", "D", "scale", "gate_logit_normalizer", "use_qk_l2norm_in_kernel", "dtype"),
     [

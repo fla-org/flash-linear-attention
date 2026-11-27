@@ -204,7 +204,9 @@ class ChunkKDAFunction(torch.autograd.Function):
         if ctx.use_beta_sigmoid_in_kernel:
             db = fused_beta_sigmoid_bwd(x=beta_raw, dy=db, scale=2.0 if ctx.allow_neg_eigval else 1.0)
 
-        return (dq.to(q), dk.to(k), dv.to(v), dg.to(g_input), db.to(beta_raw), dA, dbias, None, dh0,
+        # graph scratch buffers may be reused before autograd accumulates these gradients.
+        return (dq.to(q, copy=ctx.use_graph), dk.to(k, copy=ctx.use_graph), dv.to(v, copy=ctx.use_graph),
+                dg.to(g_input), db.to(beta_raw), dA, dbias, None, dh0,
                 None, None, None, None, None, None, None, None, None, None, None, None, None, None,
                 None, None)
 
@@ -319,7 +321,7 @@ def chunk_kda(
 
             - Pad ``cu_seqlens`` with zero-length tail sequences to exactly ``max_num_seqs + 1`` entries;
               kernels return immediately on sentinel rows (segment id < 0),
-              so output/gradient rows not covered by real tokens are left undefined.
+              so output/gradient rows not covered by real tokens are left undefined on CUDA and zeroed on Ascend.
             - Shape ``initial_state`` and the incoming ``dht`` gradient (when used) as ``[max_num_seqs, ...]``.
             - Warm up the captured step eagerly so kernel autotuning runs outside the graph;
               with ``cp_context``, this also includes NCCL communicator setup.
