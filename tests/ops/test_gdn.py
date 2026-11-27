@@ -17,7 +17,7 @@ from einops import repeat
 from fla import backends
 from fla.ops.common.chunk_o import chunk_bwd_dqkwg
 from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
-from fla.ops.gated_delta_rule.fused_recurrent import fused_recurrent_gated_delta_rule_fwd
+from fla.ops.gated_delta_rule.fused_recurrent import FusedRecurrentFunction, fused_recurrent_gated_delta_rule_fwd
 from fla.ops.gated_delta_rule.gate import fused_gdn_gate, naive_gdn_gate
 from fla.ops.gated_delta_rule.naive import naive_recurrent_gated_delta_rule
 from fla.ops.gated_delta_rule.wy_fast import prepare_wy_repr_bwd, recompute_w_u_fwd
@@ -150,6 +150,26 @@ def test_fused_recurrent(
             )
             assert_close(name, ref, tri2, 0.002)
             assert_close(f'{name}_ht', ref_ht, tri2_ht, 0.002)
+
+
+@pytest.mark.parametrize('beta_shape', [(1, 20, 2, 128), (1, 20, 3)])
+def test_chunk_rejects_non_headwise_beta(beta_shape):
+    q = torch.zeros(1, 20, 1, 128, dtype=torch.bfloat16, device=device)
+    v = torch.zeros(1, 20, 2, 128, dtype=q.dtype, device=device)
+    g = torch.zeros(1, 20, 2, device=device)
+    beta = torch.ones(beta_shape, device=device)
+    with pytest.raises(ValueError, match='beta must have shape'):
+        chunk_gated_delta_rule(q, q, v, g, beta)
+
+
+@pytest.mark.parametrize('HV', [2, 6], ids=['fewer-value-heads', 'uneven-groups'])
+def test_fused_recurrent_rejects_invalid_gva_heads(HV, monkeypatch):
+    H = 4
+    q = torch.empty(1, 2, H, 32, dtype=torch.bfloat16, device=device)
+    v = q.new_empty(1, 2, HV, 32)
+    monkeypatch.setattr(FusedRecurrentFunction, 'apply', lambda *args: pytest.fail('invalid GVA heads reached the kernel'))
+    with pytest.raises(ValueError, match=rf'HV={HV}\).*divisible by num_heads \(H={H}\)'):
+        fused_recurrent_gated_delta_rule(q=q, k=q, v=v)
 
 
 def test_fused_recurrent_default_beta_gva():

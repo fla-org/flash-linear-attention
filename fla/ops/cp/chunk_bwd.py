@@ -233,7 +233,8 @@ def chunk_cp_bwd_kernel_dh(
         if K > 192:
             p_dh4 = dhm + o_k4[:, None] * (V + K) + o_v[None, :]
             tl.store(p_dh4, b_dh4.to(p_dh4.dtype.element_ty), mask=m_k4[:, None] & m_v[None, :])
-    else:
+    elif K <= 64:
+        # a narrow chunk transform fits in registers, and forming it keeps w.T @ k off the dM dependency chain
         i_k = i_c - tl.cdiv(V, BV)
 
         o_k = tl.arange(0, BK)
@@ -278,6 +279,105 @@ def chunk_cp_bwd_kernel_dh(
 
         p_m = dhm + V + o_k[:, None] * (V + K) + o_kc[None, :]
         tl.store(p_m, b_m.to(p_m.dtype.element_ty), mask=(o_k < K)[:, None] & (o_kc < K)[None, :])
+    else:
+        i_k = i_c - tl.cdiv(V, BV)
+        o_kc = tl.arange(0, BV) + i_k * BV
+        m_kc = o_kc < K
+        o_k1 = tl.arange(0, 64)
+        m_k1 = o_k1 < K
+        o_k2 = 64 + o_k1
+        m_k2 = o_k2 < K
+        o_k3 = 128 + o_k1
+        m_k3 = o_k3 < K
+        o_k4 = 192 + o_k1
+        m_k4 = o_k4 < K
+
+        # wide states keep dM in [64, BV] row strips like dh_local; a [K, K] chunk transform would spill registers
+        b_m1 = tl.where(o_k1[:, None] == o_kc[None, :], 1.0, 0.0)
+        if K > 64:
+            b_m2 = tl.where(o_k2[:, None] == o_kc[None, :], 1.0, 0.0)
+        if K > 128:
+            b_m3 = tl.where(o_k3[:, None] == o_kc[None, :], 1.0, 0.0)
+        if K > 192:
+            b_m4 = tl.where(o_k4[:, None] == o_kc[None, :], 1.0, 0.0)
+
+        for _i_t in range(NT):
+            i_t = NT - 1 - _i_t
+            o_t = i_t * BT + tl.arange(0, BT)
+            m_t = o_t < T
+            # (diag - w.T @ k) @ dM = diag * dM - w.T @ (k @ dM); both products keep dM in fp32 at CP_DOT_PRECISION
+            p_k = k + o_t[:, None] * stride_qk + o_k1[None, :]
+            b_k = tl.load(p_k, mask=m_t[:, None] & m_k1[None, :], other=0.0).to(tl.float32)
+            b_km = tl.dot(b_k, b_m1, input_precision=CP_DOT_PRECISION)
+            if K > 64:
+                p_k = k + o_t[:, None] * stride_qk + o_k2[None, :]
+                b_k = tl.load(p_k, mask=m_t[:, None] & m_k2[None, :], other=0.0).to(tl.float32)
+                b_km = tl.dot(b_k, b_m2, b_km, input_precision=CP_DOT_PRECISION)
+            if K > 128:
+                p_k = k + o_t[:, None] * stride_qk + o_k3[None, :]
+                b_k = tl.load(p_k, mask=m_t[:, None] & m_k3[None, :], other=0.0).to(tl.float32)
+                b_km = tl.dot(b_k, b_m3, b_km, input_precision=CP_DOT_PRECISION)
+            if K > 192:
+                p_k = k + o_t[:, None] * stride_qk + o_k4[None, :]
+                b_k = tl.load(p_k, mask=m_t[:, None] & m_k4[None, :], other=0.0).to(tl.float32)
+                b_km = tl.dot(b_k, b_m4, b_km, input_precision=CP_DOT_PRECISION)
+
+            last_idx = min((i_t + 1) * BT, T) - 1
+
+            if USE_G:
+                b_g_last = tl.load(g + last_idx * HV).to(tl.float32)
+                p_g = g + o_t * HV
+                b_g = tl.load(p_g, mask=m_t, other=0.0).to(tl.float32)
+                # the scalar gate scales token rows, so it applies to k @ dM as it would to k
+                b_km *= tl.where(m_t, exp2(b_g_last - b_g), 0)[:, None]
+                b_g_last = exp2(b_g_last)
+                b_m1 *= b_g_last
+                if K > 64:
+                    b_m2 *= b_g_last
+                if K > 128:
+                    b_m3 *= b_g_last
+                if K > 192:
+                    b_m4 *= b_g_last
+            elif USE_GK:
+                p_gk_last = gk + last_idx * HV * K
+                b_m1 *= exp2(tl.load(p_gk_last + o_k1, mask=m_k1, other=0.).to(tl.float32))[:, None]
+                if K > 64:
+                    b_m2 *= exp2(tl.load(p_gk_last + o_k2, mask=m_k2, other=0.).to(tl.float32))[:, None]
+                if K > 128:
+                    b_m3 *= exp2(tl.load(p_gk_last + o_k3, mask=m_k3, other=0.).to(tl.float32))[:, None]
+                if K > 192:
+                    b_m4 *= exp2(tl.load(p_gk_last + o_k4, mask=m_k4, other=0.).to(tl.float32))[:, None]
+
+            # DPLR passes its gated bg through k and adds w.T @ bg @ dM; GDN/KDA subtract w.T @ k @ dM
+            if not USE_BG:
+                b_km = -b_km
+            p_w = w + o_k1[:, None] + o_t[None, :] * stride_w
+            b_w = tl.load(p_w, mask=m_k1[:, None] & m_t[None, :], other=0.0).to(tl.float32)
+            b_m1 = tl.dot(b_w, b_km, b_m1, input_precision=CP_DOT_PRECISION)
+            if K > 64:
+                p_w = w + o_k2[:, None] + o_t[None, :] * stride_w
+                b_w = tl.load(p_w, mask=m_k2[:, None] & m_t[None, :], other=0.0).to(tl.float32)
+                b_m2 = tl.dot(b_w, b_km, b_m2, input_precision=CP_DOT_PRECISION)
+            if K > 128:
+                p_w = w + o_k3[:, None] + o_t[None, :] * stride_w
+                b_w = tl.load(p_w, mask=m_k3[:, None] & m_t[None, :], other=0.0).to(tl.float32)
+                b_m3 = tl.dot(b_w, b_km, b_m3, input_precision=CP_DOT_PRECISION)
+            if K > 192:
+                p_w = w + o_k4[:, None] + o_t[None, :] * stride_w
+                b_w = tl.load(p_w, mask=m_k4[:, None] & m_t[None, :], other=0.0).to(tl.float32)
+                b_m4 = tl.dot(b_w, b_km, b_m4, input_precision=CP_DOT_PRECISION)
+
+        p_m1 = dhm + V + o_k1[:, None] * (V + K) + o_kc[None, :]
+        tl.store(p_m1, b_m1.to(p_m1.dtype.element_ty), mask=m_k1[:, None] & m_kc[None, :])
+        if K > 64:
+            p_m2 = dhm + V + o_k2[:, None] * (V + K) + o_kc[None, :]
+            tl.store(p_m2, b_m2.to(p_m2.dtype.element_ty), mask=m_k2[:, None] & m_kc[None, :])
+        if K > 128:
+            p_m3 = dhm + V + o_k3[:, None] * (V + K) + o_kc[None, :]
+            tl.store(p_m3, b_m3.to(p_m3.dtype.element_ty), mask=m_k3[:, None] & m_kc[None, :])
+        if K > 192:
+            p_m4 = dhm + V + o_k4[:, None] * (V + K) + o_kc[None, :]
+            tl.store(p_m4, b_m4.to(p_m4.dtype.element_ty), mask=m_k4[:, None] & m_kc[None, :])
 
 
 def chunk_cp_bwd_dh(
@@ -299,7 +399,8 @@ def chunk_cp_bwd_dh(
     _, T, H, K = q.shape
     HV, V = do.shape[2:]
     BK = triton.next_power_of_2(K)
-    BV = 32 if K <= 64 else 64
+    # each column block scans the sequence serially; 32-column blocks shorten the M chains and keep fp32 strips in registers
+    BV = 32
     grid = (triton.cdiv(V, BV) + triton.cdiv(K, BV), HV)
     chunk_cp_bwd_kernel_dh[grid](
         q=q,

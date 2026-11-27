@@ -421,7 +421,7 @@ def layer_norm_fwd(
         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
     # use the row kernel at D == 512 to fit Intel scratch-space limits.
     if D <= 512 and not (D == 512 and IS_INTEL):
-        NB = triton.cdiv(T, 2048)
+        NB = triton.next_power_of_2(triton.cdiv(T, 2048))
 
         def grid(meta):
             return (triton.cdiv(T, meta['BT']),)
@@ -514,7 +514,7 @@ def layer_norm_bwd(
 
     # use the row kernel at D == 512 to fit Intel scratch-space limits.
     if D <= 512 and not (D == 512 and IS_INTEL):
-        NB = triton.cdiv(T, 2048)
+        NB = triton.next_power_of_2(triton.cdiv(T, 2048))
         layer_norm_bwd_kernel[grid](
             x=x,
             w=weight,

@@ -12,6 +12,7 @@
 import torch
 import triton
 import triton.language as tl
+from triton.language.extra.libdevice import tanh
 
 from fla.ops.utils.op import exp
 from fla.utils import autotune_cache_kwargs, input_guard
@@ -163,13 +164,6 @@ def leaky_relu(x):
 def sigmoid(x):
     # σ(x) = 1 / (1 + exp(-x))
     return 1.0 / (1.0 + exp(-x))
-
-
-@triton.jit
-def tanh(x):
-    # tanh(x) = (exp(x) - exp(-x)) / (exp(x) + exp(-x))
-    # 2 * sigmoid(2x) - 1
-    return (exp(x) - exp(-x)) / (exp(x) + exp(-x))
 
 
 @triton.jit
