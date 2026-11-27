@@ -128,10 +128,12 @@ def test_indexer(B, T, HI, DI, topk, ratio):
 
 
 @pytest.mark.parametrize(('B', 'T', 'H', 'D', 'window_size', 'ratio', 'mode'), [
-    (2, 64, 4, 32, 16, 4, 'csa'),
+    pytest.param(2, 64, 4, 32, 16, 4, 'csa', marks=pytest.mark.smoke),
     (1, 100, 2, 16, 8, 4, 'csa'),
-    (2, 300, 4, 16, 128, 128, 'hca'),
+    (1, 3, 2, 16, 8, 4, 'csa'),
+    pytest.param(2, 300, 4, 16, 128, 128, 'hca', marks=pytest.mark.smoke),
     (1, 64, 2, 16, 8, 16, 'hca'),
+    (1, 3, 2, 16, 8, 4, 'hca'),
     (2, 50, 3, 16, 7, None, 'swa'),
 ])
 def test_attention(B, T, H, D, window_size, ratio, mode):
@@ -148,6 +150,7 @@ def test_attention(B, T, H, D, window_size, ratio, mode):
         indices = reference_indexer(q_idx, torch.randn(B, T // ratio, 16, device=device), w_idx, 5, ratio, 0.25)
     ref = reference_attention(q, kv, compressed_kv, sinks, window_size, ratio, indices, D ** -0.5)
     tri = naive_v4_attention(q, kv, compressed_kv, sinks, window_size, ratio, indices)
+    assert tri.dtype == q.dtype
     assert_close('o', ref, tri, 1e-5)
 
 

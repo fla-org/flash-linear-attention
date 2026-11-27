@@ -143,13 +143,14 @@ def naive_v4_attention(
     B, T, HQ, D = q.shape
     if scale is None:
         scale = D ** -0.5
+    dtype = q.dtype
     q, kv = q.float(), kv.float()
     i = torch.arange(T, device=q.device)
     # [B, HQ, T, T]
     s = torch.einsum('bthd,bsd->bhts', q, kv) * scale
     s = s.masked_fill(~((i[:, None] >= i[None, :]) & (i[:, None] - i[None, :] < window_size)), float('-inf'))
     values = kv
-    if compressed_kv is not None:
+    if compressed_kv is not None and compressed_kv.shape[1] > 0:
         N = compressed_kv.shape[1]
         sc = torch.einsum('bthd,bnd->bhtn', q, compressed_kv.float()) * scale
         visible = torch.arange(N, device=q.device)[None, :] < ((i + 1) // compress_rate)[:, None]
@@ -162,4 +163,4 @@ def naive_v4_attention(
         values = torch.cat([kv, compressed_kv.float()], 1)
     s = torch.cat([s, sinks.float().view(1, HQ, 1, 1).expand(B, HQ, T, 1)], -1)
     p = s.softmax(-1)[..., :-1]
-    return torch.einsum('bhts,bsd->bthd', p, values).to(q.dtype)
+    return torch.einsum('bhts,bsd->bthd', p, values).to(dtype)
