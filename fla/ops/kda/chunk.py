@@ -16,7 +16,7 @@ from fla.modules.norm.l2norm import l2norm_bwd, l2norm_fwd
 from fla.ops.common.gate import fused_beta_sigmoid, fused_beta_sigmoid_bwd
 from fla.ops.cp import FLACPContext
 from fla.ops.kda.chunk_bwd import chunk_kda_bwd
-from fla.ops.kda.chunk_fwd import chunk_kda_fwd
+from fla.ops.kda.chunk_fwd import chunk_kda_fwd, should_use_dual_wy
 from fla.ops.utils.index import prepare_chunk_indices, prepare_chunk_indices_static
 from fla.utils import IS_NPU, autocast_custom_bwd, autocast_custom_fwd, input_guard
 
@@ -86,6 +86,8 @@ class ChunkKDAFunction(torch.autograd.Function):
                 )
 
         g_input = g
+        use_dual_wy = should_use_dual_wy(use_graph=use_graph, is_gva=v.shape[2] != q.shape[2])
+        needs_grad = any(ctx.needs_input_grad)
 
         (o, final_state, g_cumsum, Aqk, Akk, w, u, qg, kg, v_new, h, initial_state) = chunk_kda_fwd(
             q=q,
@@ -111,6 +113,8 @@ class ChunkKDAFunction(torch.autograd.Function):
             cp_context=cp_context,
             use_graph=use_graph,
             chunk_offsets=chunk_offsets,
+            use_dual_wy=use_dual_wy,
+            needs_grad=needs_grad,
         )
 
         if return_intermediate_states:
@@ -142,6 +146,7 @@ class ChunkKDAFunction(torch.autograd.Function):
             chunk_offsets,
         )
         ctx.use_graph = use_graph
+        ctx.use_dual_wy = use_dual_wy
         ctx.chunk_size = chunk_size
         ctx.safe_gate = safe_gate
         ctx.scale = scale
@@ -197,6 +202,7 @@ class ChunkKDAFunction(torch.autograd.Function):
             h=h,
             use_graph=ctx.use_graph,
             chunk_offsets=chunk_offsets,
+            use_dual_wy=ctx.use_dual_wy,
         )
         if ctx.use_qk_l2norm_in_kernel:
             dq = l2norm_bwd(q, q_rstd, dq)

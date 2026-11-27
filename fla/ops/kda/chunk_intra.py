@@ -11,7 +11,7 @@ import triton.language as tl
 
 from fla.backends import dispatch
 from fla.ops.kda.chunk_intra_token_parallel import chunk_kda_fwd_intra_token_parallel
-from fla.ops.kda.wy_fast import recompute_w_u_fwd
+from fla.ops.kda.wy_fast import prepare_dual_wy_fwd, recompute_w_u_fwd
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.constant import RCP_LN2
@@ -798,58 +798,20 @@ def chunk_kda_fwd_kernel_intra_sub_chunk(
     tl.store(p_Akk, b_Ai.to(Akk.dtype.element_ty), mask=m_Akk_st)
 
 
-@dispatch
-def chunk_kda_fwd_intra(
+def _chunk_kda_fwd_intra_solve(
     q: torch.Tensor,
     k: torch.Tensor,
-    v: torch.Tensor,
-    gk: torch.Tensor | None = None,
-    beta: torch.Tensor | None = None,
-    scale: float | None = None,
+    gk: torch.Tensor,
+    beta: torch.Tensor,
+    scale: float,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
     safe_gate: bool = False,
     lower_bound: float | None = None,
-    disable_recompute: bool = False,
     use_graph: bool = False,
-):
-    """Compute intra-chunk factors and solve the triangular KDA system.
-
-    Bounded log gates in safe_gate keep diagonal-block exponentials within FP32 range, allowing Tensor Core matmuls.
-    A reference C near the middle of the cumulative gates G balances the query/key scaling factors:
-
-        exp(G_i - G_j) = exp(G_i - C) * exp(C - G_j)
-
-    v0.5.2 uses the middle token's gate, which reads future gates for earlier causal scores (x):
-
-                                key token
-                                0  1  2  3
-                query token 0   x  .  .  .
-                            1   x  x  .  .
-                            2   o  o  o  .  <- C = G_2
-                            3   o  o  o  o
-
-    Dots are masked; x and o are retained. C cancels in exact arithmetic, but rounding can leak future gates into x.
-    See https://drisspg.github.io/nuggets/KDA-Future-Token-Leakage
-
-    Instead, use the first cumulative gate with a fixed shift toward an estimated midpoint (natural-log units):
-
-        s = -lower_bound if lower_bound is supplied to intra, otherwise 2
-        d = (BC - 1) * s / 2; C = G_0 - d
-
-    For BC=16 and s=2, C = G_0 - 15. Including the RCP_LN2 conversion, the kernel's exp2 gives
-    exp(G_i - G_0 + 15) for queries and exp(G_0 - G_i - 15) for keys.
-    The default 2 is a heuristic for log gates concentrated near 0, with few near the lower bound;
-    it limits the compensation to avoid over-scaling queries.
-    chunk_kda uses this default for both fused and pre-computed gates. An explicit intra lower_bound sets s instead.
-    Forward/backward keep the same fixed BC even for partial blocks, so appending tokens cannot move C.
-
-    For actual log gates in [L, 0], the factor bounds are (BC=16, s=2, L=-5):
-
-        max_i exp(G_i - C) <= exp(d) = exp(15 * 2 / 2) = exp(15) ~= 3.269e6
-        max_i exp(C - G_i) <= exp(-(BC - 1) * L - d) = exp(-15 * (-5) - 15) = exp(60) ~= 1.142e26
-    """
+    zero_init_akk: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, HV = *k.shape, gk.shape[2]
     BT = chunk_size
     if BT not in (32, 64):
@@ -861,8 +823,12 @@ def chunk_kda_fwd_intra(
     NC = triton.cdiv(BT, BC)
 
     Aqk = torch.empty(B, T, HV, BT, device=k.device, dtype=k.dtype)
-    # Akk must be zero-initialized - kernel only writes lower triangular
-    Akk = torch.zeros(B, T, HV, BT, device=k.device, dtype=k.dtype)
+    if zero_init_akk:
+        # Primal WY readers load the full BTxBT tile without upper-triangle masking.
+        Akk = torch.zeros(B, T, HV, BT, device=k.device, dtype=k.dtype)
+    else:
+        # Dual WY readers mask loads to the lower triangle, avoiding a zero-init memset.
+        Akk = torch.empty(B, T, HV, BT, device=k.device, dtype=k.dtype)
     # Separate fp32 buffer for diagonal 16x16 blocks (for precision in solve_tril)
     Akkd = torch.empty(B, T, HV, BC, device=k.device, dtype=torch.float32)
 
@@ -928,6 +894,75 @@ def chunk_kda_fwd_intra(
         USE_SAFE_GATE=safe_gate,
         USE_GRAPH=use_graph,
     )
+    return Aqk, Akk
+
+
+@dispatch
+def chunk_kda_fwd_intra(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    gk: torch.Tensor | None = None,
+    beta: torch.Tensor | None = None,
+    scale: float | None = None,
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_size: int = 64,
+    chunk_indices: torch.LongTensor | None = None,
+    safe_gate: bool = False,
+    lower_bound: float | None = None,
+    disable_recompute: bool = False,
+    use_graph: bool = False,
+):
+    """Compute intra-chunk factors and solve the triangular KDA system.
+
+    Bounded log gates in safe_gate keep diagonal-block exponentials within FP32 range, allowing Tensor Core matmuls.
+    A reference C near the middle of the cumulative gates G balances the query/key scaling factors:
+
+        exp(G_i - G_j) = exp(G_i - C) * exp(C - G_j)
+
+    v0.5.2 uses the middle token's gate, which reads future gates for earlier causal scores (x):
+
+                                key token
+                                0  1  2  3
+                query token 0   x  .  .  .
+                            1   x  x  .  .
+                            2   o  o  o  .  <- C = G_2
+                            3   o  o  o  o
+
+    Dots are masked; x and o are retained. C cancels in exact arithmetic, but rounding can leak future gates into x.
+    See https://drisspg.github.io/nuggets/KDA-Future-Token-Leakage
+
+    Instead, use the first cumulative gate with a fixed shift toward an estimated midpoint (natural-log units):
+
+        s = -lower_bound if lower_bound is supplied to intra, otherwise 2
+        d = (BC - 1) * s / 2; C = G_0 - d
+
+    For BC=16 and s=2, C = G_0 - 15. Including the RCP_LN2 conversion, the kernel's exp2 gives
+    exp(G_i - G_0 + 15) for queries and exp(G_0 - G_i - 15) for keys.
+    The default 2 is a heuristic for log gates concentrated near 0, with few near the lower bound;
+    it limits the compensation to avoid over-scaling queries.
+    chunk_kda uses this default for both fused and pre-computed gates. An explicit intra lower_bound sets s instead.
+    Forward/backward keep the same fixed BC even for partial blocks, so appending tokens cannot move C.
+
+    For actual log gates in [L, 0], the factor bounds are (BC=16, s=2, L=-5):
+
+        max_i exp(G_i - C) <= exp(d) = exp(15 * 2 / 2) = exp(15) ~= 3.269e6
+        max_i exp(C - G_i) <= exp(-(BC - 1) * L - d) = exp(-15 * (-5) - 15) = exp(60) ~= 1.142e26
+    """
+    Aqk, Akk = _chunk_kda_fwd_intra_solve(
+        q=q,
+        k=k,
+        gk=gk,
+        beta=beta,
+        scale=scale,
+        cu_seqlens=cu_seqlens,
+        chunk_size=chunk_size,
+        chunk_indices=chunk_indices,
+        safe_gate=safe_gate,
+        lower_bound=lower_bound,
+        use_graph=use_graph,
+        zero_init_akk=True,
+    )
     w, u, qg, kg = recompute_w_u_fwd(
         k=k,
         v=v,
@@ -940,6 +975,48 @@ def chunk_kda_fwd_intra(
         use_graph=use_graph,
     )
     return w, u, qg, kg, Aqk, Akk
+
+
+def chunk_kda_fwd_intra_dual(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    gk: torch.Tensor,
+    beta: torch.Tensor,
+    scale: float,
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_size: int = 64,
+    chunk_indices: torch.LongTensor | None = None,
+    safe_gate: bool = False,
+    lower_bound: float | None = None,
+    disable_recompute: bool = False,
+    use_graph: bool = False,
+):
+    Aqk, Akk = _chunk_kda_fwd_intra_solve(
+        q=q,
+        k=k,
+        gk=gk,
+        beta=beta,
+        scale=scale,
+        cu_seqlens=cu_seqlens,
+        chunk_size=chunk_size,
+        chunk_indices=chunk_indices,
+        safe_gate=safe_gate,
+        lower_bound=lower_bound,
+        use_graph=use_graph,
+        zero_init_akk=False,
+    )
+    kd, t, qg, A_eff = prepare_dual_wy_fwd(
+        k=k,
+        beta=beta,
+        Akk=Akk,
+        gk=gk,
+        Aqk=Aqk,
+        q=q if disable_recompute else None,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        use_graph=use_graph,
+    )
+    return kd, t, qg, Aqk, Akk, A_eff
 
 
 @dispatch
