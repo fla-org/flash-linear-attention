@@ -5,37 +5,25 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-# The sLSTM of xLSTM (https://arxiv.org/abs/2405.04517): exponential input gates and sigmoid forget gates with a
-# stabilizer state m, and a block-diagonal recurrent matrix R that mixes the hidden state within each head,
-#     [i~, f~, z~, o~]_t = x_t + h_{t-1} R,
-#     m_t = max(i~_t, log sigmoid(f~_t) + m_{t-1}),
-#     c_t = exp(log sigmoid(f~_t) + m_{t-1} - m_t) c_{t-1} + exp(i~_t - m_t) tanh(z~_t),
-#     n_t = exp(log sigmoid(f~_t) + m_{t-1} - m_t) n_{t-1} + exp(i~_t - m_t),
-#     h_t = sigmoid(o~_t) c_t / n_t.
-# The recurrence is nonlinear in h, so every program scans one head token by token. The stabilizer rescales c and n
-# alike and cancels in h, so the backward pass treats m as a constant and is still exact for h.
-
 import torch
 import triton
 import triton.language as tl
 
-from fla.ops.utils.op import exp, log
+from fla.ops.utils.op import exp, logaddexp, tanh
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, input_guard
+
+StateTuple = tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
 
 
 @triton.jit
 def logsigmoid(x):
-    return tl.minimum(x, 0.) - log(1. + exp(-tl.abs(x)))
-
-
-@triton.jit
-def tanh(x):
-    return 2. * tl.sigmoid(2. * x) - 1.
+    return -logaddexp(0., -x)
 
 
 @triton.heuristics({
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[triton.Config({}, num_warps=num_warps) for num_warps in [1, 2, 4, 8]],
@@ -45,7 +33,7 @@ def tanh(x):
 @triton.jit(do_not_specialize=['T'])
 def fused_recurrent_slstm_fwd_kernel(
     x,
-    R,
+    recurrent_weight,
     h0,
     c0,
     n0,
@@ -59,26 +47,34 @@ def fused_recurrent_slstm_fwd_kernel(
     ct,
     nt,
     mt,
+    cu_seqlens,
     T,
     H: tl.constexpr,
     D: tl.constexpr,
     BD: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
 ):
-    i_bh = tl.program_id(0).to(tl.int64)
-    i_b, i_h = i_bh // H, i_bh % H
+    i_nh = tl.program_id(0).to(tl.int64)
+    i_n, i_h = i_nh // H, i_nh % H
+    if IS_VARLEN:
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = eos - bos
+    else:
+        bos = i_n * T
+
     o_d = tl.arange(0, BD)
     m_d = o_d < D
-    m_R = m_d[:, None] & m_d[None, :]
-    p_R = R + i_h * 4 * D * D + o_d[:, None] * D + o_d[None, :]
+    m_rw = m_d[:, None] & m_d[None, :]
+    p_rw = recurrent_weight + i_h * 4 * D * D + o_d[:, None] * D + o_d[None, :]
 
     b_h = tl.zeros([BD], dtype=tl.float32)
     b_c = tl.zeros([BD], dtype=tl.float32)
     b_n = tl.zeros([BD], dtype=tl.float32)
     b_m = tl.zeros([BD], dtype=tl.float32)
     if USE_INITIAL_STATE:
-        o_s = i_bh * D + o_d
+        o_s = i_nh * D + o_d
         b_h += tl.load(h0 + o_s, mask=m_d, other=0.).to(tl.float32)
         b_c += tl.load(c0 + o_s, mask=m_d, other=0.).to(tl.float32)
         b_n += tl.load(n0 + o_s, mask=m_d, other=0.).to(tl.float32)
@@ -86,17 +82,17 @@ def fused_recurrent_slstm_fwd_kernel(
 
     for i_t in range(0, T):
         # [4, H, D] gates of token t, and [H, D] states
-        o_g = (i_b * T + i_t) * 4 * H * D + i_h * D + o_d
-        o_s = ((i_b * T + i_t) * H + i_h) * D + o_d
+        o_g = (bos + i_t) * 4 * H * D + i_h * D + o_d
+        o_s = ((bos + i_t) * H + i_h) * D + o_d
         b_hk = b_h[:, None]
         b_ri = tl.load(x + o_g, mask=m_d, other=0.).to(tl.float32) + \
-            tl.sum(b_hk * tl.load(p_R, mask=m_R, other=0.).to(tl.float32), 0)
+            tl.sum(b_hk * tl.load(p_rw, mask=m_rw, other=0.).to(tl.float32), 0)
         b_rf = tl.load(x + o_g + H * D, mask=m_d, other=0.).to(tl.float32) + \
-            tl.sum(b_hk * tl.load(p_R + D * D, mask=m_R, other=0.).to(tl.float32), 0)
+            tl.sum(b_hk * tl.load(p_rw + D * D, mask=m_rw, other=0.).to(tl.float32), 0)
         b_rz = tl.load(x + o_g + 2 * H * D, mask=m_d, other=0.).to(tl.float32) + \
-            tl.sum(b_hk * tl.load(p_R + 2 * D * D, mask=m_R, other=0.).to(tl.float32), 0)
+            tl.sum(b_hk * tl.load(p_rw + 2 * D * D, mask=m_rw, other=0.).to(tl.float32), 0)
         b_ro = tl.load(x + o_g + 3 * H * D, mask=m_d, other=0.).to(tl.float32) + \
-            tl.sum(b_hk * tl.load(p_R + 3 * D * D, mask=m_R, other=0.).to(tl.float32), 0)
+            tl.sum(b_hk * tl.load(p_rw + 3 * D * D, mask=m_rw, other=0.).to(tl.float32), 0)
 
         b_logf = logsigmoid(b_rf)
         b_m_new = tl.maximum(b_ri, b_logf + b_m)
@@ -117,7 +113,7 @@ def fused_recurrent_slstm_fwd_kernel(
         tl.store(ms + o_s, b_m, mask=m_d)
 
     if STORE_FINAL_STATE:
-        o_s = i_bh * D + o_d
+        o_s = i_nh * D + o_d
         tl.store(ht + o_s, b_h, mask=m_d)
         tl.store(ct + o_s, b_c, mask=m_d)
         tl.store(nt + o_s, b_n, mask=m_d)
@@ -126,6 +122,7 @@ def fused_recurrent_slstm_fwd_kernel(
 
 @triton.heuristics({
     'USE_INITIAL_STATE': lambda args: args['dh0'] is not None,
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[triton.Config({}, num_warps=num_warps) for num_warps in [1, 2, 4, 8]],
@@ -134,7 +131,7 @@ def fused_recurrent_slstm_fwd_kernel(
 )
 @triton.jit(do_not_specialize=['T'])
 def fused_recurrent_slstm_bwd_kernel(
-    R,
+    recurrent_weight,
     c0,
     n0,
     m0,
@@ -147,26 +144,34 @@ def fused_recurrent_slstm_bwd_kernel(
     dh0,
     dc0,
     dn0,
+    cu_seqlens,
     T,
     H: tl.constexpr,
     D: tl.constexpr,
     BD: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
 ):
-    i_bh = tl.program_id(0).to(tl.int64)
-    i_b, i_h = i_bh // H, i_bh % H
+    i_nh = tl.program_id(0).to(tl.int64)
+    i_n, i_h = i_nh // H, i_nh % H
+    if IS_VARLEN:
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = eos - bos
+    else:
+        bos = i_n * T
+
     o_d = tl.arange(0, BD)
     m_d = o_d < D
-    m_R = m_d[:, None] & m_d[None, :]
-    p_R = R + i_h * 4 * D * D + o_d[:, None] * D + o_d[None, :]
+    m_rw = m_d[:, None] & m_d[None, :]
+    p_rw = recurrent_weight + i_h * 4 * D * D + o_d[:, None] * D + o_d[None, :]
 
-    # gradients of h_{t}, c_t and n_t from later tokens
+    # gradients of h_t, c_t and n_t from later tokens
     b_dh = tl.zeros([BD], dtype=tl.float32)
     b_dc = tl.zeros([BD], dtype=tl.float32)
     b_dn = tl.zeros([BD], dtype=tl.float32)
     for i_t in range(T - 1, -1, -1):
-        o_g = (i_b * T + i_t) * 4 * H * D + i_h * D + o_d
-        o_s = ((i_b * T + i_t) * H + i_h) * D + o_d
+        o_g = (bos + i_t) * 4 * H * D + i_h * D + o_d
+        o_s = ((bos + i_t) * H + i_h) * D + o_d
         b_ri = tl.load(gs + o_g, mask=m_d, other=0.)
         b_rf = tl.load(gs + o_g + H * D, mask=m_d, other=0.)
         b_rz = tl.load(gs + o_g + 2 * H * D, mask=m_d, other=0.)
@@ -179,9 +184,9 @@ def fused_recurrent_slstm_bwd_kernel(
             b_n_prev = tl.load(ns + o_s - H * D, mask=m_d, other=0.)
             b_m_prev = tl.load(ms + o_s - H * D, mask=m_d, other=0.)
         elif USE_INITIAL_STATE:
-            b_c_prev = tl.load(c0 + i_bh * D + o_d, mask=m_d, other=0.).to(tl.float32)
-            b_n_prev = tl.load(n0 + i_bh * D + o_d, mask=m_d, other=0.).to(tl.float32)
-            b_m_prev = tl.load(m0 + i_bh * D + o_d, mask=m_d, other=0.).to(tl.float32)
+            b_c_prev = tl.load(c0 + i_nh * D + o_d, mask=m_d, other=0.).to(tl.float32)
+            b_n_prev = tl.load(n0 + i_nh * D + o_d, mask=m_d, other=0.).to(tl.float32)
+            b_m_prev = tl.load(m0 + i_nh * D + o_d, mask=m_d, other=0.).to(tl.float32)
         else:
             b_c_prev = tl.zeros([BD], dtype=tl.float32)
             b_n_prev = tl.zeros([BD], dtype=tl.float32)
@@ -206,49 +211,118 @@ def fused_recurrent_slstm_bwd_kernel(
         tl.store(dgs + o_g + 2 * H * D, b_drz, mask=m_d)
         tl.store(dgs + o_g + 3 * H * D, b_dro, mask=m_d)
 
-        # the gates read h_{t-1} R
-        b_dh = tl.sum(tl.load(p_R, mask=m_R, other=0.).to(tl.float32) * b_dri[None, :], 1)
-        b_dh += tl.sum(tl.load(p_R + D * D, mask=m_R, other=0.).to(tl.float32) * b_drf[None, :], 1)
-        b_dh += tl.sum(tl.load(p_R + 2 * D * D, mask=m_R, other=0.).to(tl.float32) * b_drz[None, :], 1)
-        b_dh += tl.sum(tl.load(p_R + 3 * D * D, mask=m_R, other=0.).to(tl.float32) * b_dro[None, :], 1)
+        # the gates read h_{t-1} @ recurrent_weight
+        b_dh = tl.sum(tl.load(p_rw, mask=m_rw, other=0.).to(tl.float32) * b_dri[None, :], 1)
+        b_dh += tl.sum(tl.load(p_rw + D * D, mask=m_rw, other=0.).to(tl.float32) * b_drf[None, :], 1)
+        b_dh += tl.sum(tl.load(p_rw + 2 * D * D, mask=m_rw, other=0.).to(tl.float32) * b_drz[None, :], 1)
+        b_dh += tl.sum(tl.load(p_rw + 3 * D * D, mask=m_rw, other=0.).to(tl.float32) * b_dro[None, :], 1)
         b_dc = b_dc * b_f
         b_dn = b_dn * b_f
 
     if USE_INITIAL_STATE:
-        o_s = i_bh * D + o_d
+        o_s = i_nh * D + o_d
         tl.store(dh0 + o_s, b_dh, mask=m_d)
         tl.store(dc0 + o_s, b_dc, mask=m_d)
         tl.store(dn0 + o_s, b_dn, mask=m_d)
 
 
-def fused_recurrent_slstm_fwd(x, R, initial_state, output_final_state):
+def fused_recurrent_slstm_fwd(
+    x: torch.Tensor,
+    recurrent_weight: torch.Tensor,
+    initial_state: StateTuple | None = None,
+    output_final_state: bool = False,
+    cu_seqlens: torch.LongTensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, StateTuple | None]:
     B, T, _, H, D = x.shape
+    N = B if cu_seqlens is None else len(cu_seqlens) - 1
     y = x.new_empty(B, T, H, D)
     gs = x.new_empty(B, T, 4, H, D, dtype=torch.float)
     cs, ns, ms = (x.new_empty(B, T, H, D, dtype=torch.float) for _ in range(3))
-    h0, c0, n0, m0 = initial_state if initial_state is not None else (None,) * 4
-    final_state = tuple(x.new_empty(B, H, D, dtype=torch.float) for _ in range(4)) if output_final_state else (None,) * 4
-    fused_recurrent_slstm_fwd_kernel[(B * H,)](
-        x, R, h0, c0, n0, m0, y, gs, cs, ns, ms, *final_state, T=T, H=H, D=D, BD=triton.next_power_of_2(D),
+    h0, c0, n0, m0 = initial_state if initial_state is not None else (None, None, None, None)
+    if output_final_state:
+        ht, ct, nt, mt = (x.new_empty(N, H, D, dtype=torch.float) for _ in range(4))
+    else:
+        ht = ct = nt = mt = None
+    fused_recurrent_slstm_fwd_kernel[(N * H,)](
+        x=x,
+        recurrent_weight=recurrent_weight,
+        h0=h0,
+        c0=c0,
+        n0=n0,
+        m0=m0,
+        y=y,
+        gs=gs,
+        cs=cs,
+        ns=ns,
+        ms=ms,
+        ht=ht,
+        ct=ct,
+        nt=nt,
+        mt=mt,
+        cu_seqlens=cu_seqlens,
+        T=T,
+        H=H,
+        D=D,
+        BD=triton.next_power_of_2(D),
     )
-    return y, gs, cs, ns, ms, (final_state if output_final_state else None)
+    final_state = (ht, ct, nt, mt) if output_final_state else None
+    return y, gs, cs, ns, ms, final_state
 
 
-def fused_recurrent_slstm_bwd(R, initial_state, y, gs, cs, ns, ms, dy):
+def fused_recurrent_slstm_bwd(
+    recurrent_weight: torch.Tensor,
+    initial_state: StateTuple | None,
+    gs: torch.Tensor,
+    cs: torch.Tensor,
+    ns: torch.Tensor,
+    ms: torch.Tensor,
+    dy: torch.Tensor,
+    cu_seqlens: torch.LongTensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
     B, T, _, H, D = gs.shape
+    N = B if cu_seqlens is None else len(cu_seqlens) - 1
     dgs = torch.empty_like(gs)
-    _, c0, n0, m0 = initial_state if initial_state is not None else (None,) * 4
-    dh0, dc0, dn0 = (gs.new_empty(B, H, D) for _ in range(3)) if initial_state is not None else (None,) * 3
-    fused_recurrent_slstm_bwd_kernel[(B * H,)](
-        R, c0, n0, m0, gs, cs, ns, ms, dy, dgs, dh0, dc0, dn0, T=T, H=H, D=D, BD=triton.next_power_of_2(D),
+    if initial_state is not None:
+        h0, c0, n0, m0 = initial_state
+        dh0, dc0, dn0 = (gs.new_empty(N, H, D) for _ in range(3))
+    else:
+        h0 = c0 = n0 = m0 = None
+        dh0 = dc0 = dn0 = None
+    fused_recurrent_slstm_bwd_kernel[(N * H,)](
+        recurrent_weight=recurrent_weight,
+        c0=c0,
+        n0=n0,
+        m0=m0,
+        gs=gs,
+        cs=cs,
+        ns=ns,
+        ms=ms,
+        dy=dy,
+        dgs=dgs,
+        dh0=dh0,
+        dc0=dc0,
+        dn0=dn0,
+        cu_seqlens=cu_seqlens,
+        T=T,
+        H=H,
+        D=D,
+        BD=triton.next_power_of_2(D),
     )
-    # [B, T, H, D] hidden states read by every token
-    h_prev = torch.cat([
-        initial_state[0][:, None].float() if initial_state is not None else y.new_zeros(B, 1, H, D, dtype=torch.float),
-        y[:, :-1].float(),
-    ], 1)
-    dR = torch.einsum('bthk,btghj->hgkj', h_prev, dgs)
-    return dgs, dR, dh0, dc0, dn0
+    # Reconstruct fp32 hidden states from saved fp32 gates/states to avoid bf16/fp16 rounding in d_recurrent_weight
+    h_fp32 = torch.sigmoid(gs[:, :, 3]) * cs / ns
+    if cu_seqlens is None:
+        h_first = h0[:, None].float() if h0 is not None else h_fp32.new_zeros(B, 1, H, D)
+        h_prev = torch.cat([h_first, h_fp32[:, :-1]], dim=1)
+    else:
+        h_prev = torch.cat([h_fp32.new_zeros(1, 1, H, D), h_fp32[:, :-1]], dim=1)
+        bos = cu_seqlens[:-1]
+        valid = bos < T
+        if h0 is not None:
+            h_prev[0, bos[valid]] = h0[valid].float()
+        else:
+            h_prev[0, bos[valid]] = 0.0
+    d_recurrent_weight = torch.einsum('bthk,btghj->hgkj', h_prev, dgs)
+    return dgs, d_recurrent_weight, dh0, dc0, dn0
 
 
 class FusedRecurrentSLSTMFunction(torch.autograd.Function):
@@ -256,10 +330,27 @@ class FusedRecurrentSLSTMFunction(torch.autograd.Function):
     @staticmethod
     @input_guard
     @autocast_custom_fwd
-    def forward(ctx, x, R, h0, c0, n0, m0, output_final_state):
+    def forward(
+        ctx,
+        x: torch.Tensor,
+        recurrent_weight: torch.Tensor,
+        h0: torch.Tensor | None,
+        c0: torch.Tensor | None,
+        n0: torch.Tensor | None,
+        m0: torch.Tensor | None,
+        output_final_state: bool,
+        cu_seqlens: torch.LongTensor | None,
+    ):
         initial_state = (h0, c0, n0, m0) if h0 is not None else None
-        y, gs, cs, ns, ms, final_state = fused_recurrent_slstm_fwd(x, R, initial_state, output_final_state)
-        ctx.save_for_backward(R, h0, c0, n0, m0, y, gs, cs, ns, ms)
+        y, gs, cs, ns, ms, final_state = fused_recurrent_slstm_fwd(
+            x=x,
+            recurrent_weight=recurrent_weight,
+            initial_state=initial_state,
+            output_final_state=output_final_state,
+            cu_seqlens=cu_seqlens,
+        )
+        ctx.save_for_backward(recurrent_weight, h0, c0, n0, m0, gs, cs, ns, ms)
+        ctx.cu_seqlens = cu_seqlens
         if final_state is not None:
             ctx.mark_non_differentiable(*final_state)
         return y, final_state
@@ -267,22 +358,32 @@ class FusedRecurrentSLSTMFunction(torch.autograd.Function):
     @staticmethod
     @input_guard
     @autocast_custom_bwd
-    def backward(ctx, dy, *_):
-        R, h0, c0, n0, m0, y, gs, cs, ns, ms = ctx.saved_tensors
+    def backward(ctx, dy: torch.Tensor, *_):
+        recurrent_weight, h0, c0, n0, m0, gs, cs, ns, ms = ctx.saved_tensors
         initial_state = (h0, c0, n0, m0) if h0 is not None else None
-        dgs, dR, dh0, dc0, dn0 = fused_recurrent_slstm_bwd(R, initial_state, y, gs, cs, ns, ms, dy)
+        dgs, d_recurrent_weight, dh0, dc0, dn0 = fused_recurrent_slstm_bwd(
+            recurrent_weight=recurrent_weight,
+            initial_state=initial_state,
+            gs=gs,
+            cs=cs,
+            ns=ns,
+            ms=ms,
+            dy=dy,
+            cu_seqlens=ctx.cu_seqlens,
+        )
         if initial_state is not None:
             dh0, dc0, dn0 = dh0.to(h0), dc0.to(c0), dn0.to(n0)
-        return dgs.to(dy.dtype), dR.to(R), dh0, dc0, dn0, None, None
+        return dgs.to(dy.dtype), d_recurrent_weight.to(recurrent_weight), dh0, dc0, dn0, None, None, None
 
 
 @torch.compiler.disable
 def fused_recurrent_slstm(
     x: torch.Tensor,
-    R: torch.Tensor,
-    initial_state: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+    recurrent_weight: torch.Tensor,
+    initial_state: StateTuple | None = None,
     output_final_state: bool = False,
-) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None]:
+    cu_seqlens: torch.LongTensor | None = None,
+) -> tuple[torch.Tensor, StateTuple | None]:
     r"""
     The sLSTM of xLSTM (https://arxiv.org/abs/2405.04517) with a head-wise recurrent matrix:
 
@@ -291,27 +392,97 @@ def fused_recurrent_slstm(
         h_t = \sigma(\tilde{o}_t) \frac{c_t}{n_t},
 
     where `c_t` and `n_t` accumulate `tanh(z~_t)` and 1 with exponential input gates `exp(i~_t)` and sigmoid forget
-    gates `sigmoid(f~_t)`, stabilized by `m_t`.
+    gates `sigmoid(f~_t)`, stabilized by `m_t`. Because `m_t` rescales `c_t` and `n_t` alike and cancels in `h_t`,
+    treating `m_t` as constant during backward is exact for `h_t`.
+
+    Supported dtypes for `x` and `recurrent_weight`: `torch.float32`, `torch.float16`, `torch.bfloat16`.
+    State gradients flow through `h0`, `c0`, and `n0`; `m0` and `final_state` are non-differentiable.
 
     Args:
         x (torch.Tensor):
-            gate pre-activations of shape `[B, T, 4, H, D]`, ordered as input, forget, cell and output gates,
+            Gate pre-activations of shape `[B, T, 4, H, D]`, ordered as input, forget, cell, and output gates,
             usually a projection of the input plus the gate biases.
-        R (torch.Tensor):
-            recurrent weights of shape `[H, 4, D, D]`, where `R[h, g]` maps the hidden state of head `h` to gate `g`.
-        initial_state (Optional[tuple[torch.Tensor, ...]]):
-            initial states `(h, c, n, m)`, each of shape `[B, H, D]`. Gradients flow to `h`, `c` and `n`.
+        recurrent_weight (torch.Tensor):
+            Recurrent weights of shape `[H, 4, D, D]`, where `recurrent_weight[h, g]` maps the hidden state of
+            head `h` to gate `g`.
+        initial_state (tuple[torch.Tensor, ...], Optional):
+            Initial states `(h0, c0, n0, m0)`, each of shape `[N, H, D]` for `N` input sequences (`N = B` for
+            dense inputs, `N = len(cu_seqlens) - 1` for packed varlen inputs). Gradients flow to `h0`, `c0`, and `n0`.
             Default: `None`.
-        output_final_state (Optional[bool]):
-            Whether to output the final states `(h, c, n, m)` in fp32, which carry no gradient. Default: `False`.
+        output_final_state (bool, Optional):
+            Whether to output the final states `(ht, ct, nt, mt)` of shape `[N, H, D]` in fp32 (non-differentiable).
+            Default: `False`.
+        cu_seqlens (torch.LongTensor, Optional):
+            Cumulative sequence lengths of shape `[N + 1]` for packed variable-length inputs (requires `B == 1`),
+            consistent with the FlashAttention API. Default: `None`.
 
     Returns:
         y (torch.Tensor):
-            hidden states of shape `[B, T, H, D]`.
-        final_state (Optional[tuple[torch.Tensor, ...]]):
-            final states `(h, c, n, m)` if `output_final_state=True` else `None`.
+            Hidden states of shape `[B, T, H, D]`.
+        final_state (tuple[torch.Tensor, ...], Optional):
+            Final states `(ht, ct, nt, mt)` if `output_final_state=True` else `None`.
     """
     if x.dim() != 5 or x.shape[2] != 4:
         raise ValueError(f"`x` is expected to have shape [B, T, 4, H, D], got {tuple(x.shape)}.")
-    h0, c0, n0, m0 = initial_state if initial_state is not None else (None,) * 4
-    return FusedRecurrentSLSTMFunction.apply(x, R, h0, c0, n0, m0, output_final_state)
+    B, _, _, H, D = x.shape
+    supported_dtypes = (torch.float32, torch.float16, torch.bfloat16)
+    if x.dtype not in supported_dtypes:
+        raise ValueError(f"`x` dtype must be one of {supported_dtypes}, got {x.dtype}.")
+    if recurrent_weight.shape != (H, 4, D, D):
+        raise ValueError(
+            f"`recurrent_weight` is expected to have shape {(H, 4, D, D)}, got {tuple(recurrent_weight.shape)}.",
+        )
+    if recurrent_weight.dtype not in supported_dtypes:
+        raise ValueError(
+            f"`recurrent_weight` dtype must be one of {supported_dtypes}, got {recurrent_weight.dtype}.",
+        )
+    if recurrent_weight.device != x.device:
+        raise ValueError(
+            f"`recurrent_weight` and `x` must be on the same device, got {recurrent_weight.device} and {x.device}.",
+        )
+    if cu_seqlens is not None:
+        if x.shape[0] != 1:
+            raise ValueError(
+                f"The batch size is expected to be 1 rather than {x.shape[0]} when using `cu_seqlens`. "
+                f"Please flatten variable-length inputs before processing.",
+            )
+        if cu_seqlens.dim() != 1 or len(cu_seqlens) < 2:
+            raise ValueError(
+                f"`cu_seqlens` is expected to be a 1D tensor with at least 2 elements, got shape {tuple(cu_seqlens.shape)}.",
+            )
+        if cu_seqlens.device != x.device:
+            raise ValueError(
+                f"`cu_seqlens` and `x` must be on the same device, got {cu_seqlens.device} and {x.device}.",
+            )
+        N = len(cu_seqlens) - 1
+    else:
+        N = B
+
+    if initial_state is not None:
+        if not isinstance(initial_state, (tuple, list)) or len(initial_state) != 4:
+            raise ValueError("`initial_state` must be a 4-tuple of tensors `(h0, c0, n0, m0)`.")
+        for name, state in zip(('h0', 'c0', 'n0', 'm0'), initial_state):
+            if not isinstance(state, torch.Tensor):
+                raise ValueError(f"`initial_state` element `{name}` must be a torch.Tensor, got {type(state).__name__}.")
+            if state.shape != (N, H, D):
+                raise ValueError(
+                    f"`initial_state` element `{name}` is expected to have shape {(N, H, D)}, got {tuple(state.shape)}.",
+                )
+            if state.device != x.device:
+                raise ValueError(
+                    f"`initial_state` element `{name}` and `x` must be on the same device, got {state.device} and {x.device}.",
+                )
+        h0, c0, n0, m0 = initial_state
+    else:
+        h0 = c0 = n0 = m0 = None
+
+    return FusedRecurrentSLSTMFunction.apply(
+        x,
+        recurrent_weight,
+        h0,
+        c0,
+        n0,
+        m0,
+        output_final_state,
+        cu_seqlens,
+    )

@@ -5,8 +5,8 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from .fused_recurrent import fused_recurrent_slstm
-from .naive import naive_recurrent_slstm
+from fla.ops.slstm.fused_recurrent import fused_recurrent_slstm
+from fla.ops.slstm.naive import naive_recurrent_slstm
 
 __all__ = [
     'fused_recurrent_slstm',

@@ -718,10 +718,9 @@ register_op(OpConfig(
     import_path='fla.ops.slstm',
     inputs={
         'x': TensorSpec(lambda B, T, H, D, **kw: (B, T, 4, H, D)),
-        'R': TensorSpec(lambda B, T, H, D, **kw: (H, 4, D, D), transform=lambda t: t / t.shape[-1] ** 0.5),
+        'recurrent_weight': TensorSpec(lambda B, T, H, D, **kw: (H, 4, D, D), transform=lambda t: t / t.shape[-1] ** 0.5),
     },
-    category='hgrn',
-    test_file='tests/ops/test_slstm.py',
+    category='slstm',
 ))
 
 # --- Generalized delta rule (DPLR) ---
