@@ -332,11 +332,11 @@ def channel_mixing_rwkv7(x: torch.Tensor, x_prev: torch.Tensor, x_k: torch.Tenso
                          key_weight: torch.Tensor, value_weight: torch.Tensor, inplace: bool = True):
     assert x.dim() == 3
 
-    return Rwkv7ChannelMixing.apply(x, x_prev, x_k, key_weight, value_weight, inplace), x[-1, :]
+    return Rwkv7ChannelMixing.apply(x, x_prev, x_k, key_weight, value_weight, inplace), x[:, -1, :].clone()
 
 
 def channel_mixing_rwkv7_torch(x, x_prev, x_k, key_weight, value_weight):
     k1 = rwkv_mix_torch(x, x_prev, x_k)
     k1_K = k1 @ key_weight
     k = rwkv_relu_and_square_torch(k1_K)
-    return k @ value_weight, x[-1, :]
+    return k @ value_weight, x[:, -1, :].clone()
