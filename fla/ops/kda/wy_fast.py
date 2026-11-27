@@ -15,6 +15,19 @@ from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.op import exp2
 from fla.utils import autotune_cache_kwargs, check_shared_mem
 
+BKV_LIST = [64, 128] if check_shared_mem('ampere') else [64]
+
+
+def _prune_recompute_w_u_configs(configs, nargs, **kwargs):
+    args = {**(nargs or {}), **kwargs}
+    max_bk = max(64, triton.next_power_of_2(args['K']))
+    max_bv = max(64, triton.next_power_of_2(args['V']))
+    return [
+        c for c in configs
+        if 'BK' in c.kwargs and 'BV' in c.kwargs
+        and c.kwargs['BK'] <= max_bk and c.kwargs['BV'] <= max_bv
+    ]
+
 
 @triton.heuristics({
     'STORE_QG': lambda args: args['qg'] is not None,
@@ -23,11 +36,15 @@ from fla.utils import autotune_cache_kwargs, check_shared_mem
 })
 @fla_cache_autotune(
     configs=[
-        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        triton.Config({'BK': BK, 'BV': BV}, num_warps=num_warps, num_stages=num_stages)
+        for BK in BKV_LIST
+        for BV in BKV_LIST
         for num_warps in [2, 4, 8]
-        for num_stages in [2, 3, 4]
+        for num_stages in [2, 3]
+        if num_warps >= 4 or (BK == 64 and BV == 64)
     ],
-    key=['H', 'HV', 'K', 'V', 'BT', 'BK', 'BV', 'IS_VARLEN'],
+    key=['H', 'HV', 'K', 'V', 'BT', 'STORE_QG', 'IS_VARLEN'],
+    prune_configs_by={'early_config_prune': _prune_recompute_w_u_configs},
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -114,17 +131,18 @@ def recompute_w_u_fwd_kda_kernel(
 
         p_gk = gk + o_t[:, None] * (HV*K) + o_k[None, :]
         b_gk = tl.load(p_gk, mask=m_tk, other=0.0).to(tl.float32)
-        b_kb *= exp2(b_gk)
+        b_gk_exp = exp2(b_gk)
+        b_kb *= b_gk_exp
         if STORE_QG:
             p_q = q + o_t[:, None] * (H*K) + o_k[None, :]
             p_qg = qg + o_t[:, None] * (HV*K) + o_k[None, :]
             b_q = tl.load(p_q, mask=m_tk, other=0.0)
-            b_qg = b_q * exp2(b_gk)
+            b_qg = b_q * b_gk_exp
             tl.store(p_qg, b_qg.to(p_qg.dtype.element_ty), mask=m_tk)
         if STORE_KG:
             last_idx = min(i_t * BT + BT, T) - 1
             b_gn = tl.load(gk + last_idx * HV*K + o_k, mask=m_k, other=0.).to(tl.float32)
-            b_kg = b_k * tl.where((i_t * BT + tl.arange(0, BT) < T)[:, None], exp2(b_gn[None, :] - b_gk), 0)
+            b_kg = b_k * tl.where(m_t[:, None], exp2(b_gn[None, :] - b_gk), 0)
             p_kg = kg + o_t[:, None] * (HV*K) + o_k[None, :]
             tl.store(p_kg, b_kg.to(p_kg.dtype.element_ty), mask=m_tk)
 
@@ -283,8 +301,6 @@ def recompute_w_u_fwd(
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
     BT = A.shape[-1]
-    BK = 64
-    BV = 64
 
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
@@ -313,8 +329,6 @@ def recompute_w_u_fwd(
         K=K,
         V=V,
         BT=BT,
-        BK=BK,
-        BV=BV,
         USE_GRAPH=use_graph,
     )
     return w, u, qg, kg
