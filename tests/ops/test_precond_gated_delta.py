@@ -9,6 +9,7 @@
 
 import math
 import os
+import warnings
 
 import pytest
 import torch
@@ -936,6 +937,46 @@ def test_chunk_varlen_empty_A_state(with_initial_A_state: bool):
         assert_close(name, ref_grad, tri_grad, tolerance)
 
 
+@pytest.mark.parametrize('with_initial_A_state', [True, False], ids=['initial_A_state', 'no_initial_A_state'])
+def test_chunk_varlen_all_empty_A_state(with_initial_A_state: bool):
+    """A packing of only empty sequences has no chunk; each sequence keeps the state it came in with."""
+    torch.manual_seed(42)
+    H, D = 1, 16
+    cu_seqlens = [0, 0, 0]
+    N = len(cu_seqlens) - 1
+
+    q = torch.rand(1, 0, H, D, dtype=torch.float16, device=device)
+    k = torch.rand(1, 0, H, D, dtype=torch.float16, device=device)
+    v = torch.rand(1, 0, H, D, dtype=torch.float16, device=device)
+    g_atk = torch.rand(1, 0, H, dtype=torch.float32, device=device)
+    g = torch.rand(1, 0, H, dtype=torch.float32, device=device)
+    beta_atk = torch.rand(1, 0, H, dtype=torch.float32, device=device)
+    beta = torch.rand(1, 0, H, dtype=torch.float32, device=device)
+    h0 = torch.randn(N, H, D, D, dtype=torch.float32, device=device)
+    A0 = torch.rand(N, H, D, dtype=torch.float32, device=device) if with_initial_A_state else None
+
+    tri, tri_ht, tri_at = chunk_precond_gated_delta_rule(
+        q=q,
+        k=k,
+        v=v,
+        g_atk=g_atk,
+        g=g,
+        beta_atk=beta_atk,
+        beta=beta,
+        initial_state=h0,
+        initial_A_state=A0,
+        output_final_state=True,
+        cu_seqlens=torch.tensor(cu_seqlens, device=device),
+        x=1.5,
+        log_atk_scale=torch.rand(H, dtype=torch.float32, device=device) - 1.0,
+    )
+
+    assert tri.shape == v.shape
+    assert torch.equal(tri_ht, h0)
+    assert tri_at.dtype == torch.float32
+    assert torch.equal(tri_at, A0 if with_initial_A_state else torch.zeros(N, H, D, device=device))
+
+
 def test_fused_recurrent_default_beta_gva():
     """`beta=None` must default to ones over the HV value heads; sizing it from
     q ([B, T, H]) makes the kernel read out of bounds under GVA (HV > H)."""
@@ -956,3 +997,43 @@ def test_fused_recurrent_default_beta_gva():
     )
     assert torch.equal(o_default, o_ones)
     assert torch.equal(ht_default, ht_ones)
+
+
+@pytest.mark.skipif(device != 'cuda', reason="Host-sync counting relies on torch.cuda.set_sync_debug_mode")
+@torch.inference_mode()
+def test_chunk_varlen_syncs_do_not_grow_with_batch():
+    """The ATK forward must not read packed sequence lengths one at a time.
+
+    Doing so blocks the host on queued GPU work once per sequence, twice when the final state is
+    returned, which makes a step slower the more sequences are packed into it.
+    """
+    def count_syncs(n_seqs):
+        torch.manual_seed(42)
+        H, D, seq = 4, 64, 64
+        T = n_seqs * seq
+        cu_seqlens = torch.arange(0, T + 1, seq, dtype=torch.long, device=device)
+        q = torch.rand(1, T, H, D, dtype=torch.float16, device=device)
+        k = F.normalize(torch.randn(1, T, H, D, dtype=torch.float32, device=device), p=2, dim=-1).to(torch.float16)
+        v = torch.rand(1, T, H, D, dtype=torch.float16, device=device)
+        beta_atk = torch.rand(1, T, H, dtype=torch.float16, device=device).sigmoid()
+        beta = torch.rand(1, T, H, dtype=torch.float16, device=device).sigmoid()
+        g_atk = F.logsigmoid(torch.rand(1, T, H, dtype=torch.float32, device=device)) * 0.5
+        g = F.logsigmoid(torch.rand(1, T, H, dtype=torch.float32, device=device)) * 0.5
+        kwargs = dict(q=q, k=k, v=v, g_atk=g_atk, g=g, beta_atk=beta_atk, beta=beta,
+                      initial_state=torch.zeros(n_seqs, H, D, D, dtype=torch.float32, device=device),
+                      output_final_state=True, cu_seqlens=cu_seqlens,
+                      log_atk_scale=torch.rand(H, dtype=torch.float32, device=device) - 1.0, x=1.5)
+        chunk_precond_gated_delta_rule(**kwargs)  # compile and tune before counting
+        torch.cuda.synchronize()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            torch.cuda.set_sync_debug_mode('warn')
+            try:
+                chunk_precond_gated_delta_rule(**kwargs)
+            finally:
+                torch.cuda.set_sync_debug_mode('default')
+        # enabling the mode warns about itself, so match only the per-operation warning
+        return sum('called a synchronizing' in str(w.message) for w in caught)
+
+    few, many = count_syncs(4), count_syncs(32)
+    assert many <= few, f"syncs grew with the batch: {few} for 4 sequences, {many} for 32"
