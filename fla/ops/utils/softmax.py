@@ -10,7 +10,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils.op import exp
-from fla.utils import IS_AMD, autotune_cache_kwargs
+from fla.utils import IS_AMD, autotune_cache_kwargs, input_guard
 
 NUM_WARPS_AUTOTUNE = [1, 2, 4, 8, 16] if IS_AMD else [1, 2, 4, 8, 16, 32]
 
@@ -69,17 +69,20 @@ def softmax_bwd_kernel(
     tl.store(ds + i_n * D + o_d, b_ds.to(ds.dtype.element_ty), mask=m_d)
 
 
+@input_guard
 def softmax_fwd(
     x: torch.Tensor,
     dtype: torch.dtype | None = torch.float,
 ) -> torch.Tensor:
     shape = x.shape
-    x = x.view(-1, x.shape[-1])
+    if not x.is_contiguous():
+        x = x.contiguous()
+    x = x.reshape(-1, x.shape[-1])
 
     N, D = x.shape
     B = triton.next_power_of_2(D)
 
-    p = torch.empty_like(x, dtype=dtype)
+    p = torch.empty(N, D, dtype=dtype or x.dtype, device=x.device)
     softmax_fwd_kernel[(N,)](
         x=x,
         p=p,
@@ -89,17 +92,23 @@ def softmax_fwd(
     return p.view(*shape)
 
 
+@input_guard
 def softmax_bwd(
     p: torch.Tensor,
     dp: torch.Tensor,
     dtype: torch.dtype | None = torch.float,
 ) -> torch.Tensor:
     shape = p.shape
-    p = p.view(-1, p.shape[-1])
-    ds = torch.empty_like(p, dtype=dtype)
+    if not p.is_contiguous():
+        p = p.contiguous()
+    if not dp.is_contiguous():
+        dp = dp.contiguous()
+    p = p.reshape(-1, p.shape[-1])
+    dp = dp.reshape(-1, dp.shape[-1])
 
     N, D = p.shape
     B = triton.next_power_of_2(D)
+    ds = torch.empty(N, D, dtype=dtype or p.dtype, device=p.device)
     softmax_bwd_kernel[(N,)](
         p=p,
         dp=dp,
