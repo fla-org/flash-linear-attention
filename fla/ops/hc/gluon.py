@@ -30,19 +30,18 @@ def _prune_hc_layouts(configs, named_args, **kwargs):
         for WN in [1, num_warps]
         for R in [1, 4]
     ],
-    key=['T', 'N', 'D', 'BD', 'IS_POST', 'HAS_MIXING'],
+    key=['N', 'D', 'BD', 'IS_POST', 'HAS_MIXING'],
     prune_configs_by={'early_config_prune': _prune_hc_layouts},
     do_bench=do_bench_cudagraph,
     **autotune_cache_kwargs,
 )
-@gluon.jit(do_not_specialize=['T'])
+@gluon.jit
 def hc_fwd_kernel_gluon(
     x,
     w,
     branch,
     mixing,
     o,
-    T,
     N: gl.constexpr,
     D: gl.constexpr,
     BN: gl.constexpr,
@@ -92,12 +91,12 @@ def hc_fwd_kernel_gluon(
         for WN in [1, num_warps]
         for R in [1, 4]
     ],
-    key=['T', 'N', 'D', 'BD', 'IS_POST', 'HAS_MIXING'],
+    key=['N', 'D', 'BD', 'IS_POST', 'HAS_MIXING'],
     prune_configs_by={'early_config_prune': _prune_hc_layouts},
     do_bench=do_bench_cudagraph,
     **autotune_cache_kwargs,
 )
-@gluon.jit(do_not_specialize=['T'])
+@gluon.jit
 def hc_bwd_kernel_gluon(
     x,
     w,
@@ -108,7 +107,6 @@ def hc_bwd_kernel_gluon(
     dbranch,
     dw_partial,
     dmixing_partial,
-    T,
     N: gl.constexpr,
     D: gl.constexpr,
     BN: gl.constexpr,
@@ -174,15 +172,14 @@ def hc_bwd_kernel_gluon(
         triton.Config({'NW': num_warps}, num_warps=num_warps)
         for num_warps in [2, 4, 8]
     ],
-    key=['T', 'C', 'S'],
+    key=['C', 'S'],
     do_bench=do_bench_cudagraph,
     **autotune_cache_kwargs,
 )
-@gluon.jit(do_not_specialize=['T'])
+@gluon.jit
 def hc_bwd_kernel_reduce_gluon(
     partial,
     grad,
-    T,
     C: gl.constexpr,
     S: gl.constexpr,
     BC: gl.constexpr,
@@ -223,7 +220,6 @@ def hc_fwd_gluon(
         branch=branch,
         mixing=mixing,
         o=o,
-        T=T,
         N=N,
         D=D,
         BN=triton.next_power_of_2(N),
@@ -269,7 +265,6 @@ def hc_bwd_gluon(
         dbranch=dbranch,
         dw_partial=dw_partial,
         dmixing_partial=dmixing_partial,
-        T=T,
         N=N,
         D=D,
         BN=triton.next_power_of_2(N),
@@ -283,7 +278,6 @@ def hc_bwd_gluon(
             hc_bwd_kernel_reduce_gluon[(T,)](
                 partial=partial,
                 grad=grad,
-                T=T,
                 C=ND,
                 S=size,
                 BC=triton.next_power_of_2(ND),
