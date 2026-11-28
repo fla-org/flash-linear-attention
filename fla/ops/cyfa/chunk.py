@@ -92,6 +92,9 @@ _FUSED_READOUT_FWD_AUTOTUNE_CONFIGS = [
     for num_warps in NUM_WARPS
     for num_stages in [2, 3, 4]
 ]
+# On SM8x the 2-warp build of the separate dq/dk kernel faults on 16-bit inputs at BK=128, BV=64 (Triton 3.8),
+# and 4 warps is at least as fast for every shape, so 2 is not offered there.
+_RECURRENCE_BWD_NUM_WARPS = NUM_WARPS if USE_FUSED_DQK_DV else [num_warps for num_warps in NUM_WARPS if num_warps > 2]
 _RECURRENCE_BWD_AUTOTUNE_CONFIGS = [
     triton.Config(
         {'BK': bk, 'BV': bv},
@@ -100,7 +103,7 @@ _RECURRENCE_BWD_AUTOTUNE_CONFIGS = [
     )
     for bk in BKV_LIST
     for bv in BKV_LIST
-    for num_warps in NUM_WARPS
+    for num_warps in _RECURRENCE_BWD_NUM_WARPS
     for num_stages in [2, 3, 4]
 ]
 
