@@ -369,6 +369,8 @@ def fused_linear_cross_entropy_loss(
         torch.Tensor:
             Scalar loss in fp32.
     """
+    if reduction not in ("mean", "sum"):
+        raise ValueError(f"reduction: {reduction} is not supported")
     return FusedLinearCrossEntropyFunction.apply(
         x,
         target,

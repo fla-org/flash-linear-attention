@@ -19,6 +19,7 @@ import torch.nn.functional as F
 
 from fla import backends
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
+from fla.modules.fused_linear_cross_entropy import fused_linear_cross_entropy_loss
 from fla.modules.fused_linear_cross_entropy.ops import logsumexp_fwd as fused_linear_logsumexp_fwd
 from fla.modules.l2warp import l2_warp
 from fla.ops.utils.logsumexp import logsumexp_fwd
@@ -527,6 +528,14 @@ def test_fused_linear_cross_entropy_parallel(world_size, tmp_path):
         nprocs=world_size,
         join=True,
     )
+
+
+def test_fused_linear_cross_entropy_rejects_unsupported_reduction():
+    x = torch.randn(4, 8, device=device)
+    target = torch.randint(0, 16, (4,), device=device)
+    weight = torch.randn(16, 8, device=device)
+    with pytest.raises(ValueError, match="reduction"):
+        fused_linear_cross_entropy_loss(x, target, weight, reduction='none')
 
 
 def test_fused_linear_cross_entropy_parallel_ascend_rejection(monkeypatch):
