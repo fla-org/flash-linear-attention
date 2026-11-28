@@ -1763,8 +1763,9 @@ def chunk_bwd_dqkwg_npu(
     else:
         g_arg = q
         g_t_contig = False
-    dq = q.new_empty(B, T, HV, K)
-    dk = k.new_empty(B, T, HV, K)
+    # grouped value heads: fp32 per-head shares, rounded once after the head sum below
+    dq = q.new_empty(B, T, HV, K, dtype=q.dtype if H == HV else torch.float32)
+    dk = k.new_empty(B, T, HV, K, dtype=k.dtype if H == HV else torch.float32)
     dg = torch.empty(NK, *g.shape, dtype=torch.float32, device=g.device) if g is not None else None
     dw = torch.empty_like(w) if use_dw else None
 
@@ -1873,8 +1874,8 @@ def chunk_bwd_dqkwg_npu(
         )
 
     if H != HV:
-        dq = dq.view(B, T, H, HV // H, K).sum(3)
-        dk = dk.view(B, T, H, HV // H, K).sum(3)
+        dq = dq.view(B, T, H, HV // H, K).sum(3).to(q.dtype)
+        dk = dk.view(B, T, H, HV // H, K).sum(3).to(k.dtype)
     if dg is not None:
         dg = dg.sum(0)
         if use_full:

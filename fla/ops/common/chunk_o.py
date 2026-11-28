@@ -750,8 +750,9 @@ def chunk_bwd_dqkwg(
     BK = min(max(triton.next_power_of_2(K), 16), CONST_TILING)
     BV = min(max(triton.next_power_of_2(V), 16), CONST_TILING)
     NK = triton.cdiv(K, BK)
-    dq = q.new_empty(B, T, HV, K)
-    dk = k.new_empty(B, T, HV, K)
+    # grouped value heads: fp32 per-head shares, rounded once after the head sum below
+    dq = q.new_empty(B, T, HV, K, dtype=q.dtype if H == HV else torch.float32)
+    dk = k.new_empty(B, T, HV, K, dtype=k.dtype if H == HV else torch.float32)
     dg = torch.empty(NK, *g.shape, dtype=torch.float32, device=g.device) if g is not None else None
     dw = torch.empty_like(w) if w is not None else None
 
@@ -786,8 +787,8 @@ def chunk_bwd_dqkwg(
     )
 
     if H != HV:
-        dq = dq.view(B, T, H, HV // H, K).sum(3)
-        dk = dk.view(B, T, H, HV // H, K).sum(3)
+        dq = dq.view(B, T, H, HV // H, K).sum(3).to(q.dtype)
+        dk = dk.view(B, T, H, HV // H, K).sum(3).to(k.dtype)
     if dg is not None:
         dg = dg.sum(0)
     return dq, dk, dw, dg
