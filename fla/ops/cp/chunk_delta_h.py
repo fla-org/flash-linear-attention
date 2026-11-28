@@ -274,7 +274,7 @@ def compress_h0(h0: torch.Tensor | None, context: FLACPContext) -> torch.Tensor 
             # both parts can carry a cross-rank state
             return h0
         # only the first segment of each part can carry a cross-rank state
-        return h0[[0, context.front_num_seqs]]
+        return torch.stack((h0[0], h0[context.front_num_seqs]), dim=0)
     # clone so autograd does not retain storage for all local sequences
     return h0[:1].clone()
 
@@ -287,7 +287,8 @@ def expand_h0(h0: torch.Tensor | None, context: FLACPContext) -> torch.Tensor | 
         if B == 2:
             return h0
         expanded = h0.new_zeros(B, *h0.shape[1:])
-        expanded[[0, context.front_num_seqs]] = h0
+        expanded[0].copy_(h0[0])
+        expanded[context.front_num_seqs].copy_(h0[1])
         return expanded
     expanded = h0.new_zeros(B, *h0.shape[1:])
     expanded[:1] = h0
