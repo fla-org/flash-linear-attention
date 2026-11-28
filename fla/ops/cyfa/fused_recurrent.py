@@ -1021,6 +1021,8 @@ def fused_recurrent_cyfa(
     readout_version = _tensor_version(readout)
     cache_entry = _READOUT_TABLE_CACHE.get(cache_key)
     if cache_entry is None or cache_entry[0]() is not readout or cache_entry[1] != readout_version:
+        _READOUT_TABLE_CACHE.pop(cache_key, None)
+        del cache_entry
         readout_table = build_readout_table(readout).to(q.dtype)
 
         def remove_readout_table(readout_ref):
