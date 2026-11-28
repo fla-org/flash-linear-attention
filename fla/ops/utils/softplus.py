@@ -36,13 +36,19 @@ def _generate_softplus(num_pack):
 
 
 def _generate_softplus2(num_pack):
+    # 1 + exp2(x) rounds to 1 for x < -24, so use exp2(x) * log2(e) directly in the tail.
     template = """
-        .reg .pred p;
-        setp.gt.f32  p, ${in_reg}, 15.;
-        @p  mov.f32  ${out_reg}, ${in_reg};
-        @!p ex2.approx.ftz.f32 ${out_reg}, ${in_reg};
-        @!p add.f32            ${out_reg}, ${out_reg}, 1.0;
-        @!p lg2.approx.ftz.f32 ${out_reg}, ${out_reg};
+        .reg .f32 t, e;
+        .reg .pred p, q;
+        ex2.approx.ftz.f32 e, ${in_reg};
+        mov.f32 t, e;
+        add.f32 t, t, 1.0;
+        lg2.approx.ftz.f32 t, t;
+        mul.f32 e, e, 1.4426950408889634;
+        setp.lt.f32 q, ${in_reg}, -16.;
+        selp.f32 t, e, t, q;
+        setp.gt.f32 p, ${in_reg}, 15.;
+        selp.f32 ${out_reg}, ${in_reg}, t, p;
     """
     out_str = ""
 
@@ -89,7 +95,8 @@ def softplus_triton(x):
 @triton.jit
 def softplus2_nv(x):
     # equivalent to:
-    # return tl.where(x < 15.0, tl.math.log2(1 + tl.math.exp2(x)), x)
+    # return tl.where(x < -16.0, tl.math.exp2(x) * 1.4426950408889634,
+    #                 tl.where(x < 15.0, tl.math.log2(1 + tl.math.exp2(x)), x))
     return tl.inline_asm_elementwise(
         asm=s_softplus2,
         constraints=s_constraints,
@@ -104,7 +111,13 @@ def softplus2_nv(x):
 
 @triton.jit
 def softplus2_triton(x):
-    return tl.where(x < 15.0, tl.math.log2(1 + tl.math.exp2(x)), x)
+    # adding exp2(x) to 1 loses precision in the negative tail; use exp2(x)
+    # scaled by log2(e) directly there, where log2(1 + exp2(x)) is close to it
+    return tl.where(
+        x < -16.0,
+        tl.math.exp2(x) * 1.4426950408889634,
+        tl.where(x < 15.0, tl.math.log2(1.0 + tl.math.exp2(x)), x),
+    )
 
 
 # named wrappers preserve the symbols referenced by kernels in Inductor's generated source
