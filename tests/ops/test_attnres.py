@@ -139,3 +139,69 @@ def test_attnres_gluon_backend():
     assert candidate.default_enable is False
     assert candidate.env_var == 'FLA_ATTNRES_GLUON'
     assert candidate.priority == 3
+
+
+@pytest.mark.parametrize(
+    ('L', 'D', 'dtype', 'checkpoint_level', 'fuse_output_norm', 'offset', 'transpose'),
+    [
+        pytest.param(3, 32, torch.float16, 1, False, 1, False, id='fp16-offset-recompute'),
+        pytest.param(3, 128, torch.bfloat16, 0, True, 1, False, id='bf16-offset-output-norm'),
+        pytest.param(3, 33, torch.float32, 0, True, 1, False, id='fp32-offset-partial-tile'),
+        pytest.param(1, 64, torch.float16, 1, False, 8, False, id='aligned-offset-single-source'),
+        pytest.param(3, 32, torch.float16, 0, False, 0, True, id='transposed-residual'),
+    ],
+)
+def test_attnres_residual_views(L, D, dtype, checkpoint_level, fuse_output_norm, offset, transpose):
+    torch.manual_seed(42)
+    torch.backends.cuda.matmul.allow_tf32 = False
+    N = 3
+    residuals = [torch.randn(N, D, dtype=dtype, device=device).requires_grad_(True) for _ in range(L - 1)]
+    if transpose:
+        residual = torch.empty(D, N, dtype=dtype, device=device).t()
+    else:
+        storage = torch.empty(N * D + offset, dtype=dtype, device=device)
+        residual = storage[offset:].view(N, D)
+        assert residual.is_contiguous()
+        assert residual.data_ptr() % 16 == (offset * residual.element_size()) % 16
+    residual.copy_(torch.randn_like(residual))
+    residuals.append(residual.requires_grad_(True))
+    original = residual.detach().clone()
+    query = torch.randn(D, dtype=dtype, device=device).requires_grad_(True)
+    rms_weight = torch.randn(D, dtype=dtype, device=device).requires_grad_(True)
+    output_rms_weight = torch.randn(D, dtype=dtype, device=device).requires_grad_(True) if fuse_output_norm else None
+    ref_residuals = [r.detach().clone().requires_grad_(True) for r in residuals]
+    ref_query = query.detach().clone().requires_grad_(True)
+    ref_weight = rms_weight.detach().clone().requires_grad_(True)
+    ref_output_weight = output_rms_weight.detach().clone().requires_grad_(True) if fuse_output_norm else None
+
+    tri, tri_p = fused_attnres(
+        query=query,
+        residuals=residuals,
+        rms_weight=rms_weight,
+        output_rms_weight=output_rms_weight,
+        scale=D ** -0.5,
+        return_weights=True,
+        checkpoint_level=checkpoint_level,
+    )
+    ref, ref_p = naive_attnres(
+        query=ref_query,
+        residuals=ref_residuals,
+        rms_weight=ref_weight,
+        output_rms_weight=ref_output_weight,
+        scale=D ** -0.5,
+        return_weights=True,
+    )
+    do = torch.randn_like(tri)
+    (tri * do).sum().backward()
+    (ref * do).sum().backward()
+    assert torch.equal(residual, original)
+    for name, expected, actual in [
+        ('o', ref, tri), ('p', ref_p, tri_p),
+        ('dq', ref_query.grad, query.grad), ('dw', ref_weight.grad, rms_weight.grad),
+        ('dv', torch.stack([r.grad for r in ref_residuals]), torch.stack([r.grad for r in residuals])),
+    ]:
+        assert torch.isfinite(actual).all()
+        assert_close(name, expected, actual, 0.005)
+    if fuse_output_norm:
+        assert torch.isfinite(output_rms_weight.grad).all()
+        assert_close('dow', ref_output_weight.grad, output_rms_weight.grad, 0.005)
