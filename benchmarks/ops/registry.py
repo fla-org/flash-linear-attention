@@ -564,6 +564,42 @@ register_op(OpConfig(
     category='gate_beta',
 ))
 
+
+def shape_BHEDD(B, T, H, D, E=8, **kw):
+    return (B, H, E, D, D)
+
+
+def _recurrent_triadic_gdn_post_init(inputs, B, T, H, D, packed=False, **kw):
+    init_triadic_gdn_inputs(inputs)
+    if packed:
+        for name in ('q', 'k', 'v', 'k2', 'q2', 'g', 'beta'):
+            tensor = inputs[name]
+            inputs[name] = tensor.reshape(1, B * T, *tensor.shape[2:])
+        offsets = torch.arange(B + 1, dtype=torch.long, device=inputs['q'].device) * T
+        offsets[1:-1] -= torch.arange(1, B, device=offsets.device) % 2 * (T // 2)
+        inputs['cu_seqlens'] = offsets
+
+
+for _name, _packed in (('fused_recurrent_triadic_gdn', False), ('fused_recurrent_triadic_gdn_varlen', True)):
+    register_op(OpConfig(
+        name=_name,
+        import_path='fla.ops.triadic_gdn',
+        func_name='fused_recurrent_triadic_gdn',
+        inputs={
+            **{name: TensorSpec(shape_BTHD, requires_grad=False) for name in ('q', 'k', 'v')},
+            'k2': TensorSpec(shape_BTHE, requires_grad=False, dtype='float32'),
+            'q2': TensorSpec(shape_BTHE, requires_grad=False, dtype='float32'),
+            'g': TensorSpec(shape_BTHE, requires_grad=False, dtype='float32', transform=logsigmoid),
+            'beta': TensorSpec(shape_BTH, requires_grad=False, dtype='float32', transform=sigmoid_transform),
+            'initial_state': TensorSpec(shape_BHEDD, requires_grad=False, dtype='float32'),
+        },
+        extra_kwargs={'output_final_state': True},
+        skip_backward=True,
+        post_init=_recurrent_triadic_gdn_post_init,
+        default_shapes={name: {**shape, 'packed': _packed} for name, shape in _recurrent_kda_shapes.items()},
+        category='gate_beta',
+    ))
+
 register_op(OpConfig(
     name='fused_recurrent_gdn2',
     import_path='fla.ops.gdn2',
