@@ -260,7 +260,7 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
             # [BT, BV]
             b_dv = tl.load(p_dv, mask=m_tv, other=0.0)
 
-            b_dgk += tl.sum(b_h * b_dh, axis=0)
+            b_dgk += tl.sum(b_h.to(tl.float32) * b_dh.to(tl.float32), axis=0)
             b_dq = tl.dot(b_do, b_h.to(b_do.dtype), b_dq)
             b_dk = tl.dot(b_v_new, b_dh.to(b_v_new.dtype), b_dk)
             b_dw = tl.dot(b_dv.to(b_v_new.dtype), b_h.to(b_v_new.dtype), b_dw)
@@ -309,8 +309,11 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
 
     m_A = (o_t[:, None] > o_t[None, :]) & (m_t[:, None] & m_t)
     b_dA = tl.where(m_A, b_dA * b_beta[None, :], 0)
-    b_dA = tl.dot(b_dA.to(b_A.dtype), b_A)
-    b_dA = tl.dot(b_A, b_dA.to(b_A.dtype))
+    # Include the rounded residual in each product to reduce the error from narrowing dA.
+    b_hi = b_dA.to(b_A.dtype)
+    b_dA = tl.dot(b_hi, b_A, tl.dot((b_dA - b_hi.to(tl.float32)).to(b_A.dtype), b_A))
+    b_hi = b_dA.to(b_A.dtype)
+    b_dA = tl.dot(b_A, b_hi, tl.dot(b_A, (b_dA - b_hi.to(tl.float32)).to(b_A.dtype)))
     b_dA = tl.where(m_A, -b_dA, 0)
 
     m_dA = m_t[:, None] & (o_A[None, :] < BT)
