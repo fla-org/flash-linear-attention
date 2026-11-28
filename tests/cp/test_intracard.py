@@ -5,7 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""Check intra-card CP routing, cache reuse, and grouped-head outputs and final states."""
+"""Check intra-card CP routing, cache reuse, and packed/grouped-head outputs and final states."""
 
 import inspect
 import os
@@ -37,6 +37,7 @@ def _clear_intracard_cache():
 @pytest.mark.skipif(not (IS_TF32_SUPPORTED or IS_NPU), reason="requires NVIDIA Ampere or newer, or Ascend")
 def test_chunk_kda_cache(monkeypatch):
     """Reuse the intracard precompute cache for repeated calls with the same cu_seqlens object."""
+    monkeypatch.setattr(backends.TritonAscendBackend, 'is_available', classmethod(lambda cls: False))
     # intracard CP is disabled by default.
     monkeypatch.setenv("FLA_INTRACARD_CP", "1")
     torch.manual_seed(0)
@@ -118,6 +119,7 @@ def test_backend_enabled(monkeypatch, enabled: bool):
 @pytest.mark.skipif(not (IS_TF32_SUPPORTED or IS_NPU), reason="requires NVIDIA Ampere or newer, or Ascend")
 def test_chunk_gdn_grouped_heads(monkeypatch):
     """Compare intra-card splitting with the ordinary chunk path when query heads are shared by value heads."""
+    monkeypatch.setattr(backends.TritonAscendBackend, 'is_available', classmethod(lambda cls: False))
     monkeypatch.setenv("FLA_INTRACARD_CP", "1")
     monkeypatch.setenv("FLA_FLASH_QLA", "0")
     monkeypatch.setenv("FLA_TILELANG", "0")
@@ -182,6 +184,53 @@ def test_chunk_gdn_grouped_heads(monkeypatch):
     assert torch.allclose(ht_intra, ht_ref, atol=1e-2, rtol=1e-2), (
         f"Final state mismatch: max diff={(ht_intra - ht_ref).abs().max().item()}"
     )
+
+
+@pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
+@pytest.mark.skipif(not (IS_TF32_SUPPORTED or IS_NPU), reason='requires NVIDIA Ampere or newer, or Ascend')
+@pytest.mark.parametrize(('op', 'lengths'), [
+    pytest.param(chunk_gated_delta_rule, (32768, 64, 32768), id='gdn-gap'),
+    pytest.param(chunk_kda, (32768, 64, 32768), id='kda-gap'),
+    pytest.param(chunk_gated_delta_rule, (32768, 32768), id='gdn-adjacent'),
+    pytest.param(chunk_kda, (32768, 32768), id='kda-adjacent'),
+])
+def test_chunk_packed_boundaries(monkeypatch, op, lengths):
+    """Preserve outputs, final states, and sample independence across split sequence boundaries."""
+    monkeypatch.setattr(backends.TritonAscendBackend, 'is_available', classmethod(lambda cls: False))
+    for name in ('FLA_FLASH_QLA', 'FLA_FLASH_KDA', 'FLA_TILELANG'):
+        monkeypatch.setenv(name, '0')
+    torch.manual_seed(42)
+    shape = (1, sum(lengths), 1, 64)
+    q, k = [F.normalize(torch.randn(shape, device=device), dim=-1).bfloat16() for _ in range(2)]
+    v = torch.randn_like(q)
+    g = F.logsigmoid(torch.randn(shape if op is chunk_kda else shape[:-1], device=device))
+    beta = torch.randn(shape[:-1], device=device).sigmoid()
+    cu_seqlens_cpu = torch.tensor([0, *lengths], dtype=torch.int32).cumsum(0, dtype=torch.int32)
+    kwargs = dict(q=q, k=k, v=v, g=g, beta=beta, output_final_state=True,
+                  cu_seqlens=cu_seqlens_cpu.to(device), cu_seqlens_cpu=cu_seqlens_cpu)
+
+    with torch.inference_mode():
+        monkeypatch.setenv('FLA_INTRACARD_CP', '0')
+        o_ref, ht_ref = op(**kwargs)
+        assert not _intracard_cache, 'the reference must bypass intra-card splitting'
+
+        monkeypatch.setenv('FLA_INTRACARD_CP', '1')
+        o_intra, ht_intra = op(**kwargs)
+        assert len(_intracard_cache) == 1, 'the test must execute intra-card splitting'
+        split_info = next(iter(_intracard_cache.values())).split_info
+        assert split_info.split_seq_ids == [0, len(lengths) - 1]
+        assert all(n > 1 for n in split_info.num_subseqs)
+
+        last_start = sum(lengths[:-1])
+        changed_v = v.clone()
+        changed_v[:, sum(lengths[:-2]):last_start].add_(1)
+        o_changed, _ = op(**{**kwargs, 'v': changed_v})
+
+    assert torch.equal(o_intra[:, last_start:], o_changed[:, last_start:]), (
+        "changing the preceding sequence must not change the last sequence's outputs"
+    )
+    torch.testing.assert_close(o_intra, o_ref, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(ht_intra, ht_ref, atol=1e-2, rtol=1e-2)
 
 
 @pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
