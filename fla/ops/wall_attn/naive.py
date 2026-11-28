@@ -38,11 +38,6 @@ def naive_wall_attn(
     P = chunk_global_cumsum(g, cu_seqlens=cu_seqlens, scale=RCP_LN2)
     k_exp = k.repeat_interleave(G, dim=2)
     B, T, HQ, _K = q.shape
-    diff = P.unsqueeze(2).float() - P.unsqueeze(1).float()
-    scores = (
-        q.unsqueeze(2).float() * k_exp.unsqueeze(1).float() * torch.exp2(diff)
-    ).sum(-1).permute(0, 3, 1, 2).contiguous()
-
     i_idx = torch.arange(T, device=q.device, dtype=torch.long).view(1, T, 1)
     j_idx = torch.arange(T, device=q.device, dtype=torch.long).view(1, 1, T)
     valid = j_idx <= i_idx
@@ -60,6 +55,12 @@ def naive_wall_attn(
         seg_j = seg.view(1, 1, T)
         valid = valid & (seg_i == seg_j)
 
+    diff = P.unsqueeze(2).float() - P.unsqueeze(1).float()
+    # exclude non-attending pairs before exponentiation to keep their gradients finite.
+    diff = diff.masked_fill(~valid.unsqueeze(-1).unsqueeze(-1), 0.0)
+    scores = (
+        q.unsqueeze(2).float() * k_exp.unsqueeze(1).float() * torch.exp2(diff)
+    ).sum(-1).permute(0, 3, 1, 2).contiguous()
     valid_hq = valid.unsqueeze(1).expand(B, HQ, T, T)
     scores = scores.masked_fill(~valid_hq, float("-inf")) * (scale * RCP_LN2)
 
