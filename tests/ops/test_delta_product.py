@@ -31,6 +31,8 @@ from fla.utils import assert_close, device
             (4, 1500, 8, 128, 0.1, 3, False, torch.float16),
             (2, 2048, 8, 128, 1, 3, False, torch.float16),
             (2, 2048, 8, 128, 1, 3, True, torch.float16),
+            (2, 65, 4, 64, 0.1, 4, False, torch.bfloat16),
+            (2, 33, 4, 128, 1, 2, True, torch.float16),
         ]
     ],
 )
@@ -100,6 +102,7 @@ def test_chunk(
         (2, 100, 2, [0, 63, 100, 500, 1000], torch.float16),
         (2, 128, 2, [0, 100, 300, 800, 1500, 2000], torch.float16),
         (2, 256, 3, [0, 100, 123, 300, 500, 800, 1000, 1500, 2048], torch.float16),
+        (2, 64, 4, [0, 1, 15, 31, 65, 65, 130], torch.bfloat16),
     ],
 )
 @pytest.mark.smoke
@@ -175,18 +178,31 @@ def test_chunk_varlen(
         k_i = k[:, start*num_householder:end*num_householder, :, :]
         v_i = v[:, start*num_householder:end*num_householder, :, :]
         beta_i = beta[:, start*num_householder:end*num_householder, :]
+        h0_i = h0[i:i+1]
         o3_i, h3_i = naive_recurrent_gated_delta_product(
-            q_i, k_i, v_i, None, beta_i, scale=scale, cu_seqlens=None, output_final_state=True, num_householder=num_householder,
+            q_i,
+            k_i,
+            v_i,
+            None,
+            beta_i,
+            scale=scale,
+            cu_seqlens=None,
+            initial_state=h0_i.float(),
+            output_final_state=True,
+            num_householder=num_householder,
         )
         torch_ref[:, start:end, :, :] = o3_i
         torch_ref_ht[i, :, :, :] = h3_i.squeeze(0)
 
-    ((torch_ref * do).sum() + (torch_ref_ht * dht).sum()).backward(retain_graph=True)
+    ((torch_ref * do).sum() + (torch_ref_ht * dht).sum()).backward()
+    torch_ref_dq, torch_ref_dk, torch_ref_dv, torch_ref_dbeta, torch_ref_dh0 = (
+        q.grad, k.grad, v.grad, beta.grad, h0.grad,
+    )
 
-    assert_close('o', ref, tri, 0.005)
-    assert_close('ht', ref_ht, tri_ht, 0.005)
-    assert_close('dq', ref_dq, tri_dq, 0.007)
-    assert_close('dk', ref_dk, tri_dk, 0.008)
-    assert_close('dv', ref_dv, tri_dv, 0.007)
-    assert_close('db', ref_dbeta, tri_dbeta, 0.015)
-    assert_close('dh0', ref_dh0, tri_dh0, 0.007)
+    assert_close('o', torch_ref, tri, 0.005)
+    assert_close('ht', torch_ref_ht, tri_ht, 0.005)
+    assert_close('dq', torch_ref_dq, tri_dq, 0.007)
+    assert_close('dk', torch_ref_dk, tri_dk, 0.008)
+    assert_close('dv', torch_ref_dv, tri_dv, 0.007)
+    assert_close('db', torch_ref_dbeta, tri_dbeta, 0.015)
+    assert_close('dh0', torch_ref_dh0, tri_dh0, 0.007)
