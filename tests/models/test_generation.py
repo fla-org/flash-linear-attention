@@ -167,8 +167,15 @@ def test_prepare_inputs_for_generation_decode_without_cache(preparation_model):
     assert result.get('inputs_embeds') is None
 
 
-@pytest.mark.parametrize('first_iteration', [False, True])
-def test_prepare_inputs_cached(first_iteration):
+@pytest.mark.parametrize(
+    ('first_iteration', 'cache_keyword'),
+    [
+        pytest.param(False, 'past_key_values', id='decode-past-key-values'),
+        pytest.param(True, 'past_key_values', id='prefill-past-key-values'),
+        pytest.param(False, 'cache', id='decode-cache'),
+    ],
+)
+def test_prepare_inputs_cached(first_iteration, cache_keyword):
     torch.manual_seed(42)
     model = GLAForCausalLM(GLAConfig(hidden_size=32, num_hidden_layers=0, vocab_size=32, fuse_norm=False))
     cache = Cache()
@@ -179,12 +186,12 @@ def test_prepare_inputs_cached(first_iteration):
     cu_seqlens = torch.tensor([0, 3, 6], dtype=torch.int32)
     prepared = model.prepare_inputs_for_generation(
         input_ids=input_ids,
-        past_key_values=cache,
         attention_mask=attention_mask,
         inputs_embeds=inputs_embeds,
         next_sequence_length=3,
         is_first_iteration=first_iteration,
         cu_seqlens=cu_seqlens,
+        **{cache_keyword: cache},
     )
     if first_iteration:
         assert prepared['input_ids'] is None
@@ -194,6 +201,7 @@ def test_prepare_inputs_cached(first_iteration):
         assert prepared.get('inputs_embeds') is None
     assert prepared['attention_mask'] is attention_mask
     assert prepared['past_key_values'] is cache
+    assert 'cache' not in prepared
     assert prepared['cu_seqlens'] is cu_seqlens
 
 

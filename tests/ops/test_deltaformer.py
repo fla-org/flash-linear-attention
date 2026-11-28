@@ -87,6 +87,46 @@ def test_deltaformer_attn(
     assert_close('dbeta', ref_dbeta, tri_dbeta, 0.008)
 
 
+@pytest.mark.parametrize('with_beta', [False, True])
+@requires_flash_attn
+@pytest.mark.skipif(IS_INTEL_ALCHEMIST, reason="Skipping test on Intel Alchemist due to known issues with SRAM.")
+def test_deltaformer_attn_padding_mask(with_beta: bool):
+    torch.manual_seed(42)
+    B, T, H, D = 4, 96, 2, 64
+    mask = torch.ones((B, T), dtype=torch.bool, device=device)
+    mask[0, :19] = False
+    mask[1] = False
+    mask[2, 25:48] = False
+    mask[3, 70:] = False
+
+    q, k, v = [torch.randn((B, T, H, D), dtype=torch.float16, device=device).requires_grad_() for _ in range(3)]
+    beta = torch.rand((B, T, H), dtype=q.dtype, device=device).requires_grad_() if with_beta else None
+    inputs = (q, k, v) + ((beta,) if beta is not None else ())
+    do = torch.randn_like(q)
+
+    ref = torch.zeros_like(q)
+    for i in range(B):
+        if mask[i].any():
+            ref[i, mask[i]] = naive_deltaformer_attn(*(tensor[i:i+1, mask[i]] for tensor in inputs)).squeeze(0)
+    ref_grads = torch.autograd.grad(ref, inputs, do)
+    actual = deltaformer_attn(q, k, v, beta, attention_mask=mask, C=64)
+    actual_grads = torch.autograd.grad(actual, inputs, do)
+
+    assert torch.isfinite(actual).all()
+    assert_close('o', ref, actual, 0.006)
+    assert torch.count_nonzero(actual[~mask]) == 0
+    for name, ref_grad, actual_grad in zip(('dq', 'dk', 'dv', 'dbeta'), ref_grads, actual_grads):
+        assert torch.isfinite(actual_grad).all()
+        assert_close(name, ref_grad, actual_grad, 0.008)
+        assert torch.count_nonzero(actual_grad[~mask]) == 0
+
+    actual = deltaformer_attn(q, k, v, beta, attention_mask=torch.zeros_like(mask))
+    assert actual.shape == q.shape
+    assert torch.count_nonzero(actual) == 0
+    for grad in torch.autograd.grad(actual, inputs, do):
+        assert torch.count_nonzero(grad) == 0
+
+
 def naive_deltaformer_u(q, k, v, beta):
     """
     Stage 1 of naive_deltaformer_attn (which only returns o), sequence-first layout:
