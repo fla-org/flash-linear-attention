@@ -46,6 +46,11 @@ requires = ["setuptools>=64", "wheel"]
 [tool.setuptools.dynamic]
 version = {attr = "fla.__version__"}
 
+[tool.setuptools.package-data]
+"fla.ops.swila" = ["LICENSE", "README.md"]
+"fla.modules.swila" = ["LICENSE", "README.md"]
+"fla.models.swila" = ["LICENSE", "README.md"]
+
 [tool.pytest.ini_options]
 log_cli = true
 log_cli_level = "INFO"
