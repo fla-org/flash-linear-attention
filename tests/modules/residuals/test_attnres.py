@@ -17,20 +17,19 @@ from fla.utils import assert_close, device, device_platform
 
 @pytest.mark.skipif(device_platform == 'cpu', reason='AttnRes requires an accelerator')
 @pytest.mark.parametrize(
-    ('block_size', 'dtype', 'input_dtype', 'output_norm'),
+    ('block_size', 'dtype', 'input_dtype'),
     [
-        pytest.param(1, torch.float32, torch.float32, False, id='full-fp32-readout'),
-        pytest.param(4, torch.float16, torch.float16, True, id='block-fp16'),
-        pytest.param(4, torch.bfloat16, torch.bfloat16, False, id='block-bf16-readout'),
-        pytest.param(4, torch.bfloat16, torch.float32, True, id='block-mixed-dtype'),
-        pytest.param(1, torch.bfloat16, torch.bfloat16, True, id='full-bf16'),
+        pytest.param(1, torch.float32, torch.float32, id='full-fp32'),
+        pytest.param(4, torch.float16, torch.float16, id='block-fp16'),
+        pytest.param(4, torch.bfloat16, torch.bfloat16, id='block-bf16'),
+        pytest.param(4, torch.bfloat16, torch.float32, id='block-mixed-dtype'),
+        pytest.param(1, torch.bfloat16, torch.bfloat16, id='full-bf16'),
     ],
 )
 def test_attnres(
     block_size: int,
     dtype: torch.dtype,
     input_dtype: torch.dtype,
-    output_norm: bool,
     request: pytest.FixtureRequest,
 ):
     """Check cross-layer attention and block sums against a differentiable six-branch reference."""
@@ -68,7 +67,7 @@ def test_attnres(
         query=module.query.weight,
         residuals=ref_states[-1],
         rms_weight=module.attnres_norm.weight,
-        output_rms_weight=module.norm.weight if output_norm else None,
+        output_rms_weight=module.norm.weight,
         rms_eps=module.norm.eps,
     )
 
@@ -79,7 +78,7 @@ def test_attnres(
         inputs.append(branch_input)
         state = module.post(branch_output=F.silu(branch_input).to(dtype), context=context)
         states.append(state)
-    out = modules[-1](state=state) if output_norm else modules[-1].readout(state=state)
+    out = modules[-1](state=state)
 
     for i, (expected, branch_input) in enumerate(zip(ref_inputs, inputs)):
         assert branch_input.dtype == expected.dtype

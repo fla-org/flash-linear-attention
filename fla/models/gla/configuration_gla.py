@@ -56,6 +56,7 @@ class GLAConfig(AttentionConfigBase, PreTrainedConfig):
         use_l2warp: bool = False,
         vocab_size: int = 32000,
         attnres_block_size: int | None = None,
+        residual_type: str | None = None,
         **kwargs,
     ):
         self.hidden_size = hidden_size
@@ -89,6 +90,9 @@ class GLAConfig(AttentionConfigBase, PreTrainedConfig):
         self.use_l2warp = use_l2warp
         self.vocab_size = vocab_size
         self.attnres_block_size = attnres_block_size
+        if residual_type is None:
+            residual_type = 'standard' if attnres_block_size is None else 'attnres'
+        self.residual_type = residual_type
 
         validate_loss_config(fuse_cross_entropy=fuse_cross_entropy, fuse_linear_cross_entropy=fuse_linear_cross_entropy)
 

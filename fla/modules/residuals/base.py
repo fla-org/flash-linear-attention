@@ -6,19 +6,30 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 from abc import ABC, abstractmethod
-from typing import Generic, TypeVar
+from typing import TYPE_CHECKING, ClassVar, Generic, Protocol, TypeVar
 
 import torch
 from torch import nn
 
-from fla.modules.norm import RMSNorm
+if TYPE_CHECKING:
+    from transformers.configuration_utils import PretrainedConfig
 
-StateT = TypeVar('StateT')
+
+class ResidualState(Protocol):
+    """Current model-visible tensor and the residual history retained between layers."""
+
+    @property
+    def hidden_states(self) -> torch.Tensor:
+        """Current tensor exposed by the model, before branch or output normalization."""
+        ...
+
+
+StateT = TypeVar('StateT', bound=ResidualState)
 ContextT = TypeVar('ContextT')
 
 
 class BaseResidual(nn.Module, ABC, Generic[StateT, ContextT]):
-    r"""Residual aggregation, normalization, and state updates.
+    r"""Residual aggregation, branch input preparation, and state updates.
 
     Let v_0 = h_1 be the embedding and v_i = f_i(h_i) be a branch output.
     The depth mixing weights M_{i->l} determine the input h_l to branch l:
@@ -31,37 +42,47 @@ class BaseResidual(nn.Module, ABC, Generic[StateT, ContextT]):
     State may retain individual outputs, block sums, or a recurrent summary.
     The module owns three operations:
 
-    * `readout(state)` computes h_l without branch normalization.
-    * `pre(state)` returns the normalized h_l and the context needed to update state.
+    * `pre(state)` prepares h_l for the branch and returns the context needed to update state.
     * `post(branch_output, context)` incorporates v_l into the state used by the next branch.
+    * `forward(state)` prepares the final model output from the state.
 
-    The model executes its branch between `pre` and `post` to produce v_l = f_l(h_l).
-    Here f_l includes the normalization performed by `pre`; the model owns the remaining branch computation.
-    Context carries the old state and any update coefficients needed after that computation.
+    The model executes its branch between `pre` and `post`, using the input returned by `pre`.
+    For pre-norm architectures, normalization typically occurs in `pre`.
+    Context carries the old state and any update coefficients needed after the branch computation.
     The next residual module reads the updated state using its own mixing weights.
 
     `initialize(x)` creates the initial state from embeddings.
-    Calling the output residual module applies output normalization to its readout.
+    The model records intermediate outputs through `state.hidden_states`.
     State and context retain autograd connections and must not be mutated or cached on the module.
     See Section 6.2 of `Attention Residuals <https://arxiv.org/abs/2603.15031>`_.
     """
 
     supports_reentrant_checkpointing = True
+    _registry: ClassVar[dict[str, type['BaseResidual']]] = {}
 
-    def __init__(
-        self,
-        hidden_size: int,
-        norm_eps: float = 1e-6,
-        fuse_norm: bool = True,
-    ):
+    def __init__(self, hidden_size: int):
         super().__init__()
         self.hidden_size = hidden_size
-        self.fuse_norm = fuse_norm
-        self.norm = (RMSNorm if fuse_norm else nn.RMSNorm)(hidden_size, eps=norm_eps)
 
-    def reset_parameters(self) -> None:
-        """Initialize owned parameters; custom implementations may override this method."""
-        self.norm.reset_parameters()
+    @classmethod
+    def register(cls, residual_type: str, residual_class: type['BaseResidual']) -> None:
+        """Register an implementation for selection through `config.residual_type`."""
+        cls._registry[residual_type] = residual_class
+
+    @classmethod
+    def from_config(cls, config: 'PretrainedConfig', **kwargs) -> 'BaseResidual':
+        """Construct a residual module from model settings.
+
+        On `BaseResidual`, `config.residual_type` selects the registered implementation.
+        Concrete classes read their own options from the configuration.
+        Additional keyword arguments supply constructor parameters specific to one branch.
+        """
+        if cls is BaseResidual:
+            residual_class = cls._registry.get(config.residual_type)
+            if residual_class is None:
+                raise ValueError(f'Unknown residual type: {config.residual_type}')
+            return residual_class.from_config(config, **kwargs)
+        return cls(hidden_size=config.hidden_size, **kwargs)
 
     @abstractmethod
     def initialize(self, x: torch.Tensor) -> StateT:
@@ -76,9 +97,6 @@ class BaseResidual(nn.Module, ABC, Generic[StateT, ContextT]):
         raise NotImplementedError
 
     @abstractmethod
-    def readout(self, state: StateT) -> torch.Tensor:
-        raise NotImplementedError
-
     def forward(self, state: StateT) -> torch.Tensor:
-        """Normalize the final readout; implementations may fuse aggregation and normalization."""
-        return self.norm(self.readout(state))
+        """Prepare the final model output, including any implementation-specific normalization."""
+        raise NotImplementedError
