@@ -183,6 +183,48 @@ def test_backward_matches_eager_reference(B: int, T: int, H: int, HQ: int, K: in
     # `dg` is validated separately in `test_g_gradient_matches_finite_differences`.
 
 
+@pytest.mark.parametrize('dtype', [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize('diag_bf16', [False, True], ids=['diag_fp32', 'diag_bf16'])
+@pytest.mark.parametrize(
+    ('lengths', 'window_size'),
+    [
+        pytest.param([1024], None, id='aligned'),
+        pytest.param([1025], None, id='dense_tail'),
+        pytest.param([17, 1025], None, id='packed_tail'),
+        pytest.param([1025], 128, id='windowed_tail'),
+    ],
+)
+def test_backward_dkv_partial_tail_strong_decay(dtype, diag_bf16, lengths, window_size, monkeypatch):
+    monkeypatch.setattr('fla.ops.wall_attn.parallel._DKV_DIAG_BF16', diag_bf16)
+    monkeypatch.setattr('fla.ops.wall_attn.backends.triton_ascend.parallel._DKV_DIAG_BF16', diag_bf16)
+    torch.manual_seed(42)
+    T = sum(lengths)
+    K = V = 32
+    q = torch.randn(1, T, 1, K, device=device, dtype=dtype).requires_grad_()
+    k = torch.randn_like(q).requires_grad_()
+    v = torch.randn(1, T, 1, V, device=device, dtype=dtype).requires_grad_()
+    g = torch.full(q.shape, -0.1, device=device, dtype=torch.float32).requires_grad_()
+    cu_seqlens = None
+    if len(lengths) > 1:
+        cu_seqlens = torch.tensor([0, *lengths], device=device, dtype=torch.long).cumsum(0)
+
+    q_ref, k_ref, v_ref = [x.detach().clone().requires_grad_(dtype == torch.float32) for x in (q, k, v)]
+    kwargs = dict(scale=K**-0.5, window_size=window_size, cu_seqlens=cu_seqlens)
+    o = parallel_wall_attn(q, k, v, g, **kwargs)
+    grad_output = torch.randn_like(o)
+    o.backward(grad_output)
+    for name, value in [('o', o), ('dq', q.grad), ('dk', k.grad), ('dv', v.grad), ('dg', g.grad)]:
+        assert torch.isfinite(value).all(), f'{name} must remain finite under strong tail decay'
+
+    ref = naive_wall_attn(q_ref, k_ref, v_ref, g.detach(), **kwargs)
+    assert_close(' o', ref, o, RTOL_FWD)
+    # the existing gradient error budget is defined for fp32 inputs.
+    if dtype == torch.float32:
+        ref.backward(grad_output.float())
+        for name, expected, actual in [('dq', q_ref.grad, q.grad), ('dk', k_ref.grad, k.grad), ('dv', v_ref.grad, v.grad)]:
+            assert_close(name, expected, actual, RTOL_GRAD)
+
+
 def test_backward_value_split_matches_single_tile(monkeypatch):
     torch.manual_seed(42)
     dtype = torch.float32
