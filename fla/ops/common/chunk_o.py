@@ -308,12 +308,15 @@ def chunk_bwd_kernel_dqkwg(
         b_dg_last += tl.sum(b_dk * b_k)
 
         b_ds = tl.where(m_A, b_ds * exp2(b_g[:, None] - b_g[None, :]), 0) * scale
+        b_dg = tl.sum(b_dq * b_q, axis=1) - tl.sum(b_dk * b_k, axis=1)
+        # Keep the row/column cancellation in one fp32 matrix before the
+        # separate Q/K dot products round independently.
+        b_ds2 = b_ds * tl.dot(b_q, tl.trans(b_k))
+        b_dg += tl.sum(b_ds2, axis=1) - tl.sum(b_ds2, axis=0)
         b_ds = b_ds.to(b_k.dtype)
         # [BT, BK]
         b_dq = tl.dot(b_ds, b_k, b_dq)
         b_dk = tl.dot(tl.trans(b_ds), b_q, b_dk)
-
-        b_dg = tl.sum(b_dq * b_q, axis=1) - tl.sum(b_dk * b_k, axis=1)
 
         p_dg = dg + o_t * HV
         # reverse cumsum runs in a separate kernel to avoid a Triton compiler issue.

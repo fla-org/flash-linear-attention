@@ -200,6 +200,7 @@ def test_fused_recurrent_default_beta_gva():
             id="B{}-T{}-H{}-HV{}-D{}-scale{}-gate_logit_normalizer{}-mask_p{}-use_qk_l2norm_in_kernel{}-{}".format(*test),
         )
         for test in [
+            (2, 64, 4, 4, 16, 0.25, 1 / 16, 0, True, torch.float32),
             (4, 1024, 4, 4, 128, 0.1, 1, 1.0, False, torch.float16),
             (2, 75, 4, 4, 64, 1, 0.01, 0, False, torch.float16),
             (2, 500, 3, 3, 60, 1, 1, 0, False, torch.float16),
