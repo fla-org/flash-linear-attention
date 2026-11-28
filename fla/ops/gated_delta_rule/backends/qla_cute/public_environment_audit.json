@@ -1,0 +1,23 @@
+{
+  "passed": true,
+  "index": "https://pypi.org/simple",
+  "distributions": {
+    "typing_extensions": "4.16.0",
+    "nvidia-cutlass-dsl": "4.8.0",
+    "nvidia-cutlass-dsl-libs-cu13": "4.8.0",
+    "nvidia-cutlass-dsl-libs-cu12": "4.8.0",
+    "cuda-pathfinder": "1.9.1",
+    "protobuf": "7.36.2",
+    "cuda-bindings": "13.5.0",
+    "nvidia-cutlass-dsl-libs-base": "4.8.0",
+    "nvidia-cutlass-dsl-libs-core": "4.8.0"
+  },
+  "publication": "Local preparation only.",
+  "verified_module_count": 246,
+  "api_module_origins": {
+    "cutlass": "nvidia_cutlass_dsl/dsl_packages/cutlass/__init__.py",
+    "cutlass.cute": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/__init__.py",
+    "cutlass.experimental.primitives.nvvm_wrapper": "nvidia_cutlass_dsl/dsl_packages/cutlass/experimental/primitives/nvvm_wrapper.py",
+    "cuda.bindings.driver": "cuda/bindings/driver.cpython-312-x86_64-linux-gnu.so"
+  }
+}

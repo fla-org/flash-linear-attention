@@ -1,0 +1,18 @@
+{
+  "source_sha256": {
+    "kernel.py": "4026de69556b442ad7d5cdd785187bb103764d4f3ce44e39bd4db6203a13a9bc",
+    "gdn.py": "7459794358515dd6c277a2bc7921606a2cc6beed07ad46102a80e5d39e7f3832",
+    "gdn_prep.py": "23b415a16e5bcd35c717817d9501173e99e7efe9f1a2655a0459974b0bfe9f93",
+    "gdn_recur.py": "19131dfd3bf42c58420178e302fb45ad26fd10ec1b404886c86c803f873b338f",
+    "gdn_tc.py": "b53daec41693e267fd1294881ee4ea8ef2d10b89acb24f4a7830613d6014a53a"
+  },
+  "public_distribution": "nvidia-cutlass-dsl[cu13]==4.8.0",
+  "distribution_index": "https://pypi.org/simple",
+  "baseline_revision": "a14dbf3474514e1674526431e960325f72081e9f",
+  "adaptations": [
+    "FLA import paths and copyright headers",
+    "Remove development-only comments and launch-skipping hooks",
+    "Keep production GPU arithmetic and dispatch unchanged"
+  ],
+  "publication": "Local preparation only; no remote branch or pull request published."
+}

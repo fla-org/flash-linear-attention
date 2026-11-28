@@ -1,0 +1,17 @@
+{
+  "entry": "fla.ops.gated_delta_rule.backends.qla_cute.run",
+  "original_export_timing_reused": false,
+  "source_sha256": {
+    "fla/ops/gated_delta_rule/backends/qla_cute/__init__.py": "7a45616ae454e5ab0e2e04dbb93bd892fe8d42f6e58df78cc1cb6efdf321ee72",
+    "fla/ops/gated_delta_rule/backends/qla_cute/kernel.py": "c21bc7a4bf1bdae9a58675d379004343e064e357d98438b3e27bd353abcb21ee",
+    "fla/ops/gated_delta_rule/backends/qla_cute/gdn.py": "30e52c22e10978cff0946d37365afcbe17323170f6ba9113fff4398098397729",
+    "fla/ops/gated_delta_rule/backends/qla_cute/gdn_prep.py": "626cbcae3733a83e77dfafdee8590b18e6faea8d5bdada3a2a1834a15889c6cf",
+    "fla/ops/gated_delta_rule/backends/qla_cute/gdn_recur.py": "22c865ff3682f5b13cecf201165e6baa997ed4524a7869027ffd581de664e0c0",
+    "fla/ops/gated_delta_rule/backends/qla_cute/gdn_tc.py": "5921a5e0de10eeb4748c202d49c34878f9cdd44622d2a306013a14a1f093d565",
+    "fla/ops/gated_delta_rule/backends/qla_cute/benchmark_shared.json": "56c89eb379de2ef60f3039f6bef0a4e75061e3f5a190c3d1886ac0b016782c49",
+    "fla/ops/gated_delta_rule/backends/qla_cute/public_environment_audit.json": "04f1bb6d0d1a6056586c71c384ededba8d5ed534519fa9cbb37932e32fc6cddd",
+    "fla/ops/gated_delta_rule/backends/qla_cute/source_audit.json": "cd3ec9ea097cb06a4164457f3776f8e3749d8f9e036cb538c00d4d9b9a118286",
+    "benchmarks/ops/benchmark_qla_cute.py": "4ba6ed5e49fa970cfa179c459a028208b5dc14a20d07f170c659c7fc059e67ed",
+    "benchmarks/ops/qla_cute_timing.py": "6dd798044db7288bba5ab8021ff976238bd62290edd1f9bc0d8b2e1f5c78253a"
+  }
+}

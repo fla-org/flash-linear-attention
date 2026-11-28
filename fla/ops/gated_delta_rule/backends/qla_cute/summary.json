@@ -1,0 +1,16 @@
+{
+  "measurement": "Explicit FLA-package public CuTe DSL entry versus pinned FlashQLA official forward",
+  "complete": true,
+  "cases": 171,
+  "passed": 171,
+  "faster_cases": 171,
+  "geomean_speedup": 1.806886267346564,
+  "min_speedup": 1.4028610875070742,
+  "max_speedup": 2.6206524183149553,
+  "max_output_relative_l2": 0.004240616633019364,
+  "max_state_relative_l2": 0.0036791470639658858,
+  "max_sample_spread_percent": 2.9158421795319507,
+  "baseline_revision": "a14dbf3474514e1674526431e960325f72081e9f",
+  "fla_base_revision": "c55dc553edf44701bf703715ed052d811f8a6376",
+  "timing_backend": "cupti_concurrent_gpu_activity_span"
+}
