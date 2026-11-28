@@ -32,7 +32,7 @@ from fla.utils import autotune_cache_kwargs, get_multiprocessor_count, input_gua
     key=["D", "NB", "IS_RMS_NORM", "STORE_RESIDUAL_OUT", "HAS_RESIDUAL", "HAS_WEIGHT"],
     **autotune_cache_kwargs,
 )
-@triton.jit(do_not_specialize=['T'])
+@triton.jit(do_not_specialize=['T', 'NB'])
 def layer_norm_gated_fwd_kernel(
     x,
     g,
@@ -48,7 +48,7 @@ def layer_norm_gated_fwd_kernel(
     D: tl.constexpr,
     BT: tl.constexpr,
     BD: tl.constexpr,
-    NB: tl.constexpr,
+    NB,
     ACTIVATION: tl.constexpr,
     IS_RMS_NORM: tl.constexpr,
     STORE_RESIDUAL_OUT: tl.constexpr,
@@ -200,7 +200,7 @@ def layer_norm_gated_fwd_kernel_row(
     key=["D", "NB", "IS_RMS_NORM", "HAS_DRESIDUAL", "HAS_WEIGHT"],
     **autotune_cache_kwargs,
 )
-@triton.jit(do_not_specialize=['T'])
+@triton.jit(do_not_specialize=['T', 'NB'])
 def layer_norm_gated_bwd_kernel(
     x,
     g,
@@ -221,7 +221,7 @@ def layer_norm_gated_bwd_kernel(
     D: tl.constexpr,
     BT: tl.constexpr,
     BD: tl.constexpr,
-    NB: tl.constexpr,
+    NB,
     ACTIVATION: tl.constexpr,
     IS_RMS_NORM: tl.constexpr,
     STORE_DRESIDUAL: tl.constexpr,
