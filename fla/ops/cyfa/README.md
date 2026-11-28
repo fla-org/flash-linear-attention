@@ -20,7 +20,8 @@ Q/K RMSNorm weights have shape `[Dk]` and are applied inside the operator.
 Both operators return `(output, final_state)`, with `final_state=None` unless requested.
 The state tuple contains FP32 tensors with shapes `[N, H, Dk, M]`, `[N, H, M, Dv]`, and `[N, H]` for the key memory, value memory, and cumulative clock.
 For dense inputs `N=B`; for packed inputs `B=1` and `N=len(cu_seqlens)-1`.
-The inference-only single-token path can update the supplied memory tensors in place when final states are requested.
+When final states are requested, single-token inference returns distinct key/value memory tensors; callers must use the returned state.
+The cumulative clock may share storage with the supplied clock tensor when PDL is disabled.
 
 ```python
 import torch
