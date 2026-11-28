@@ -101,23 +101,27 @@ def bench(fn, step=20, warm_up=10, grad_to_none=None):
 
 
 def profile_kernels(fn, rank, steps=5, warmup=2):
-    """Profile individual kernels using PyTorch profiler."""
-    # Warmup
+    """Run the collective on all ranks and collect profiler events on rank 0."""
     for _ in range(warmup):
         fn()
 
-    # Profile
+    profile_steps = range(1 + steps)  # One profiler warmup step before recording.
+    if rank != 0:
+        for _ in profile_steps:
+            fn()
+        return []
+
     with torch.profiler.profile(
         activities=[
             torch.profiler.ProfilerActivity.CPU,
             torch.profiler.ProfilerActivity.CUDA,
         ],
-        schedule=torch.profiler.schedule(wait=0, warmup=1, active=steps),
+        schedule=torch.profiler.schedule(wait=0, warmup=1, active=steps, repeat=1),
         with_stack=False,
         record_shapes=False,
         profile_memory=False,
     ) as prof:
-        for _ in range(steps + 1):
+        for _ in profile_steps:
             torch.cuda.synchronize()
             fn()
             torch.cuda.synchronize()
@@ -126,10 +130,10 @@ def profile_kernels(fn, rank, steps=5, warmup=2):
     # Get kernel stats
     kernel_stats = []
     for event in prof.key_averages():
-        if event.cuda_time_total > 0:  # Only CUDA kernels
+        if event.device_time_total > 0:
             kernel_stats.append({
                 'name': event.key,
-                'cuda_time_ms': event.cuda_time_total / 1000,  # Convert to ms
+                'cuda_time_ms': event.device_time_total / 1000,
                 'calls': event.count,
             })
 
@@ -378,15 +382,11 @@ def run_benchmark(args):
     # Warmup CUDA
     torch.cuda.synchronize()
 
-    # Run kernel profiling (rank 0 only)
-    if profile_kernels_flag and rank == 0:
-        print(f"\n{'='*60}")
-        print("Profiling CP kernels (Rank 0 only)")
-        print(f"{'='*60}\n")
-
+    if profile_kernels_flag:
         kernel_stats = profile_kernels(kda_with_cp, rank, steps=5, warmup=2)
-        print(format_kernel_table(kernel_stats, top_n=20))
-        print()
+        if rank == 0:
+            print("Profiling CP kernels (Rank 0 only)")
+            print(format_kernel_table(kernel_stats, top_n=20))
 
     # Run benchmarks
     if args.bench:
