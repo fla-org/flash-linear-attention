@@ -1020,12 +1020,7 @@ def fused_recurrent_cyfa(
     cache_key = (id(readout), int(num_slots), str(q.device), q.dtype)
     readout_version = _tensor_version(readout)
     cache_entry = _READOUT_TABLE_CACHE.get(cache_key)
-    readout_table = None
-    if cache_entry is not None:
-        readout_ref, cached_version, cached_table = cache_entry
-        if readout_ref() is readout and cached_version == readout_version:
-            readout_table = cached_table
-    if readout_table is None:
+    if cache_entry is None or cache_entry[0]() is not readout or cache_entry[1] != readout_version:
         readout_table = build_readout_table(readout).to(q.dtype)
 
         def remove_readout_table(readout_ref):
@@ -1034,6 +1029,8 @@ def fused_recurrent_cyfa(
                 del _READOUT_TABLE_CACHE[cache_key]
 
         _READOUT_TABLE_CACHE[cache_key] = (weakref.ref(readout, remove_readout_table), readout_version, readout_table)
+    else:
+        readout_table = cache_entry[2]
     return FusedRecurrentCyFAFunction.apply(
         q,
         q_norm_weight,
