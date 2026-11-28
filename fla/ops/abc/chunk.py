@@ -15,7 +15,7 @@ from fla.ops.utils.op import exp, unflatten_program_id
 from fla.utils import input_guard
 
 
-@triton.jit(do_not_specialize=['T'])
+@triton.jit(do_not_specialize=['T', 'NT'])
 def chunk_abc_fwd_kernel_h(
     k,
     v,
@@ -29,7 +29,7 @@ def chunk_abc_fwd_kernel_h(
     BT: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    NT: tl.constexpr,
+    NT,
     NORMK: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
@@ -149,7 +149,7 @@ def chunk_abc_fwd_kernel_intra_K(
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=m_rv)
 
 
-@triton.jit(do_not_specialize=['T'])
+@triton.jit(do_not_specialize=['T', 'NT'])
 def chunk_abc_fwd_kernel_K(
     q,
     k,
@@ -164,7 +164,7 @@ def chunk_abc_fwd_kernel_K(
     BT: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    NT: tl.constexpr,
+    NT,
 ):
     i_v, i_t = unflatten_program_id(tl.cdiv(V, BV))
     i_bh = tl.program_id(1).to(tl.int64)
@@ -283,7 +283,7 @@ def chunk_abc_fwd_kernel_intra_V(
             tl.store(A + o_A + j, b_A.to(b_q.dtype), mask=m_A)
 
 
-@triton.jit(do_not_specialize=['T'])
+@triton.jit(do_not_specialize=['T', 'NT'])
 def chunk_abc_fwd_kernel_V(
     q,
     v,
@@ -298,7 +298,7 @@ def chunk_abc_fwd_kernel_V(
     BT: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    NT: tl.constexpr,
+    NT,
 ):
     i_v, i_t = unflatten_program_id(tl.cdiv(V, BV))
     i_bh = tl.program_id(1).to(tl.int64)
@@ -346,7 +346,7 @@ def chunk_abc_fwd_kernel_V(
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=m_tv)
 
 
-@triton.jit(do_not_specialize=['T'])
+@triton.jit(do_not_specialize=['T', 'NT'])
 def chunk_abc_bwd_kernel_dh(
     q,
     z,
@@ -359,7 +359,7 @@ def chunk_abc_bwd_kernel_dh(
     BT: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    NT: tl.constexpr,
+    NT,
     NORMK: tl.constexpr,
 ):
     i_k, i_v, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
@@ -414,7 +414,7 @@ def chunk_abc_bwd_kernel_dh(
         b_dh = tl.dot(b_q, b_do, b_dh, allow_tf32=False)
 
 
-@triton.jit(do_not_specialize=['T'])
+@triton.jit(do_not_specialize=['T', 'NT'])
 def chunk_abc_bwd_kernel_V(
     k,
     v,
@@ -434,7 +434,7 @@ def chunk_abc_bwd_kernel_V(
     BT: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    NT: tl.constexpr,
+    NT,
 ):
     i_k, i_t = unflatten_program_id(tl.cdiv(K, BK))
     i_bh = tl.program_id(1).to(tl.int64)
@@ -694,7 +694,7 @@ def chunk_abc_bwd_kernel_intra_K(
             tl.store(dA + o_A + j, b_dA.to(b_do.dtype), mask=m_A)
 
 
-@triton.jit(do_not_specialize=['T'])
+@triton.jit(do_not_specialize=['T', 'NT'])
 def chunk_abc_bwd_kernel_K(
     q,
     k,
@@ -715,7 +715,7 @@ def chunk_abc_bwd_kernel_K(
     BT: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    NT: tl.constexpr,
+    NT,
 ):
     i_k, i_t = unflatten_program_id(tl.cdiv(K, BK))
     i_bh = tl.program_id(1).to(tl.int64)
@@ -862,7 +862,7 @@ def chunk_abc_bwd_kernel_intra_KV(
     tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), mask=m_rv)
 
 
-@triton.jit(do_not_specialize=['T'])
+@triton.jit(do_not_specialize=['T', 'NT'])
 def chunk_abc_bwd_kernel_rcum_inter(
     s,
     z,
@@ -872,7 +872,7 @@ def chunk_abc_bwd_kernel_rcum_inter(
     S: tl.constexpr,
     BT: tl.constexpr,
     BS: tl.constexpr,
-    NT: tl.constexpr,
+    NT,
 ):
     i_m, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
 

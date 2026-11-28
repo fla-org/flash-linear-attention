@@ -130,7 +130,8 @@ def chunk_h_fwd_kernel(
         if USE_G_GAMMA:
             b_g_last = b_gamma * min(BT, T - i_t * BT)
             b_h *= exp2(b_g_last)
-            b_v = b_v * exp2(b_g_last - b_g)[:, None]
+            # past the end of a partial chunk b_g_last - b_g is positive and exp2 can overflow, 0 * inf = nan
+            b_v = b_v * tl.where(m_t, exp2(b_g_last - b_g), 0)[:, None]
 
         if USE_GK:
             p_gk = gk + kv_base + o_k[:, None] + o_t[None, :] * (H * K)
@@ -297,6 +298,24 @@ def chunk_fwd_h_verifier(k, v, *args, **kwargs):
     return True, None
 
 
+def _packed_varlen_split_segments(
+    cu_seqlens: torch.Tensor,
+    split_size: int,
+) -> tuple[int, int, list[tuple[int, int, int, int]]]:
+    """Host-side bounds for Python slicing (one `.cpu()`/tolist, not per-element `.item()`)."""
+    cu_cpu = cu_seqlens if cu_seqlens.device.type == "cpu" else cu_seqlens.detach().cpu()
+    split_cpu = prepare_chunk_offsets(cu_seqlens=cu_cpu, chunk_size=split_size)
+    cu = cu_cpu.tolist()
+    off = split_cpu.tolist()
+    n = len(cu) - 1
+    ns = off[-1]
+    segments = [
+        (int(cu[i_n]), int(cu[i_n + 1]), off[i_n], off[i_n + 1] - off[i_n])
+        for i_n in range(n)
+    ]
+    return n, ns, segments
+
+
 @register(chunk_fwd_h, backend=TritonAscendBackend, verifier=chunk_fwd_h_verifier)
 @input_guard
 def chunk_fwd_h_npu(
@@ -313,6 +332,7 @@ def chunk_fwd_h_npu(
     chunk_size: int = 64,
     split_size: int | None = None,
     states_in_fp32: bool = False,
+    chunk_indices: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = chunk_size
@@ -322,18 +342,12 @@ def chunk_fwd_h_npu(
     # packed varlen: run the equal-length kernel per sequence for complete state stores
     if cu_seqlens is not None:
         assert B == 1, "NPU varlen chunk_h expects packed batch B=1"
-        split_offsets = prepare_chunk_offsets(cu_seqlens=cu_seqlens, chunk_size=BS)
-        N = len(cu_seqlens) - 1
-        NS = int(split_offsets[-1].item())
+        N, NS, segments = _packed_varlen_split_segments(cu_seqlens, BS)
         state_shape = (V, K) if state_v_first else (K, V)
         # zero-init: kernels may only partially store each tile
         h = k.new_zeros(B, NS, H, *state_shape, dtype=torch.float if states_in_fp32 else k.dtype)
         ht = k.new_zeros(N, H, *state_shape, dtype=torch.float) if output_final_state else None
-        for i_n in range(N):
-            bos = int(cu_seqlens[i_n].item())
-            eos = int(cu_seqlens[i_n + 1].item())
-            boh = int(split_offsets[i_n].item())
-            n_i = int(split_offsets[i_n + 1].item()) - boh
+        for i_n, (bos, eos, boh, n_i) in enumerate(segments):
             if eos <= bos or n_i <= 0:
                 if ht is not None and h0 is not None:
                     ht[i_n].copy_(h0[i_n])
@@ -428,6 +442,7 @@ def chunk_bwd_dh_npu(
     chunk_size: int = 64,
     split_size: int | None = None,
     states_in_fp32: bool = False,
+    chunk_indices: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     HQ = q.shape[2]
@@ -438,17 +453,11 @@ def chunk_bwd_dh_npu(
     # packed varlen: run the equal-length kernel per sequence for complete state stores
     if cu_seqlens is not None:
         assert B == 1, "NPU varlen chunk_bwd_dh expects packed batch B=1"
-        split_offsets = prepare_chunk_offsets(cu_seqlens=cu_seqlens, chunk_size=BS)
-        N = len(cu_seqlens) - 1
-        NS = int(split_offsets[-1].item())
+        N, NS, segments = _packed_varlen_split_segments(cu_seqlens, BS)
         state_shape = (V, K) if state_v_first else (K, V)
         dh = k.new_zeros(B, NS, HQ, *state_shape, dtype=torch.float if states_in_fp32 else k.dtype)
         dh0 = torch.zeros_like(h0, dtype=torch.float) if h0 is not None else None
-        for i_n in range(N):
-            bos = int(cu_seqlens[i_n].item())
-            eos = int(cu_seqlens[i_n + 1].item())
-            boh = int(split_offsets[i_n].item())
-            n_i = int(split_offsets[i_n + 1].item()) - boh
+        for i_n, (bos, eos, boh, n_i) in enumerate(segments):
             if eos <= bos or n_i <= 0:
                 if dh0 is not None and dht is not None:
                     dh0[i_n].copy_(dht[i_n])

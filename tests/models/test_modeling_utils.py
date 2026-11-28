@@ -19,19 +19,28 @@ from fla.models.cache_utils import Cache
 from fla.utils import assert_close, device_name
 
 CAUSAL_LM_CONFIGS = [
-    models.ABCConfig, models.BitNetConfig, models.CombaConfig, models.DeltaNetConfig,
+    models.ABCConfig, models.BitNetConfig, models.CombaConfig, models.DeltaFormerConfig, models.DeltaNetConfig,
     models.ForgettingTransformerConfig, models.GatedDeltaNetConfig, models.GatedDeltaProductConfig,
-    models.GLAConfig, models.GSA2Config, models.GSAConfig, models.HGRNConfig, models.HGRN2Config, models.KDAConfig, models.LightNetConfig,
+    models.GLAConfig, models.GSA2Config, models.GSAConfig, models.HGRNConfig, models.HGRN2Config,
+    models.KDAConfig, models.LightNetConfig, models.LinearAttentionConfig,
     models.MesaNetConfig, models.MLAConfig, models.MoBAConfig, models.NSAConfig, models.ParallaxConfig,
     models.PaTHAttentionConfig, models.PrecondGatedDeltaNetConfig, models.RavenConfig, models.RetNetConfig,
     models.RodimusConfig, models.RWKV6Config, models.TransformerConfig, models.WallTransformerConfig,
 ]
 
 DECODER_CONFIGS = [
-    models.ABCConfig, models.CombaConfig, models.DeltaNetConfig, models.GatedDeltaNetConfig,
-    models.GatedDeltaProductConfig, models.GLAConfig, models.GSA2Config, models.GSAConfig, models.KDAConfig,
-    models.MesaNetConfig, models.MLAConfig, models.MoBAConfig, models.NSAConfig, models.RavenConfig,
+    models.ABCConfig, models.BitNetConfig, models.CombaConfig, models.DeltaFormerConfig, models.DeltaNetConfig,
+    models.ForgettingTransformerConfig,
+    models.GatedDeltaNetConfig, models.GatedDeltaProductConfig, models.GLAConfig, models.GSA2Config, models.GSAConfig,
+    models.KDAConfig, models.LightNetConfig, models.LinearAttentionConfig, models.MesaNetConfig, models.MLAConfig,
+    models.MoBAConfig, models.NSAConfig, models.ParallaxConfig, models.PaTHAttentionConfig, models.RavenConfig,
+    models.RetNetConfig, models.TransformerConfig, models.WallTransformerConfig,
 ]
+
+CACHE_FIRST_CONFIGS = (
+    models.BitNetConfig, models.ForgettingTransformerConfig, models.ParallaxConfig,
+    models.PaTHAttentionConfig, models.TransformerConfig, models.WallTransformerConfig,
+)
 
 
 @pytest.fixture
@@ -136,9 +145,7 @@ def test_causal_lm_loss_fused(linear, use_l2warp, num_items, make_model):
         assert_close(name, parameter.grad, fused_parameter.grad, 1e-3)
 
 
-@pytest.mark.parametrize('config_class', [GLAConfig, MemoryAttnConfig, pytest.param(
-    MomConfig, marks=pytest.mark.skipif(device_name == 'cpu', reason='MoM normalization requires an accelerator.'),
-)])
+@pytest.mark.parametrize('config_class', [GLAConfig, MemoryAttnConfig, MomConfig])
 @pytest.mark.parametrize('selection', [None, 0, 2, torch.tensor([0, 2, 5])])
 @pytest.mark.parametrize('return_dict', [False, True])
 def test_causal_lm_logits(config_class, selection, return_dict, full_precision_matmul, make_model):
@@ -203,11 +210,10 @@ def test_causal_lm_fwd_args(config_class, return_dict, make_model):
     with torch.no_grad():
         expected = model(input_ids=input_ids, labels=labels, use_cache=False)
         embeddings = model.get_input_embeddings()(input_ids)
-        if config_class in (
-            models.BitNetConfig, models.TransformerConfig, models.WallTransformerConfig,
-            models.ForgettingTransformerConfig, models.ParallaxConfig, models.PaTHAttentionConfig,
-        ):
+        if config_class in CACHE_FIRST_CONFIGS:
             actual = model(None, None, None, embeddings, labels, False, False, True, return_dict)
+        elif config_class is models.DeltaFormerConfig:
+            actual = model(None, None, embeddings, None, False, False, True, return_dict, labels)
         else:
             actual = model(None, None, embeddings, None, labels, False, False, True, return_dict)
         torch.testing.assert_close(actual.logits if return_dict else actual[1], expected.logits)
@@ -233,7 +239,7 @@ def test_decoder_fwd(config_class, training, use_cache, return_dict, make_model)
     input_ids = torch.randint(0, 64, (2, 7))
     attention_mask = torch.ones_like(input_ids)
     cu_seqlens = torch.tensor([0, 7, 14], dtype=torch.int32)
-    expected_cache = not training if use_cache is None else use_cache
+    expected_cache = (model.config.use_cache and not training) if use_cache is None else use_cache
     outputs = model(
         input_ids=input_ids,
         attention_mask=attention_mask,
@@ -282,7 +288,10 @@ def test_decoder_inputs(config_class, return_dict, make_model):
     cache = Cache()
     expected = model(input_ids=input_ids, use_cache=True, output_hidden_states=True)
     embeddings = model.embeddings(input_ids)
-    outputs = model(None, attention_mask, embeddings, cache, True, False, True, return_dict)
+    if config_class in CACHE_FIRST_CONFIGS:
+        outputs = model(None, attention_mask, cache, embeddings, True, False, True, return_dict)
+    else:
+        outputs = model(None, attention_mask, embeddings, cache, True, False, True, return_dict)
     torch.testing.assert_close(outputs[0], expected.last_hidden_state)
     assert (outputs.past_key_values if return_dict else outputs[1]) is cache
     torch.testing.assert_close(outputs.hidden_states if return_dict else outputs[2], expected.hidden_states)
@@ -290,3 +299,21 @@ def test_decoder_inputs(config_class, return_dict, make_model):
         model(input_ids=input_ids, inputs_embeds=embeddings)
     with pytest.raises(ValueError, match='either input_ids or inputs_embeds'):
         model()
+
+
+@pytest.mark.parametrize('return_dict', [False, True], ids=['tuple', 'dict'])
+def test_linear_attention_lm_kwargs(return_dict, make_model):
+    model = make_model(models.LinearAttentionConfig).eval()
+    layer = nn.Module()
+    layer.forward = Mock(side_effect=lambda hidden_states, **kwargs: (
+        hidden_states, None, kwargs['past_key_values'], kwargs['attnres_states'],
+    ))
+    model.model.layers = nn.ModuleList([layer])
+    input_ids = torch.randint(0, 64, (1, 7))
+    cu_seqlens = torch.tensor([0, 3, 7], dtype=torch.int32)
+    outputs = model(input_ids=input_ids, use_cache=False, return_dict=return_dict, cu_seqlens=cu_seqlens)
+    layer.forward.assert_called_once()
+    assert layer.forward.call_args.kwargs['cu_seqlens'] is cu_seqlens
+    logits = outputs.logits if return_dict else outputs[0]
+    expected = model.lm_head(model.model.norm(model.model.embeddings(input_ids)))
+    torch.testing.assert_close(logits, expected)

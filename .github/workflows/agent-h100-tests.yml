@@ -1,0 +1,167 @@
+name: Agent-selected H100 tests
+
+run-name: agent-h100-${{ inputs.pr_number }}-${{ inputs.attempt_id }}-${{ inputs.suite }}
+
+concurrency:
+  group: agent-h100-${{ inputs.pr_number }}-${{ inputs.attempt_id }}-${{ inputs.suite }}-${{ inputs.dispatch }}
+  cancel-in-progress: true
+
+on:
+  workflow_dispatch:
+    inputs: &agent_test_inputs
+      pr_number:
+        description: Pull request number
+        required: true
+        type: string
+      attempt_id:
+        description: Immutable review attempt ID
+        required: true
+        type: string
+      base_sha:
+        description: Exact base commit
+        required: true
+        type: string
+      head_sha:
+        description: Exact PR head commit
+        required: true
+        type: string
+      suite:
+        description: Test suite from .github/agent-tests/catalog.json
+        required: true
+        type: string
+      targets:
+        description: Space-separated test files or nodeids inside the selected suite
+        required: true
+        type: string
+      dispatch:
+        description: Backend dispatch mode
+        required: true
+        type: string
+        default: off
+      source_ref:
+        description: Trusted source ref for the runner and catalog
+        required: false
+        type: string
+        default: main
+  workflow_call:
+    inputs: *agent_test_inputs
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  test:
+    name: Agent H100 / ${{ inputs.suite }} / ${{ inputs.dispatch }}
+    runs-on: nvidia-h100-1
+    timeout-minutes: 120
+    env:
+      FLA_CI_ENV: 1
+      FLA_AGENT_PR_NUMBER: ${{ inputs.pr_number }}
+      FLA_AGENT_ATTEMPT_ID: ${{ inputs.attempt_id }}
+      FLA_AGENT_BASE_SHA: ${{ inputs.base_sha }}
+      FLA_AGENT_HEAD_SHA: ${{ inputs.head_sha }}
+    steps:
+      - name: Validate trusted source ref
+        shell: bash
+        env:
+          EXPECTED_SOURCE_REF: ${{ inputs.source_ref }}
+        run: |
+          if [[ "$EXPECTED_SOURCE_REF" != "main" && "$EXPECTED_SOURCE_REF" != "agent-dispatchable-ci" ]]; then
+            echo "::error::source_ref must be main or the reviewed agent-dispatchable-ci migration branch"
+            exit 1
+          fi
+
+      - name: Check out trusted workflow sources
+        uses: actions/checkout@v7.0.0
+        with:
+          ref: ${{ inputs.source_ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up trusted CI environment
+        uses: ./.github/actions/setup-ci-env
+        with:
+          runner_name: ${{ runner.name }}
+          conda_env_name: 'pytorch_2_12'
+          gpu_type: 'nvidia'
+          install_tilelang: 'true'
+          skip_gpu_check: true
+          ignore_skip_tests: 'true'
+
+      - name: Stage trusted test runner
+        shell: bash
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          mkdir -p "$RUNNER_TEMP/agent-ci" "$RUNNER_TEMP/agent-ci-results"
+          cp scripts/agent_ci.py "$RUNNER_TEMP/agent-ci/agent_ci.py"
+          cp .github/agent-tests/catalog.json "$RUNNER_TEMP/agent-ci/catalog.json"
+          git rev-parse HEAD > "$RUNNER_TEMP/agent-ci-results/source_revision.txt"
+
+      - name: Fetch and verify exact PR commits
+        shell: bash
+        env:
+          EXPECTED_HEAD_SHA: ${{ inputs.head_sha }}
+          EXPECTED_BASE_SHA: ${{ inputs.base_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$FLA_AGENT_PR_NUMBER" =~ ^[0-9]+$ ]]
+          [[ "$FLA_AGENT_ATTEMPT_ID" =~ ^[A-Za-z0-9_-]+$ ]]
+          [[ "$EXPECTED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$EXPECTED_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          git fetch origin "refs/pull/${FLA_AGENT_PR_NUMBER}/head"
+          test "$(git rev-parse FETCH_HEAD)" = "$EXPECTED_HEAD_SHA"
+          if ! git cat-file -e "${EXPECTED_BASE_SHA}^{commit}" 2>/dev/null; then
+            git fetch origin "$EXPECTED_BASE_SHA"
+          fi
+          MERGE_BASE_SHA=$(git merge-base "$EXPECTED_BASE_SHA" "$EXPECTED_HEAD_SHA")
+          git diff --name-only "$MERGE_BASE_SHA...$EXPECTED_HEAD_SHA" > "$RUNNER_TEMP/agent-ci-results/changed_files.txt"
+          git checkout --detach "$EXPECTED_HEAD_SHA"
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD_SHA"
+
+      - name: Verify PR base and head revisions
+        uses: actions/github-script@v9.0.0
+        with:
+          script: |
+            const pr = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: Number('${{ inputs.pr_number }}'),
+            });
+            if (pr.data.base.sha !== '${{ inputs.base_sha }}') {
+              core.setFailed(`base_sha ${'${{ inputs.base_sha }}'} is not the PR base ${pr.data.base.sha}`);
+            }
+            if (pr.data.head.sha !== '${{ inputs.head_sha }}') {
+              core.setFailed(`head_sha ${'${{ inputs.head_sha }}'} is not the current PR head ${pr.data.head.sha}`);
+            }
+
+      - name: Install PR revision
+        shell: bash
+        run: |
+          $CONDA_BIN_PATH/pip uninstall -y flash-linear-attention
+          $CONDA_BIN_PATH/pip install .
+
+      - name: Run selected tests
+        shell: bash
+        env:
+          AGENT_TEST_TARGETS: ${{ inputs.targets }}
+          AGENT_TEST_SUITE: ${{ inputs.suite }}
+          AGENT_TEST_DISPATCH: ${{ inputs.dispatch }}
+        run: |
+          $CONDA_BIN_PATH/python "$RUNNER_TEMP/agent-ci/agent_ci.py" \
+            --catalog "$RUNNER_TEMP/agent-ci/catalog.json" \
+            --platform h100 \
+            --suite "$AGENT_TEST_SUITE" \
+            --targets "$AGENT_TEST_TARGETS" \
+            --dispatch "$AGENT_TEST_DISPATCH" \
+            --results "$RUNNER_TEMP/agent-ci-results/junit" \
+            --metadata "$RUNNER_TEMP/agent-ci-results/metadata.json"
+
+      - name: Upload attempt evidence
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: agent-h100-${{ inputs.attempt_id }}-${{ inputs.suite }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/agent-ci-results/
+          if-no-files-found: error
+          retention-days: 7

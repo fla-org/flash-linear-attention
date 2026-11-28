@@ -128,7 +128,8 @@ def chunk_fwd_kernel_h(
         if USE_G_GAMMA:
             b_g_last = b_gamma * min(BT, T - i_t_int64 * BT)
             b_h *= exp2(b_g_last)
-            b_v = (b_v * exp2(b_g_last - b_g)[:, None]).to(b_v.dtype)
+            # past the end of a partial chunk b_g_last - b_g is positive and exp2 can overflow, 0 * inf = nan
+            b_v = (b_v * tl.where(m_t, exp2(b_g_last - b_g), 0)[:, None]).to(b_v.dtype)
 
         # vector decay, h = Diag(gk) @ h
         if USE_GK:
@@ -174,7 +175,7 @@ def chunk_fwd_kernel_h(
         for num_warps in [1, 2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
-    key=['BT', 'USE_G', 'USE_GK', 'USE_GV', 'STATE_V_FIRST', 'K', 'V'],
+    key=['HQ', 'H', 'K', 'V', 'BT', 'USE_G', 'USE_GK', 'USE_GV', 'IS_VARLEN', 'STATE_V_FIRST'],
     **autotune_cache_kwargs,
 )
 # keep scale=1 dynamic to avoid a Hopper masked-load shared-memory miscompile.
@@ -322,6 +323,7 @@ def chunk_fwd_h(
     chunk_size: int = 64,
     split_size: int | None = None,
     states_in_fp32: bool = False,
+    chunk_indices: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = chunk_size
@@ -332,7 +334,8 @@ def chunk_fwd_h(
         N, NS, split_offsets = B, triton.cdiv(T, BS), None
     else:
         split_offsets = prepare_chunk_offsets(cu_seqlens, BS)
-        N, NS = len(cu_seqlens) - 1, split_offsets[-1].item()
+        N = len(cu_seqlens) - 1
+        NS = len(chunk_indices) if BS == BT and chunk_indices is not None else split_offsets[-1].item()
 
     # `state_v_first` stores the states in V-first `[V, K]` layout instead of `[K, V]`
     state_shape = (V, K) if state_v_first else (K, V)
@@ -384,6 +387,7 @@ def chunk_bwd_dh(
     chunk_size: int = 64,
     split_size: int | None = None,
     states_in_fp32: bool = False,
+    chunk_indices: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     HQ = q.shape[2]
@@ -396,7 +400,8 @@ def chunk_bwd_dh(
         N, NS, split_offsets = B, triton.cdiv(T, BS), None
     else:
         split_offsets = prepare_chunk_offsets(cu_seqlens, BS)
-        N, NS = len(cu_seqlens) - 1, split_offsets[-1].item()
+        N = len(cu_seqlens) - 1
+        NS = len(chunk_indices) if BS == BT and chunk_indices is not None else split_offsets[-1].item()
     NG = HQ // H
 
     # `state_v_first` stores the states in V-first `[V, K]` layout instead of `[K, V]`

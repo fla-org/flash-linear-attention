@@ -8,8 +8,9 @@
 import os
 
 _worker = os.environ.get("PYTEST_XDIST_WORKER")
+_npu_xdist_rank = None
 if os.environ.get("FLA_NPU_XDIST") == "1" and _worker and _worker.startswith("gw"):
-    os.environ["ASCEND_RT_VISIBLE_DEVICES"] = _worker[2:]
+    _npu_xdist_rank = int(_worker[2:])
 
 import inspect
 import subprocess
@@ -21,7 +22,16 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from fla.utils import device_torch_lib
+from fla.utils import IS_NPU, device_torch_lib
+
+if IS_NPU and _npu_xdist_rank is not None:
+    device_count = device_torch_lib.device_count()
+    if device_count > 0:
+        # Honor ASCEND_RT_VISIBLE_DEVICES when set; otherwise this selects
+        # the first x visible devices for pytest -n x.
+        device_id = _npu_xdist_rank % device_count
+        device_torch_lib.set_device(device_id)
+        print(f"[FLA NPU xdist] {_worker} bound to NPU {device_id}")
 
 try:
     from torch.compiler import is_compiling

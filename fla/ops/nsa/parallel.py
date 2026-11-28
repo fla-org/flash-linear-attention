@@ -430,7 +430,7 @@ def _prune_dkv_bq(configs, nargs, **kwargs):
     prune_configs_by={'early_config_prune': _prune_dkv_bq},
     **autotune_cache_kwargs,
 )
-@triton.jit(do_not_specialize=['T'])
+@triton.jit(do_not_specialize=['T', 'TC'])
 def parallel_nsa_bwd_kernel_dkv(
     q,
     k,
@@ -452,7 +452,7 @@ def parallel_nsa_bwd_kernel_dkv(
     G: tl.constexpr,
     K: tl.constexpr,
     V: tl.constexpr,
-    TC: tl.constexpr,
+    TC,
     BS: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,

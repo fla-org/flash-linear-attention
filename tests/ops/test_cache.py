@@ -11,6 +11,7 @@ import triton
 import triton.language as tl
 
 from fla.modules.causal_conv1d.ops import causal_conv1d_bwd_kernel, causal_conv1d_fwd_kernel
+from fla.modules.norm.l2norm import l2norm_bwd_kernel, l2norm_fwd_kernel
 from fla.modules.token_shift import token_shift_bwd_kernel_long, token_shift_fwd_kernel_long
 from fla.ops.gla.chunk import chunk_gla_bwd_kernel_inter
 from fla.ops.utils.cache import AutotuneKey, fla_cache_autotune
@@ -38,7 +39,10 @@ def _optional_restore_kernel(x, y, N, BLOCK_SIZE: tl.constexpr):
         tl.store(y + idx, tl.zeros_like(idx), mask=mask)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.skipif(
+    not torch.cuda.is_available() and device != "npu",
+    reason="requires CUDA or NPU",
+)
 def test_fla_cache_autotune_handles_none_restore_value():
     """A None argument listed in restore_value must not crash autotuning.
 
@@ -63,17 +67,16 @@ def test_fla_cache_autotune_handles_none_restore_value():
     assert torch.equal(y2, torch.zeros(M, dtype=torch.int32, device=device))
 
 
-@pytest.mark.parametrize("kernel", [
-    causal_conv1d_fwd_kernel,
-    causal_conv1d_bwd_kernel,
-    token_shift_fwd_kernel_long,
-    token_shift_bwd_kernel_long,
-], ids=["causal_conv1d_fwd", "causal_conv1d_bwd", "token_shift_fwd_long", "token_shift_bwd_long"])
-def test_kernels_do_not_take_unused_nb(kernel):
-    """NB (a 1024-token bucket of the input size) is never read inside these kernel bodies, so none of them may take it:
-    in the autotune key it forces a re-tune on every new bucket, and as a constexpr it still compiles a new kernel for each one.
-    """
-    autotuner = kernel.fn
+@pytest.mark.parametrize("autotuner", [
+    pytest.param(causal_conv1d_fwd_kernel.fn, id="causal_conv1d_fwd"),
+    pytest.param(causal_conv1d_bwd_kernel.fn, id="causal_conv1d_bwd"),
+    pytest.param(token_shift_fwd_kernel_long.fn, id="token_shift_fwd_long"),
+    pytest.param(token_shift_bwd_kernel_long.fn, id="token_shift_bwd_long"),
+    pytest.param(l2norm_fwd_kernel, id="l2norm_fwd"),
+    pytest.param(l2norm_bwd_kernel, id="l2norm_bwd"),
+])
+def test_kernels_do_not_take_unused_nb(autotuner):
+    """Changing the row-count bucket must not require a new tuning round or JIT specialization."""
     assert 'NB' not in autotuner.keys
     assert 'NB' not in autotuner.arg_names
 

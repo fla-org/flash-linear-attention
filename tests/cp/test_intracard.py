@@ -35,9 +35,10 @@ def _clear_intracard_cache():
 @pytest.mark.skipif(not (IS_TF32_SUPPORTED or IS_NPU), reason="requires NVIDIA Ampere or newer, or Ascend")
 def test_chunk_kda_cache(monkeypatch):
     """Reuse the intracard precompute cache for repeated calls with the same cu_seqlens object."""
-    monkeypatch.setattr(backends.TritonAscendBackend, 'is_available', classmethod(lambda cls: False))
     # intracard CP is disabled by default.
     monkeypatch.setenv("FLA_INTRACARD_CP", "1")
+    # Ascend fwd_h is priority 0. Raise intra-card above it for this test only.
+    monkeypatch.setattr(IntraCardCPBackend, 'priority', -1)
     torch.manual_seed(0)
     dtype = torch.bfloat16
 
@@ -121,7 +122,8 @@ def test_backend_enabled(monkeypatch, enabled: bool):
 ])
 def test_chunk_packed_boundaries(monkeypatch, op, Hq, H):
     """Preserve packed/grouped-head outputs, final states, and sample independence under splitting."""
-    monkeypatch.setattr(backends.TritonAscendBackend, 'is_available', classmethod(lambda cls: False))
+    # Ascend fwd_h is priority 0. Raise intra-card above it for this test only.
+    monkeypatch.setattr(IntraCardCPBackend, 'priority', -1)
     for name in ('FLA_FLASH_QLA', 'FLA_FLASH_KDA', 'FLA_TILELANG'):
         monkeypatch.setenv(name, '0')
     torch.manual_seed(42)

@@ -1,0 +1,235 @@
+name: runner-maintenance
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Print candidates and disk usage without deleting anything'
+        required: true
+        type: boolean
+        default: true
+      max_age_days:
+        description: 'Delete Triton cache entries modified more than this many days ago'
+        required: true
+        type: string
+        default: '7'
+      clean_pip_cache:
+        description: 'Clean pip HTTP/wheel caches'
+        required: true
+        type: boolean
+        default: true
+      clean_npm_cache:
+        description: 'Run npm cache clean --force; Node installations under .nvm are not removed'
+        required: true
+        type: boolean
+        default: true
+      clean_conda_cache:
+        description: 'Run conda clean --all for package/index caches; environments are not removed'
+        required: true
+        type: boolean
+        default: true
+      clean_triton_stale:
+        description: 'Delete Triton cache entries modified more than max_age_days ago'
+        required: true
+        type: boolean
+        default: true
+      clean_triton_all:
+        description: 'Delete the entire Triton cache; causes recompilation on later jobs'
+        required: true
+        type: boolean
+        default: false
+      clean_pytest_cache:
+        description: 'Delete .pytest_cache directories under runner work and /tmp'
+        required: true
+        type: boolean
+        default: true
+      confirm:
+        description: 'Type DELETE to allow non-dry-run deletion'
+        required: false
+        type: string
+        default: ''
+
+permissions: {}
+
+jobs:
+  cleanup:
+    name: H100 runner cache maintenance
+    runs-on: nvidia-h100-1
+    timeout-minutes: 30
+    env:
+      DRY_RUN: ${{ inputs.dry_run }}
+      MAX_AGE_DAYS: ${{ inputs.max_age_days }}
+      CLEAN_PIP: ${{ inputs.clean_pip_cache }}
+      CLEAN_NPM: ${{ inputs.clean_npm_cache }}
+      CLEAN_CONDA: ${{ inputs.clean_conda_cache }}
+      CLEAN_TRITON_STALE: ${{ inputs.clean_triton_stale }}
+      CLEAN_TRITON_ALL: ${{ inputs.clean_triton_all }}
+      CLEAN_PYTEST: ${{ inputs.clean_pytest_cache }}
+      CONFIRM: ${{ inputs.confirm }}
+
+    steps:
+      - name: Diagnose before cleanup
+        shell: bash
+        run: |
+          echo "== context =="
+          whoami; echo "HOME=$HOME"; echo "dry_run=$DRY_RUN max_age_days=$MAX_AGE_DAYS"
+          echo "pip=$CLEAN_PIP npm=$CLEAN_NPM conda=$CLEAN_CONDA triton_stale=$CLEAN_TRITON_STALE triton_all=$CLEAN_TRITON_ALL pytest=$CLEAN_PYTEST"
+          echo "== df =="
+          df -h /
+          echo "== docker =="
+          docker system df 2>/dev/null || echo "no docker access"
+          echo "== docker images =="
+          docker images --size --format '{{.Repository}}:{{.Tag}} {{.Size}}' 2>/dev/null | head -30 || true
+          echo "== home top =="
+          du -x -d1 -h "$HOME" 2>/dev/null | sort -rh | head -12 || true
+          echo "== cache dirs =="
+          du -xh --max-depth=2 "$HOME/.cache" 2>/dev/null | sort -h | tail -30 || true
+          echo "== triton dirs =="
+          du -xh --max-depth=2 "$HOME/.triton" 2>/dev/null | sort -h | tail -30 || true
+          echo "== conda envs =="
+          du -sh "$HOME"/*/envs/* 2>/dev/null | sort -h | tail -30 || true
+          echo "== known caches =="
+          du -sh "$HOME/.cache/pip" "$HOME/.triton" "$HOME"/miniforge3/pkgs "$HOME"/miniconda3/pkgs "$HOME"/anaconda3/pkgs 2>/dev/null || true
+          echo "== runner work =="
+          du -xh --max-depth=3 /home/ubuntu/actions-runner/_work 2>/dev/null | sort -h | tail -40 || true
+          echo "== tmp top =="
+          du -xh --max-depth=2 /tmp 2>/dev/null | sort -h | tail -30 || true
+          echo "== large files =="
+          find "$HOME/.cache" "$HOME/.triton" /home/ubuntu/actions-runner/_work /tmp -xdev -type f -size +500M -printf '%s %p\n' 2>/dev/null | sort -nr | head -30 | awk '{printf "%.1fG %s\n", $1/1073741824, $2}' || true
+
+      - name: Clean whitelisted caches
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if ! [[ "$MAX_AGE_DAYS" =~ ^[0-9]+$ ]]; then
+            echo "::error::max_age_days must be a non-negative integer"
+            exit 1
+          fi
+          if [ "$DRY_RUN" != "true" ] && [ "$CONFIRM" != "DELETE" ]; then
+            echo "::error::Set confirm=DELETE to run non-dry-run cleanup"
+            exit 1
+          fi
+
+          FAILED=0
+          cleanup_path() {
+            local path="$1"
+            [ -e "$path" ] || return 0
+            local size
+            size=$(du -sh "$path" 2>/dev/null | awk '{print $1}') || size=unknown
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "[dry-run] would remove ${size:-unknown} $path"
+            else
+              echo "removing ${size:-unknown} $path"
+              rm -rf -- "$path"
+            fi
+          }
+
+          if [ "$CLEAN_PIP" = "true" ]; then
+            echo "== pip cache =="
+            cleanup_path "$HOME/.cache/pip"
+            shopt -s nullglob
+            for pip in "$HOME"/*/envs/*/bin/pip; do
+              [ -x "$pip" ] || continue
+              if [ "$DRY_RUN" = "true" ]; then
+                echo "[dry-run] would run $pip cache purge"
+              else
+                echo "purging pip cache for $pip"
+                "$pip" cache purge || { echo "::warning::pip cache purge failed for $pip"; FAILED=1; }
+              fi
+            done
+          fi
+
+          if [ "$CLEAN_NPM" = "true" ]; then
+            echo "== npm cache =="
+            if command -v npm >/dev/null 2>&1; then
+              if [ "$DRY_RUN" = "true" ]; then
+                echo "[dry-run] would run npm cache clean --force"
+              else
+                echo "cleaning npm cache"
+                npm cache clean --force || { echo "::warning::npm cache clean failed"; FAILED=1; }
+              fi
+            else
+              echo "npm not found; skipping npm cache clean"
+            fi
+          fi
+
+          if [ "$CLEAN_CONDA" = "true" ]; then
+            echo "== conda package/index cache =="
+            CONDA_BASE=$(conda info --base 2>/dev/null || true)
+            if [ -z "$CONDA_BASE" ]; then
+              for name in miniforge3 miniconda3 anaconda3; do
+                if [ -x "$HOME/$name/bin/conda" ]; then
+                  CONDA_BASE="$HOME/$name"
+                  break
+                fi
+              done
+            fi
+            if [ -n "$CONDA_BASE" ]; then
+              if [ "$DRY_RUN" = "true" ]; then
+                echo "[dry-run] would run $CONDA_BASE/bin/conda clean --all -y"
+              else
+                echo "cleaning conda package/index caches for $CONDA_BASE"
+                "$CONDA_BASE/bin/conda" clean --all -y || { echo "::warning::conda clean failed for $CONDA_BASE"; FAILED=1; }
+              fi
+            else
+              echo "no conda installation found"
+            fi
+          fi
+
+          if [ "$CLEAN_TRITON_ALL" = "true" ]; then
+            echo "== triton cache (all) =="
+            cleanup_path "$HOME/.triton/cache"
+          elif [ "$CLEAN_TRITON_STALE" = "true" ] && [ -d "$HOME/.triton/cache" ]; then
+            echo "== triton cache (modified more than $MAX_AGE_DAYS days ago) =="
+            candidates=$(mktemp)
+            if ! find "$HOME/.triton/cache" -mindepth 1 -maxdepth 1 -mtime "+$MAX_AGE_DAYS" -print0 > "$candidates"; then
+              echo "::warning::failed to list Triton cache candidates"
+              FAILED=1
+            fi
+            while IFS= read -r -d '' path; do
+              cleanup_path "$path"
+            done < "$candidates"
+            rm -f "$candidates"
+          fi
+
+          if [ "$CLEAN_PYTEST" = "true" ]; then
+            echo "== pytest caches =="
+            candidates=$(mktemp)
+            if ! find /home/ubuntu/actions-runner/_work /tmp -maxdepth 5 -type d -name .pytest_cache -prune -print0 > "$candidates" 2>/dev/null; then
+              echo "::warning::failed to list pytest cache candidates"
+              FAILED=1
+            fi
+            while IFS= read -r -d '' path; do
+              cleanup_path "$path"
+            done < "$candidates"
+            rm -f "$candidates"
+          fi
+
+          if [ "$FAILED" -ne 0 ]; then
+            echo "::error::One or more requested cleanup operations failed"
+            exit 1
+          fi
+
+      - name: Diagnose after cleanup
+        if: always()
+        shell: bash
+        run: |
+          echo "== df =="
+          df -h /
+          echo "== home top =="
+          du -x -d1 -h "$HOME" 2>/dev/null | sort -rh | head -12 || true
+          echo "== cache dirs =="
+          du -xh --max-depth=2 "$HOME/.cache" 2>/dev/null | sort -h | tail -30 || true
+          echo "== triton dirs =="
+          du -xh --max-depth=2 "$HOME/.triton" 2>/dev/null | sort -h | tail -30 || true
+          echo "== conda envs =="
+          du -sh "$HOME"/*/envs/* 2>/dev/null | sort -h | tail -30 || true
+          echo "== known caches =="
+          du -sh "$HOME/.cache/pip" "$HOME/.triton" "$HOME"/miniforge3/pkgs "$HOME"/miniconda3/pkgs "$HOME"/anaconda3/pkgs 2>/dev/null || true
+          echo "== runner work =="
+          du -xh --max-depth=3 /home/ubuntu/actions-runner/_work 2>/dev/null | sort -h | tail -40 || true
+          echo "== tmp top =="
+          du -xh --max-depth=2 /tmp 2>/dev/null | sort -h | tail -30 || true
+          echo "== large files =="
+          find "$HOME/.cache" "$HOME/.triton" /home/ubuntu/actions-runner/_work /tmp -xdev -type f -size +500M -printf '%s %p\n' 2>/dev/null | sort -nr | head -30 | awk '{printf "%.1fG %s\n", $1/1073741824, $2}' || true
