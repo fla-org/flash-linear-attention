@@ -663,6 +663,8 @@ class ParallelSimpleGLAFunction(torch.autograd.Function):
         ctx.save_for_backward(q, k, v, g, cu_seqlens, chunk_indices)
         ctx.scale = scale
         ctx.chunk_size = chunk_size
+        if attn is not None:
+            ctx.mark_non_differentiable(attn)
         return o.to(q.dtype), attn
 
     @staticmethod
@@ -721,7 +723,7 @@ def parallel_simple_gla(
         o (torch.Tensor):
             Outputs of shape `[B, T, H, V]`.
         attn (torch.Tensor):
-            Attention scores of shape `[B, H, T, T]` if `output_attentions=True` else `None`.
+            Non-differentiable attention scores of shape `[B, H, T, T]` if `output_attentions=True` else `None`.
     """
     if cu_seqlens is not None:
         if q.shape[0] != 1:

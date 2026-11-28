@@ -774,6 +774,8 @@ def test_parallel(
         ref_dg, g.grad = g.grad.clone(), None
 
     tri, tri_A = parallel_simple_gla(q=q, k=k, v=v, g=g, scale=scale, output_attentions=True)
+    assert not tri_A.requires_grad
+    assert tri_A.grad_fn is None
     tri.backward(do)
     tri_dq, q.grad = q.grad.clone(), None
     tri_dk, k.grad = k.grad.clone(), None
@@ -787,6 +789,44 @@ def test_parallel(
     assert_close('dv', ref_dv, tri_dv, 0.005)
     if USE_G:
         assert_close('dg', ref_dg, tri_dg, 0.015)
+
+
+@pytest.mark.parametrize('use_g', [True, False], ids=['with_g', 'no_g'])
+def test_parallel_output_attentions_non_differentiable(use_g: bool):
+    torch.manual_seed(0)
+    os.environ['TRITON_F32_DEFAULT'] = 'ieee'
+    B, T, H, K, V = 1, 64, 2, 16, 16
+    q = torch.randn((B, T, H, K), dtype=torch.float32, device=device).requires_grad_()
+    k = torch.randn((B, T, H, K), dtype=torch.float32, device=device).requires_grad_()
+    v = torch.randn((B, T, H, V), dtype=torch.float32, device=device).requires_grad_()
+    g = F.logsigmoid(torch.randn((B, T, H), dtype=torch.float32, device=device)).requires_grad_() if use_g else None
+    do = torch.randn_like(v)
+    w = torch.randn((B, H, T, T), dtype=torch.float32, device=device)
+
+    ref_g = g if use_g else torch.zeros((B, T, H), dtype=torch.float32, device=device)
+    ref_o, ref_attn = naive_parallel_simple_gla(q=q, k=k, v=v, g=ref_g)
+    ref_o.backward(do)
+    ref_dq, q.grad = q.grad.clone(), None
+    ref_dk, k.grad = k.grad.clone(), None
+    ref_dv, v.grad = v.grad.clone(), None
+    ref_dg = None
+    if use_g:
+        ref_dg, g.grad = g.grad.clone(), None
+
+    o, attn = parallel_simple_gla(q=q, k=k, v=v, g=g, output_attentions=True)
+    assert not attn.requires_grad
+    assert attn.grad_fn is None
+    with pytest.raises(RuntimeError, match='does not require grad'):
+        (attn * w).sum().backward()
+
+    o.backward(do)
+    assert_close('o', ref_o, o, 0.005)
+    assert_close('A', ref_attn, attn, 0.005)
+    assert_close('dq', ref_dq, q.grad, 0.005)
+    assert_close('dk', ref_dk, k.grad, 0.005)
+    assert_close('dv', ref_dv, v.grad, 0.005)
+    if use_g:
+        assert_close('dg', ref_dg, g.grad, 0.005)
 
 
 @pytest.mark.parametrize(

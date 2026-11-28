@@ -89,8 +89,8 @@ def parallel_attn_npu_kernel(
 def _parallel_attn_npu(q: torch.Tensor, k: torch.Tensor, g: torch.Tensor | None, scale: float) -> torch.Tensor:
     """Ascend implementation of `parallel_simple_gla(output_attentions=True)`.
 
-    The returned score matrix carries no `grad_fn`;
-    the CUDA path instead produces it inside `ParallelSimpleGLAFunction`.
+    The returned score matrix carries no `grad_fn`, matching the non-differentiable
+    `attn` output of `ParallelSimpleGLAFunction`.
     """
     B, T, H, K = q.shape
     BT = 64
