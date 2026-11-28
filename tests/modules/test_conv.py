@@ -159,7 +159,7 @@ def causal_conv1d_ref(
 def test_conv_ascend_dx_grid_split(monkeypatch):
     from fla.modules.causal_conv1d.backends import triton_ascend
 
-    if triton_ascend._arch_series() != 'ascend950':
+    if not triton_ascend._is_ascend_950():
         pytest.skip('Ascend 950 dX tiling requires an Ascend 950 device')
 
     torch.manual_seed(42)

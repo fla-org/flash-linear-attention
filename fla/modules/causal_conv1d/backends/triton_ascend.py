@@ -25,7 +25,6 @@ from fla.modules.causal_conv1d.ops import (
 )
 from fla.ops.utils import prepare_chunk_indices
 from fla.utils import get_device_arch, get_multiprocessor_count, input_guard
-from fla.utils.hardware import _ARCH_SERIES
 
 # triton-ascend exposes extract_slice/insert_slice via cann.extension on some versions.
 try:
@@ -45,22 +44,15 @@ class _Conv1dTileConfig(NamedTuple):
 
 
 _DEFAULT_TILE_CONFIG = _Conv1dTileConfig()
-_TILE_CONFIG_BY_SERIES = {
-    'ascend950': _Conv1dTileConfig(fp32_fwd_bd=128, dx_tile_budget=8192),
-}
+_ASCEND_950_TILE_CONFIG = _Conv1dTileConfig(fp32_fwd_bd=128, dx_tile_budget=8192)
 
 
-def _arch_series() -> str:
-    """Return the Triton NPU architecture series, or an empty string if unrecognized."""
-    arch = get_device_arch().lower()
-    for series, prefixes in _ARCH_SERIES.items():
-        if arch.startswith(prefixes):
-            return series
-    return ''
+def _is_ascend_950() -> bool:
+    return get_device_arch().lower().startswith(('ascend950', 'ascend910_95'))
 
 
 def _get_conv1d_tile_config() -> _Conv1dTileConfig:
-    return _TILE_CONFIG_BY_SERIES.get(_arch_series(), _DEFAULT_TILE_CONFIG)
+    return _ASCEND_950_TILE_CONFIG if _is_ascend_950() else _DEFAULT_TILE_CONFIG
 
 
 def _select_coregrid_bd(D: int, preferred: int) -> int | None:

@@ -22,10 +22,6 @@ from fla.utils.env import check_pytorch_version
 
 logger = logging.getLogger(__name__)
 
-_ARCH_SERIES = {
-    'ascend950': ('ascend950', 'ascend910_95'),
-}
-
 
 def _cpu_device_warning():
     warnings.warn(('Triton is not supported on current platform, roll back to CPU.'), stacklevel=2)
