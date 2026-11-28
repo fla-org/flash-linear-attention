@@ -493,6 +493,7 @@ def _launch_bwd_2d_kernel(kernel, *, nt: int, bh_total: int, kernel_kwargs: dict
 
 def _launch_bwd_3d_kernel(kernel, *, nk: int, nt: int, bh_total: int, kernel_kwargs: dict) -> None:
     max_nt = max_grid_axis_chunks(axis_size=nt, other_grid_product=bh_total, max_grid=ASCEND_MAX_GRID_DIM)
+    compile_opts = ascend_compile_kwargs(only='enable_dynamic_cv_pipeline')
     for k_idx in range(nk):
         kernel_kwargs['K_OFFSET'] = k_idx
         for nt_off in range(0, nt, max_nt):
@@ -508,7 +509,8 @@ def _launch_bwd_3d_kernel(kernel, *, nk: int, nt: int, bh_total: int, kernel_kwa
             for bh_off in range(0, bh_total, max_bh):
                 bh_len = min(max_bh, bh_total - bh_off)
                 kernel_kwargs['BH_OFFSET'] = bh_off
-                kernel[(1, nt_len, bh_len)](**kernel_kwargs)
+                launch_kwargs = {**kernel_kwargs, **compile_opts}
+                kernel[(1, nt_len, bh_len)](**launch_kwargs)
 
 
 @triton.jit(do_not_specialize=['T', 'task_num', 'num_core', 'scale'])

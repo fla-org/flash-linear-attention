@@ -94,6 +94,7 @@ IS_INTEL = (device_platform == 'xpu')
 IS_INTEL_ALCHEMIST = (IS_INTEL and 'Intel(R) Arc(TM) A' in torch.xpu.get_device_name(0))
 
 IS_NPU = (device_platform == 'npu')
+IS_ASCEND_950 = (IS_NPU and get_device_arch().startswith(('Ascend950', 'Ascend910_95')))
 
 IS_NVIDIA = (device_platform == 'cuda')
 IS_NVIDIA_HOPPER = (
@@ -210,11 +211,14 @@ else:
             return contextlib.nullcontext()
 
 
-def ascend_compile_kwargs(*, blacklist_auto_blockify: bool = False, workspace_multibuffer: int = 1) -> dict:
-    """Return NPU Triton launch kwargs that disable auto-multi-buffer.
+def ascend_compile_kwargs(
+    *, blacklist_auto_blockify: bool = False, workspace_multibuffer: int = 1, only: str | None = None,
+) -> dict:
+    """Return Ascend Triton launch options, or an empty dict on other devices.
 
-    Empty on non-NPU devices. When ``blacklist_auto_blockify`` is set, also
-    disable AutoBlockify if the installed compiler accepts that override.
+    Pass ``only`` to return just the named override when it applies.
+    Set ``blacklist_auto_blockify=True`` to disable AutoBlockify when the compiler supports it.
+    On Ascend 950, disable DynamicCV when supported to avoid UB overflow.
     """
     if not IS_NPU:
         return {}
@@ -223,14 +227,18 @@ def ascend_compile_kwargs(*, blacklist_auto_blockify: bool = False, workspace_mu
         from triton.backends.ascend.compiler import NPUOptions
         fields = getattr(NPUOptions, '__dataclass_fields__', {})
     except ImportError:
-        return kwargs
+        fields = {}
+    if IS_ASCEND_950 and 'enable_dynamic_cv_pipeline' in fields:
+        kwargs['enable_dynamic_cv_pipeline'] = False
     # BiShengIR 2.0 pipelines CV workspaces 4 slots deep by default, overflowing the 192KB UB.
     if 'set_workspace_multibuffer' in fields:
         kwargs['set_workspace_multibuffer'] = workspace_multibuffer
     blacklist_field = fields.get('has_auto_blockify_blacklist_op')
     if blacklist_auto_blockify and blacklist_field is not None and blacklist_field.init:
         kwargs['has_auto_blockify_blacklist_op'] = True
-    return kwargs
+    if only is None:
+        return kwargs
+    return {only: kwargs[only]} if only in kwargs else {}
 
 
 # expose extra.cann as extra.ascend for torch_npu inductor
