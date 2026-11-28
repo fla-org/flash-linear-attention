@@ -1542,6 +1542,8 @@ def chunk_gla(
             cu_seqlens=cu_seqlens
         )
     """
+    if torch.isinf(g).any():
+        raise ValueError("chunk_gla does not support infinite log gates")
     if return_intermediate_states:
         assert not torch.is_grad_enabled(), "return_intermediate_states requires gradients to be disabled"
     if cu_seqlens is not None:

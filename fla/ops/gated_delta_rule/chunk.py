@@ -581,6 +581,10 @@ def chunk_gated_delta_rule(
                 f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}.",
             )
     use_gate_in_kernel = kwargs.get('use_gate_in_kernel', False)
+    # Raw -inf maps to a finite zero log gate under softplus.
+    invalid_gate = torch.isposinf(g) if use_gate_in_kernel else torch.isinf(g)
+    if invalid_gate.any():
+        raise ValueError("chunk_gated_delta_rule does not support infinite log gates")
     A_log = kwargs.get('A_log')
     dt_bias = kwargs.get('dt_bias')
     if use_gate_in_kernel:

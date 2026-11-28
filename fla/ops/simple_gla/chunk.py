@@ -325,6 +325,10 @@ def chunk_simple_gla(
         raise DeprecationWarning(
             "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
         )
+    if g is not None and torch.isinf(g).any():
+        raise ValueError("chunk_simple_gla does not support infinite log gates")
+    if g_gamma is not None and torch.isinf(g_gamma).any():
+        raise ValueError("chunk_simple_gla does not support infinite gamma gates")
     chunk_size = kwargs.pop('chunk_size', None)
     if chunk_size is not None and chunk_size != 2 ** (chunk_size.bit_length() - 1):
         raise ValueError(f"`chunk_size` must be a power of 2, got {chunk_size}.")
