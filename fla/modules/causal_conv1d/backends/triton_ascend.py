@@ -24,8 +24,8 @@ from fla.modules.causal_conv1d.ops import (
     compute_dh0_triton,
 )
 from fla.ops.utils import prepare_chunk_indices
-from fla.utils import get_multiprocessor_count, input_guard
-from fla.utils.hardware import get_npu_arch_series, get_npu_target_arch
+from fla.utils import get_device_arch, get_multiprocessor_count, input_guard
+from fla.utils.hardware import _ARCH_SERIES
 
 # triton-ascend exposes extract_slice/insert_slice via cann.extension on some versions.
 try:
@@ -50,9 +50,17 @@ _TILE_CONFIG_BY_SERIES = {
 }
 
 
+def _arch_series() -> str:
+    """Return the Triton NPU architecture series, or an empty string if unrecognized."""
+    arch = get_device_arch().lower()
+    for series, prefixes in _ARCH_SERIES.items():
+        if arch.startswith(prefixes):
+            return series
+    return ''
+
+
 def _get_conv1d_tile_config() -> _Conv1dTileConfig:
-    series = get_npu_arch_series(get_npu_target_arch())
-    return _TILE_CONFIG_BY_SERIES.get(series, _DEFAULT_TILE_CONFIG)
+    return _TILE_CONFIG_BY_SERIES.get(_arch_series(), _DEFAULT_TILE_CONFIG)
 
 
 def _select_coregrid_bd(D: int, preferred: int) -> int | None:
@@ -951,9 +959,6 @@ def _launch_bwd_dx_core(dy, weight, dht, cu_seqlens, cu_seqlens_cpu, B, T, D, W,
             BD = min(16, max(8, triton.next_power_of_2(D)))
         else:
             BD, BT = _npu_tile_config(T=T, BT=BT, D=D, dtype=dy.dtype, initial_state=None)
-            if tile_budget is not None:
-                # Avoid reserving UB for channels outside a small input.
-                BD = min(BD, max(8, triton.next_power_of_2(D)))
     bd_limit = None
     if tile_budget is not None:
         BT = min(BT, tile_budget // 8)
@@ -1617,12 +1622,12 @@ def _launch_fwd_coregrid(
     """
     B, T, D = x.shape
     W = weight.shape[1]
+    weight_wd = weight.transpose(0, 1).contiguous()
+    NUM_CORES = get_multiprocessor_count(x.device.index)
     preferred_bd = _get_conv1d_tile_config().fp32_fwd_bd if x.dtype == torch.float32 else 256
     BD = _select_coregrid_bd(D=D, preferred=preferred_bd)
     if BD is None:
         raise RuntimeError(f'coregrid fwd: no aligned BD for D={D}')
-    weight_wd = weight.transpose(0, 1).contiguous()
-    NUM_CORES = get_multiprocessor_count(x.device.index)
     BT = min(32, triton.next_power_of_2(triton.cdiv(max(16, B * T), NUM_CORES)))
     NUM_BLKS_D = triton.cdiv(D, BD)
     if cu_seqlens is not None:

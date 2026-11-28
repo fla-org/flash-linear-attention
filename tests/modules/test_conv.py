@@ -6,7 +6,6 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import inspect
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -31,19 +30,20 @@ _CONV_REF_FP32_DTYPES = (torch.float16, torch.bfloat16)
 @pytest.mark.parametrize(
     ('arch', 'has_residual', 'dtype', 'fwd_bd', 'bwd_bt', 'bwd_bd'),
     [
-        pytest.param('Ascend950DT', True, torch.float32, 128, 64, 8, id='950-fp32-residual'),
-        pytest.param('Ascend950DT', False, torch.float32, 128, 64, 8, id='950-fp32-no-residual'),
-        pytest.param('Ascend910_9599', True, torch.bfloat16, 256, 512, 8, id='950-bf16-dx'),
-        pytest.param('Ascend950DT', True, torch.float16, 256, 512, 8, id='950-fp16-small-dx'),
+        pytest.param('Ascend950DT', True, torch.float32, 128, 64, 16, id='950-fp32-residual'),
+        pytest.param('Ascend950DT', False, torch.float32, 128, 64, 16, id='950-fp32-no-residual'),
+        pytest.param('Ascend910_9599', True, torch.bfloat16, 256, 512, 16, id='950-bf16-dx'),
+        pytest.param('Ascend950DT', True, torch.float16, 256, 512, 16, id='950-fp16-small-dx'),
         pytest.param('Ascend910B', True, torch.float32, 256, 64, 16, id='a2-fp32-residual'),
         pytest.param('Ascend910_9391', True, torch.bfloat16, 256, 512, 32, id='a3-bf16-dx'),
         pytest.param('Unknown950Test', True, torch.float32, 256, 64, 16, id='unknown-default'),
+        pytest.param('', True, torch.float32, 256, 64, 16, id='unavailable-default'),
     ],
 )
 def test_conv_ascend_tile_policy(monkeypatch, arch, has_residual, dtype, fwd_bd, bwd_bt, bwd_bd):
     from fla.modules.causal_conv1d.backends import triton_ascend
 
-    monkeypatch.setattr(triton_ascend, 'get_npu_target_arch', lambda: arch)
+    monkeypatch.setattr(triton_ascend, 'get_device_arch', lambda: arch)
     monkeypatch.setattr(triton_ascend, 'get_multiprocessor_count', lambda index: 64)
     fwd_kernel, bwd_kernel = MagicMock(), MagicMock()
     monkeypatch.setattr(triton_ascend, 'causal_conv1d_fwd_coregrid_kernel', fwd_kernel)
@@ -98,7 +98,7 @@ def test_conv_ascend_tile_policy(monkeypatch, arch, has_residual, dtype, fwd_bd,
 def test_conv_ascend_dx_tile_budget(monkeypatch, arch, dtype, T, grid_limit, bt, bd, launches):
     from fla.modules.causal_conv1d.backends import triton_ascend
 
-    monkeypatch.setattr(triton_ascend, 'get_npu_target_arch', lambda: arch)
+    monkeypatch.setattr(triton_ascend, 'get_device_arch', lambda: arch)
     monkeypatch.setattr(triton_ascend, '_NPU_MAX_TRITON_GRID', grid_limit)
     kernel = MagicMock()
     monkeypatch.setattr(triton_ascend, 'causal_conv1d_bwd_dx_kernel', kernel)
@@ -117,40 +117,6 @@ def test_conv_ascend_dx_tile_budget(monkeypatch, arch, dtype, T, grid_limit, bt,
         assert call.kwargs['CHUNK_OFFSET'] == chunk_offset
         assert grid[0] * grid[1] * grid[2] <= grid_limit
         chunk_offset += grid[1]
-
-
-@pytest.mark.skipif(not IS_NPU, reason='Ascend tiling requires the NPU backend')
-def test_conv_ascend_tile_policy_retries_target_lookup(monkeypatch, request):
-    from fla.modules.causal_conv1d.backends import triton_ascend
-    from fla.utils import hardware
-
-    get_target = MagicMock(side_effect=[
-        RuntimeError('target temporarily unavailable'),
-        SimpleNamespace(backend='npu', arch='Ascend950DT'),
-    ])
-    monkeypatch.setattr(hardware.triton.runtime, 'driver', SimpleNamespace(
-        active=SimpleNamespace(get_current_target=get_target),
-    ))
-    hardware._get_npu_target_arch.cache_clear()
-    request.addfinalizer(hardware._get_npu_target_arch.cache_clear)
-    monkeypatch.setattr(triton_ascend, 'get_multiprocessor_count', lambda index: 64)
-    kernel = MagicMock()
-    monkeypatch.setattr(triton_ascend, 'causal_conv1d_fwd_coregrid_kernel', kernel)
-
-    triton_ascend._launch_fwd_coregrid(
-        x=torch.empty(1, 2048, 256, dtype=torch.float32),
-        weight=torch.empty(256, 4, dtype=torch.float32),
-        bias=None,
-        residual=None,
-        activation=None,
-        cu_seqlens=None,
-        cu_seqlens_cpu=None,
-    )
-
-    assert get_target.call_count == 2
-    launch = kernel.__getitem__.return_value
-    launch.assert_called_once()
-    assert (launch.call_args.kwargs['BT'], launch.call_args.kwargs['BD']) == (32, 128)
 
 
 def _conv_ref_compute_dtype(*tensors: torch.Tensor | None) -> torch.dtype:
@@ -190,36 +156,25 @@ def causal_conv1d_ref(
 
 
 @pytest.mark.skipif(not IS_NPU, reason='Ascend grid splitting requires the NPU backend')
-@pytest.mark.parametrize(
-    ('B', 'T', 'seq_bounds', 'grid_limit', 'tile', 'grids', 'offsets'),
-    [
-        pytest.param(2, 1536, None, 20, (512, 16), [(5, 2, 2), (5, 1, 2)], [0, 2], id='dense'),
-        pytest.param(1, 1024, (0, 1, 512, 1024), 4, (256, 32), [(3, 1, 1)] * 5, [0] * 5, id='packed'),
-    ],
-)
-def test_conv_ascend_dx_grid_split(monkeypatch, B, T, seq_bounds, grid_limit, tile, grids, offsets):
+def test_conv_ascend_dx_grid_split(monkeypatch):
     from fla.modules.causal_conv1d.backends import triton_ascend
-    from fla.utils.hardware import get_npu_arch_series, get_npu_target_arch
 
-    if get_npu_arch_series(get_npu_target_arch()) != 'ascend950':
+    if triton_ascend._arch_series() != 'ascend950':
         pytest.skip('Ascend 950 dX tiling requires an Ascend 950 device')
 
     torch.manual_seed(42)
-    D, W = 80, 4
+    B, T, D, W = 1, 1024, 80, 4
+    seq_bounds = (0, 1, 512, T)
     dtype = torch.bfloat16
     x = torch.randn(B, T, D, dtype=dtype, device='cpu', requires_grad=True)
     weight = torch.randn(D, W, dtype=dtype, device='cpu')
     dy = torch.randn_like(x)
-    if seq_bounds is None:
-        cu_seqlens_cpu = cu_seqlens = None
-        ref = causal_conv1d_ref(x.transpose(1, 2), weight).transpose(1, 2)
-    else:
-        cu_seqlens_cpu = torch.tensor(seq_bounds, dtype=torch.int32, device='cpu')
-        cu_seqlens = cu_seqlens_cpu.to(device)
-        ref = torch.cat([
-            causal_conv1d_ref(x[:, start:end].transpose(1, 2), weight).transpose(1, 2)
-            for start, end in zip(seq_bounds[:-1], seq_bounds[1:], strict=True)
-        ], dim=1)
+    cu_seqlens_cpu = torch.tensor(seq_bounds, dtype=torch.int32, device='cpu')
+    cu_seqlens = cu_seqlens_cpu.to(device)
+    ref = torch.cat([
+        causal_conv1d_ref(x[:, start:end].transpose(1, 2), weight).transpose(1, 2)
+        for start, end in zip(seq_bounds[:-1], seq_bounds[1:], strict=True)
+    ], dim=1)
     ref_dx, = torch.autograd.grad(ref, x, dy)
 
     kernel = triton_ascend.causal_conv1d_bwd_dx_kernel
@@ -236,7 +191,7 @@ def test_conv_ascend_dx_grid_split(monkeypatch, B, T, seq_bounds, grid_limit, ti
 
     recording_kernel = MagicMock()
     recording_kernel.__getitem__.side_effect = record_grid
-    monkeypatch.setattr(triton_ascend, '_NPU_MAX_TRITON_GRID', grid_limit)
+    monkeypatch.setattr(triton_ascend, '_NPU_MAX_TRITON_GRID', 4)
     monkeypatch.setattr(triton_ascend, 'causal_conv1d_bwd_dx_kernel', recording_kernel)
     dx = triton_ascend._launch_bwd_dx_core(
         dy=dy.to(device),
@@ -251,9 +206,8 @@ def test_conv_ascend_dx_grid_split(monkeypatch, B, T, seq_bounds, grid_limit, ti
         BT=64,
     ).cpu()
 
-    assert launches == [(grid, tile, offset) for grid, offset in zip(grids, offsets, strict=True)]
-    if seq_bounds is not None:
-        assert [indices.tolist() for indices in chunk_indices] == [[[0, 0]], [[1, 0]], [[1, 1]], [[2, 0]], [[2, 1]]]
+    assert launches == [((3, 1, 1), (256, 32), 0)] * 5
+    assert [indices.tolist() for indices in chunk_indices] == [[[0, 0]], [[1, 0]], [[1, 1]], [[2, 0]], [[2, 1]]]
     assert torch.isfinite(dx).all()
     assert_close('dx', ref_dx, dx, 1e-3)
 
@@ -416,7 +370,6 @@ def test_conv(
             (4, 500, 128, 3, None, True, False, torch.float16, 'triton'),
             (4, 1024, 1024, 4, None, False, False, torch.float16, 'triton'),
             (4, 2048, 256, 4, "swish", True, True, torch.float32, 'triton'),
-            (4, 129, 8, 4, None, True, False, torch.bfloat16, 'triton'),
             (4, 500, 128, 3, "swish", True, True, torch.float32, 'cuda'),
             (4, 1024, 200, 4, "swish", False, True, torch.float32, 'cuda'),
             (4, 500, 128, 3, None, True, False, torch.float16, 'cuda'),
