@@ -33,6 +33,13 @@ class TritonAscendCPBackend(BaseBackend):
         from fla.utils import IS_NPU
         return IS_NPU
 
+    def _graph_metadata_verifier(self, cu_seqlens, context=None, layout='contiguous'):
+        return _verify_npu_input((cu_seqlens,), {})
+
+    def _graph_metadata(self, cu_seqlens, context=None, layout='contiguous'):
+        from fla.ops.cp.backends.triton_ascend.chunk_delta_h import cp_graph_metadata_npu
+        return cp_graph_metadata_npu(cu_seqlens, context=context, layout=layout)
+
     def chunk_gated_delta_rule_fwd_h_pre_process_verifier(self, *args, **kwargs):
         return _verify_npu_input(args, kwargs)
 
