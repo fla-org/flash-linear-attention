@@ -159,7 +159,7 @@ def fused_recurrent_delta_rule_bwd_kernel(
     p_dv = dv + ((i_k * all + bos) * H + i_h) * V + i_v * BV + tl.arange(0, BV) + (T - 1).to(tl.int64) * H*V
     if IS_BETA_HEADWISE:
         p_beta = beta + (bos + T - 1) * H*V + i_h * V + i_v * BV + tl.arange(0, BV)
-        p_dbeta = db + ((i_v * NK + i_k) * all + bos + T - 1) * H*V + i_h * V + tl.arange(0, BV)
+        p_dbeta = db + (bos + T - 1) * H*V + i_h * V + i_v * BV + tl.arange(0, BV)
     else:
         p_beta = beta + (bos + T - 1) * H + i_h
         p_dbeta = db + (i_v * all + bos + T - 1) * H + i_h
@@ -336,7 +336,7 @@ def fused_recurrent_delta_rule_bwd(
     dk = q.new_empty(NV, *k.shape)
     dv = q.new_empty(NK, *v.shape)
     if beta_vector:
-        db = q.new_empty(NV, NK, B, T, H, V)
+        db = q.new_empty(B, T, H, V)
     else:
         db = q.new_empty(NV, B, T, H)
     grid = (NV * NK * N * H,)
@@ -376,7 +376,7 @@ def fused_recurrent_delta_rule_bwd(
     dq = dq.sum(0)
     dk = dk.sum(0)
     dv = dv.sum(0)
-    db = db.sum((0, 1)) if beta_vector else db.sum(0)
+    db = db if beta_vector else db.sum(0)
 
     return dq, dk, dv, db, dh0
 

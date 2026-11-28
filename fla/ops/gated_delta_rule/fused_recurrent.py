@@ -450,6 +450,12 @@ def fused_recurrent_gated_delta_rule(
                 f"The number of initial states is expected to be equal to the number of input sequences, "
                 f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}.",
             )
+    H, HV = k.shape[2], v.shape[2]
+    if HV % H != 0:
+        raise ValueError(
+            f"For GVA, num_v_heads (HV={HV}) must be evenly divisible by "
+            f"num_heads (H={H}), but got HV % H = {HV % H}"
+        )
     if scale is None:
         scale = k.shape[-1] ** -0.5
     if beta is None:

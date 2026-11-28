@@ -5,7 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""Forward/backward affine summaries and per-head vector-gate addressing."""
+"""Check CP state summaries for per-head gate addressing and against FP64 recurrences."""
 
 from types import SimpleNamespace
 
@@ -13,7 +13,8 @@ import pytest
 import torch
 import triton
 
-from fla.ops.cp.chunk_bwd import chunk_cp_bwd_kernel_dh
+from fla.ops.cp.chunk_bwd import chunk_cp_bwd_dh, chunk_cp_bwd_kernel_dh
+from fla.ops.cp.chunk_fwd import chunk_cp_fwd_h
 from fla.utils import IS_NPU, IS_TF32_SUPPORTED, assert_close, device
 
 pytestmark = pytest.mark.skipif(not (IS_TF32_SUPPORTED or IS_NPU), reason="requires NVIDIA Ampere or newer, or Ascend")
@@ -52,7 +53,7 @@ def test_chunk_bwd_gate_head(monkeypatch, tmp_path, T: int, H: int, K: int, V: i
     cu_seqlens = torch.tensor([0, T], device=device, dtype=torch.long)
 
     BK = triton.next_power_of_2(K)
-    BV = 32 if K <= 64 else 64
+    BV = 32
     grid = (triton.cdiv(V, BV) + triton.cdiv(K, BV), H)
 
     # the control run uses zero gates for every head
@@ -123,6 +124,143 @@ def test_chunk_bwd_gate_head(monkeypatch, tmp_path, T: int, H: int, K: int, V: i
             f"Head {h} dh ratio={ratio:.4f} is too small. "
             f"Expected large difference due to exp2(-10) ≈ 0.001 decay."
         )
+
+
+def _summary_reference(q, k, w, u, v, do, dv, g, gk, bg, scale, bos, T, BT):
+    """Return FP64 [h_local | M] and [dh_local | dM] on the host, rounding operands to bf16 where the kernels do."""
+    H, K = k.shape[2:]
+    HV, V = u.shape[2:]
+
+    def rows(x, head, start, end):
+        return x[0, bos + start:bos + end, head].cpu().double()
+
+    def bf16(x):
+        return x.to(torch.bfloat16).double()
+
+    hm, dhm = (torch.empty(HV, K, V + K, dtype=torch.float64) for _ in range(2))
+    chunks = [(start, min(start + BT, T)) for start in range(0, T, BT)]
+    for i_h in range(HV):
+        i_k = i_h // (HV // H)
+        i_w = i_k if bg is not None else i_h
+        h, m = torch.zeros(K, V, dtype=torch.float64), torch.eye(K, dtype=torch.float64)
+        dh, dm = torch.zeros_like(h), torch.eye(K, dtype=torch.float64)
+        decays = {}
+        for start, end in chunks:
+            factor = torch.ones(end - start, dtype=torch.float64)
+            diag = torch.ones(K, dtype=torch.float64)
+            if g is not None:
+                g_c = rows(g, i_h, start, end)
+                factor, diag = torch.exp2(g_c[-1] - g_c), torch.exp2(g_c[-1]).expand(K)
+            elif gk is not None:
+                diag = torch.exp2(rows(gk, i_h, start, end)[-1])
+            decays[start] = (factor, diag)
+            k_c, w_c, u_c = rows(k, i_k, start, end), rows(w, i_w, start, end), rows(u, i_h, start, end)
+            if bg is None:
+                h = diag[:, None] * h + k_c.T @ bf16((u_c - w_c @ bf16(h)) * factor[:, None])
+                m = (torch.diag(diag) - (k_c * factor[:, None]).T @ w_c) @ m
+            else:
+                bg_c = rows(bg, i_k, start, end)
+                v_new = bf16((w_c @ bf16(h) + u_c) * factor[:, None])
+                h = diag[:, None] * h + k_c.T @ rows(v, i_h, start, end) + bg_c.T @ v_new
+                m = (torch.diag(diag) + (bg_c * factor[:, None]).T @ w_c) @ m
+        for start, end in reversed(chunks):
+            factor, diag = decays[start]
+            # the backward summary reads bg in place of k for DPLR
+            q_c, k_c, w_c = rows(q, i_k, start, end), rows(k if bg is None else bg, i_k, start, end), rows(w, i_w, start, end)
+            if g is not None:
+                q_c = q_c * torch.exp2(rows(g, i_h, start, end))[:, None]
+            dv_c = (k_c @ bf16(dh)) * factor[:, None] + rows(dv, i_h, start, end)
+            local, update = q_c.T @ rows(do, i_h, start, end), w_c.T @ bf16(dv_c)
+            if bg is None:
+                dh = diag[:, None] * dh + local * scale - update
+                dm = (torch.diag(diag) - w_c.T @ (k_c * factor[:, None])) @ dm
+            else:
+                dh = diag[:, None] * dh + local + update
+                dm = (torch.diag(diag) + w_c.T @ (k_c * factor[:, None])) @ dm
+        hm[i_h], dhm[i_h] = torch.cat((h, m), dim=-1), torch.cat((dh, dm), dim=-1)
+    return hm, dhm
+
+
+@pytest.mark.parametrize(
+    ('T', 'H', 'HV', 'K', 'V', 'gate', 'use_bg'),
+    [
+        pytest.param(*p, id='T{}-H{}-HV{}-K{}-V{}-{}-{}'.format(*p[:6], 'dplr' if p[6] else 'delta'))
+        for p in [
+            # four full 64-row strips with the KDA vector gate
+            (300, 2, 2, 256, 128, 'vector', False),
+            # three strips with the GDN scalar gate and grouped value heads
+            (200, 1, 2, 192, 64, 'scalar', False),
+            # DPLR with a partial fourth strip and a partial value block
+            (150, 2, 2, 200, 80, 'vector', True),
+            # two ungated strips ending in a one-token chunk
+            (129, 2, 2, 128, 128, None, False),
+            # narrow states keep the [K, K] chunk transform
+            (100, 2, 4, 64, 64, 'vector', False),
+        ]
+    ],
+)
+def test_chunk_summary(T: int, H: int, HV: int, K: int, V: int, gate: str | None, use_bg: bool):
+    """Forward and backward summaries match FP64 recurrences across state widths, gates, and DPLR."""
+    torch.manual_seed(42)
+    BT, bos = 64, 37
+    # the prefix gives the summarized sequence a nonzero varlen offset
+    q, k = (torch.randn(1, bos + T, H, K, device=device, dtype=torch.bfloat16) * 0.05 for _ in range(2))
+    w = torch.randn(1, bos + T, H if use_bg else HV, K, device=device, dtype=torch.bfloat16) * 0.05
+    bg = torch.randn_like(k) * 0.05 if use_bg else None
+    u, v, do, dv = (torch.randn(1, bos + T, HV, V, device=device, dtype=torch.bfloat16) for _ in range(4))
+    # chunk-local cumulative log2 decays, aligned with the chunks of the offset sequence
+    NT = triton.cdiv(T, BT)
+    decay = torch.zeros(1, NT * BT, HV, K if gate == 'vector' else 1, device=device)
+    decay[:, :T] = -0.05 * torch.rand(1, T, HV, decay.shape[-1], device=device)
+    decay = decay.view(1, NT, BT, HV, -1).cumsum(2).view(1, NT * BT, HV, -1)[:, :T]
+    gates = torch.zeros(1, bos + T, HV, decay.shape[-1], device=device)
+    gates[:, bos:] = decay
+    g = gates[..., 0] if gate == 'scalar' else None
+    gk = gates if gate == 'vector' else None
+    cu_seqlens = torch.tensor([bos, bos + T], device=device, dtype=torch.long)
+    scale = K ** -0.5
+
+    # NaN-filled outputs expose any summary element the kernels leave unwritten
+    hm = torch.full((HV, K, V + K), float('nan'), device=device)
+    dhm = torch.full_like(hm, float('nan'))
+    chunk_cp_fwd_h(k=k, w=w, u=u, hm=hm, g=g, gk=gk, bg=bg, v=v if use_bg else None, cu_seqlens=cu_seqlens, chunk_size=BT)
+    chunk_cp_bwd_dh(
+        q=q,
+        k=k,
+        w=w,
+        do=do,
+        dv=dv,
+        dhm=dhm,
+        g=g,
+        gk=gk,
+        bg=bg,
+        scale=scale,
+        cu_seqlens=cu_seqlens,
+        chunk_size=BT,
+    )
+    ref_hm, ref_dhm = _summary_reference(
+        q=q,
+        k=k,
+        w=w,
+        u=u,
+        v=v,
+        do=do,
+        dv=dv,
+        g=g,
+        gk=gk,
+        bg=bg,
+        scale=scale,
+        bos=bos,
+        T=T,
+        BT=BT,
+    )
+
+    hm, dhm = hm.cpu(), dhm.cpu()
+    assert hm.isfinite().all() and dhm.isfinite().all()
+    assert_close('h', ref_hm[..., :V], hm[..., :V], 0.006)
+    assert_close('M', ref_hm[..., V:], hm[..., V:], 1e-4)
+    assert_close('dh', ref_dhm[..., :V], dhm[..., :V], 0.006)
+    assert_close('dM', ref_dhm[..., V:], dhm[..., V:], 1e-4)
 
 
 SUMMARY_CASES = [
@@ -229,7 +367,7 @@ def _native_summary(monkeypatch, forward=False):
             target.copy_(summary)
             return summary.unsqueeze(0), None
 
-        # compare the actual local kernel against the oracle before any cross-rank merge.
+        # compare the actual local kernel against the CPU recurrence before any cross-rank merge.
         monkeypatch.setattr(chunk_delta_h, 'all_gather_into_tensor', capture)
         if forward:
             kwargs.pop('q')

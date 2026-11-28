@@ -143,7 +143,9 @@ def prepare_position_ids(cu_seqlens: torch.LongTensor, cu_seqlens_cpu: torch.Lon
 
 @tensor_cache
 def prepare_sequence_ids(cu_seqlens: torch.LongTensor, cu_seqlens_cpu: torch.LongTensor | None = None) -> torch.LongTensor:
-    return prepare_position_ids(cu_seqlens, cu_seqlens_cpu).eq(0).cumsum(0) - 1
+    # Empty segments have no position-0 token, so deriving ids from positions shifts them.
+    src = cu_seqlens_cpu if cu_seqlens_cpu is not None else cu_seqlens
+    return _segmented_arange(prepare_lens(src))[0].to(cu_seqlens)
 
 
 @tensor_cache
