@@ -1523,8 +1523,9 @@ def test_recompute_w_u_fwd_gdn2_ub_budget(store_qg, expected, monkeypatch):
 def test_chunk_npu_backward_device_policy(monkeypatch, arch, is_950):
     """Keep the 950 compiler workarounds isolated from other Ascend devices."""
     from fla.ops.gdn2.backends.triton_ascend import chunk_bwd
+    from fla.utils import hardware
 
-    monkeypatch.setattr(chunk_bwd, 'get_npu_target_arch', lambda: arch)
+    monkeypatch.setattr(hardware, 'get_device_arch', lambda: arch)
     config = chunk_bwd._get_wy_backward_config()
     assert config.compile_overrides == ({'buf_slot_num_of_veccore': 1} if is_950 else {})
     assert config.gate_dw_tiles == ({48: 16} if is_950 else {})
@@ -1546,8 +1547,9 @@ def test_chunk_npu_backward_device_policy(monkeypatch, arch, is_950):
 )
 def test_chunk_npu_state_tail_policy(arch, K, expected, monkeypatch):
     from fla.ops.common.backends.triton_ascend import chunk_delta_h
+    from fla.utils import hardware
 
-    monkeypatch.setattr(chunk_delta_h, 'get_npu_target_arch', lambda: arch)
+    monkeypatch.setattr(hardware, 'get_device_arch', lambda: arch)
     monkeypatch.setattr(chunk_delta_h, '_select_fwd_h_tiles', lambda k, v, state_v_first: (k, 64))
     assert chunk_delta_h._dense_single_slab_tail(K, 64, False, None, None) is expected
 

@@ -23,7 +23,7 @@ from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 from fla.ops.utils.op import exp2
 from fla.utils import ascend_compile_kwargs, input_guard
 from fla.utils.ascend_ub_manager import compute_row_tile_block_size, get_npu_properties
-from fla.utils.hardware import get_npu_arch_series, get_npu_target_arch
+from fla.utils.hardware import is_ascend_950
 
 SUB_CHUNK_SIZE = 16
 BWD_MEM_MULT = 10.0
@@ -38,19 +38,16 @@ class _WYBackwardConfig(NamedTuple):
 
 
 _DEFAULT_WY_BACKWARD_CONFIG = _WYBackwardConfig(compile_overrides={}, gate_dw_tiles={})
-_WY_BACKWARD_CONFIGS = {
-    'ascend950': _WYBackwardConfig(
-        # three vector slots exceed UB for the WY backward tiles on Ascend 950.
-        compile_overrides={'buf_slot_num_of_veccore': 1},
-        # full reduction tiles avoid an unsupported L1-to-L1 padding copy on Ascend 950.
-        gate_dw_tiles={48: 16},
-    ),
-}
+_ASCEND_950_WY_BACKWARD_CONFIG = _WYBackwardConfig(
+    # Three vector slots exceed UB for the WY backward tiles on Ascend 950.
+    compile_overrides={'buf_slot_num_of_veccore': 1},
+    # Full reduction tiles avoid an unsupported L1-to-L1 padding copy on Ascend 950.
+    gate_dw_tiles={48: 16},
+)
 
 
 def _get_wy_backward_config() -> _WYBackwardConfig:
-    series = get_npu_arch_series(get_npu_target_arch())
-    return _WY_BACKWARD_CONFIGS.get(series, _DEFAULT_WY_BACKWARD_CONFIG)
+    return _ASCEND_950_WY_BACKWARD_CONFIG if is_ascend_950() else _DEFAULT_WY_BACKWARD_CONFIG
 
 
 def get_bwd_tile(size: int, block_rows: int) -> int:
