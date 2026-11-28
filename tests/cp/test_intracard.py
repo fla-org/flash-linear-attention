@@ -5,9 +5,8 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""Check intra-card CP routing, cache reuse, and grouped-head outputs and final states."""
+"""Check intra-card CP routing, cache reuse, and packed/grouped-head outputs and final states."""
 
-import inspect
 import os
 from types import SimpleNamespace
 from unittest.mock import create_autospec
@@ -19,7 +18,6 @@ import torch.nn.functional as F
 from fla import backends
 from fla.ops.common import intracard_cp
 from fla.ops.common.backends.intracard import IntraCardCPBackend
-from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_fwd_h
 from fla.ops.common.intracard_cp import _intracard_cache
 from fla.ops.gated_delta_rule import chunk_gated_delta_rule
 from fla.ops.kda import chunk_kda
@@ -116,76 +114,51 @@ def test_backend_enabled(monkeypatch, enabled: bool):
     assert IntraCardCPBackend().is_enabled() is enabled
 
 
-@pytest.mark.skipif(os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") == "1", reason="backend dispatch disabled")
-@pytest.mark.skipif(not (IS_TF32_SUPPORTED or IS_NPU), reason="requires NVIDIA Ampere or newer, or Ascend")
-def test_chunk_gdn_grouped_heads(monkeypatch):
-    """Compare intra-card splitting with the ordinary chunk path when query heads are shared by value heads."""
-    monkeypatch.setenv("FLA_INTRACARD_CP", "1")
+@pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
+@pytest.mark.skipif(not (IS_TF32_SUPPORTED or IS_NPU), reason='requires NVIDIA Ampere or newer, or Ascend')
+@pytest.mark.parametrize(('op', 'Hq', 'H'), [
+    pytest.param(chunk_gated_delta_rule, 2, 4, id='gdn-grouped'),
+    pytest.param(chunk_kda, 1, 1, id='kda'),
+])
+def test_chunk_packed_boundaries(monkeypatch, op, Hq, H):
+    """Preserve packed/grouped-head outputs, final states, and sample independence under splitting."""
     # Ascend fwd_h is priority 0. Raise intra-card above it for this test only.
     monkeypatch.setattr(IntraCardCPBackend, 'priority', -1)
-    monkeypatch.setenv("FLA_FLASH_QLA", "0")
-    monkeypatch.setenv("FLA_TILELANG", "0")
-    torch.manual_seed(0)
-    dtype = torch.bfloat16
+    for name in ('FLA_FLASH_QLA', 'FLA_FLASH_KDA', 'FLA_TILELANG'):
+        monkeypatch.setenv(name, '0')
+    torch.manual_seed(42)
+    # one batch covers split sequences separated by a short sequence and adjacent split sequences
+    lengths = (32768, 64, 32768, 32768)
+    q, k = [F.normalize(torch.randn(1, sum(lengths), Hq, 64, device=device), dim=-1).bfloat16() for _ in range(2)]
+    v = torch.randn(1, sum(lengths), H, 64, device=device, dtype=torch.bfloat16)
+    g = F.logsigmoid(torch.randn(v.shape if op is chunk_kda else v.shape[:-1], device=device))
+    beta = torch.randn(v.shape[:-1], device=device).sigmoid()
+    cu_seqlens_cpu = torch.tensor([0, *lengths], dtype=torch.int32).cumsum(0, dtype=torch.int32)
+    kwargs = dict(q=q, k=k, v=v, g=g, beta=beta, output_final_state=True,
+                  cu_seqlens=cu_seqlens_cpu.to(device), cu_seqlens_cpu=cu_seqlens_cpu)
 
-    # the sequence must be long enough to bypass early_return in intracard_fwd_h.
-    B, T, Hq, H, D = 1, 32768, 2, 4, 64
-
-    q = F.normalize(torch.randn(B, T, Hq, D, device=device, dtype=torch.float32), p=2, dim=-1).to(dtype)
-    k = F.normalize(torch.randn(B, T, Hq, D, device=device, dtype=torch.float32), p=2, dim=-1).to(dtype)
-    v = torch.randn(B, T, H, D, device=device, dtype=dtype)
-    g = F.logsigmoid(torch.randn(B, T, H, device=device, dtype=torch.float32))
-    beta = torch.randn(B, T, H, device=device, dtype=torch.float32).sigmoid()
-
-    cu_seqlens = torch.tensor([0, T], device=device, dtype=torch.int32)
-    cu_seqlens_cpu = cu_seqlens.cpu()
-
-    split_calls = 0
-    original_precompute = intracard_cp._precompute_intracard_indices
-
-    def counted_precompute(*args, **kwargs):
-        nonlocal split_calls
-        split_calls += 1
-        return original_precompute(*args, **kwargs)
-
-    # index construction occurs only after the backend actually splits the sequence
-    monkeypatch.setattr(intracard_cp, "_precompute_intracard_indices", counted_precompute)
     with torch.inference_mode():
-        o_intra, ht_intra = chunk_gated_delta_rule(
-            q=q,
-            k=k,
-            v=v,
-            g=g,
-            beta=beta,
-            output_final_state=True,
-            cu_seqlens=cu_seqlens,
-            cu_seqlens_cpu=cu_seqlens_cpu,
-        )
+        monkeypatch.setenv('FLA_INTRACARD_CP', '0')
+        o_ref, ht_ref = op(**kwargs)
+        assert not _intracard_cache, 'the reference must bypass intra-card splitting'
 
-    assert split_calls == 1, "the grouped-head case must execute intra-card splitting"
+        monkeypatch.setenv('FLA_INTRACARD_CP', '1')
+        o_intra, ht_intra = op(**kwargs)
+        assert len(_intracard_cache) == 1, 'the test must execute intra-card splitting'
+        split_info = next(iter(_intracard_cache.values())).split_info
+        assert split_info.split_seq_ids == [0, 2, 3]
+        assert all(n > 1 for n in split_info.num_subseqs)
 
-    common_registry = backends._function_registries[inspect.unwrap(chunk_gated_delta_rule_fwd_h)]
-    with monkeypatch.context() as patch:
-        patch.setattr(common_registry, '_backends', {})
-        with torch.inference_mode():
-            o_ref, ht_ref = chunk_gated_delta_rule(
-                q=q,
-                k=k,
-                v=v,
-                g=g,
-                beta=beta,
-                output_final_state=True,
-                cu_seqlens=cu_seqlens,
-                cu_seqlens_cpu=cu_seqlens_cpu,
-            )
+        short_start, short_end = cu_seqlens_cpu[1:3].tolist()
+        changed_v = v.clone()
+        changed_v[:, short_start:short_end].add_(1)
+        o_changed, _ = op(**{**kwargs, 'v': changed_v})
 
-    assert split_calls == 1, "the reference must bypass intra-card splitting"
-    assert torch.allclose(o_intra, o_ref, atol=1e-2, rtol=1e-2), (
-        f"Output mismatch: max diff={(o_intra - o_ref).abs().max().item()}"
+    assert torch.equal(o_intra[:, short_end:], o_changed[:, short_end:]), (
+        "changing the short sequence must not change later sequences' outputs"
     )
-    assert torch.allclose(ht_intra, ht_ref, atol=1e-2, rtol=1e-2), (
-        f"Final state mismatch: max diff={(ht_intra - ht_ref).abs().max().item()}"
-    )
+    torch.testing.assert_close(o_intra, o_ref, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(ht_intra, ht_ref, atol=1e-2, rtol=1e-2)
 
 
 @pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
