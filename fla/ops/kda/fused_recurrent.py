@@ -275,6 +275,8 @@ def fused_recurrent_kda_fwd(
         out = torch.empty_like(v) if cu_seqlens is None else torch.zeros_like(v)
     else:
         assert out.shape == v.shape
+        if not out.is_contiguous():
+            raise ValueError("`out` must be contiguous")
     if inplace_final_state:
         assert initial_state is not None
         final_state = initial_state
