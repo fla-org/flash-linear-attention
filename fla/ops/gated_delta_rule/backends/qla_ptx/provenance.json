@@ -1,0 +1,23 @@
+{
+  "checkpoint": "r19c",
+  "source_sha256": {
+    "gdn_cp.py": "8beb7562438e6b80ceae569f7cfd548ed3f50602eb6a6397bd0d85a393c6e44b",
+    "gdn.py": "fe62d695fa7df54dfa4085d46a6c3e7ac89080b7ad8b473226186aa2cd5a79f9",
+    "kernel.py": "fbc89e500e6f922883995c09cc0fabb56d0050435eece44f3a77b12f89899f51",
+    "tuned.py": "5f75d9fdf3dae6369c772f6e9307478d78c76d7c0a7f87187f77f6cf86828bc7",
+    "prepare_bf16.py": "be77756a91a2a83c7de28cb6432d1aeac1d8b09a651681dcf9415d227e37454e",
+    "chunk_async.py": "f62867882f8cb5b1ef31c8837087885ff020125cc6cb25699cb1bf342cc7334e",
+    "chunk_pipeline.py": "174aeb6361c05a56a1f6b253d21c5c1eb4b9ab019c4ccf23cd03ffb731c1bdef",
+    "chunk_wide.py": "59167240956aca5f47a5fe5d102f25e1247e03d8b66d59c3fceaa4552d2c8e27",
+    "context.py": "a5bf6c6a50bd28e2bfbbf3be3b85443999e0449cb2bae9f12d041797a8581453",
+    "context_sensitivity_zero.py": "5f5fff109b2d7e616192af9882f1236a5312442a0eeec5ef37e422376620112a",
+    "context_packed.py": "e968a52b3c4d38b2d26e3f720e162d5c2febc2f4e5a9415f7b2bf109d38fc3f8"
+  },
+  "baseline_revision": "a14dbf3474514e1674526431e960325f72081e9f",
+  "benchmark_protocol_sha256": "56c89eb379de2ef60f3039f6bef0a4e75061e3f5a190c3d1886ac0b016782c49",
+  "benchmark_source_sha256": "34d67057ca21004a6ca35880b608d7984f514a747919fc980aba4ca856129d48",
+  "source_protocol_sha256": "8e8c87ceb777ed31a37e4a8ebfb831e24c2ce54603b49ebfed5bf413c5a65518",
+  "timing_backend": "cupti_concurrent_gpu_activity_span",
+  "source_benchmark_sha256": "a37bdd5ce1b9f897185dc23867cda80e2affda702a6c5e35df87d9db2f3783b3",
+  "timer_sha256": "86d1233e12e29d5dc3496065fed8fe9a3e587130f9f2b5953e129df9b79e8abc"
+}

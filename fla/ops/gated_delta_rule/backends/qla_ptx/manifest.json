@@ -1,0 +1,9429 @@
+{
+  "arch": "sm_103a",
+  "device": "NVIDIA B300 SXM6 AC",
+  "bindings": {
+    "[\"gdn_cp\", \"modules\", {\"flag\": 1, \"hq\": 2, \"hv\": 8, \"vw\": 8}]:0": {
+      "ptx": "ptx/f97fd7283f8b2662fc7098d2.ptx",
+      "ptx_sha256": "003339bc0259b2ca25a652e20d1248d2c0210d3e1b84bac754b9e70b3f452465",
+      "shim": "ptx/f97fd7283f8b2662fc7098d2.cpp",
+      "shim_sha256": "fb628e0978b3cbf2a7c2d1b5cec199af4b16bfc29d928235644f71227c5c3d6e",
+      "entry": "run",
+      "module_ident": "cp_state_5a8620638b",
+      "kernel_name": "kernel_cp_state",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "xflag"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "cslots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 2,
+        "HV": 8,
+        "FLAG": 1
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 1, \"hq\": 2, \"hv\": 8, \"vw\": 8}]:1": {
+      "ptx": "ptx/9c7b92637770ec7fb582a5d4.ptx",
+      "ptx_sha256": "f48841f66e59732bd005e268d4581d58631a11ceddf47bf531844ad8970e9086",
+      "shim": "ptx/9c7b92637770ec7fb582a5d4.cpp",
+      "shim_sha256": "cbe19592ccf6468884bc69fb0d686b5834af3d497c611b75ee130c6de105f0cf",
+      "entry": "run",
+      "module_ident": "cp_comb_b8a8a9102d",
+      "kernel_name": "kernel_cp_comb",
+      "arg_plan": [
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "xflag"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "parameter",
+          "cslots"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HV": 8
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 1, \"hq\": 2, \"hv\": 8, \"vw\": 8}]:2": {
+      "ptx": "ptx/7e8e932f9347b77da00abe2d.ptx",
+      "ptx_sha256": "056f102bcb131d71b30a267631b98ab3a9f0d8e0e250c9dbc8dda34c4fa9354e",
+      "shim": "ptx/7e8e932f9347b77da00abe2d.cpp",
+      "shim_sha256": "754dde3502de5e44e6c64edb882e6877b1d807d4ab0f120fa4953abb622120ea",
+      "entry": "run",
+      "module_ident": "cp_out_08547ba652",
+      "kernel_name": "kernel_cp_out",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "q_tma"
+        ],
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "tma_buffer",
+          "out_tma"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 2,
+        "HV": 8,
+        "FLAG": 1
+      }
+    },
+    "[\"gdn_cp\", \"prep_cp_module\", {\"hq\": 2, \"hv\": 8}]:0": {
+      "ptx": "ptx/f52da5115b104fe6e8b18bbb.ptx",
+      "ptx_sha256": "8f424929c169336c37484e914e84c0aae6ffedda0008ab3df9b31283051e1257",
+      "shim": "ptx/f52da5115b104fe6e8b18bbb.cpp",
+      "shim_sha256": "5349508b665034636ea61e852f7621c43bd0c7822d9e3c787beda8dece145359",
+      "entry": "run",
+      "module_ident": "gdn_prep_cp_68a7034fd7",
+      "kernel_name": "kernel_gdn_prep_cp",
+      "arg_plan": [
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "HQ": 2,
+        "HV": 8
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 0, \"hq\": 2, \"hv\": 8, \"vw\": 8}]:0": {
+      "ptx": "ptx/3258a559a73eb6004d0cbaf3.ptx",
+      "ptx_sha256": "14fbee9f079ee30df80ffe137f99a101ce7c4d8c75b6869532ea6ca099a866eb",
+      "shim": "ptx/3258a559a73eb6004d0cbaf3.cpp",
+      "shim_sha256": "8cc4d847c7075a8e5aeaa31acba35b1b6734016c9f883465406f263679e2a247",
+      "entry": "run",
+      "module_ident": "cp_state_ace8d03d3f",
+      "kernel_name": "kernel_cp_state",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "xflag"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "cslots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 2,
+        "HV": 8,
+        "FLAG": 0
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 0, \"hq\": 2, \"hv\": 8, \"vw\": 8}]:1": {
+      "ptx": "ptx/9c7b92637770ec7fb582a5d4.ptx",
+      "ptx_sha256": "f48841f66e59732bd005e268d4581d58631a11ceddf47bf531844ad8970e9086",
+      "shim": "ptx/9c7b92637770ec7fb582a5d4.cpp",
+      "shim_sha256": "cbe19592ccf6468884bc69fb0d686b5834af3d497c611b75ee130c6de105f0cf",
+      "entry": "run",
+      "module_ident": "cp_comb_b8a8a9102d",
+      "kernel_name": "kernel_cp_comb",
+      "arg_plan": [
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "xflag"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "parameter",
+          "cslots"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HV": 8
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 0, \"hq\": 2, \"hv\": 8, \"vw\": 8}]:2": {
+      "ptx": "ptx/ddd7f11fa41e8cabfb831eba.ptx",
+      "ptx_sha256": "fc4f63781dae92ebbed6f77a744969c14f83a6e623a0f2b9a2fb1a137bb703f4",
+      "shim": "ptx/ddd7f11fa41e8cabfb831eba.cpp",
+      "shim_sha256": "cec4ab6b617258faa227332bb040a94cb46b7e954bb3859b36bf5bb59b22adf9",
+      "entry": "run",
+      "module_ident": "cp_out_af39db2b15",
+      "kernel_name": "kernel_cp_out",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "q_tma"
+        ],
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "tma_buffer",
+          "out_tma"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 2,
+        "HV": 8,
+        "FLAG": 0
+      }
+    },
+    "[\"gdn\", \"prep_module\", {\"hq\": 2, \"hv\": 8, \"large\": false}]:0": {
+      "ptx": "ptx/a24361c551e426033e90cf1e.ptx",
+      "ptx_sha256": "dcb43ac835f63bdf7fa30e79a3801744f029b16fa93fd737e49cd2f2d775866c",
+      "shim": "ptx/a24361c551e426033e90cf1e.cpp",
+      "shim_sha256": "6368c6a1d199f3b33aaa5a879c57f0efdd93a2bba3ed6f0b0371bc56993d85e8",
+      "entry": "run",
+      "module_ident": "gdn_prep_8ecac336b1",
+      "kernel_name": "kernel_gdn_prep",
+      "arg_plan": [
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "HQ": 2,
+        "HV": 8
+      }
+    },
+    "[\"gdn\", \"prep1_module\", {\"hq\": 2, \"hv\": 8}]:0": {
+      "ptx": "ptx/cf1190a2e666cc9859e38683.ptx",
+      "ptx_sha256": "dce65553cf65a04394226f52fc6817058cc1cfe434f5fae53031d7b3fb56c8ed",
+      "shim": "ptx/cf1190a2e666cc9859e38683.cpp",
+      "shim_sha256": "08f45d4177a146dadb706448af36aa8a08c1628e99a1341ab7bc8e2285829f07",
+      "entry": "run",
+      "module_ident": "gdn_prep1_d34e8ecea8",
+      "kernel_name": "kernel_gdn_prep1",
+      "arg_plan": [
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "HQ": 2,
+        "HV": 8
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 1, \"hq\": 2, \"hv\": 8, \"vw\": 32}]:0": {
+      "ptx": "ptx/f97fd7283f8b2662fc7098d2.ptx",
+      "ptx_sha256": "003339bc0259b2ca25a652e20d1248d2c0210d3e1b84bac754b9e70b3f452465",
+      "shim": "ptx/f97fd7283f8b2662fc7098d2.cpp",
+      "shim_sha256": "fb628e0978b3cbf2a7c2d1b5cec199af4b16bfc29d928235644f71227c5c3d6e",
+      "entry": "run",
+      "module_ident": "cp_state_5a8620638b",
+      "kernel_name": "kernel_cp_state",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "xflag"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "cslots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 2,
+        "HV": 8,
+        "FLAG": 1
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 1, \"hq\": 2, \"hv\": 8, \"vw\": 32}]:1": {
+      "ptx": "ptx/d33f6bff72eed5331ce8698b.ptx",
+      "ptx_sha256": "703bc20e25c87591fa0ccad2c285069f57f63b61512b41fd22d15daa36d8ac9e",
+      "shim": "ptx/d33f6bff72eed5331ce8698b.cpp",
+      "shim_sha256": "15791736d634e7e9df6299b1d9976e3d0a4bc405bcec65e5b5ef6eea4fbeaba5",
+      "entry": "run",
+      "module_ident": "cp_comb_a51acbc68a",
+      "kernel_name": "kernel_cp_comb",
+      "arg_plan": [
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "xflag"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "parameter",
+          "cslots"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HV": 8
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 1, \"hq\": 2, \"hv\": 8, \"vw\": 32}]:2": {
+      "ptx": "ptx/7e8e932f9347b77da00abe2d.ptx",
+      "ptx_sha256": "056f102bcb131d71b30a267631b98ab3a9f0d8e0e250c9dbc8dda34c4fa9354e",
+      "shim": "ptx/7e8e932f9347b77da00abe2d.cpp",
+      "shim_sha256": "754dde3502de5e44e6c64edb882e6877b1d807d4ab0f120fa4953abb622120ea",
+      "entry": "run",
+      "module_ident": "cp_out_08547ba652",
+      "kernel_name": "kernel_cp_out",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "q_tma"
+        ],
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "tma_buffer",
+          "out_tma"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 2,
+        "HV": 8,
+        "FLAG": 1
+      }
+    },
+    "[\"gdn_cp\", \"prep_plain1_module\", {\"hq\": 2, \"hv\": 8}]:0": {
+      "ptx": "ptx/5917d59861df025dfc6b5d3d.ptx",
+      "ptx_sha256": "465238271463d9695fac916844c28d6e116a1738884879feba1a7d4de9bea9dc",
+      "shim": "ptx/5917d59861df025dfc6b5d3d.cpp",
+      "shim_sha256": "7aab79b93c58a37f1a90e81a098a229bda09628ce883d31f12be332cd859f298",
+      "entry": "run",
+      "module_ident": "gdn_prep_plain1_55c33e0e9b",
+      "kernel_name": "kernel_gdn_prep_plain1",
+      "arg_plan": [
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "buffer",
+          "done"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 2,
+        "HV": 8
+      }
+    },
+    "[\"gdn\", \"modules\", {\"flag\": 2, \"hq\": 2, \"hv\": 8}]:0": {
+      "ptx": "ptx/a26c865936606e1c658a77bd.ptx",
+      "ptx_sha256": "fcc6142f7c11d5ac1675b46e7846b7bcb77f902f3353115bd4a3ca4a1401ca0e",
+      "shim": "ptx/a26c865936606e1c658a77bd.cpp",
+      "shim_sha256": "af97873822da6b86bb4c7cce6e31190c52fd27ceb663427ca90b1da02fead68f",
+      "entry": "run",
+      "module_ident": "gdn_recur_1682ecc3a1",
+      "kernel_name": "kernel_gdn_recur",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "q_tma"
+        ],
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "tma_buffer",
+          "out_tma"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "buffer",
+          "flag_mem"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "HQ": 2,
+        "HV": 8,
+        "FLAG": 2
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 1, \"hq\": 4, \"hv\": 16, \"vw\": 8}]:0": {
+      "ptx": "ptx/0db579003c01ceb9c09e6980.ptx",
+      "ptx_sha256": "a289ee6dda084310b778e3ae8a0ebcd3eb708a26d450b5e3d436d29b761b8dad",
+      "shim": "ptx/0db579003c01ceb9c09e6980.cpp",
+      "shim_sha256": "94680fedac3136f05e9f7af020b2783ee3ca51547bcf8a23d05dd65b0ac3669f",
+      "entry": "run",
+      "module_ident": "cp_state_df5c2e3033",
+      "kernel_name": "kernel_cp_state",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "xflag"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "cslots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 4,
+        "HV": 16,
+        "FLAG": 1
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 1, \"hq\": 4, \"hv\": 16, \"vw\": 8}]:1": {
+      "ptx": "ptx/89929dec479d05b1c1f2e767.ptx",
+      "ptx_sha256": "f0a1f2d01c564df57ec8404e5563da7be1342f30cbb82651c10c00fc0d6cc46b",
+      "shim": "ptx/89929dec479d05b1c1f2e767.cpp",
+      "shim_sha256": "37f7a8156f48b2b96aa2ee2497e972da3b4849c063797a5210d6fea20b0f791a",
+      "entry": "run",
+      "module_ident": "cp_comb_5636619f40",
+      "kernel_name": "kernel_cp_comb",
+      "arg_plan": [
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "xflag"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "parameter",
+          "cslots"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HV": 16
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 1, \"hq\": 4, \"hv\": 16, \"vw\": 8}]:2": {
+      "ptx": "ptx/c91458d736c018316f7c0e33.ptx",
+      "ptx_sha256": "d692ebd2a39a04740ec78779d531c39a23ab71d71ce47fca4b5d5ab719161aee",
+      "shim": "ptx/c91458d736c018316f7c0e33.cpp",
+      "shim_sha256": "3b337055d3243072d20b578e6e77be6efd505559066ab29ad1c5fd06926f7515",
+      "entry": "run",
+      "module_ident": "cp_out_64162fbf50",
+      "kernel_name": "kernel_cp_out",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "q_tma"
+        ],
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "tma_buffer",
+          "out_tma"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 4,
+        "HV": 16,
+        "FLAG": 1
+      }
+    },
+    "[\"gdn_cp\", \"prep_cp_module\", {\"hq\": 4, \"hv\": 16}]:0": {
+      "ptx": "ptx/f56358a099252910b3f1e0fb.ptx",
+      "ptx_sha256": "d63719f0e595f4ac3c70c7edfb616706a7674f7358ab325cde591eb7fd6e74b0",
+      "shim": "ptx/f56358a099252910b3f1e0fb.cpp",
+      "shim_sha256": "29059c7e664df0d399f55f80f0c83fbf3f967246692aa95141ccaec1a9c3a5fd",
+      "entry": "run",
+      "module_ident": "gdn_prep_cp_89ee3dc7b8",
+      "kernel_name": "kernel_gdn_prep_cp",
+      "arg_plan": [
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "HQ": 4,
+        "HV": 16
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 0, \"hq\": 4, \"hv\": 16, \"vw\": 8}]:0": {
+      "ptx": "ptx/ab3f1bcfaf560d8711b23bd8.ptx",
+      "ptx_sha256": "98669e2ccaba6eb44aa10e1b9088d8707bbd363a9b0e082de0364f7429dfe052",
+      "shim": "ptx/ab3f1bcfaf560d8711b23bd8.cpp",
+      "shim_sha256": "9d35a457b24a04487cf13028a23902d2814c754748f69b5ac86531654d2f06b9",
+      "entry": "run",
+      "module_ident": "cp_state_7ea336c93b",
+      "kernel_name": "kernel_cp_state",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "xflag"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "cslots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 4,
+        "HV": 16,
+        "FLAG": 0
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 0, \"hq\": 4, \"hv\": 16, \"vw\": 8}]:1": {
+      "ptx": "ptx/89929dec479d05b1c1f2e767.ptx",
+      "ptx_sha256": "f0a1f2d01c564df57ec8404e5563da7be1342f30cbb82651c10c00fc0d6cc46b",
+      "shim": "ptx/89929dec479d05b1c1f2e767.cpp",
+      "shim_sha256": "37f7a8156f48b2b96aa2ee2497e972da3b4849c063797a5210d6fea20b0f791a",
+      "entry": "run",
+      "module_ident": "cp_comb_5636619f40",
+      "kernel_name": "kernel_cp_comb",
+      "arg_plan": [
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "xflag"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "parameter",
+          "cslots"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HV": 16
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 0, \"hq\": 4, \"hv\": 16, \"vw\": 8}]:2": {
+      "ptx": "ptx/16a3d98ff78a36627a9cfe0c.ptx",
+      "ptx_sha256": "5e29deea19abfd6f3d9ff13290b25492ed2095f85e2f3d5b0de5c29a246f234c",
+      "shim": "ptx/16a3d98ff78a36627a9cfe0c.cpp",
+      "shim_sha256": "568fe8d5a6833d5ccc2885f68cb5e6428b8103d913cf230d387e85b07a4d9e4b",
+      "entry": "run",
+      "module_ident": "cp_out_661ec2a1a2",
+      "kernel_name": "kernel_cp_out",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "q_tma"
+        ],
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "tma_buffer",
+          "out_tma"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 4,
+        "HV": 16,
+        "FLAG": 0
+      }
+    },
+    "[\"gdn\", \"prep_module\", {\"hq\": 4, \"hv\": 16, \"large\": false}]:0": {
+      "ptx": "ptx/d4181017bb1c3dbfb9539c34.ptx",
+      "ptx_sha256": "6afa4e055dd8bc32e1e7965c202c00a386b31f15b6747500fa32200881ba6d93",
+      "shim": "ptx/d4181017bb1c3dbfb9539c34.cpp",
+      "shim_sha256": "1eb503b5977fca3b0173b00ff7ab9713c626321f2331af31f20723f3c2fdadee",
+      "entry": "run",
+      "module_ident": "gdn_prep_5d7923540c",
+      "kernel_name": "kernel_gdn_prep",
+      "arg_plan": [
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "HQ": 4,
+        "HV": 16
+      }
+    },
+    "[\"gdn\", \"prep1_module\", {\"hq\": 4, \"hv\": 16}]:0": {
+      "ptx": "ptx/54ae34811d009c660224b057.ptx",
+      "ptx_sha256": "ba313ba0489e1bf6a99e173d6eeec8737a0a94699cf123431494bb9030ad4358",
+      "shim": "ptx/54ae34811d009c660224b057.cpp",
+      "shim_sha256": "d8c2bf67c3ec0867b9e432cf9ca9da78bc99cc78dc04982ceea2b3bfc4a27eb6",
+      "entry": "run",
+      "module_ident": "gdn_prep1_0a85f78544",
+      "kernel_name": "kernel_gdn_prep1",
+      "arg_plan": [
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "HQ": 4,
+        "HV": 16
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 0, \"hq\": 4, \"hv\": 16, \"vw\": 16}]:0": {
+      "ptx": "ptx/ab3f1bcfaf560d8711b23bd8.ptx",
+      "ptx_sha256": "98669e2ccaba6eb44aa10e1b9088d8707bbd363a9b0e082de0364f7429dfe052",
+      "shim": "ptx/ab3f1bcfaf560d8711b23bd8.cpp",
+      "shim_sha256": "9d35a457b24a04487cf13028a23902d2814c754748f69b5ac86531654d2f06b9",
+      "entry": "run",
+      "module_ident": "cp_state_7ea336c93b",
+      "kernel_name": "kernel_cp_state",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "xflag"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "cslots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 4,
+        "HV": 16,
+        "FLAG": 0
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 0, \"hq\": 4, \"hv\": 16, \"vw\": 16}]:1": {
+      "ptx": "ptx/c69e425a7966dd53e389a5cb.ptx",
+      "ptx_sha256": "6cb1f4c6d2ee595e0b2d63a7d0a86d7901faa7019c68733d20086670cac52785",
+      "shim": "ptx/c69e425a7966dd53e389a5cb.cpp",
+      "shim_sha256": "6fe7a7a322df49633d75ccaadfc202a521437b60e761a341c72d1f538a1b4fb7",
+      "entry": "run",
+      "module_ident": "cp_comb_2dffa9580a",
+      "kernel_name": "kernel_cp_comb",
+      "arg_plan": [
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "xflag"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "parameter",
+          "cslots"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HV": 16
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 0, \"hq\": 4, \"hv\": 16, \"vw\": 16}]:2": {
+      "ptx": "ptx/16a3d98ff78a36627a9cfe0c.ptx",
+      "ptx_sha256": "5e29deea19abfd6f3d9ff13290b25492ed2095f85e2f3d5b0de5c29a246f234c",
+      "shim": "ptx/16a3d98ff78a36627a9cfe0c.cpp",
+      "shim_sha256": "568fe8d5a6833d5ccc2885f68cb5e6428b8103d913cf230d387e85b07a4d9e4b",
+      "entry": "run",
+      "module_ident": "cp_out_661ec2a1a2",
+      "kernel_name": "kernel_cp_out",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "q_tma"
+        ],
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "tma_buffer",
+          "out_tma"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 4,
+        "HV": 16,
+        "FLAG": 0
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 2, \"hq\": 4, \"hv\": 16, \"vw\": 32}]:0": {
+      "ptx": "ptx/20a12de40541c6638a854962.ptx",
+      "ptx_sha256": "36bd5a4b6f5d03fe150a23cd3b2ba12ac3e277c732432cfb70728e1ceb6d53ff",
+      "shim": "ptx/20a12de40541c6638a854962.cpp",
+      "shim_sha256": "3cd0dce2d268d5167e1963aaabf88750830f29410c3baa2f70ccef40536b8698",
+      "entry": "run",
+      "module_ident": "cp_state_5ada62e754",
+      "kernel_name": "kernel_cp_state",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "xflag"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "cslots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "HQ": 4,
+        "HV": 16,
+        "FLAG": 2
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 2, \"hq\": 4, \"hv\": 16, \"vw\": 32}]:1": {
+      "ptx": "ptx/57bae8726e855237b11a9a51.ptx",
+      "ptx_sha256": "02138c2a4dd0f2181d535a39a3898eefab281842f31b3e44f9ab29003c2e2bf5",
+      "shim": "ptx/57bae8726e855237b11a9a51.cpp",
+      "shim_sha256": "35a290c631085c51bd913f9a6ce443db8d291a783e271939322045da99c60d4a",
+      "entry": "run",
+      "module_ident": "cp_comb_2d96a223f0",
+      "kernel_name": "kernel_cp_comb",
+      "arg_plan": [
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "xflag"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "parameter",
+          "cslots"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HV": 16
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 2, \"hq\": 4, \"hv\": 16, \"vw\": 32}]:2": {
+      "ptx": "ptx/32389b379c2ae44c48c37e41.ptx",
+      "ptx_sha256": "d692ebd2a39a04740ec78779d531c39a23ab71d71ce47fca4b5d5ab719161aee",
+      "shim": "ptx/32389b379c2ae44c48c37e41.cpp",
+      "shim_sha256": "ee1e4e4d5ac5502c3cbfd8b5b70079b8004ddc891cc6eb4c2ea858ef15f85910",
+      "entry": "run",
+      "module_ident": "cp_out_6f6af180a5",
+      "kernel_name": "kernel_cp_out",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "q_tma"
+        ],
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "tma_buffer",
+          "out_tma"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 4,
+        "HV": 16,
+        "FLAG": 2
+      }
+    },
+    "[\"gdn_cp\", \"prep_cp1_module\", {\"hq\": 4, \"hv\": 16, \"large\": true}]:0": {
+      "ptx": "ptx/6e2b341bba60411272101574.ptx",
+      "ptx_sha256": "bd678b38e0e2beed57a91f5bb4e07a4caf16088b4d6de803384842cb0cb1963f",
+      "shim": "ptx/6e2b341bba60411272101574.cpp",
+      "shim_sha256": "c96031d620ab1e2881b135667bc22dc4573a74f8220386465755d4698b78ba62",
+      "entry": "run",
+      "module_ident": "gdn_prep_cp1_d0886ab668",
+      "kernel_name": "kernel_gdn_prep_cp1",
+      "arg_plan": [
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "buffer",
+          "done"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 4,
+        "HV": 16
+      }
+    },
+    "[\"gdn\", \"modules\", {\"flag\": 0, \"hq\": 4, \"hv\": 16}]:0": {
+      "ptx": "ptx/f422b8ab0c756a66747a3069.ptx",
+      "ptx_sha256": "4e81f67655b612ac968db3f3f8227dda4f6843e94416afac09e51a3a0553bec5",
+      "shim": "ptx/f422b8ab0c756a66747a3069.cpp",
+      "shim_sha256": "71ac77600b446a1584bef5897a4d25a47b6dd51a7f1fe071b8e7c33a24ed0be2",
+      "entry": "run",
+      "module_ident": "gdn_recur_7bc179879d",
+      "kernel_name": "kernel_gdn_recur",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "q_tma"
+        ],
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "tma_buffer",
+          "out_tma"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "buffer",
+          "flag_mem"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 4,
+        "HV": 16,
+        "FLAG": 0
+      }
+    },
+    "[\"gdn\", \"prep_module\", {\"hq\": 4, \"hv\": 16, \"large\": true}]:0": {
+      "ptx": "ptx/5db2b6843126d537c080d13d.ptx",
+      "ptx_sha256": "d4d0e5f2a6070b029fb9165606734575512d157a46d22bd3a9dfbc9d41a6cd61",
+      "shim": "ptx/5db2b6843126d537c080d13d.cpp",
+      "shim_sha256": "3d6d3861bec0e35e1fe01a649ccf3a9c8d95fc221381b5973c1aac8b5f60e477",
+      "entry": "run",
+      "module_ident": "gdn_prep_648b729cd3",
+      "kernel_name": "kernel_gdn_prep",
+      "arg_plan": [
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "HQ": 4,
+        "HV": 16
+      }
+    },
+    "[\"gdn_cp\", \"prep_plain1_module\", {\"hq\": 4, \"hv\": 16}]:0": {
+      "ptx": "ptx/7a5d5ff4330b632a839daf6b.ptx",
+      "ptx_sha256": "73e69cb671fc5d1e58a54f75db4dac5e3c12efaa7904286970eed91704265626",
+      "shim": "ptx/7a5d5ff4330b632a839daf6b.cpp",
+      "shim_sha256": "2c0552c7c40c8d6ea57eb3f3e6402c8f6e93824f860bb8db0c31d39af33ae620",
+      "entry": "run",
+      "module_ident": "gdn_prep_plain1_702bfcc719",
+      "kernel_name": "kernel_gdn_prep_plain1",
+      "arg_plan": [
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "buffer",
+          "done"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 4,
+        "HV": 16
+      }
+    },
+    "[\"gdn\", \"modules\", {\"flag\": 2, \"hq\": 4, \"hv\": 16}]:0": {
+      "ptx": "ptx/08a8525203629df40cbd28fd.ptx",
+      "ptx_sha256": "76f69d83c09276de555f1673610a9ae9f9abe9f97f559c7fba0fae1bc753335c",
+      "shim": "ptx/08a8525203629df40cbd28fd.cpp",
+      "shim_sha256": "1e6a00f6d8ace5399183679e752878b4942655b1c4371502ada961a30273b832",
+      "entry": "run",
+      "module_ident": "gdn_recur_819ef60510",
+      "kernel_name": "kernel_gdn_recur",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "q_tma"
+        ],
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "tma_buffer",
+          "out_tma"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "buffer",
+          "flag_mem"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "HQ": 4,
+        "HV": 16,
+        "FLAG": 2
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 1, \"hq\": 8, \"hv\": 32, \"vw\": 8}]:0": {
+      "ptx": "ptx/2eec53b2130560fe459cb100.ptx",
+      "ptx_sha256": "337733a8623f3886b91b862affd90e183a5bc6c3b0d32ce4692f0a2992ee9b18",
+      "shim": "ptx/2eec53b2130560fe459cb100.cpp",
+      "shim_sha256": "89af0ffc71b45c74ce26911524d601b4b13dde2f8c3fbef968f2ed06eda70303",
+      "entry": "run",
+      "module_ident": "cp_state_ed2b6b7e66",
+      "kernel_name": "kernel_cp_state",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "xflag"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "cslots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 8,
+        "HV": 32,
+        "FLAG": 1
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 1, \"hq\": 8, \"hv\": 32, \"vw\": 8}]:1": {
+      "ptx": "ptx/3ee56998c079380b3dd95286.ptx",
+      "ptx_sha256": "6d90e32de0730bfeeec434f513dd5ed7a491054b00dbc5d888e1b1dbf94668d8",
+      "shim": "ptx/3ee56998c079380b3dd95286.cpp",
+      "shim_sha256": "534e1354b6227c65dcd12aff447458f257bfc2c1866292f44ce465a1c3459ff1",
+      "entry": "run",
+      "module_ident": "cp_comb_7f00a0ef09",
+      "kernel_name": "kernel_cp_comb",
+      "arg_plan": [
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "xflag"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "parameter",
+          "cslots"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HV": 32
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 1, \"hq\": 8, \"hv\": 32, \"vw\": 8}]:2": {
+      "ptx": "ptx/ee6de0f2ca67efc1fa043e95.ptx",
+      "ptx_sha256": "594bb0adf284200669ae28d8a47f943b80c8f93288d8221f0ac9b1632d6f06c3",
+      "shim": "ptx/ee6de0f2ca67efc1fa043e95.cpp",
+      "shim_sha256": "b6e26d020927e3232bd0d3abd612a13fad1b03be2512c081ee92248dc5a6793d",
+      "entry": "run",
+      "module_ident": "cp_out_9a4783d1d4",
+      "kernel_name": "kernel_cp_out",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "q_tma"
+        ],
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "tma_buffer",
+          "out_tma"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 8,
+        "HV": 32,
+        "FLAG": 1
+      }
+    },
+    "[\"gdn_cp\", \"prep_cp_module\", {\"hq\": 8, \"hv\": 32}]:0": {
+      "ptx": "ptx/3815ca23159befcb466be4e3.ptx",
+      "ptx_sha256": "ddff5636a9c8377f5abf5cf8c6a39f1a09aa5494f32130ad035f68a244d4c4ae",
+      "shim": "ptx/3815ca23159befcb466be4e3.cpp",
+      "shim_sha256": "922322dbf6c60e530a623f23daa1e26695db0b184b1c37c70c0d99e8a1d6f1e1",
+      "entry": "run",
+      "module_ident": "gdn_prep_cp_74202ea7e7",
+      "kernel_name": "kernel_gdn_prep_cp",
+      "arg_plan": [
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "HQ": 8,
+        "HV": 32
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 0, \"hq\": 8, \"hv\": 32, \"vw\": 8}]:0": {
+      "ptx": "ptx/10c6cf24bb8d1dad2e1e67da.ptx",
+      "ptx_sha256": "5de9aa86f118383d75728531ffa68afbe6e08d107b1e2286c177b2737ba18628",
+      "shim": "ptx/10c6cf24bb8d1dad2e1e67da.cpp",
+      "shim_sha256": "7dc3e2e44121df0ec50210357e55d88993ce1c9196878df3ff12ea55363e049f",
+      "entry": "run",
+      "module_ident": "cp_state_6472d11fb5",
+      "kernel_name": "kernel_cp_state",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "xflag"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "cslots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 8,
+        "HV": 32,
+        "FLAG": 0
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 0, \"hq\": 8, \"hv\": 32, \"vw\": 8}]:1": {
+      "ptx": "ptx/3ee56998c079380b3dd95286.ptx",
+      "ptx_sha256": "6d90e32de0730bfeeec434f513dd5ed7a491054b00dbc5d888e1b1dbf94668d8",
+      "shim": "ptx/3ee56998c079380b3dd95286.cpp",
+      "shim_sha256": "534e1354b6227c65dcd12aff447458f257bfc2c1866292f44ce465a1c3459ff1",
+      "entry": "run",
+      "module_ident": "cp_comb_7f00a0ef09",
+      "kernel_name": "kernel_cp_comb",
+      "arg_plan": [
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "xflag"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "parameter",
+          "cslots"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HV": 32
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 0, \"hq\": 8, \"hv\": 32, \"vw\": 8}]:2": {
+      "ptx": "ptx/753199f8897c6d99963b758f.ptx",
+      "ptx_sha256": "d911b467d1713e3240f4167887cf4255662be587937393a07569b7e5c5eaa113",
+      "shim": "ptx/753199f8897c6d99963b758f.cpp",
+      "shim_sha256": "04263ce3b0b7e0675ab24ea2612198a9dd207bad0019850ae48e6e511a58ac3f",
+      "entry": "run",
+      "module_ident": "cp_out_395d75f314",
+      "kernel_name": "kernel_cp_out",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "q_tma"
+        ],
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "tma_buffer",
+          "out_tma"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 8,
+        "HV": 32,
+        "FLAG": 0
+      }
+    },
+    "[\"gdn\", \"prep_module\", {\"hq\": 8, \"hv\": 32, \"large\": false}]:0": {
+      "ptx": "ptx/812e986906fe28932649489a.ptx",
+      "ptx_sha256": "5e744431bb0a2bc14b5a20c0430f4f7f7fecc404554bb1f81c92185511acb3bf",
+      "shim": "ptx/812e986906fe28932649489a.cpp",
+      "shim_sha256": "125167ca198494cb0177109f7ee2ee9a78e1aa03bf1bda1115b5fce2535c5db2",
+      "entry": "run",
+      "module_ident": "gdn_prep_edb2668bfe",
+      "kernel_name": "kernel_gdn_prep",
+      "arg_plan": [
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "HQ": 8,
+        "HV": 32
+      }
+    },
+    "[\"gdn_cp\", \"prep_plain1_module\", {\"hq\": 8, \"hv\": 32}]:0": {
+      "ptx": "ptx/8b48aa8a1a2c7d957191b9ff.ptx",
+      "ptx_sha256": "d39b7b3bfdde91cd6f65702d4ac60d03f456315f8c901bf7f5c72c68eebf8cc3",
+      "shim": "ptx/8b48aa8a1a2c7d957191b9ff.cpp",
+      "shim_sha256": "a44612610387b55a571ee952e10c6143817e47c34cfb7613b31964606dda0844",
+      "entry": "run",
+      "module_ident": "gdn_prep_plain1_7a6d4a3842",
+      "kernel_name": "kernel_gdn_prep_plain1",
+      "arg_plan": [
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "buffer",
+          "done"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 8,
+        "HV": 32
+      }
+    },
+    "[\"gdn\", \"modules\", {\"flag\": 2, \"hq\": 8, \"hv\": 32}]:0": {
+      "ptx": "ptx/2cf2e9c1c76bed6d269b82aa.ptx",
+      "ptx_sha256": "13e7197530251026c148b6e55669f5b7bc8193c806690178e875c6cfb90b2de2",
+      "shim": "ptx/2cf2e9c1c76bed6d269b82aa.cpp",
+      "shim_sha256": "418d58631982f176cc54e863caf2966981df8f90f0168819669977d9a0d3544c",
+      "entry": "run",
+      "module_ident": "gdn_recur_228e9b9d0d",
+      "kernel_name": "kernel_gdn_recur",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "q_tma"
+        ],
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "tma_buffer",
+          "out_tma"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "buffer",
+          "flag_mem"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "HQ": 8,
+        "HV": 32,
+        "FLAG": 2
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 2, \"hq\": 8, \"hv\": 32, \"vw\": 8}]:0": {
+      "ptx": "ptx/48873ed8873ca6f2a14713f0.ptx",
+      "ptx_sha256": "f2cfed2dac6bb62edd911623b64a6a9914df33b21e790893da473630909f8db2",
+      "shim": "ptx/48873ed8873ca6f2a14713f0.cpp",
+      "shim_sha256": "d01034d87c00856bae6acd7be6753a99339b12d78757fbf4afae13517d719b21",
+      "entry": "run",
+      "module_ident": "cp_state_03026085aa",
+      "kernel_name": "kernel_cp_state",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "xflag"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "cslots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "HQ": 8,
+        "HV": 32,
+        "FLAG": 2
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 2, \"hq\": 8, \"hv\": 32, \"vw\": 8}]:1": {
+      "ptx": "ptx/3ee56998c079380b3dd95286.ptx",
+      "ptx_sha256": "6d90e32de0730bfeeec434f513dd5ed7a491054b00dbc5d888e1b1dbf94668d8",
+      "shim": "ptx/3ee56998c079380b3dd95286.cpp",
+      "shim_sha256": "534e1354b6227c65dcd12aff447458f257bfc2c1866292f44ce465a1c3459ff1",
+      "entry": "run",
+      "module_ident": "cp_comb_7f00a0ef09",
+      "kernel_name": "kernel_cp_comb",
+      "arg_plan": [
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "xflag"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "parameter",
+          "cslots"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HV": 32
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 2, \"hq\": 8, \"hv\": 32, \"vw\": 8}]:2": {
+      "ptx": "ptx/e9e278a7c608e694791d1ad1.ptx",
+      "ptx_sha256": "594bb0adf284200669ae28d8a47f943b80c8f93288d8221f0ac9b1632d6f06c3",
+      "shim": "ptx/e9e278a7c608e694791d1ad1.cpp",
+      "shim_sha256": "048009215e821f38782e0eba0391257dae9317cfe815813fe0d2f34284a2cc11",
+      "entry": "run",
+      "module_ident": "cp_out_1f47511a23",
+      "kernel_name": "kernel_cp_out",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "q_tma"
+        ],
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "tma_buffer",
+          "out_tma"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 8,
+        "HV": 32,
+        "FLAG": 2
+      }
+    },
+    "[\"gdn_cp\", \"prep_cp1_module\", {\"hq\": 8, \"hv\": 32, \"large\": true}]:0": {
+      "ptx": "ptx/127988ac07081a8a6c31700d.ptx",
+      "ptx_sha256": "5f54b5eb476838155d33ea9962c3b7682f082e1da2af0451cc04c87eaf296895",
+      "shim": "ptx/127988ac07081a8a6c31700d.cpp",
+      "shim_sha256": "dc6434f73c774c223be03afe288289f98d0af513c145bd33771e510703168d7c",
+      "entry": "run",
+      "module_ident": "gdn_prep_cp1_a649dff86e",
+      "kernel_name": "kernel_gdn_prep_cp1",
+      "arg_plan": [
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "buffer",
+          "done"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 8,
+        "HV": 32
+      }
+    },
+    "[\"gdn_cp\", \"prep_cp1_module\", {\"hq\": 8, \"hv\": 32, \"large\": false}]:0": {
+      "ptx": "ptx/debdffec8a961c7b0b37bc6e.ptx",
+      "ptx_sha256": "4ce880f099d59e1b680467db24043e13b5b971d97ad2a1e67642640616ae87c9",
+      "shim": "ptx/debdffec8a961c7b0b37bc6e.cpp",
+      "shim_sha256": "223145fd3f81fb775c56afb06ceb7db6f15d101591040c3f50720045335cf47a",
+      "entry": "run",
+      "module_ident": "gdn_prep_cp1_2de7998c99",
+      "kernel_name": "kernel_gdn_prep_cp1",
+      "arg_plan": [
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "buffer",
+          "done"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 8,
+        "HV": 32
+      }
+    },
+    "[\"gdn\", \"modules\", {\"flag\": 0, \"hq\": 8, \"hv\": 32}]:0": {
+      "ptx": "ptx/9e2c5be0142e54ba8b03e75b.ptx",
+      "ptx_sha256": "3141016d01be0e8ab5d118b89fe85f97cb372b7e9fa25aa7ca0de54270f03cee",
+      "shim": "ptx/9e2c5be0142e54ba8b03e75b.cpp",
+      "shim_sha256": "804d513e3515964363d12c49454f9d66f8b68681f3768b3eb4e68346f38b18f3",
+      "entry": "run",
+      "module_ident": "gdn_recur_12e33f7d5c",
+      "kernel_name": "kernel_gdn_recur",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "q_tma"
+        ],
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "tma_buffer",
+          "out_tma"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "buffer",
+          "flag_mem"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 8,
+        "HV": 32,
+        "FLAG": 0
+      }
+    },
+    "[\"gdn\", \"prep_module\", {\"hq\": 8, \"hv\": 32, \"large\": true}]:0": {
+      "ptx": "ptx/6064443afbd9d90d7b1078af.ptx",
+      "ptx_sha256": "df257d82d4eddf3a00dd27c1605125cd7d0e3ddac59ad0c253066ed5e78ec586",
+      "shim": "ptx/6064443afbd9d90d7b1078af.cpp",
+      "shim_sha256": "8eecd2bd23b1ae03c6e6b601fd4f66bccfbdfb607118bdd539d21d32164d4f85",
+      "entry": "run",
+      "module_ident": "gdn_prep_4360464dd8",
+      "kernel_name": "kernel_gdn_prep",
+      "arg_plan": [
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "HQ": 8,
+        "HV": 32
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 2, \"hq\": 16, \"hv\": 64, \"vw\": 32}]:0": {
+      "ptx": "ptx/d9d727ae62f4b94c8708ccd0.ptx",
+      "ptx_sha256": "90c0a864af51c25978c38798f234b3bee2ed18996f7cfaa5137292c41c19821d",
+      "shim": "ptx/d9d727ae62f4b94c8708ccd0.cpp",
+      "shim_sha256": "71cc3c34a4df346f93c68f0837265c3173c4b587439777dbdac75b490fd3445d",
+      "entry": "run",
+      "module_ident": "cp_state_149b8366f2",
+      "kernel_name": "kernel_cp_state",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "xflag"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "cslots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "HQ": 16,
+        "HV": 64,
+        "FLAG": 2
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 2, \"hq\": 16, \"hv\": 64, \"vw\": 32}]:1": {
+      "ptx": "ptx/390d16ab0a9ea44b0c4f1547.ptx",
+      "ptx_sha256": "b96e4d74430cd67022c987e1f3821277211ed1284c9421dd1e3c9320b17334f5",
+      "shim": "ptx/390d16ab0a9ea44b0c4f1547.cpp",
+      "shim_sha256": "896b9ff4bd685a80c7d40cfadf2e9e391f2a2b1f22511864b4b9642ab9115978",
+      "entry": "run",
+      "module_ident": "cp_comb_f5625932f7",
+      "kernel_name": "kernel_cp_comb",
+      "arg_plan": [
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "xflag"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "parameter",
+          "cslots"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HV": 64
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 2, \"hq\": 16, \"hv\": 64, \"vw\": 32}]:2": {
+      "ptx": "ptx/52b32d55a053553c4c13817b.ptx",
+      "ptx_sha256": "56dd0aa8448da1bb181146e6eaba08cfd976f6d25e9bae6c7db59de3e06b18bd",
+      "shim": "ptx/52b32d55a053553c4c13817b.cpp",
+      "shim_sha256": "47b427776fd42686d91bc77337ef8650eb7efd60ce4f0f46ab5c2ce2066af302",
+      "entry": "run",
+      "module_ident": "cp_out_1c2e801419",
+      "kernel_name": "kernel_cp_out",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "q_tma"
+        ],
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "tma_buffer",
+          "out_tma"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 16,
+        "HV": 64,
+        "FLAG": 2
+      }
+    },
+    "[\"gdn_cp\", \"prep_cp1_module\", {\"hq\": 16, \"hv\": 64, \"large\": true}]:0": {
+      "ptx": "ptx/6a0d3a2311f7e53bfdfb9d7f.ptx",
+      "ptx_sha256": "1a9550b53748327fa0d86781c3be8009c4b8e112d775b38a3e100ca166557b41",
+      "shim": "ptx/6a0d3a2311f7e53bfdfb9d7f.cpp",
+      "shim_sha256": "97017097f5d5b9bb0f4689fa7b0ce1796ef6c1884fe6b3551c97791b2243eb14",
+      "entry": "run",
+      "module_ident": "gdn_prep_cp1_b6aed2e70c",
+      "kernel_name": "kernel_gdn_prep_cp1",
+      "arg_plan": [
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "buffer",
+          "done"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 16,
+        "HV": 64
+      }
+    },
+    "[\"gdn_cp\", \"prep_plain1_module\", {\"hq\": 16, \"hv\": 64}]:0": {
+      "ptx": "ptx/1ec63ca12c6b86b2819929d9.ptx",
+      "ptx_sha256": "e4bb0cf108d5220a818bff20ba0d08650cfeeba71aaaf5382d03cbec96ddae26",
+      "shim": "ptx/1ec63ca12c6b86b2819929d9.cpp",
+      "shim_sha256": "f40bd82645273f24f1b0dcc13926bda12c279df0fcf42f78f287037e3332a62c",
+      "entry": "run",
+      "module_ident": "gdn_prep_plain1_ba1fe950b7",
+      "kernel_name": "kernel_gdn_prep_plain1",
+      "arg_plan": [
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "buffer",
+          "done"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 16,
+        "HV": 64
+      }
+    },
+    "[\"gdn\", \"modules\", {\"flag\": 2, \"hq\": 16, \"hv\": 64}]:0": {
+      "ptx": "ptx/a3f44d0b5e1ed469873796a5.ptx",
+      "ptx_sha256": "f451d5d349588b2f4d367fdbdcc7fe747c91bbf58440e2b03158d2ffe4a9f522",
+      "shim": "ptx/a3f44d0b5e1ed469873796a5.cpp",
+      "shim_sha256": "93772c330233064dfee2f938d18ed87a338aa6403310b99fbfe896f522746fea",
+      "entry": "run",
+      "module_ident": "gdn_recur_e031d2efde",
+      "kernel_name": "kernel_gdn_recur",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "q_tma"
+        ],
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "tma_buffer",
+          "out_tma"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "buffer",
+          "flag_mem"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "HQ": 16,
+        "HV": 64,
+        "FLAG": 2
+      }
+    },
+    "[\"gdn\", \"modules\", {\"flag\": 0, \"hq\": 16, \"hv\": 64}]:0": {
+      "ptx": "ptx/6a7889b221e512fb8a898740.ptx",
+      "ptx_sha256": "4731e34680902ed7cf98f91190afaa14e92d420ae580121bacef7afcebd09ecd",
+      "shim": "ptx/6a7889b221e512fb8a898740.cpp",
+      "shim_sha256": "1603710d362cf0651833333af9222379ee05d0d4e311382409d39223f94637b0",
+      "entry": "run",
+      "module_ident": "gdn_recur_26effd4951",
+      "kernel_name": "kernel_gdn_recur",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "q_tma"
+        ],
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "tma_buffer",
+          "out_tma"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "buffer",
+          "flag_mem"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 16,
+        "HV": 64,
+        "FLAG": 0
+      }
+    },
+    "[\"gdn\", \"prep_module\", {\"hq\": 16, \"hv\": 64, \"large\": true}]:0": {
+      "ptx": "ptx/7a15570b10b0b93bb855d114.ptx",
+      "ptx_sha256": "382daa5a1cbc0f9098e584c609c52a406b66dfc77174630d196645f283ff892e",
+      "shim": "ptx/7a15570b10b0b93bb855d114.cpp",
+      "shim_sha256": "97522ce07f3ce64a28e4cfdcc82c344ace5409e7a56644a01ea676a5e1056950",
+      "entry": "run",
+      "module_ident": "gdn_prep_d3ffb25d91",
+      "kernel_name": "kernel_gdn_prep",
+      "arg_plan": [
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "HQ": 16,
+        "HV": 64
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 1, \"hq\": 16, \"hv\": 32, \"vw\": 8}]:0": {
+      "ptx": "ptx/13765e6b4085a772e1066be2.ptx",
+      "ptx_sha256": "ecbf2b821c1cbda62b419e3883dc5631d9b0eff5234c2278f1219d0d2f577833",
+      "shim": "ptx/13765e6b4085a772e1066be2.cpp",
+      "shim_sha256": "528cc0bf3dfd7368c19602a92cecf822d3a90bbec82c0aeb5ce28618f41ffbb2",
+      "entry": "run",
+      "module_ident": "cp_state_394357e233",
+      "kernel_name": "kernel_cp_state",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "xflag"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "cslots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 16,
+        "HV": 32,
+        "FLAG": 1
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 1, \"hq\": 16, \"hv\": 32, \"vw\": 8}]:1": {
+      "ptx": "ptx/3ee56998c079380b3dd95286.ptx",
+      "ptx_sha256": "6d90e32de0730bfeeec434f513dd5ed7a491054b00dbc5d888e1b1dbf94668d8",
+      "shim": "ptx/3ee56998c079380b3dd95286.cpp",
+      "shim_sha256": "534e1354b6227c65dcd12aff447458f257bfc2c1866292f44ce465a1c3459ff1",
+      "entry": "run",
+      "module_ident": "cp_comb_7f00a0ef09",
+      "kernel_name": "kernel_cp_comb",
+      "arg_plan": [
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "xflag"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "parameter",
+          "cslots"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HV": 32
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 1, \"hq\": 16, \"hv\": 32, \"vw\": 8}]:2": {
+      "ptx": "ptx/f9c2f614358d4d50926250ca.ptx",
+      "ptx_sha256": "113f89f7e44f477620833817769a693a35cfa1c885474994505881c570b093c2",
+      "shim": "ptx/f9c2f614358d4d50926250ca.cpp",
+      "shim_sha256": "2b9f3366ff7085f7381af49104261b1cd4fc4426b6fdd128c5a405fa7f3e89ed",
+      "entry": "run",
+      "module_ident": "cp_out_5773b65dc9",
+      "kernel_name": "kernel_cp_out",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "q_tma"
+        ],
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "tma_buffer",
+          "out_tma"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 16,
+        "HV": 32,
+        "FLAG": 1
+      }
+    },
+    "[\"gdn_cp\", \"prep_cp_module\", {\"hq\": 16, \"hv\": 32}]:0": {
+      "ptx": "ptx/82fa2be3d035b46b2dcc4d16.ptx",
+      "ptx_sha256": "3d5cc2513e02a248ee0a71257270108dcccb9f4a494d0fa12fda3ceaa1f0ffe8",
+      "shim": "ptx/82fa2be3d035b46b2dcc4d16.cpp",
+      "shim_sha256": "4bcce938a1abf93738f45609c1abdd4e2e74235ec9dfeb1cc20526b0f9a2c118",
+      "entry": "run",
+      "module_ident": "gdn_prep_cp_ae6ae55076",
+      "kernel_name": "kernel_gdn_prep_cp",
+      "arg_plan": [
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "HQ": 16,
+        "HV": 32
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 0, \"hq\": 16, \"hv\": 32, \"vw\": 8}]:0": {
+      "ptx": "ptx/8f02693eda5374963c276675.ptx",
+      "ptx_sha256": "b602d2c5a5de1ba33bef95d8f6b122a7d5bae11b5fe1488d1555c483a928f2e1",
+      "shim": "ptx/8f02693eda5374963c276675.cpp",
+      "shim_sha256": "115eaf6e98bde4ef1a0178a46668c866cb4ffa2ea66886f5de3f50e38484dfa9",
+      "entry": "run",
+      "module_ident": "cp_state_ef9bc44e54",
+      "kernel_name": "kernel_cp_state",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "xflag"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "cslots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 16,
+        "HV": 32,
+        "FLAG": 0
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 0, \"hq\": 16, \"hv\": 32, \"vw\": 8}]:1": {
+      "ptx": "ptx/3ee56998c079380b3dd95286.ptx",
+      "ptx_sha256": "6d90e32de0730bfeeec434f513dd5ed7a491054b00dbc5d888e1b1dbf94668d8",
+      "shim": "ptx/3ee56998c079380b3dd95286.cpp",
+      "shim_sha256": "534e1354b6227c65dcd12aff447458f257bfc2c1866292f44ce465a1c3459ff1",
+      "entry": "run",
+      "module_ident": "cp_comb_7f00a0ef09",
+      "kernel_name": "kernel_cp_comb",
+      "arg_plan": [
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "xflag"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "parameter",
+          "cslots"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HV": 32
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 0, \"hq\": 16, \"hv\": 32, \"vw\": 8}]:2": {
+      "ptx": "ptx/930d9d69bd0863c1017eb09f.ptx",
+      "ptx_sha256": "184c3debac1e0b73dcae77ede97810a144f939c8c8329a255288fb774daa61de",
+      "shim": "ptx/930d9d69bd0863c1017eb09f.cpp",
+      "shim_sha256": "e7ff0592273e214bb54f9875b694d0486a4f690de5c8ba8002887784644ede22",
+      "entry": "run",
+      "module_ident": "cp_out_35d714b6d9",
+      "kernel_name": "kernel_cp_out",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "q_tma"
+        ],
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "tma_buffer",
+          "out_tma"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 16,
+        "HV": 32,
+        "FLAG": 0
+      }
+    },
+    "[\"gdn\", \"prep_module\", {\"hq\": 16, \"hv\": 32, \"large\": false}]:0": {
+      "ptx": "ptx/c266cec3c9a37f660bf4ab76.ptx",
+      "ptx_sha256": "66a8876922478052f356fa3e9151be22d10731ff6bf929b99d8b3061b4d66f07",
+      "shim": "ptx/c266cec3c9a37f660bf4ab76.cpp",
+      "shim_sha256": "c307454f296f331527f6d21134d559b63b0cbd5ac7305020949dc5bea8905301",
+      "entry": "run",
+      "module_ident": "gdn_prep_71aac34f51",
+      "kernel_name": "kernel_gdn_prep",
+      "arg_plan": [
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "HQ": 16,
+        "HV": 32
+      }
+    },
+    "[\"gdn\", \"modules\", {\"flag\": 0, \"hq\": 16, \"hv\": 32}]:0": {
+      "ptx": "ptx/c644aeac9578f40f03dc8490.ptx",
+      "ptx_sha256": "2785b6d18d642a4b84cba2b55c39189f119251ad9dc26274994301babb14937e",
+      "shim": "ptx/c644aeac9578f40f03dc8490.cpp",
+      "shim_sha256": "ba23fdff8e755110a5fb239e0dcfb4337ee77b6b1982947c07d12b51808dc589",
+      "entry": "run",
+      "module_ident": "gdn_recur_c6e9209318",
+      "kernel_name": "kernel_gdn_recur",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "q_tma"
+        ],
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "tma_buffer",
+          "out_tma"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "buffer",
+          "flag_mem"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 16,
+        "HV": 32,
+        "FLAG": 0
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 2, \"hq\": 16, \"hv\": 32, \"vw\": 8}]:0": {
+      "ptx": "ptx/aba16fd1ee7868da36e79a41.ptx",
+      "ptx_sha256": "de21f9a8a8ad0b18a8da20c603eee8ae9f17ad3e72e50915590f588baad5e1a1",
+      "shim": "ptx/aba16fd1ee7868da36e79a41.cpp",
+      "shim_sha256": "613f1243fc335995defde8c2013975bf56ee3d9272eaa98ef3fd630cf7f4c981",
+      "entry": "run",
+      "module_ident": "cp_state_b61ce97b6d",
+      "kernel_name": "kernel_cp_state",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "xflag"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "cslots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "HQ": 16,
+        "HV": 32,
+        "FLAG": 2
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 2, \"hq\": 16, \"hv\": 32, \"vw\": 8}]:1": {
+      "ptx": "ptx/3ee56998c079380b3dd95286.ptx",
+      "ptx_sha256": "6d90e32de0730bfeeec434f513dd5ed7a491054b00dbc5d888e1b1dbf94668d8",
+      "shim": "ptx/3ee56998c079380b3dd95286.cpp",
+      "shim_sha256": "534e1354b6227c65dcd12aff447458f257bfc2c1866292f44ce465a1c3459ff1",
+      "entry": "run",
+      "module_ident": "cp_comb_7f00a0ef09",
+      "kernel_name": "kernel_cp_comb",
+      "arg_plan": [
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "xflag"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "parameter",
+          "cslots"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HV": 32
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 2, \"hq\": 16, \"hv\": 32, \"vw\": 8}]:2": {
+      "ptx": "ptx/7cc82bf5ad9564ea49dfbb82.ptx",
+      "ptx_sha256": "113f89f7e44f477620833817769a693a35cfa1c885474994505881c570b093c2",
+      "shim": "ptx/7cc82bf5ad9564ea49dfbb82.cpp",
+      "shim_sha256": "7594b165b5c930e0f0b4077d6448f2b581fa6c89ab7eb0585aec7b10bfdde30b",
+      "entry": "run",
+      "module_ident": "cp_out_efccfe0d2d",
+      "kernel_name": "kernel_cp_out",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "q_tma"
+        ],
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "tma_buffer",
+          "out_tma"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 16,
+        "HV": 32,
+        "FLAG": 2
+      }
+    },
+    "[\"gdn_cp\", \"prep_cp1_module\", {\"hq\": 16, \"hv\": 32, \"large\": true}]:0": {
+      "ptx": "ptx/625101d92598421e16f0ae36.ptx",
+      "ptx_sha256": "37725fb3006af003233b92d121885c39902bc0123e523997844c6a2a91c5b8ed",
+      "shim": "ptx/625101d92598421e16f0ae36.cpp",
+      "shim_sha256": "c807bb2e83d7ba48d0d79f85eaf70c8d67d7b934b2e3eddda2ce62a36367bae4",
+      "entry": "run",
+      "module_ident": "gdn_prep_cp1_dce89c8c30",
+      "kernel_name": "kernel_gdn_prep_cp1",
+      "arg_plan": [
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "buffer",
+          "done"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 16,
+        "HV": 32
+      }
+    },
+    "[\"gdn\", \"prep_module\", {\"hq\": 16, \"hv\": 32, \"large\": true}]:0": {
+      "ptx": "ptx/a8870d6ffaca9eed3fed9c6d.ptx",
+      "ptx_sha256": "c6f1acb32b1f8a211d4f7727056db07ca16af738d9f3dcfe6e505d4d93730695",
+      "shim": "ptx/a8870d6ffaca9eed3fed9c6d.cpp",
+      "shim_sha256": "107d53401675f68552be17e0d9e1dd679ebc7cef8a38629de32c466d8ec3b154",
+      "entry": "run",
+      "module_ident": "gdn_prep_b56f613671",
+      "kernel_name": "kernel_gdn_prep",
+      "arg_plan": [
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "HQ": 16,
+        "HV": 32
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 1, \"hq\": 8, \"hv\": 24, \"vw\": 8}]:0": {
+      "ptx": "ptx/993a18607be53c118fee1b99.ptx",
+      "ptx_sha256": "494da0205c3fe300aee76bf0a3a87ae1115aab055ff2a5461dc505a517cfe952",
+      "shim": "ptx/993a18607be53c118fee1b99.cpp",
+      "shim_sha256": "5636cd6face50814088449258b96ef1cc11cfa12a989970e4cea0e094d58e880",
+      "entry": "run",
+      "module_ident": "cp_state_2634f8fb54",
+      "kernel_name": "kernel_cp_state",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "xflag"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "cslots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 8,
+        "HV": 24,
+        "FLAG": 1
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 1, \"hq\": 8, \"hv\": 24, \"vw\": 8}]:1": {
+      "ptx": "ptx/d4c0ee4df57f3cfea88e85dd.ptx",
+      "ptx_sha256": "e9398933de045f8491b9084c3ca1e47e5ced3370583d16e59b5f2a16c5c1c9bf",
+      "shim": "ptx/d4c0ee4df57f3cfea88e85dd.cpp",
+      "shim_sha256": "4e15ea7da2c0cd3a2f6039ceceddb6390f200e87c353f8b4299fa07f77ac3e7b",
+      "entry": "run",
+      "module_ident": "cp_comb_fcd2b0ceea",
+      "kernel_name": "kernel_cp_comb",
+      "arg_plan": [
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "xflag"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "parameter",
+          "cslots"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HV": 24
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 1, \"hq\": 8, \"hv\": 24, \"vw\": 8}]:2": {
+      "ptx": "ptx/675e4fa66ab6f506eac0c9c8.ptx",
+      "ptx_sha256": "31b9684c5b0ab53b5daa95fece14495852390111f00ff211f0887fec6f0bdd6b",
+      "shim": "ptx/675e4fa66ab6f506eac0c9c8.cpp",
+      "shim_sha256": "69dfb95f4fa5bc61d7155a713f0e5ebb0309e172c7f63f9bf35fd9c8feb4d8c7",
+      "entry": "run",
+      "module_ident": "cp_out_d7018f5a09",
+      "kernel_name": "kernel_cp_out",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "q_tma"
+        ],
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "tma_buffer",
+          "out_tma"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 8,
+        "HV": 24,
+        "FLAG": 1
+      }
+    },
+    "[\"gdn_cp\", \"prep_cp_module\", {\"hq\": 8, \"hv\": 24}]:0": {
+      "ptx": "ptx/203262b69ab3992e787ce363.ptx",
+      "ptx_sha256": "5a70e73828635849133abcf1ff98844d4b8d9f0edcf71064ba8eac29df6140fc",
+      "shim": "ptx/203262b69ab3992e787ce363.cpp",
+      "shim_sha256": "b7724ddc714336385402d31a1673113e6a04884164d2218b2d5593b915d88c1c",
+      "entry": "run",
+      "module_ident": "gdn_prep_cp_0caadcd5fd",
+      "kernel_name": "kernel_gdn_prep_cp",
+      "arg_plan": [
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "HQ": 8,
+        "HV": 24
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 0, \"hq\": 8, \"hv\": 24, \"vw\": 8}]:0": {
+      "ptx": "ptx/52c37e97fad4dd09f2235bed.ptx",
+      "ptx_sha256": "71958b15e3144a9f92e267c07201a2bbe584b73a359883ab4bf17c2c41591844",
+      "shim": "ptx/52c37e97fad4dd09f2235bed.cpp",
+      "shim_sha256": "1dafb06535b50e44c6abc2ce42470c476cf990313f8d4e4fc841d16725294b4b",
+      "entry": "run",
+      "module_ident": "cp_state_07c293762b",
+      "kernel_name": "kernel_cp_state",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "xflag"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "cslots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 8,
+        "HV": 24,
+        "FLAG": 0
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 0, \"hq\": 8, \"hv\": 24, \"vw\": 8}]:1": {
+      "ptx": "ptx/d4c0ee4df57f3cfea88e85dd.ptx",
+      "ptx_sha256": "e9398933de045f8491b9084c3ca1e47e5ced3370583d16e59b5f2a16c5c1c9bf",
+      "shim": "ptx/d4c0ee4df57f3cfea88e85dd.cpp",
+      "shim_sha256": "4e15ea7da2c0cd3a2f6039ceceddb6390f200e87c353f8b4299fa07f77ac3e7b",
+      "entry": "run",
+      "module_ident": "cp_comb_fcd2b0ceea",
+      "kernel_name": "kernel_cp_comb",
+      "arg_plan": [
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "xflag"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "parameter",
+          "cslots"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HV": 24
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 0, \"hq\": 8, \"hv\": 24, \"vw\": 8}]:2": {
+      "ptx": "ptx/ecae860c7169a02ce4e822db.ptx",
+      "ptx_sha256": "338f3677664536608d22c6e23dcbce8ec88e3c0358263184a3f5c5098dc5cc13",
+      "shim": "ptx/ecae860c7169a02ce4e822db.cpp",
+      "shim_sha256": "d1cbbd869f696073aea80b6bffcfb035b89bd99191dcb17f183536f8412ecc74",
+      "entry": "run",
+      "module_ident": "cp_out_aa542054e2",
+      "kernel_name": "kernel_cp_out",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "q_tma"
+        ],
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "tma_buffer",
+          "out_tma"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 8,
+        "HV": 24,
+        "FLAG": 0
+      }
+    },
+    "[\"gdn\", \"prep_module\", {\"hq\": 8, \"hv\": 24, \"large\": false}]:0": {
+      "ptx": "ptx/f721768bc675556508b9368a.ptx",
+      "ptx_sha256": "eeb99e168c4a56d61ba63b86492fd6aeaf62de69b32ac32c7e71e5fd18fd5661",
+      "shim": "ptx/f721768bc675556508b9368a.cpp",
+      "shim_sha256": "380fba8e625b1850f99258f6e45de76e4dd02b2465b44908bb4d5968a458c5b3",
+      "entry": "run",
+      "module_ident": "gdn_prep_2a319974cf",
+      "kernel_name": "kernel_gdn_prep",
+      "arg_plan": [
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "HQ": 8,
+        "HV": 24
+      }
+    },
+    "[\"gdn\", \"prep1_module\", {\"hq\": 8, \"hv\": 24}]:0": {
+      "ptx": "ptx/67f67ac733aa1014d383bd5f.ptx",
+      "ptx_sha256": "555fb595fc62148f142b4f4be189eba629967a8434361c3a9211241f26b0390f",
+      "shim": "ptx/67f67ac733aa1014d383bd5f.cpp",
+      "shim_sha256": "869342abf2f8287328d86242314608d14224a189e1423197a8410d6352af2572",
+      "entry": "run",
+      "module_ident": "gdn_prep1_fd01f366c6",
+      "kernel_name": "kernel_gdn_prep1",
+      "arg_plan": [
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "HQ": 8,
+        "HV": 24
+      }
+    },
+    "[\"gdn_cp\", \"prep_plain_module\", {\"hq\": 8, \"hv\": 24, \"large\": true}]:0": {
+      "ptx": "ptx/72c52db4b6a7c4a81dd9b060.ptx",
+      "ptx_sha256": "e67fcb7053730e2a4a3dcb79d8874e3d2c9df21249be937ec8fa250847de07f7",
+      "shim": "ptx/72c52db4b6a7c4a81dd9b060.cpp",
+      "shim_sha256": "c067df3d235257c493ad536d6c7f63f6c0cda49f29dfd4fa613356b96cc58f34",
+      "entry": "run",
+      "module_ident": "gdn_prep_plain_a734c6bf43",
+      "kernel_name": "kernel_gdn_prep_plain",
+      "arg_plan": [
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "buffer",
+          "done"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 8,
+        "HV": 24
+      }
+    },
+    "[\"gdn\", \"modules\", {\"flag\": 2, \"hq\": 8, \"hv\": 24}]:0": {
+      "ptx": "ptx/9614fe057dbf5e4374d910ee.ptx",
+      "ptx_sha256": "b5c2a7a323a19f90ad18a9c57e60410de168031530d5e0f2e450798ea4a0d7d1",
+      "shim": "ptx/9614fe057dbf5e4374d910ee.cpp",
+      "shim_sha256": "66873803ea93e266d9d70b23da26a40f5d99de86c0ee12309d233f003508ff7c",
+      "entry": "run",
+      "module_ident": "gdn_recur_649a4a7e51",
+      "kernel_name": "kernel_gdn_recur",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "q_tma"
+        ],
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "tma_buffer",
+          "out_tma"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "buffer",
+          "flag_mem"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "HQ": 8,
+        "HV": 24,
+        "FLAG": 2
+      }
+    },
+    "[\"gdn\", \"modules\", {\"flag\": 0, \"hq\": 8, \"hv\": 24}]:0": {
+      "ptx": "ptx/62f55422addda8f52432569d.ptx",
+      "ptx_sha256": "a9dc1e759f108ea43b38f290a05e929463c22df23940c5c786def8823d761c84",
+      "shim": "ptx/62f55422addda8f52432569d.cpp",
+      "shim_sha256": "59a5325d0de8c20fc68e81b3dcdff50070efa6c049d61efe91c1e4461d7e519c",
+      "entry": "run",
+      "module_ident": "gdn_recur_7576e0f7d4",
+      "kernel_name": "kernel_gdn_recur",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "q_tma"
+        ],
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "tma_buffer",
+          "out_tma"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "buffer",
+          "flag_mem"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 8,
+        "HV": 24,
+        "FLAG": 0
+      }
+    },
+    "[\"gdn\", \"prep_module\", {\"hq\": 8, \"hv\": 24, \"large\": true}]:0": {
+      "ptx": "ptx/f6995739916b8bd7a25d0ef1.ptx",
+      "ptx_sha256": "79fb091a92da01dddeaa6f452b0d296383305262cd6ce4ac18aa627a659f2652",
+      "shim": "ptx/f6995739916b8bd7a25d0ef1.cpp",
+      "shim_sha256": "49bfe8c53d39ad7cc2a13705d414ce532a29e438cf76eb9b49c7a72f2dbcbb4c",
+      "entry": "run",
+      "module_ident": "gdn_prep_387ea2ae7a",
+      "kernel_name": "kernel_gdn_prep",
+      "arg_plan": [
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "HQ": 8,
+        "HV": 24
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 1, \"hq\": 16, \"hv\": 48, \"vw\": 32}]:0": {
+      "ptx": "ptx/662efd157fcddd2d81960b2b.ptx",
+      "ptx_sha256": "e5bbcc4e43c4db77bc2fa05c58107fb887d73b98830fd7476c6a34686b57d065",
+      "shim": "ptx/662efd157fcddd2d81960b2b.cpp",
+      "shim_sha256": "16b96a5c47b7c0fe2a8dc023c6f71c515fb9f5536a299f81ba0f3eede2d13abf",
+      "entry": "run",
+      "module_ident": "cp_state_de20013ff0",
+      "kernel_name": "kernel_cp_state",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "xflag"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "cslots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 16,
+        "HV": 48,
+        "FLAG": 1
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 1, \"hq\": 16, \"hv\": 48, \"vw\": 32}]:1": {
+      "ptx": "ptx/2c66f091b8f1cd6db0c918f3.ptx",
+      "ptx_sha256": "8f55e2ec4456f33c9f5ca7a08cfdfbdbd1d21c57c219960b6d06bced52c976e4",
+      "shim": "ptx/2c66f091b8f1cd6db0c918f3.cpp",
+      "shim_sha256": "54643d5a5eeefa7fda66a9e486b1d5fd94b6a80629aa8998a827ef0e0e76bbbd",
+      "entry": "run",
+      "module_ident": "cp_comb_1b481f8fad",
+      "kernel_name": "kernel_cp_comb",
+      "arg_plan": [
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "xflag"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "parameter",
+          "cslots"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HV": 48
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 1, \"hq\": 16, \"hv\": 48, \"vw\": 32}]:2": {
+      "ptx": "ptx/a3cbcbef61f31c20afd058eb.ptx",
+      "ptx_sha256": "4ebbc2d9b8382fcaec6b9e64ac33cec1f61344badc1d3d9631375417b0aeb1a2",
+      "shim": "ptx/a3cbcbef61f31c20afd058eb.cpp",
+      "shim_sha256": "bd71f49b0f51f3d02165a075edaccea04da681e4ff2c8d0614ee7368c983b554",
+      "entry": "run",
+      "module_ident": "cp_out_d0a9b53755",
+      "kernel_name": "kernel_cp_out",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "q_tma"
+        ],
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "tma_buffer",
+          "out_tma"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 16,
+        "HV": 48,
+        "FLAG": 1
+      }
+    },
+    "[\"gdn_cp\", \"prep_cp_module\", {\"hq\": 16, \"hv\": 48}]:0": {
+      "ptx": "ptx/f1158a1fa62f4b555be9c01e.ptx",
+      "ptx_sha256": "b6432821f1119f0c3ca66c0b32c4a698eba40ac6146bc77cefb51de2b2d672b6",
+      "shim": "ptx/f1158a1fa62f4b555be9c01e.cpp",
+      "shim_sha256": "ad192af035aca3ec42c624db1cf4929cb2a7c4f08e406308ba163e557831b9c3",
+      "entry": "run",
+      "module_ident": "gdn_prep_cp_90a1dd6b4b",
+      "kernel_name": "kernel_gdn_prep_cp",
+      "arg_plan": [
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "HQ": 16,
+        "HV": 48
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 0, \"hq\": 16, \"hv\": 48, \"vw\": 32}]:0": {
+      "ptx": "ptx/4fa3aaa3a3aeae7567f84a65.ptx",
+      "ptx_sha256": "50dc88e12fd6057e9005fe04add3bfbae5acf0559b24c58415b6b6fa8207b46b",
+      "shim": "ptx/4fa3aaa3a3aeae7567f84a65.cpp",
+      "shim_sha256": "e1f56c8caa4cb782d55cf846857805521e74065ae8575ce67e74e82330c63174",
+      "entry": "run",
+      "module_ident": "cp_state_a94d21cdd8",
+      "kernel_name": "kernel_cp_state",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "xflag"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "cslots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 16,
+        "HV": 48,
+        "FLAG": 0
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 0, \"hq\": 16, \"hv\": 48, \"vw\": 32}]:1": {
+      "ptx": "ptx/2c66f091b8f1cd6db0c918f3.ptx",
+      "ptx_sha256": "8f55e2ec4456f33c9f5ca7a08cfdfbdbd1d21c57c219960b6d06bced52c976e4",
+      "shim": "ptx/2c66f091b8f1cd6db0c918f3.cpp",
+      "shim_sha256": "54643d5a5eeefa7fda66a9e486b1d5fd94b6a80629aa8998a827ef0e0e76bbbd",
+      "entry": "run",
+      "module_ident": "cp_comb_1b481f8fad",
+      "kernel_name": "kernel_cp_comb",
+      "arg_plan": [
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "xflag"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "parameter",
+          "cslots"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HV": 48
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 0, \"hq\": 16, \"hv\": 48, \"vw\": 32}]:2": {
+      "ptx": "ptx/72327ed53fbc16a8742ef236.ptx",
+      "ptx_sha256": "03df416bfd0fa2c40b784ea2885aa4022d54fd16013ca26236714b500b52374b",
+      "shim": "ptx/72327ed53fbc16a8742ef236.cpp",
+      "shim_sha256": "3ec4e3e293e3fcb722749037c351be0994c291abe3363af8e49a466918a3fb1f",
+      "entry": "run",
+      "module_ident": "cp_out_1b7ab69bce",
+      "kernel_name": "kernel_cp_out",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "q_tma"
+        ],
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "tma_buffer",
+          "out_tma"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 16,
+        "HV": 48,
+        "FLAG": 0
+      }
+    },
+    "[\"gdn\", \"prep_module\", {\"hq\": 16, \"hv\": 48, \"large\": false}]:0": {
+      "ptx": "ptx/e887c06b11ca9b47f657f3b5.ptx",
+      "ptx_sha256": "90a29e74ca11e7696a031ea9798f50a841d3c80bf2d7b1a2bbd6a56559c6a2be",
+      "shim": "ptx/e887c06b11ca9b47f657f3b5.cpp",
+      "shim_sha256": "bb789bf5c69617216fe7e52943161949e0f820e84e5e8bbe56a08cbb6777184c",
+      "entry": "run",
+      "module_ident": "gdn_prep_f1c19175cf",
+      "kernel_name": "kernel_gdn_prep",
+      "arg_plan": [
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "HQ": 16,
+        "HV": 48
+      }
+    },
+    "[\"gdn_cp\", \"prep_plain1_module\", {\"hq\": 16, \"hv\": 48}]:0": {
+      "ptx": "ptx/1011023987f0b33dea141c66.ptx",
+      "ptx_sha256": "3f7530d2a68ac8f20f884ca0938e79595e1709ba4d3eeb69188f854c352c1609",
+      "shim": "ptx/1011023987f0b33dea141c66.cpp",
+      "shim_sha256": "e05fbfb71c551a1270daedc78f3f67e942fd231fda534f428613b9553f716c08",
+      "entry": "run",
+      "module_ident": "gdn_prep_plain1_2f4a53e821",
+      "kernel_name": "kernel_gdn_prep_plain1",
+      "arg_plan": [
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "buffer",
+          "done"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 16,
+        "HV": 48
+      }
+    },
+    "[\"gdn\", \"modules\", {\"flag\": 2, \"hq\": 16, \"hv\": 48}]:0": {
+      "ptx": "ptx/52b39f2f7c6f5d1933ae0e2b.ptx",
+      "ptx_sha256": "2d5de28b0ce6a7ab50603c49504160fa10bd6f44f18b0500a6ec5505228e3c8e",
+      "shim": "ptx/52b39f2f7c6f5d1933ae0e2b.cpp",
+      "shim_sha256": "82668731852183bc2c902760477c15b97625925b1b9d53f085d449a088961f6e",
+      "entry": "run",
+      "module_ident": "gdn_recur_6f7d4b4c5f",
+      "kernel_name": "kernel_gdn_recur",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "q_tma"
+        ],
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "tma_buffer",
+          "out_tma"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "buffer",
+          "flag_mem"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "HQ": 16,
+        "HV": 48,
+        "FLAG": 2
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 2, \"hq\": 16, \"hv\": 48, \"vw\": 32}]:0": {
+      "ptx": "ptx/67323a7661576435020de264.ptx",
+      "ptx_sha256": "83f963d94b273d31739cd73acb7cdea30ff4b472e5b4b745a220a77914d2e327",
+      "shim": "ptx/67323a7661576435020de264.cpp",
+      "shim_sha256": "fba46f00d6eb3c55f1e9b83b47e4780672e5d01de1d6bc59aaa515a2508b3d02",
+      "entry": "run",
+      "module_ident": "cp_state_a632c12ef9",
+      "kernel_name": "kernel_cp_state",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "xflag"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "cslots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "HQ": 16,
+        "HV": 48,
+        "FLAG": 2
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 2, \"hq\": 16, \"hv\": 48, \"vw\": 32}]:1": {
+      "ptx": "ptx/2c66f091b8f1cd6db0c918f3.ptx",
+      "ptx_sha256": "8f55e2ec4456f33c9f5ca7a08cfdfbdbd1d21c57c219960b6d06bced52c976e4",
+      "shim": "ptx/2c66f091b8f1cd6db0c918f3.cpp",
+      "shim_sha256": "54643d5a5eeefa7fda66a9e486b1d5fd94b6a80629aa8998a827ef0e0e76bbbd",
+      "entry": "run",
+      "module_ident": "cp_comb_1b481f8fad",
+      "kernel_name": "kernel_cp_comb",
+      "arg_plan": [
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "xflag"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "parameter",
+          "cslots"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HV": 48
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 2, \"hq\": 16, \"hv\": 48, \"vw\": 32}]:2": {
+      "ptx": "ptx/adcd48656252027a612433b0.ptx",
+      "ptx_sha256": "4ebbc2d9b8382fcaec6b9e64ac33cec1f61344badc1d3d9631375417b0aeb1a2",
+      "shim": "ptx/adcd48656252027a612433b0.cpp",
+      "shim_sha256": "cdb01826fa360a535bfe33dabb0dd83ab6277c59c0a73b31810b8c84e6fa98cb",
+      "entry": "run",
+      "module_ident": "cp_out_4300718b78",
+      "kernel_name": "kernel_cp_out",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "q_tma"
+        ],
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "tma_buffer",
+          "out_tma"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 16,
+        "HV": 48,
+        "FLAG": 2
+      }
+    },
+    "[\"gdn_cp\", \"prep_cp1_module\", {\"hq\": 16, \"hv\": 48, \"large\": true}]:0": {
+      "ptx": "ptx/12fed90a03cb5b4f2ebd180d.ptx",
+      "ptx_sha256": "a2bb026d1f590f738c8d8b2586a6224eafa01a9dbdfa8f169aba16a8567283e3",
+      "shim": "ptx/12fed90a03cb5b4f2ebd180d.cpp",
+      "shim_sha256": "06cd8d536b3ad188640932dd720c0f1580e697c74e5bfcd2143a7609227e116a",
+      "entry": "run",
+      "module_ident": "gdn_prep_cp1_80d2da2a94",
+      "kernel_name": "kernel_gdn_prep_cp1",
+      "arg_plan": [
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "buffer",
+          "done"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 16,
+        "HV": 48
+      }
+    },
+    "[\"gdn\", \"modules\", {\"flag\": 0, \"hq\": 16, \"hv\": 48}]:0": {
+      "ptx": "ptx/da3a070c1830927f0ecec64b.ptx",
+      "ptx_sha256": "4992b4bd31a4d7bd57445343012ea7df750371a5fa36f90402e37a2cf1bd120f",
+      "shim": "ptx/da3a070c1830927f0ecec64b.cpp",
+      "shim_sha256": "85e0e03450ec8712ff0ffe2fac679ad5a54a05615d829b5b7290ed2799e23570",
+      "entry": "run",
+      "module_ident": "gdn_recur_01e6bb9a34",
+      "kernel_name": "kernel_gdn_recur",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "q_tma"
+        ],
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "tma_buffer",
+          "out_tma"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "buffer",
+          "flag_mem"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 16,
+        "HV": 48,
+        "FLAG": 0
+      }
+    },
+    "[\"gdn\", \"prep_module\", {\"hq\": 16, \"hv\": 48, \"large\": true}]:0": {
+      "ptx": "ptx/9d5d9a15144bbe9da0ec71f1.ptx",
+      "ptx_sha256": "657cc92e9f34f3b1c648953009122680554764f5a6bc14146b99cbcd79829930",
+      "shim": "ptx/9d5d9a15144bbe9da0ec71f1.cpp",
+      "shim_sha256": "fbbb54b0be621505350d12a590d268f6ec6010395a6d6b8b2ae7a9a1ba7fd15e",
+      "entry": "run",
+      "module_ident": "gdn_prep_5d8a8f5e1a",
+      "kernel_name": "kernel_gdn_prep",
+      "arg_plan": [
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "HQ": 16,
+        "HV": 48
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 1, \"hq\": 16, \"hv\": 16, \"vw\": 8}]:0": {
+      "ptx": "ptx/e1c93c4bfa084495c294a144.ptx",
+      "ptx_sha256": "58b086201eca2177c5279f3efbe7f15e1c79c95078789a8e27ba27648b6bfc23",
+      "shim": "ptx/e1c93c4bfa084495c294a144.cpp",
+      "shim_sha256": "5d239b25739bfcd7a8e926704d38a895908c4162b35592b973c5befed1300f26",
+      "entry": "run",
+      "module_ident": "cp_state_5b149e269e",
+      "kernel_name": "kernel_cp_state",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "xflag"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "cslots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 16,
+        "HV": 16,
+        "FLAG": 1
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 1, \"hq\": 16, \"hv\": 16, \"vw\": 8}]:1": {
+      "ptx": "ptx/89929dec479d05b1c1f2e767.ptx",
+      "ptx_sha256": "f0a1f2d01c564df57ec8404e5563da7be1342f30cbb82651c10c00fc0d6cc46b",
+      "shim": "ptx/89929dec479d05b1c1f2e767.cpp",
+      "shim_sha256": "37f7a8156f48b2b96aa2ee2497e972da3b4849c063797a5210d6fea20b0f791a",
+      "entry": "run",
+      "module_ident": "cp_comb_5636619f40",
+      "kernel_name": "kernel_cp_comb",
+      "arg_plan": [
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "xflag"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "parameter",
+          "cslots"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HV": 16
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 1, \"hq\": 16, \"hv\": 16, \"vw\": 8}]:2": {
+      "ptx": "ptx/e7b9bd2fa0b610d371ed0648.ptx",
+      "ptx_sha256": "59048400d3c604f6f1b6e3efd5458a5b81aaf7c118e9688e7b681371205cd53e",
+      "shim": "ptx/e7b9bd2fa0b610d371ed0648.cpp",
+      "shim_sha256": "a9affaf228fde634a912ae7097b03dcf6f575609635a51015c5969b21af4e1fc",
+      "entry": "run",
+      "module_ident": "cp_out_3ac5ed6d95",
+      "kernel_name": "kernel_cp_out",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "q_tma"
+        ],
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "tma_buffer",
+          "out_tma"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 16,
+        "HV": 16,
+        "FLAG": 1
+      }
+    },
+    "[\"gdn_cp\", \"prep_cp_module\", {\"hq\": 16, \"hv\": 16}]:0": {
+      "ptx": "ptx/9ec0b58b6a176070be4feece.ptx",
+      "ptx_sha256": "f5ac07a9cd6bc4a255a638ee40ca0a676d3b8fd7e81997f8578af9ebb0a3ae20",
+      "shim": "ptx/9ec0b58b6a176070be4feece.cpp",
+      "shim_sha256": "342cd61a89f293356cca17ab568e9f8878c4a0fca4daca5c0522311b2a6711a4",
+      "entry": "run",
+      "module_ident": "gdn_prep_cp_e4f21f085e",
+      "kernel_name": "kernel_gdn_prep_cp",
+      "arg_plan": [
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "HQ": 16,
+        "HV": 16
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 1, \"hq\": 16, \"hv\": 16, \"vw\": 16}]:0": {
+      "ptx": "ptx/e1c93c4bfa084495c294a144.ptx",
+      "ptx_sha256": "58b086201eca2177c5279f3efbe7f15e1c79c95078789a8e27ba27648b6bfc23",
+      "shim": "ptx/e1c93c4bfa084495c294a144.cpp",
+      "shim_sha256": "5d239b25739bfcd7a8e926704d38a895908c4162b35592b973c5befed1300f26",
+      "entry": "run",
+      "module_ident": "cp_state_5b149e269e",
+      "kernel_name": "kernel_cp_state",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "xflag"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "cslots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 16,
+        "HV": 16,
+        "FLAG": 1
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 1, \"hq\": 16, \"hv\": 16, \"vw\": 16}]:1": {
+      "ptx": "ptx/c69e425a7966dd53e389a5cb.ptx",
+      "ptx_sha256": "6cb1f4c6d2ee595e0b2d63a7d0a86d7901faa7019c68733d20086670cac52785",
+      "shim": "ptx/c69e425a7966dd53e389a5cb.cpp",
+      "shim_sha256": "6fe7a7a322df49633d75ccaadfc202a521437b60e761a341c72d1f538a1b4fb7",
+      "entry": "run",
+      "module_ident": "cp_comb_2dffa9580a",
+      "kernel_name": "kernel_cp_comb",
+      "arg_plan": [
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "xflag"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "parameter",
+          "cslots"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HV": 16
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 1, \"hq\": 16, \"hv\": 16, \"vw\": 16}]:2": {
+      "ptx": "ptx/e7b9bd2fa0b610d371ed0648.ptx",
+      "ptx_sha256": "59048400d3c604f6f1b6e3efd5458a5b81aaf7c118e9688e7b681371205cd53e",
+      "shim": "ptx/e7b9bd2fa0b610d371ed0648.cpp",
+      "shim_sha256": "a9affaf228fde634a912ae7097b03dcf6f575609635a51015c5969b21af4e1fc",
+      "entry": "run",
+      "module_ident": "cp_out_3ac5ed6d95",
+      "kernel_name": "kernel_cp_out",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "q_tma"
+        ],
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "tma_buffer",
+          "out_tma"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 16,
+        "HV": 16,
+        "FLAG": 1
+      }
+    },
+    "[\"gdn_cp\", \"prep_plain_module\", {\"hq\": 16, \"hv\": 16, \"large\": true}]:0": {
+      "ptx": "ptx/021d94cc580f0fac2296000a.ptx",
+      "ptx_sha256": "1f8d0979309d66890e67bbf9ec3be9e49b5adee10a0247976a44d3dab8899ced",
+      "shim": "ptx/021d94cc580f0fac2296000a.cpp",
+      "shim_sha256": "00c9ddd5aedc27c8533aaa79e03d2c569ad7908b80579a9e4b995f5a04800f93",
+      "entry": "run",
+      "module_ident": "gdn_prep_plain_b5a9b38df2",
+      "kernel_name": "kernel_gdn_prep_plain",
+      "arg_plan": [
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "buffer",
+          "done"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 16,
+        "HV": 16
+      }
+    },
+    "[\"gdn\", \"modules\", {\"flag\": 2, \"hq\": 16, \"hv\": 16}]:0": {
+      "ptx": "ptx/677f71b550f7f05705af1c6d.ptx",
+      "ptx_sha256": "a508c6df381989c3a0889b5df4a3e2d0d962c8ebef57680c9d4c6e9528f2353d",
+      "shim": "ptx/677f71b550f7f05705af1c6d.cpp",
+      "shim_sha256": "2b20a420fcee3637141b2a939162e6fb9dd11912ace2f1777ff8b1b459594cfc",
+      "entry": "run",
+      "module_ident": "gdn_recur_0329e3f908",
+      "kernel_name": "kernel_gdn_recur",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "q_tma"
+        ],
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "tma_buffer",
+          "out_tma"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "buffer",
+          "flag_mem"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "HQ": 16,
+        "HV": 16,
+        "FLAG": 2
+      }
+    },
+    "[\"gdn\", \"modules\", {\"flag\": 0, \"hq\": 16, \"hv\": 16}]:0": {
+      "ptx": "ptx/553da8aac40874c0483e6bc1.ptx",
+      "ptx_sha256": "b345f8360cdd689a567af16b30daadd239867af50c88a65a539178f78ecd03cb",
+      "shim": "ptx/553da8aac40874c0483e6bc1.cpp",
+      "shim_sha256": "c3ed6ad625a310dd9c9a80529a9eab8292ce97b6b6d612b190a2fa166d9eb8c2",
+      "entry": "run",
+      "module_ident": "gdn_recur_c646d3b101",
+      "kernel_name": "kernel_gdn_recur",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "q_tma"
+        ],
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "tma_buffer",
+          "out_tma"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "buffer",
+          "flag_mem"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 16,
+        "HV": 16,
+        "FLAG": 0
+      }
+    },
+    "[\"gdn\", \"prep_module\", {\"hq\": 16, \"hv\": 16, \"large\": true}]:0": {
+      "ptx": "ptx/c7bc1768dabe9ef8cb7dfea6.ptx",
+      "ptx_sha256": "27005a4edc6edfc3ab67f0ee0ff303afa6b4540e22cdbdedeab5572b061fa77f",
+      "shim": "ptx/c7bc1768dabe9ef8cb7dfea6.cpp",
+      "shim_sha256": "71eb918e03584ce0d236f5688960dc7b586310934837b19c7eccff87fc5fd4e1",
+      "entry": "run",
+      "module_ident": "gdn_prep_c77fe94971",
+      "kernel_name": "kernel_gdn_prep",
+      "arg_plan": [
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "HQ": 16,
+        "HV": 16
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 1, \"hq\": 32, \"hv\": 32, \"vw\": 8}]:0": {
+      "ptx": "ptx/782267863e2ae12ee9ad3035.ptx",
+      "ptx_sha256": "cf046a262ea9209dc792aac11199d44e49c877909fd6f0b61b40c9af812bd0b2",
+      "shim": "ptx/782267863e2ae12ee9ad3035.cpp",
+      "shim_sha256": "687cd72921c54983437de375c36558fc0fad6e8147d095c941c523e114f2c26f",
+      "entry": "run",
+      "module_ident": "cp_state_bba00aec36",
+      "kernel_name": "kernel_cp_state",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "xflag"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "cslots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 32,
+        "HV": 32,
+        "FLAG": 1
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 1, \"hq\": 32, \"hv\": 32, \"vw\": 8}]:1": {
+      "ptx": "ptx/3ee56998c079380b3dd95286.ptx",
+      "ptx_sha256": "6d90e32de0730bfeeec434f513dd5ed7a491054b00dbc5d888e1b1dbf94668d8",
+      "shim": "ptx/3ee56998c079380b3dd95286.cpp",
+      "shim_sha256": "534e1354b6227c65dcd12aff447458f257bfc2c1866292f44ce465a1c3459ff1",
+      "entry": "run",
+      "module_ident": "cp_comb_7f00a0ef09",
+      "kernel_name": "kernel_cp_comb",
+      "arg_plan": [
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "xflag"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "parameter",
+          "cslots"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HV": 32
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 1, \"hq\": 32, \"hv\": 32, \"vw\": 8}]:2": {
+      "ptx": "ptx/b3843c983bdbbb3859bef532.ptx",
+      "ptx_sha256": "098e246b28fff7545af53caa5d00471760c49ce705adb615cdfd1c85779aa4af",
+      "shim": "ptx/b3843c983bdbbb3859bef532.cpp",
+      "shim_sha256": "18b69ff24ba6dc81715ac29aa5bdfefcb936ccc3543fada783fa8bc4cad86664",
+      "entry": "run",
+      "module_ident": "cp_out_580a4aae2a",
+      "kernel_name": "kernel_cp_out",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "q_tma"
+        ],
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "tma_buffer",
+          "out_tma"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 32,
+        "HV": 32,
+        "FLAG": 1
+      }
+    },
+    "[\"gdn_cp\", \"prep_cp_module\", {\"hq\": 32, \"hv\": 32}]:0": {
+      "ptx": "ptx/0c577c22f0a501fc39cea37f.ptx",
+      "ptx_sha256": "a8485a0dede1519493d945e28242acef3945698eb2125e48b5ad8291ae3e4e84",
+      "shim": "ptx/0c577c22f0a501fc39cea37f.cpp",
+      "shim_sha256": "b92727bc3fa5732bebe6dc52538a7bff1e5a51cdcc6e33804000d7b23f420ddd",
+      "entry": "run",
+      "module_ident": "gdn_prep_cp_65b5091aff",
+      "kernel_name": "kernel_gdn_prep_cp",
+      "arg_plan": [
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "HQ": 32,
+        "HV": 32
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 2, \"hq\": 32, \"hv\": 32, \"vw\": 8}]:0": {
+      "ptx": "ptx/1fb85d73342a047838cae5f7.ptx",
+      "ptx_sha256": "84c1e1f08f25b3254a1dc2201f0b9b272fbb2784ab6021415e11d8e454bacecd",
+      "shim": "ptx/1fb85d73342a047838cae5f7.cpp",
+      "shim_sha256": "65d399d1d51109d745c853a777cc43506a5fca8bd24b339f62ff6f5be7ffcd13",
+      "entry": "run",
+      "module_ident": "cp_state_594d9030ae",
+      "kernel_name": "kernel_cp_state",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "xflag"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "cslots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "HQ": 32,
+        "HV": 32,
+        "FLAG": 2
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 2, \"hq\": 32, \"hv\": 32, \"vw\": 8}]:1": {
+      "ptx": "ptx/3ee56998c079380b3dd95286.ptx",
+      "ptx_sha256": "6d90e32de0730bfeeec434f513dd5ed7a491054b00dbc5d888e1b1dbf94668d8",
+      "shim": "ptx/3ee56998c079380b3dd95286.cpp",
+      "shim_sha256": "534e1354b6227c65dcd12aff447458f257bfc2c1866292f44ce465a1c3459ff1",
+      "entry": "run",
+      "module_ident": "cp_comb_7f00a0ef09",
+      "kernel_name": "kernel_cp_comb",
+      "arg_plan": [
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "xflag"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "parameter",
+          "cslots"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HV": 32
+      }
+    },
+    "[\"gdn_cp\", \"modules\", {\"flag\": 2, \"hq\": 32, \"hv\": 32, \"vw\": 8}]:2": {
+      "ptx": "ptx/7daa899d24ae650f29e74479.ptx",
+      "ptx_sha256": "098e246b28fff7545af53caa5d00471760c49ce705adb615cdfd1c85779aa4af",
+      "shim": "ptx/7daa899d24ae650f29e74479.cpp",
+      "shim_sha256": "917d72f3dc0de736708b2f5ba6bd6c270c3b284459dea95cbe6cd4c1d74dabef",
+      "entry": "run",
+      "module_ident": "cp_out_78306fbeb2",
+      "kernel_name": "kernel_cp_out",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "q_tma"
+        ],
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "xbuf"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "tma_buffer",
+          "out_tma"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 32,
+        "HV": 32,
+        "FLAG": 2
+      }
+    },
+    "[\"gdn_cp\", \"prep_cp1_module\", {\"hq\": 32, \"hv\": 32, \"large\": true}]:0": {
+      "ptx": "ptx/b732c731b59f8632ca8a55cd.ptx",
+      "ptx_sha256": "1affab7011c735b931bc4266d0ec4097a82d0dfcf80ac8ada1949fa6b5c77c53",
+      "shim": "ptx/b732c731b59f8632ca8a55cd.cpp",
+      "shim_sha256": "f867fd014e514667720cb1224ddf0667456a189f4adaaa26aa859719901ca1d2",
+      "entry": "run",
+      "module_ident": "gdn_prep_cp1_39704991b2",
+      "kernel_name": "kernel_gdn_prep_cp1",
+      "arg_plan": [
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "buffer",
+          "done"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "lcmin"
+        ],
+        [
+          "parameter",
+          "jmax"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 32,
+        "HV": 32
+      }
+    },
+    "[\"gdn\", \"modules\", {\"flag\": 0, \"hq\": 32, \"hv\": 32}]:0": {
+      "ptx": "ptx/a30a8a52ffb921984f363d37.ptx",
+      "ptx_sha256": "31d94fd202403ab14cd151652b2bf8e041526afff88c64629a3e5f94fa6fcc4f",
+      "shim": "ptx/a30a8a52ffb921984f363d37.cpp",
+      "shim_sha256": "a6c6786b08def6083026ea0ef426af3e8c0975d38abbd95da2af3cf0989fd51c",
+      "entry": "run",
+      "module_ident": "gdn_recur_2d951be18c",
+      "kernel_name": "kernel_gdn_recur",
+      "arg_plan": [
+        [
+          "tma_buffer",
+          "q_tma"
+        ],
+        [
+          "tma_buffer",
+          "k_tma"
+        ],
+        [
+          "tma_buffer",
+          "v_tma"
+        ],
+        [
+          "buffer",
+          "initial"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "buffer",
+          "out"
+        ],
+        [
+          "tma_buffer",
+          "out_tma"
+        ],
+        [
+          "buffer",
+          "final"
+        ],
+        [
+          "buffer",
+          "flags"
+        ],
+        [
+          "buffer",
+          "flag_mem"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "parameter",
+          "scale"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": true,
+      "specializations": {
+        "HQ": 32,
+        "HV": 32,
+        "FLAG": 0
+      }
+    },
+    "[\"gdn\", \"prep_module\", {\"hq\": 32, \"hv\": 32, \"large\": true}]:0": {
+      "ptx": "ptx/0f2fab388565d3a2a47c122b.ptx",
+      "ptx_sha256": "7dbec2c89bc117d5b1cee6b735797b083d54610349a8ed431043a7dcdf199c1e",
+      "shim": "ptx/0f2fab388565d3a2a47c122b.cpp",
+      "shim_sha256": "3c93f61b26d992b96ae2fec9ac86bfcde8b318b95546c1ac8a960a52293482f6",
+      "entry": "run",
+      "module_ident": "gdn_prep_fbfb1aeecf",
+      "kernel_name": "kernel_gdn_prep",
+      "arg_plan": [
+        [
+          "buffer",
+          "k"
+        ],
+        [
+          "buffer",
+          "g"
+        ],
+        [
+          "buffer",
+          "beta"
+        ],
+        [
+          "buffer",
+          "cu"
+        ],
+        [
+          "buffer",
+          "inv"
+        ],
+        [
+          "buffer",
+          "factors"
+        ],
+        [
+          "parameter",
+          "nseq"
+        ],
+        [
+          "parameter",
+          "slots"
+        ],
+        [
+          "grid",
+          "grid_x"
+        ],
+        [
+          "grid",
+          "grid_y"
+        ],
+        [
+          "grid",
+          "grid_z"
+        ]
+      ],
+      "use_pdl": false,
+      "specializations": {
+        "HQ": 32,
+        "HV": 32
+      }
+    }
+  },
+  "complete": true
+}

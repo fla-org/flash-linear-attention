@@ -1,0 +1,20 @@
+{
+  "source": "standalone official-workload PTX export",
+  "ptx_modules": 103,
+  "launch_bindings": 123,
+  "host_dispatch_and_launch_ast_equivalent": true,
+  "host_comparison_exclusions": [
+    "Python import paths",
+    "explicit loader call ordinals",
+    "Equivalent nonempty-buffer tail slice: buf[buf.numel() - 1:] becomes buf[-1:]"
+  ],
+  "standalone_export_sha256": {
+    "manifest.json": "a6007ad262a166d49e97f70b834408bda030a3191fc59e25269fe46a161109b1",
+    "benchmark_shared.json": "56c89eb379de2ef60f3039f6bef0a4e75061e3f5a190c3d1886ac0b016782c49",
+    "provenance.json": "3bc781a0419aaddbeee9d1b9499cf07b4887f0cdd8e6667322c9ae3f8608f012"
+  },
+  "host_adaptation": "Explicit factory call ordinals replace mutable global counters, preserving manifest binding keys across failed module initialization.",
+  "host_adapter_bytes_identical": true,
+  "ptx_identical_after_stripping_terminal_whitespace": true,
+  "normalized_ptx_modules": 103
+}

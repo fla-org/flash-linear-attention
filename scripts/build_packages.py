@@ -88,6 +88,9 @@ Repository = "https://github.com/fla-org/flash-linear-attention"
     # namespace, so both generated pyproject.toml files need namespace discovery.
     content += """
 
+[tool.setuptools.package-data]
+"fla.ops.gated_delta_rule.backends.qla_ptx" = ["*.json", "ptx/*.ptx", "ptx/*.cpp", "*.md"]
+
 [tool.setuptools.packages.find]
 include = ["fla*"]
 namespaces = true
