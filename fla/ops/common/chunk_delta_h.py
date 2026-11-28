@@ -359,14 +359,14 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
 @fla_cache_autotune(
     configs=[
         triton.Config({'BV': BV}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [2, 4]
-        for num_stages in ([2, 3, 4] if check_shared_mem('ampere') else [1])
+        for num_warps in [2, 4, 8]
+        for num_stages in ([2, 3] if check_shared_mem('ampere') else [1])
         for BV in ([32, 64] if check_shared_mem('ada') else [32])
     ],
-    key=['H', 'HV', 'K', 'V', 'BT', 'BV', 'USE_G', 'STATE_V_FIRST'],
+    key=['H', 'HV', 'K', 'V', 'BT', 'USE_G', 'USE_GK', 'STATE_V_FIRST'],
     **autotune_cache_kwargs,
 )
-@triton.jit(do_not_specialize=['T'])
+@triton.jit(do_not_specialize=['T', 'scale'])
 def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
     q,
     k,
@@ -582,6 +582,9 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
 
         tl.store(p_dv2, b_dv.to(p_dv.dtype.element_ty), mask=m_t[:, None] & m_v[None, :])
         # Update dh
+        # keep out-of-place when USE_G and K <= 128 to avoid mixed TF32/BF16 accumulator layout overhead at BV=32.
+        if not STATE_V_FIRST and (not USE_G or K > 128):
+            b_dv_neg = (-b_dv).to(w.dtype.element_ty)
         p_w = w + o_k1[:, None] + o_t[None, :] * (HV*K)
         p_q = q + o_k1[:, None] + o_t[None, :] * (H*K)
         b_w = tl.load(p_w, mask=m_k1[:, None] & m_t[None, :], other=0.0)
@@ -596,6 +599,9 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
                 b_dh1 *= exp2(b_gk_last1[:, None])
         if STATE_V_FIRST:
             b_dh1 += tl.trans(tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) * scale - tl.dot(b_w, b_dv.to(b_w.dtype)))
+        elif not USE_G or K > 128:
+            b_dh1 = tl.dot(b_w, b_dv_neg, b_dh1)
+            b_dh1 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) * scale
         else:
             b_dh1 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) * scale - tl.dot(b_w, b_dv.to(b_w.dtype))
         if K > 64:
@@ -613,6 +619,9 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
                     b_dh2 *= exp2(b_gk_last2[:, None])
             if STATE_V_FIRST:
                 b_dh2 += tl.trans(tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) * scale - tl.dot(b_w, b_dv.to(b_w.dtype)))
+            elif not USE_G or K > 128:
+                b_dh2 = tl.dot(b_w, b_dv_neg, b_dh2)
+                b_dh2 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) * scale
             else:
                 b_dh2 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) * scale - tl.dot(b_w, b_dv.to(b_w.dtype))
         if K > 128:
@@ -631,7 +640,8 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
             if STATE_V_FIRST:
                 b_dh3 += tl.trans(tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) * scale - tl.dot(b_w, b_dv.to(b_w.dtype)))
             else:
-                b_dh3 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) * scale - tl.dot(b_w, b_dv.to(b_w.dtype))
+                b_dh3 = tl.dot(b_w, b_dv_neg, b_dh3)
+                b_dh3 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) * scale
         if K > 192:
             p_q = q + o_k4[:, None] + o_t[None, :] * (H*K)
             p_w = w + o_k4[:, None] + o_t[None, :] * (HV*K)
@@ -648,7 +658,8 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
             if STATE_V_FIRST:
                 b_dh4 += tl.trans(tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) * scale - tl.dot(b_w, b_dv.to(b_w.dtype)))
             else:
-                b_dh4 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) * scale - tl.dot(b_w, b_dv.to(b_w.dtype))
+                b_dh4 = tl.dot(b_w, b_dv_neg, b_dh4)
+                b_dh4 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) * scale
 
     if USE_INITIAL_STATE:
         if STATE_V_FIRST:
@@ -810,7 +821,7 @@ def chunk_gated_delta_rule_bwd_dhu(
         dv2=dv2,
         cu_seqlens=cu_seqlens,
         chunk_offsets=chunk_offsets,
-        scale=scale,
+        scale=float(scale) if scale is not None else scale,
         T=T,
         H=H,
         HV=HV,
