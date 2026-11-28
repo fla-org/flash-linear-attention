@@ -122,9 +122,14 @@ class MomBlock(GradientCheckpointingLayer):
 
     def __init__(self, config: MomConfig, layer_idx: int):
         super().__init__()
+        self.config = config
         self.hidden_size = config.hidden_size
 
-        self.attn_norm = RMSNorm(hidden_size=config.hidden_size, eps=config.norm_eps, dtype=torch.float32)
+        self.attn_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(
+            config.hidden_size,
+            eps=config.norm_eps,
+            dtype=torch.float32,
+        )
         attn_spec = get_attention_spec(config.attn, layer_idx=layer_idx)
         if attn_spec is not None:
             self.attn = Attention(
@@ -156,7 +161,11 @@ class MomBlock(GradientCheckpointingLayer):
                 )
             else:
                 raise NotImplementedError(f"The MoM backend {config.mom_backend} is not currently supported.")
-        self.mlp_norm = RMSNorm(hidden_size=config.hidden_size, eps=config.norm_eps, dtype=torch.float32)
+        self.mlp_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(
+            config.hidden_size,
+            eps=config.norm_eps,
+            dtype=torch.float32,
+        )
         self.mlp = MomMLP(
             hidden_size=config.hidden_size,
             hidden_ratio=config.hidden_ratio,
@@ -245,11 +254,12 @@ class MomBlock(GradientCheckpointingLayer):
                 output_rms_weight=self.mlp_norm.weight,
                 rms_eps=self.mlp_res_norm.eps,
             )
-        elif hasattr(self, 'mlp_norm'):
+        elif self.config.fuse_norm:
             hidden_states, residual = self.mlp_norm(hidden_states, residual, True)
         else:
             hidden_states = residual + hidden_states
             residual = hidden_states
+            hidden_states = self.mlp_norm(hidden_states)
         hidden_states = self.mlp(hidden_states, **kwargs)
 
         if self.use_attnres:
@@ -328,7 +338,7 @@ class MomModel(MomPreTrainedModel):
 
         self.embeddings = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
         self.layers = nn.ModuleList([MomBlock(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
-        self.norm = RMSNorm(config.hidden_size, eps=config.norm_eps, dtype=torch.float32)
+        self.norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps, dtype=torch.float32)
 
         self.use_attnres = config.attnres_block_size is not None
         if self.use_attnres:

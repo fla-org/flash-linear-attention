@@ -10,12 +10,23 @@
 from __future__ import annotations
 
 import torch
+import torch.nn.functional as F
 import triton
 import triton.language as tl
 
 from fla.backends import TritonAscendBackend, register
+from fla.ops.common.backends.triton_ascend.chunk_delta_h import (
+    _zero_padded_view,
+    chunk_token_rows,
+    mload,
+    mstore,
+    need_dma_mask,
+    need_kv_dma_mask,
+    time_axis_needs_mask,
+)
 from fla.ops.kda.wy_fast import recompute_w_u_fwd
 from fla.ops.utils import prepare_chunk_indices
+from fla.ops.utils.index import ensure_cu_seqlens_cpu, partition_chunk_indices_full_tail
 from fla.ops.utils.op import exp2
 from fla.utils import input_guard
 from fla.utils.ascend_ub_manager import compute_row_tile_block_size, get_npu_properties
@@ -32,9 +43,44 @@ MAX_TILE_FWD = 128
 PREFERRED_TILE = 64
 
 
-def launch_wy_core_grid(kernel, *, task_num: int, kernel_kwargs: dict) -> None:
+@triton.jit
+def add_token_rows(ptr, row_base, rows, stride, SPLIT: tl.constexpr):
+    # keep the tail mask relative to the scalar pointer base so DMA lanes stay affine
+    return (ptr + row_base * stride) + rows * stride
+
+
+def _launch_wy_core_grid(kernel, *, task_num: int, kernel_kwargs: dict, full_chunks: bool = False) -> None:
     num_core = get_npu_properties()["num_aicore"]
+    cu = kernel_kwargs['cu_seqlens']
+    if full_chunks:
+        kwargs = {**kernel_kwargs, 'MASK_DMA': need_kv_dma_mask(
+            kernel_kwargs['K'], kernel_kwargs['BK'], kernel_kwargs['V'], kernel_kwargs['BV'])}
+        kernel[(num_core,)](task_num=task_num, num_core=num_core, **kwargs)
+        return
+    if cu is not None and not kernel_kwargs['USE_GRAPH']:
+        full_ci, tail_ci = partition_chunk_indices_full_tail(
+            kernel_kwargs['chunk_indices'], ensure_cu_seqlens_cpu(cu), kernel_kwargs['BT'],
+        )
+        kv_mask = need_kv_dma_mask(
+            kernel_kwargs['K'], kernel_kwargs['BK'], kernel_kwargs['V'], kernel_kwargs['BV'],
+        )
+        for ci, time_tail in ((full_ci, False), (tail_ci, True)):
+            if ci is not None:
+                kwargs = {**kernel_kwargs, 'chunk_indices': ci, 'MASK_DMA': time_tail or kv_mask}
+                kernel[(num_core,)](
+                    task_num=ci.shape[0] * kernel_kwargs['B'] * kernel_kwargs['HV'],
+                    num_core=num_core, **kwargs,
+                )
+        return
     kernel[(num_core,)](task_num=task_num, num_core=num_core, **kernel_kwargs)
+
+
+def launch_wy_core_grid(
+    kernel, *, task_num: int, kernel_kwargs: dict, full_chunks: bool = False,
+) -> None:
+    _launch_wy_core_grid(
+        kernel, task_num=task_num, kernel_kwargs=kernel_kwargs, full_chunks=full_chunks,
+    )
 
 
 def get_fwd_block_sizes(dim: int) -> list[int]:
@@ -88,17 +134,20 @@ def prepare_time_contiguous_input(x: torch.Tensor, HV: int) -> tuple[torch.Tenso
 
 
 @triton.jit
-def make_beta_block_ptr(beta_ptr, T, i_t, BT, BETA_T_CONTIG: tl.constexpr, HV: tl.constexpr):
+def _beta_row_ptr(beta_ptr, row_base, rows, BETA_T_CONTIG: tl.constexpr, HV: tl.constexpr, SPLIT: tl.constexpr):
+    # SPLIT keeps the row vector int32. An int64 row vector scalarizes the DMA.
     if BETA_T_CONTIG:
-        return tl.make_block_ptr(beta_ptr, (T,), (1,), (i_t * BT,), (BT,), (0,))
-    return tl.make_block_ptr(beta_ptr, (T,), (HV,), (i_t * BT,), (BT,), (0,))
+        return add_token_rows(beta_ptr, row_base, rows, 1, SPLIT)
+    return add_token_rows(beta_ptr, row_base, rows, HV, SPLIT)
 
 
 @triton.jit
-def make_gate_block_ptr(gk_ptr, T, K, i_t, i_k, BT, BK, GK_T_CONTIG: tl.constexpr, HV: tl.constexpr):
+def _gk_tile_ptr(
+    gk_ptr, row_base, rows, o_k, K, GK_T_CONTIG: tl.constexpr, HV: tl.constexpr, SPLIT: tl.constexpr,
+):
     if GK_T_CONTIG:
-        return tl.make_block_ptr(gk_ptr, (T, K), (K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-    return tl.make_block_ptr(gk_ptr, (T, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+        return add_token_rows(gk_ptr, row_base, rows[:, None], K, SPLIT) + o_k[None, :]
+    return add_token_rows(gk_ptr, row_base, rows[:, None], HV * K, SPLIT) + o_k[None, :]
 
 
 @triton.heuristics({
@@ -136,6 +185,7 @@ def recompute_w_u_fwd_kda_kernel_npu(
     IS_VARLEN: tl.constexpr,
     BETA_T_CONTIG: tl.constexpr,
     GK_T_CONTIG: tl.constexpr,
+    MASK_DMA: tl.constexpr,
     USE_GRAPH: tl.constexpr = False,
 ):
     T_max = T
@@ -189,60 +239,69 @@ def recompute_w_u_fwd_kda_kernel_npu(
                 q_ptr = q + (bos * H + i_h) * K
                 qg_ptr = qg + (bos * HV + i_hv) * K
 
-            p_b = make_beta_block_ptr(beta_ptr, T, i_t, BT, BETA_T_CONTIG, HV)
-            b_b = tl.load(p_b, boundary_check=(0,))
+            row_base, rows, m_t = chunk_token_rows(i_t, T, BT)
+            p_b = _beta_row_ptr(beta_ptr, row_base, rows, BETA_T_CONTIG, HV, not MASK_DMA)
+            b_b = mload(p_b, m_t, MASK_DMA)
 
-            p_A = tl.make_block_ptr(A_ptr, (T, BT), (HV * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
+            o_i = tl.arange(0, BT)
+            m_p_A = m_t[:, None]
+            p_A = add_token_rows(A_ptr, row_base, rows[:, None], HV * BT, not MASK_DMA) + o_i[None, :]
 
-            last_idx = min(i_t * BT + BT, T) - 1
+            last_idx = min(tl.cast(i_t, tl.int64) * BT + BT, T) - 1
 
             for i_v in range(tl.cdiv(V, BV)):
-                p_v = tl.make_block_ptr(v_ptr, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-                p_u = tl.make_block_ptr(u_ptr, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-                b_v = tl.load(p_v, boundary_check=(0, 1))
+                o_v = i_v * BV + tl.arange(0, BV)
+                m_v = (o_v >= 0) & (o_v < V)
+                m_p_v = m_t[:, None] & m_v[None, :]
+                p_v = add_token_rows(v_ptr, row_base, rows[:, None], HV * V, not MASK_DMA) + o_v[None, :]
+                p_u = add_token_rows(u_ptr, row_base, rows[:, None], HV * V, not MASK_DMA) + o_v[None, :]
+                b_v = mload(p_v, m_p_v, MASK_DMA)
                 b_vb = (b_v * b_b[:, None]).to(b_v.dtype)
                 # Ascend tl.dot may clobber the left operand; reload A each V tile.
-                b_A = tl.load(p_A, boundary_check=(0, 1))
+                b_A = mload(p_A, m_p_A, MASK_DMA)
                 b_u = tl.dot(b_A, b_vb, allow_tf32=False)
-                tl.store(p_u, b_u.to(p_u.dtype.element_ty), boundary_check=(0, 1))
+                mstore(p_u, b_u.to(p_u.dtype.element_ty), m_p_v, MASK_DMA)
 
             for i_k in range(tl.cdiv(K, BK)):
-                p_k = tl.make_block_ptr(k_ptr, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-                b_k = tl.load(p_k, boundary_check=(0, 1))
+                o_k_2 = i_k * BK + tl.arange(0, BK)
+                m_k_2 = (o_k_2 >= 0) & (o_k_2 < K)
+                m_p_k = m_t[:, None] & m_k_2[None, :]
+                p_k = add_token_rows(k_ptr, row_base, rows[:, None], H * K, not MASK_DMA) + o_k_2[None, :]
+                b_k = mload(p_k, m_p_k, MASK_DMA)
                 b_kb = b_k * b_b[:, None]
 
-                p_gk = make_gate_block_ptr(gk_ptr, T, K, i_t, i_k, BT, BK, GK_T_CONTIG, HV)
-                b_gk = tl.load(p_gk, boundary_check=(0, 1)).to(tl.float32)
+                p_gk = _gk_tile_ptr(gk_ptr, row_base, rows, o_k_2, K, GK_T_CONTIG, HV, not MASK_DMA)
+                b_gk = mload(p_gk, m_p_k, MASK_DMA).to(tl.float32)
                 b_gk_exp = exp2(b_gk)
                 b_kb = b_kb * b_gk_exp
 
                 if STORE_QG:
-                    p_q = tl.make_block_ptr(q_ptr, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-                    p_qg = tl.make_block_ptr(qg_ptr, (T, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-                    b_q = tl.load(p_q, boundary_check=(0, 1))
-                    tl.store(p_qg, (b_q * b_gk_exp).to(p_qg.dtype.element_ty), boundary_check=(0, 1))
+                    p_q = add_token_rows(q_ptr, row_base, rows[:, None], H * K, not MASK_DMA) + o_k_2[None, :]
+                    p_qg = add_token_rows(qg_ptr, row_base, rows[:, None], HV * K, not MASK_DMA) + o_k_2[None, :]
+                    b_q = mload(p_q, m_p_k, MASK_DMA)
+                    mstore(p_qg, (b_q * b_gk_exp).to(p_qg.dtype.element_ty), m_p_k, MASK_DMA)
 
                 if STORE_KG:
                     o_k = i_k * BK + tl.arange(0, BK)
                     m_k = o_k < K
                     if GK_T_CONTIG:
-                        b_gn = tl.load(gk_ptr + last_idx * K + o_k, mask=m_k, other=0.0).to(tl.float32)
+                        b_gn = mload(gk_ptr + tl.cast(last_idx, tl.int64) * K + o_k, m_k, MASK_DMA).to(tl.float32)
                     else:
-                        b_gn = tl.load(gk_ptr + last_idx * HV * K + o_k, mask=m_k, other=0.0).to(tl.float32)
+                        b_gn = mload(gk_ptr + tl.cast(last_idx, tl.int64) * HV * K + o_k, m_k, MASK_DMA).to(tl.float32)
                     b_kg = b_k * exp2(b_gn[None, :] - b_gk)
-                    p_kg = tl.make_block_ptr(kg_ptr, (T, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-                    tl.store(p_kg, b_kg.to(p_kg.dtype.element_ty), boundary_check=(0, 1))
+                    p_kg = add_token_rows(kg_ptr, row_base, rows[:, None], HV * K, not MASK_DMA) + o_k_2[None, :]
+                    mstore(p_kg, b_kg.to(p_kg.dtype.element_ty), m_p_k, MASK_DMA)
 
                 # Ascend tl.dot may clobber the left operand; reload A each K tile.
-                b_A = tl.load(p_A, boundary_check=(0, 1))
+                b_A = mload(p_A, m_p_A, MASK_DMA)
                 b_w = tl.dot(b_A, b_kb.to(b_k.dtype), allow_tf32=False)
-                p_w = tl.make_block_ptr(w_ptr, (T, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-                tl.store(p_w, b_w.to(p_w.dtype.element_ty), boundary_check=(0, 1))
+                p_w = add_token_rows(w_ptr, row_base, rows[:, None], HV * K, not MASK_DMA) + o_k_2[None, :]
+                mstore(p_w, b_w.to(p_w.dtype.element_ty), m_p_k, MASK_DMA)
 
 
 @register(recompute_w_u_fwd, backend=TritonAscendBackend)
 @input_guard
-def recompute_w_u_fwd_npu(
+def recompute_w_u_fwd_kda_npu(
     k: torch.Tensor,
     v: torch.Tensor,
     beta: torch.Tensor,
@@ -252,12 +311,30 @@ def recompute_w_u_fwd_npu(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
     use_graph: bool = False,
+    _full_chunks: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
     BT = A.shape[-1]
+    if cu_seqlens is None and not use_graph and T % BT == 0:
+        k_pad, v_pad = triton.next_power_of_2(K), triton.next_power_of_2(V)
+        if k_pad <= 256 and v_pad <= 256 and (k_pad != K or v_pad != V):
+            def pad_k(x):
+                return F.pad(x, (0, k_pad - K)) if k_pad != K else x
+
+            w, u, qg, kg = recompute_w_u_fwd_kda_npu(
+                k=pad_k(k), v=F.pad(v, (0, v_pad - V)) if v_pad != V else v,
+                beta=beta, A=A, gk=pad_k(gk), q=pad_k(q) if q is not None else None,
+                chunk_indices=chunk_indices,
+            )
+            return (_zero_padded_view(w, K), _zero_padded_view(u, V),
+                    _zero_padded_view(qg, K) if qg is not None else None, _zero_padded_view(kg, K))
     store_qg = q is not None
     BK, BV = get_fwd_tiles(BT, K, V, store_qg=store_qg)
+    if (not use_graph and store_qg and BT == 64 and K == V == 128
+            and (_full_chunks or (cu_seqlens is not None and not time_axis_needs_mask(
+                T, BT, cu_seqlens, ensure_cu_seqlens_cpu(cu_seqlens))))):
+        BK, BV = 128, 64
 
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
@@ -274,6 +351,7 @@ def recompute_w_u_fwd_npu(
     launch_wy_core_grid(
         recompute_w_u_fwd_kda_kernel_npu,
         task_num=NT * B * HV,
+        full_chunks=_full_chunks and not use_graph,
         kernel_kwargs=dict(
             q=q,
             k=k,
@@ -298,6 +376,7 @@ def recompute_w_u_fwd_npu(
             BV=BV,
             BETA_T_CONTIG=beta_t_contig,
             GK_T_CONTIG=gk_t_contig,
+            MASK_DMA=need_dma_mask(T, BT, K, BK, V, BV, cu_seqlens is not None, cu_seqlens),
             USE_GRAPH=use_graph,
         ),
     )

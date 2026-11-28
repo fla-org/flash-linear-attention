@@ -11,9 +11,18 @@ import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 from fla.ops.utils.op import exp2, unflatten_program_id
-from fla.utils import IS_NVIDIA_HOPPER, autotune_cache_kwargs
+from fla.utils import IS_NVIDIA_BLACKWELL, IS_NVIDIA_HOPPER, autotune_cache_kwargs
 
 NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8, 16]
+
+# Triton miscompiles the USE_G=False (ungated) specialization of
+# `chunk_gated_delta_product_fwd_kernel_h_blockdim64` with num_warps=4 on
+# Blackwell (sm_100): the stored recurrent states h are wrong while v_new
+# from the same recurrence is exact (see #1594; confirmed upstream as
+# triton-lang/triton#12555, fixed in triton 3.5.0 but not in the 3.3.x
+# line that torch 2.7.x pins). num_warps=2 is correct in all 12 configs,
+# so restrict the Blackwell autotune configs to num_warps=2.
+FWD_H_NUM_WARPS = [2] if IS_NVIDIA_BLACKWELL else [2, 4]
 
 
 @triton.heuristics({
@@ -26,7 +35,7 @@ NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8, 16]
 @triton.autotune(
     configs=[
         triton.Config({'BV': BV}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [2, 4]
+        for num_warps in FWD_H_NUM_WARPS
         for num_stages in [2, 3, 4]
         for BV in [32, 64]
     ],

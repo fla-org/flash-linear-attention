@@ -24,7 +24,7 @@ from fla.ops.gla.chunk import (
 )
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp2
-from fla.utils import ascend_compile_kwargs, input_guard
+from fla.utils import ascend_compile_kwargs, autotune_cache_kwargs, input_guard
 from fla.utils.ascend_ub_manager import (
     compute_row_tile_block_size,
     get_npu_properties,
@@ -40,6 +40,16 @@ SAFETY_MARGIN = 0.80
 
 # disable auto-multi-buffer on inter and K>256 intra-A split/merge launches
 GLA_COMPILE_KWARGS = ascend_compile_kwargs()
+
+
+def _prune_fwd_o_configs(configs, nargs, **kwargs):
+    args = {**(nargs or {}), **kwargs}
+    K = args['K']
+    max_bk = max(32, triton.next_power_of_2(K))
+    configs = [config for config in configs if config.kwargs['BK'] <= max_bk]
+    if K >= 128:
+        configs = [config for config in configs if config.kwargs['BK'] >= 64]
+    return configs
 
 
 def verify_head_dims(K: int, V: int | None = None) -> tuple[bool, str | None]:
@@ -300,6 +310,8 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra_merge_npu(
         triton.Config({'BK': 32}),
     ],
     key=['H', 'HV', 'K', 'V', 'IS_VARLEN', 'STATE_V_FIRST'],
+    prune_configs_by={'early_config_prune': _prune_fwd_o_configs},
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T', 'total_chunks', 'task_num', 'num_core'])
 def chunk_gla_fwd_kernel_o_npu(
@@ -348,36 +360,67 @@ def chunk_gla_fwd_kernel_o_npu(
             p_h_base = h + (i_tg * HV + i_hv) * K * V
             p_A_base = A + (bos * HV + i_hv) * BT
 
+            o_t = i_t * BT + tl.arange(0, BT)
+            o_bt = tl.arange(0, BT)
+            o_v = i_v * BV + tl.arange(0, BV)
+            m_v = o_v < V
+            m_t = o_t < T_cur
             b_o = tl.zeros([BT, BV], dtype=tl.float32)
             for i_k in range(tl.cdiv(K, BK)):
-                p_q = tl.make_block_ptr(p_q_base, (T_cur, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-                p_g = tl.make_block_ptr(p_g_base, (T_cur, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+                o_k = i_k * BK + tl.arange(0, BK)
+                m_k = o_k < K
+                m_tk = m_t[:, None] & m_k[None, :]
+                b_q = tl.load(
+                    p_q_base + o_t[:, None] * (H * K) + o_k[None, :],
+                    mask=m_tk,
+                    other=0.0,
+                )
+                b_g = tl.load(
+                    p_g_base + o_t[:, None] * (HV * K) + o_k[None, :],
+                    mask=m_tk,
+                    other=0.0,
+                ).to(tl.float32)
                 if STATE_V_FIRST:
-                    p_h = tl.make_block_ptr(p_h_base, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
+                    m_vk = (o_v[:, None] < V) & m_k[None, :]
+                    b_h = tl.load(
+                        p_h_base + o_v[:, None] * K + o_k[None, :],
+                        mask=m_vk,
+                        other=0.0,
+                    )
                 else:
-                    p_h = tl.make_block_ptr(p_h_base, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
-                b_q = tl.load(p_q, boundary_check=(0, 1))
-                b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
+                    m_kv = m_k[:, None] & (o_v[None, :] < V)
+                    b_h = tl.load(
+                        p_h_base + o_k[:, None] * V + o_v[None, :],
+                        mask=m_kv,
+                        other=0.0,
+                    )
                 # fold scale into the operand: an elementwise op on the accumulator
                 # between the two dots forces a fixpipe round-trip through UB
                 b_qg = (b_q * exp2(b_g) * scale).to(b_q.dtype)
-                b_h = tl.load(p_h, boundary_check=(0, 1))
                 if STATE_V_FIRST:
                     b_o = tl.dot(b_qg, tl.trans(b_h).to(b_qg.dtype), b_o)
                 else:
                     b_o = tl.dot(b_qg, b_h.to(b_qg.dtype), b_o)
 
-            o_t = i_t * BT + tl.arange(0, BT)
-            m_t = o_t < T_cur
-            p_A = tl.make_block_ptr(p_A_base, (T_cur, BT), (HV * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
-            p_v = tl.make_block_ptr(p_v_base, (T_cur, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-            p_o = tl.make_block_ptr(p_o_base, (T_cur, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-            b_A = tl.load(p_A, boundary_check=(0, 1))
-            m_s = tl.arange(0, BT)[:, None] >= tl.arange(0, BT)[None, :]
+            m_tv = m_t[:, None] & m_v[None, :]
+            b_A = tl.load(
+                p_A_base + o_t[:, None] * (HV * BT) + o_bt[None, :],
+                mask=m_t[:, None] & (o_bt[None, :] < T_cur),
+                other=0.0,
+            )
+            m_s = o_bt[:, None] >= o_bt[None, :]
             b_A = tl.where(m_s & (m_t[:, None] & m_t[None, :]), b_A, 0.0)
-            b_v = tl.load(p_v, boundary_check=(0, 1))
+            b_v = tl.load(
+                p_v_base + o_t[:, None] * (HV * V) + o_v[None, :],
+                mask=m_tv,
+                other=0.0,
+            )
             b_o = tl.dot(b_A.to(b_v.dtype), b_v, b_o)
-            tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
+            tl.store(
+                p_o_base + o_t[:, None] * (HV * V) + o_v[None, :],
+                b_o.to(o.dtype.element_ty),
+                mask=m_tv,
+            )
 
 
 @triton.heuristics({'IS_VARLEN': lambda args: args['cu_seqlens'] is not None})

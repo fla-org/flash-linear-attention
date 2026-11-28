@@ -14,7 +14,7 @@ from einops import rearrange
 
 from fla import backends
 from fla.modules.convolution import ShortConvolution, causal_conv1d, causal_conv1d_update
-from fla.utils import IS_NVIDIA, assert_close, device
+from fla.utils import IS_NVIDIA, IS_NVIDIA_BLACKWELL, assert_close, device
 
 try:
     from causal_conv1d import causal_conv1d_fn
@@ -660,6 +660,67 @@ def test_conv_non_contiguous_dy(B: int, T: int, D: int, W: int, activation: str 
     assert_close("dh0", ref_dh0, tri_dh0, 1e-3)
 
 
+@pytest.mark.skipif(not IS_NVIDIA_BLACKWELL, reason="large-offset repro requires a Blackwell/B200-class CUDA GPU")
+def test_conv_channel_major_large_offsets():
+    # a channel-major `x` has stride T along D, so channel offsets pass 2**31 from channel 2148 on;
+    # the depthwise reference only needs the last C channels, which straddle that boundary
+    torch.manual_seed(42)
+    B, T, D, W, C, dtype = 1, 1_000_003, 2200, 4, 128, torch.float16
+    assert (D - C) * T < 2**31 <= (D - 1) * T
+    x = torch.randn(B, D, T, device=device, dtype=dtype).transpose(1, 2).requires_grad_(True)
+    weight = torch.randn(D, W, device=device, dtype=dtype).requires_grad_(True)
+    bias = torch.randn(D, device=device, dtype=dtype).requires_grad_(True)
+    h0 = F.pad(torch.randn(B, D, W - 1, device=device, dtype=dtype), (1, 0)).requires_grad_(True)
+    dy = torch.randn(B, D, T, device=device, dtype=dtype).transpose(1, 2)
+    dht = torch.randn(B, D, W - 1, device=device, dtype=dtype)
+
+    tri, tri_ht = causal_conv1d(
+        x=x,
+        weight=weight,
+        bias=bias,
+        initial_state=h0,
+        output_final_state=True,
+        activation='silu',
+    )
+    torch.autograd.backward((tri, tri_ht[..., 1:]), (dy, dht))
+
+    s = slice(D - C, D)
+    ref_x = x.detach()[..., s].transpose(1, 2).clone().requires_grad_(True)
+    ref_w = weight.detach()[s].clone().requires_grad_(True)
+    ref_b = bias.detach()[s].clone().requires_grad_(True)
+    ref_h0 = h0.detach()[:, s].clone().requires_grad_(True)
+    ref, ref_ht = causal_conv1d_ref(
+        x=ref_x,
+        weight=ref_w,
+        bias=ref_b,
+        initial_state=ref_h0[..., 1:],
+        output_final_state=True,
+        activation='silu',
+    )
+    torch.autograd.backward((ref, ref_ht), (dy[..., s].transpose(1, 2), dht[:, s]))
+
+    assert_close('y', ref.transpose(1, 2), tri[..., s], 1e-3)
+    assert_close('ht', ref_ht, tri_ht[:, s, 1:], 1e-3)
+    assert_close('dx', ref_x.grad.transpose(1, 2), x.grad[..., s], 1e-3)
+    assert_close('dw', ref_w.grad, weight.grad[s], 1e-3)
+    assert_close('db', ref_b.grad, bias.grad[s], 1e-3)
+    assert_close('dh0', ref_h0.grad, h0.grad[:, s], 1e-3)
+
+    # the last token of the same layout is a decode input with stride T along D
+    cache = torch.randn(B, D, W, device=device, dtype=dtype)
+    ref_cache = cache[:, s].clone()
+    tri_y, tri_cache = causal_conv1d_update(
+        x=x.detach()[:, -1],
+        cache=cache,
+        weight=weight.detach(),
+        bias=bias.detach(),
+        activation='silu',
+    )
+    ref_y = causal_conv1d_update_ref(x.detach()[:, -1, s], ref_cache, weight.detach()[s], bias.detach()[s], activation='silu')
+    assert_close('decode y', ref_y, tri_y[:, s], 1e-3)
+    assert_close('decode cache', ref_cache, tri_cache[:, s], 1e-3)
+
+
 @pytest.mark.skipif(not IS_NVIDIA, reason='Gluon convolution requires NVIDIA')
 @pytest.mark.parametrize(
     ('dtype', 'weight_dtype'),
@@ -1302,3 +1363,47 @@ def test_conv_backend_dispatch(
     y, _ = causal_conv1d(x=x, weight=weight, activation='silu')
     y.sum().backward()
     assert not conv_backend_calls
+
+
+@pytest.mark.parametrize('has_residual', [False, True])
+@pytest.mark.parametrize('has_initial_state', [False, True])
+def test_conv_4d_backward(has_residual: bool, has_initial_state: bool):
+    torch.manual_seed(42)
+    B, T, H, K, W = 2, 64, 4, 32, 4
+    D = H * K
+    dtype = torch.float32
+
+    x = torch.randn(B, T, H, K, device=device, dtype=dtype, requires_grad=True)
+    weight = torch.randn(D, W, device=device, dtype=dtype, requires_grad=True)
+    bias = torch.randn(D, device=device, dtype=dtype, requires_grad=True)
+    residual = torch.randn(B, T, H, K, device=device, dtype=dtype, requires_grad=True) if has_residual else None
+    initial_state = torch.randn(B, D, W, device=device, dtype=dtype, requires_grad=True) if has_initial_state else None
+    dy = torch.randn(B, T, H, K, device=device, dtype=dtype)
+
+    x_3d = x.detach().reshape(B, T, D).requires_grad_(True)
+    w_ref = weight.detach().clone().requires_grad_(True)
+    b_ref = bias.detach().clone().requires_grad_(True)
+    r_3d = residual.detach().reshape(B, T, D).requires_grad_(True) if has_residual else None
+    h0_ref = initial_state.detach().clone().requires_grad_(True) if has_initial_state else None
+
+    y_3d, _ = causal_conv1d(
+        x=x_3d, weight=w_ref, bias=b_ref, residual=r_3d, initial_state=h0_ref, activation="swish", backend="triton"
+    )
+    y_3d.backward(dy.reshape(B, T, D))
+
+    y_4d, _ = causal_conv1d(
+        x=x, weight=weight, bias=bias, residual=residual, initial_state=initial_state, activation="swish", backend="triton"
+    )
+    y_4d.backward(dy)
+
+    assert y_4d.shape == (B, T, H, K)
+    assert x.grad.shape == (B, T, H, K)
+    assert_close("y", y_3d.view(B, T, H, K), y_4d, 1e-5)
+    assert_close("dx", x_3d.grad.view(B, T, H, K), x.grad, 1e-5)
+    assert_close("dw", w_ref.grad, weight.grad, 1e-5)
+    assert_close("db", b_ref.grad, bias.grad, 1e-5)
+    if has_residual:
+        assert residual.grad.shape == (B, T, H, K)
+        assert_close("dr", r_3d.grad.view(B, T, H, K), residual.grad, 1e-5)
+    if has_initial_state:
+        assert_close("dh0", h0_ref.grad, initial_state.grad, 1e-5)

@@ -31,7 +31,7 @@ def test_long_conv_causal(module: type, T: int, max_len: int):
     y = conv(x)
 
     k = conv.filter if module is LongConvolution else conv.filter(T)[0]
-    windows = F.pad(x.transpose(1, 2), (k.shape[-1] - 1, 0)).unfold(-1, k.shape[-1], 1)
+    windows = F.pad(x.transpose(1, 2), (k.shape[-1] - 1, 0)).unfold(2, k.shape[-1], 1)
     ref = x + (windows * k.flip(-1)[None, :, None, :]).sum(-1).transpose(1, 2)
     torch.testing.assert_close(y, ref, rtol=1e-4, atol=1e-4)
 

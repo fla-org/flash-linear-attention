@@ -882,6 +882,40 @@ def test_chunk_bwd_dqkwg(B: int, T: int, H: int, HV: int, D: int, use_g: bool, u
         assert dg_ref is None and dg_tri is None
 
 
+@pytest.mark.parametrize(
+    ('dtype', 'shift'),
+    [
+        pytest.param(torch.bfloat16, 0.05, id='bf16-accumulation'),
+        pytest.param(torch.float16, 4.5, id='fp16-overflow'),
+    ],
+)
+def test_chunk_bwd_dqkwg_dg_last_fp32_reduction(dtype: torch.dtype, shift: float):
+    torch.manual_seed(42)
+    B, T, H, HV, D, BT = 1, 128, 2, 2, 128, 64
+    NT = T // BT
+    scale = D ** -0.5
+    q = torch.randn(B, T, H, D, dtype=dtype, device=device) * 0.2
+    k = torch.randn(B, T, H, D, dtype=dtype, device=device) * 0.2
+    v_new = torch.randn(B, T, HV, D, dtype=dtype, device=device) * 0.2
+    do = torch.randn(B, T, HV, D, dtype=dtype, device=device) * 0.2
+    h = (torch.randn(B, NT, HV, D, D, dtype=torch.float32, device=device) + shift).to(dtype)
+    dh = (torch.randn(B, NT, HV, D, D, dtype=torch.float32, device=device) + shift).to(dtype)
+    w = torch.randn(B, T, HV, D, dtype=dtype, device=device) * 0.2
+    dv = torch.randn(B, T, HV, D, dtype=dtype, device=device) * 0.2
+    g = -torch.rand(B, T, HV, dtype=torch.float32, device=device) * 0.1
+
+    dq_ref, dk_ref, dw_ref, dg_ref = chunk_bwd_dqkwg_ref(q, k, v_new, do, h, dh, w, dv, g, scale, BT)
+    dq_tri, dk_tri, dw_tri, dg_tri = chunk_bwd_dqkwg(
+        q=q, k=k, v=v_new, do=do, h=h, dh=dh, w=w, dv=dv, g=g, scale=scale, chunk_size=BT,
+    )
+
+    assert torch.isfinite(dg_tri).all(), 'dg contains non-finite values'
+    assert_close('dq', dq_ref, dq_tri, 0.006)
+    assert_close('dk', dk_ref, dk_tri, 0.006)
+    assert_close('dw', dw_ref, dw_tri, 0.006)
+    assert_close('dg', dg_ref, dg_tri, 0.006)
+
+
 def gdn_fwd_torch(
     q: torch.Tensor,
     k: torch.Tensor,

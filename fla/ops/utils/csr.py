@@ -16,7 +16,7 @@ from fla.ops.utils.index import prepare_chunk_offsets
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
     'USE_BLOCK_COUNTS': lambda args: isinstance(args['block_counts'], torch.Tensor),
 })
-@triton.jit(do_not_specialize=['T', 'N'])
+@triton.jit(do_not_specialize=['T', 'N', 'TC'])
 def prepare_block_csr_kernel(
     block_indices,
     block_counts,
@@ -31,7 +31,7 @@ def prepare_block_csr_kernel(
     S: tl.constexpr,
     BT: tl.constexpr,
     BS: tl.constexpr,
-    TC: tl.constexpr,
+    TC,
     COUNT_ONLY: tl.constexpr,
     USE_BLOCK_COUNTS: tl.constexpr,
     IS_VARLEN: tl.constexpr,
