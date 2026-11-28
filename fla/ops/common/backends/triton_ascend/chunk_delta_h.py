@@ -32,6 +32,7 @@ from fla.utils.ascend_ub_manager import (
     get_npu_properties,
     get_ub_manager,
 )
+from fla.utils.hardware import is_ascend_950
 
 
 @lru_cache(maxsize=4)
@@ -1063,6 +1064,9 @@ def _dense_chunk_store(base, row_base, lanes, cols, values, T, STRIDE: tl.conste
 
 def _dense_single_slab_tail(K, V, state_v_first, g, cu_seqlens):
     if cu_seqlens is not None or state_v_first or g is not None:
+        return False
+    # ragged single-slab kernels exceed UB on Ascend 950; retain the masked slab path.
+    if is_ascend_950():
         return False
     BK, BV = _select_fwd_h_tiles(K, V, False)
     return K == BK and V % BV == 0

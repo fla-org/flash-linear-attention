@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 import torch
 import triton
 import triton.language as tl
@@ -21,12 +23,31 @@ from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 from fla.ops.utils.op import exp2
 from fla.utils import ascend_compile_kwargs, input_guard
 from fla.utils.ascend_ub_manager import compute_row_tile_block_size, get_npu_properties
+from fla.utils.hardware import is_ascend_950
 
 SUB_CHUNK_SIZE = 16
 BWD_MEM_MULT = 10.0
 SAFETY_MARGIN = 0.80
 FALLBACK_TILE = 16
 MAX_TILE = 128
+
+
+class _WYBackwardConfig(NamedTuple):
+    compile_overrides: dict[str, int]
+    gate_dw_tiles: dict[int, int]
+
+
+_DEFAULT_WY_BACKWARD_CONFIG = _WYBackwardConfig(compile_overrides={}, gate_dw_tiles={})
+_ASCEND_950_WY_BACKWARD_CONFIG = _WYBackwardConfig(
+    # Three vector slots exceed UB for the WY backward tiles on Ascend 950.
+    compile_overrides={'buf_slot_num_of_veccore': 1},
+    # Full reduction tiles avoid an unsupported L1-to-L1 padding copy on Ascend 950.
+    gate_dw_tiles={48: 16},
+)
+
+
+def _get_wy_backward_config() -> _WYBackwardConfig:
+    return _ASCEND_950_WY_BACKWARD_CONFIG if is_ascend_950() else _DEFAULT_WY_BACKWARD_CONFIG
 
 
 def get_bwd_tile(size: int, block_rows: int) -> int:
@@ -866,6 +887,9 @@ def chunk_gdn2_bwd_wy_dqkg_fused_npu(
     if K % 64 and k.dtype in (torch.float16, torch.bfloat16):
         BK = min(BK, 32)
     BV = get_bwd_tile(V, block_rows=bc_k)
+    config = _get_wy_backward_config()
+    compile_kwargs = ascend_compile_kwargs()
+    compile_kwargs.update(config.compile_overrides)
     NK = triton.cdiv(K, BK)
     is_varlen = cu_seqlens is not None
     chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT) if is_varlen else g.new_zeros(1, dtype=torch.int64)
@@ -897,7 +921,7 @@ def chunk_gdn2_bwd_wy_dqkg_fused_npu(
         BV=BV,
         IS_VARLEN=is_varlen,
         T_CONTIG=t_contig,
-        **ascend_compile_kwargs(),
+        **compile_kwargs,
     )
 
     mask_dma = need_dma_mask(T, BT, K, BK, V, BV, is_varlen, cu_seqlens) or BT % bc_k != 0
@@ -941,7 +965,6 @@ def chunk_gdn2_bwd_wy_dqkg_fused_npu(
     g_arg, g_t_contig = prepare_time_contiguous_input(g, H)
     b_arg = prepare_time_contiguous_input(b, H)[0]
     gate_dw = torch.empty(B, T, H, K, dtype=torch.float32, device=k.device)
-    compile_kwargs = ascend_compile_kwargs()
     dw_kwargs = dict(
         h=h,
         dv=dv_arg,
@@ -958,7 +981,7 @@ def chunk_gdn2_bwd_wy_dqkg_fused_npu(
         V=V,
         BT=BT,
         BK=BK,
-        BV=BV,
+        BV=config.gate_dw_tiles.get(V, BV),
         STATE_V_FIRST=state_v_first,
         IS_VARLEN=is_varlen,
         G_T_CONTIG=g_t_contig,
@@ -1082,7 +1105,7 @@ def chunk_gdn2_bwd_wy_dqkg_fused_npu(
         BT=BT,
         IS_VARLEN=is_varlen,
         A_T_CONTIG=t_contig,
-        **ascend_compile_kwargs(),
+        **compile_kwargs,
     )
     if is_varlen:
         finalize_kwargs['task_num'] = NT * bh_total

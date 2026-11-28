@@ -22,7 +22,6 @@ from fla.utils.env import check_pytorch_version
 
 logger = logging.getLogger(__name__)
 
-
 def _cpu_device_warning():
     warnings.warn(('Triton is not supported on current platform, roll back to CPU.'), stacklevel=2)
 
@@ -71,6 +70,11 @@ def get_device_arch() -> str:
         return str(triton.runtime.driver.active.get_current_target().arch).split(':')[0]
     except Exception:
         return ''
+
+
+def is_ascend_950() -> bool:
+    """Return whether Triton's compile target belongs to the Ascend 950 series."""
+    return get_device_arch().lower().startswith(('ascend950', 'ascend910_95'))
 
 
 def map_triton_backend_to_torch_device() -> str:
