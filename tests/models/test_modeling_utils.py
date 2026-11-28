@@ -22,7 +22,7 @@ CAUSAL_LM_CONFIGS = [
     models.ABCConfig, models.BitNetConfig, models.CombaConfig, models.DeltaFormerConfig, models.DeltaNetConfig,
     models.ForgettingTransformerConfig, models.GatedDeltaNetConfig, models.GatedDeltaProductConfig,
     models.GLAConfig, models.GSA2Config, models.GSAConfig, models.HGRNConfig, models.HGRN2Config,
-    models.KDAConfig, models.LightNetConfig, models.LinearAttentionConfig,
+    models.KDAConfig, models.LightNetConfig, models.LinearAttentionConfig, models.LoLCATsConfig,
     models.MesaNetConfig, models.MLAConfig, models.MoBAConfig, models.NSAConfig, models.ParallaxConfig,
     models.PaTHAttentionConfig, models.PrecondGatedDeltaNetConfig, models.RavenConfig, models.RetNetConfig,
     models.RodimusConfig, models.RWKV6Config, models.TransformerConfig, models.WallTransformerConfig,
@@ -32,7 +32,7 @@ DECODER_CONFIGS = [
     models.ABCConfig, models.BitNetConfig, models.CombaConfig, models.DeltaFormerConfig, models.DeltaNetConfig,
     models.ForgettingTransformerConfig,
     models.GatedDeltaNetConfig, models.GatedDeltaProductConfig, models.GLAConfig, models.GSA2Config, models.GSAConfig,
-    models.KDAConfig, models.LightNetConfig, models.LinearAttentionConfig, models.MesaNetConfig, models.MLAConfig,
+    models.KDAConfig, models.LightNetConfig, models.LinearAttentionConfig, models.LoLCATsConfig, models.MesaNetConfig, models.MLAConfig,
     models.MoBAConfig, models.NSAConfig, models.ParallaxConfig, models.PaTHAttentionConfig, models.RavenConfig,
     models.RetNetConfig, models.TransformerConfig, models.WallTransformerConfig,
 ]
