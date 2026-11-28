@@ -36,6 +36,7 @@ from fla.ops.momentum_delta_rule import (
 from fla.ops.nsa import parallel_nsa
 from fla.ops.parallax import parallel_parallax
 from fla.ops.path_attn import parallel_path_attn
+from fla.ops.phba import SequenceLengthPlan, chunk_phba
 from fla.ops.precond_gated_delta_rule import chunk_precond_gated_delta_rule, fused_recurrent_precond_gated_delta_rule
 from fla.ops.precond_kda import chunk_precond_kda, fused_recurrent_precond_kda
 from fla.ops.retention import chunk_retention, fused_chunk_retention, fused_recurrent_retention, parallel_retention
@@ -47,6 +48,7 @@ from fla.ops.triadic_gdn import chunk_triadic_gdn
 from fla.ops.wall_attn import parallel_wall_attn, parallel_wall_attn_decode
 
 __all__ = [
+    'SequenceLengthPlan',
     'chunk_abc',
     'chunk_comba',
     'chunk_cyfa',
@@ -63,6 +65,7 @@ __all__ = [
     'chunk_log_linear_attn',
     'chunk_mesa_net',
     'chunk_momentum_delta_rule',
+    'chunk_phba',
     'chunk_precond_gated_delta_rule',
     'chunk_precond_kda',
     'chunk_retention',
