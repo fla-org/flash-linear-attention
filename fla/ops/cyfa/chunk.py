@@ -92,8 +92,8 @@ _FUSED_READOUT_FWD_AUTOTUNE_CONFIGS = [
     for num_warps in NUM_WARPS
     for num_stages in [2, 3, 4]
 ]
-# On SM8x the 2-warp build of the separate dq/dk kernel faults on 16-bit inputs at BK=128, BV=64 (Triton 3.8),
-# and 4 warps is at least as fast for every shape, so 2 is not offered there.
+# On pre-Hopper NVIDIA the 2-warp build of the separate dq/dk kernel faults on 16-bit inputs at BK=128, BV=64
+# (Triton 3.8), and 2 warps was not the fastest for any shape tested there, so it is not offered.
 _RECURRENCE_BWD_NUM_WARPS = NUM_WARPS if USE_FUSED_DQK_DV else [num_warps for num_warps in NUM_WARPS if num_warps > 2]
 _RECURRENCE_BWD_AUTOTUNE_CONFIGS = [
     triton.Config(
