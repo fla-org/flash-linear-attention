@@ -5,11 +5,13 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+import weakref
+
 import pytest
 import torch
 import triton
 
-from fla.ops.cyfa import chunk_cyfa, fused_recurrent_cyfa
+from fla.ops.cyfa import chunk_cyfa, fused_recurrent, fused_recurrent_cyfa
 from fla.ops.cyfa.chunk import _prune_table_grad_configs
 from fla.ops.cyfa.naive import naive_recurrent_cyfa
 from fla.utils import IS_NVIDIA, IS_NVIDIA_HOPPER, IS_NVIDIA_SM100, assert_close, device
@@ -209,6 +211,33 @@ def test_fused_recurrent(T, varlen, dtype):
     for name, expected, result in zip(('hkt', 'hvt', 'lambda'), ref_state, state, strict=True):
         assert torch.isfinite(result).all(), name
         assert_close(name, expected, result, 0.005)
+
+
+@pytest.mark.smoke
+@torch.no_grad()
+def test_fused_recurrent_readout_cache(monkeypatch):
+    torch.manual_seed(42)
+    monkeypatch.setattr(fused_recurrent, '_READOUT_TABLE_CACHE', {})
+    cache = fused_recurrent._READOUT_TABLE_CACHE
+    inputs = make_inputs(1, 1, 1, 32, 32, 16, torch.bfloat16)
+    readout = inputs['readout']
+    previous_table = None
+    for _ in range(3):
+        readout.add_(0.1)
+        ref, _ = naive_recurrent_cyfa(**inputs)
+        actual, _ = fused_recurrent_cyfa(**inputs)
+        assert_close('o', ref.float(), actual.float(), 0.005)
+        assert len(cache) == 1
+        assert previous_table is None or previous_table() is None
+        previous_table = weakref.ref(next(iter(cache.values()))[-1])
+        fused_recurrent_cyfa(**inputs)
+        assert next(iter(cache.values()))[-1] is previous_table()
+
+    readout_ref = weakref.ref(readout)
+    del inputs['readout'], readout
+    assert readout_ref() is None
+    assert not cache
+    assert previous_table() is None
 
 
 @pytest.mark.smoke

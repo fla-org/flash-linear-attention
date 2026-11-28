@@ -36,8 +36,8 @@ from .utils import (
 )
 
 _READOUT_TABLE_CACHE: dict[
-    tuple[int, int, int, str, torch.dtype],
-    tuple[weakref.ReferenceType[torch.Tensor], torch.Tensor],
+    tuple[int, int, str, torch.dtype],
+    tuple[weakref.ReferenceType[torch.Tensor], int, torch.Tensor],
 ] = {}
 _READOUT_NUM_WARPS = (
     NUM_WARPS if check_shared_mem("ampere") else [w for w in NUM_WARPS if w <= 4]
@@ -1017,16 +1017,22 @@ def fused_recurrent_cyfa(
             store_q=False,
             store_rstd=True,
         )
-    cache_key = (id(readout), _tensor_version(readout), int(num_slots), str(q.device), q.dtype)
+    cache_key = (id(readout), int(num_slots), str(q.device), q.dtype)
+    readout_version = _tensor_version(readout)
     cache_entry = _READOUT_TABLE_CACHE.get(cache_key)
-    readout_table = None
-    if cache_entry is not None:
-        readout_ref, cached_table = cache_entry
-        if readout_ref() is readout:
-            readout_table = cached_table
-    if readout_table is None:
+    if cache_entry is None or cache_entry[0]() is not readout or cache_entry[1] != readout_version:
+        _READOUT_TABLE_CACHE.pop(cache_key, None)
+        del cache_entry
         readout_table = build_readout_table(readout).to(q.dtype)
-        _READOUT_TABLE_CACHE[cache_key] = (weakref.ref(readout), readout_table)
+
+        def remove_readout_table(readout_ref):
+            entry = _READOUT_TABLE_CACHE.get(cache_key)
+            if entry is not None and entry[0] is readout_ref:
+                del _READOUT_TABLE_CACHE[cache_key]
+
+        _READOUT_TABLE_CACHE[cache_key] = (weakref.ref(readout, remove_readout_table), readout_version, readout_table)
+    else:
+        readout_table = cache_entry[2]
     return FusedRecurrentCyFAFunction.apply(
         q,
         q_norm_weight,
